@@ -160,10 +160,7 @@ export const ALL_APPS_FRONTEND = {
   },
   onboarding: {
     icon: ClipboardTextIcon,
-    href: "onboarding",
-    navigationItems: [
-      { displayName: "Onboarding", href: "." },
-    ],
+    href: "app-configuration/onboarding",
     screenshots: [],
     storeDescription: (
       <>
@@ -178,7 +175,6 @@ export const ALL_APPS_FRONTEND = {
     href: "teams",
     navigationItems: [
       { displayName: "Teams", href: ".", getBreadcrumbItems: getTeamBreadcrumbItems },
-      { displayName: "Team Settings", href: "../team-settings" },
     ],
     screenshots: getScreenshots('teams', 4),
     storeDescription: (
@@ -207,10 +203,7 @@ export const ALL_APPS_FRONTEND = {
   },
   "api-keys": {
     icon: KeyIcon,
-    href: "api-keys-app",
-    navigationItems: [
-      { displayName: "API Keys", href: "." },
-    ],
+    href: "app-configuration/api-keys",
     screenshots: getScreenshots('api-keys', 1),
     storeDescription: (
       <>
@@ -290,10 +283,7 @@ export const ALL_APPS_FRONTEND = {
   },
   "data-vault": {
     icon: VaultIcon,
-    href: "data-vault",
-    navigationItems: [
-      { displayName: "Data Vault", href: "." },
-    ],
+    href: "app-configuration/data-vault",
     screenshots: getScreenshots('data-vault', 4),
     storeDescription: (
       <>

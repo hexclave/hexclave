@@ -64,7 +64,7 @@ export default function AppDetailsModalPageClient({ appId }: { appId: AppId }) {
   const handleOpenChange = (open: boolean) => {
     if (!open) {
       // Navigate back to apps list. Modal stays open until pathname changes.
-      router.replace(`/projects/${project.id}/apps`);
+      router.replace(`/projects/${project.id}/app-configuration/apps`);
     }
   };
 

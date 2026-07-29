@@ -26,7 +26,7 @@ export default function PageClient() {
 
   if (showLocalConfigInstructions) {
     return (
-      <PageLayout title="Project Keys">
+      <PageLayout>
         <LocalConfigProjectKeysInstructions />
       </PageLayout>
     );
@@ -47,7 +47,6 @@ function ProjectKeysManagement(props: { create: boolean }) {
 
   return (
     <PageLayout
-      title="Project Keys"
       actions={
         <DesignButton onClick={() => setIsNewApiKeyDialogOpen(true)}>
           Create Project Keys

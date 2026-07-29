@@ -1,10 +1,11 @@
 import PageClient from "./page-client";
 
 export const metadata = {
-  title: "Create Product",
+  title: "New Product",
 };
 
 export default function Page() {
-  return <PageClient />;
+  return (
+    <PageClient />
+  );
 }
-

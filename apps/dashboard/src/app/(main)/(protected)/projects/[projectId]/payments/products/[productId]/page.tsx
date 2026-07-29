@@ -1,17 +1,11 @@
 import PageClient from "./page-client";
 
 export const metadata = {
-  title: "Product Details",
+  title: "Product",
 };
 
-export default async function Page({
-  params,
-}: {
-  params: Promise<{ productId: string }>,
-}) {
-  const awaitedParams = await params;
+export default function Page() {
   return (
-    <PageClient productId={awaitedParams.productId} />
+    <PageClient />
   );
 }
-

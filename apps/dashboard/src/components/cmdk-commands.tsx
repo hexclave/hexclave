@@ -276,8 +276,8 @@ const PROJECT_SHORTCUTS: ProjectShortcutDefinition[] = [
     id: "settings/trusted-domains",
     icon: GlobeIcon,
     label: "Trusted Domains",
-    description: "Settings",
-    href: "/domains",
+    description: "Project Settings",
+    href: "/project-settings/domains",
     keywords: ["domains", "trusted domains", "custom domain", "handler", "allowlist"],
     requiredApps: ["authentication"],
   },
@@ -294,8 +294,8 @@ const PROJECT_SHORTCUTS: ProjectShortcutDefinition[] = [
     id: "data-vault/stores",
     icon: HardDriveIcon,
     label: "Data Vault Stores",
-    description: "Data Vault",
-    href: "/data-vault/stores",
+    description: "App Configuration",
+    href: "/app-configuration/data-vault",
     keywords: ["data vault", "stores", "vault", "secrets", "encrypted storage"],
     requiredApps: ["data-vault"],
   },
@@ -567,22 +567,12 @@ export function useCmdKCommands({
 
     // Settings items
     commands.push({
-      id: "settings/explore-apps",
+      id: "settings/app-configuration",
       icon: <CubeIcon className="h-3.5 w-3.5 text-muted-foreground" />,
-      label: "Explore Apps",
+      label: "App Configuration",
       description: "Settings",
-      keywords: ["apps", "marketplace", "store", "install"],
-      onAction: { type: "navigate", href: `/projects/${projectId}/apps` },
-      preview: null,
-    });
-
-    commands.push({
-      id: "settings/project-keys",
-      icon: <KeyIcon className="h-3.5 w-3.5 text-muted-foreground" />,
-      label: "Project Keys",
-      description: "Settings",
-      keywords: ["api", "keys", "credentials", "secret"],
-      onAction: { type: "navigate", href: `/projects/${projectId}/project-keys` },
+      keywords: ["apps", "marketplace", "store", "install", "config", "hexclave.config"],
+      onAction: { type: "navigate", href: `/projects/${projectId}/app-configuration/apps` },
       preview: null,
     });
 
@@ -591,8 +581,18 @@ export function useCmdKCommands({
       icon: <GearIcon className="h-3.5 w-3.5 text-muted-foreground" />,
       label: "Project Settings",
       description: "Settings",
-      keywords: ["config", "configuration", "options"],
+      keywords: ["config", "configuration", "options", "domains", "credentials", "billing", "usage", "secrets"],
       onAction: { type: "navigate", href: `/projects/${projectId}/project-settings` },
+      preview: null,
+    });
+
+    commands.push({
+      id: "settings/project-keys",
+      icon: <KeyIcon className="h-3.5 w-3.5 text-muted-foreground" />,
+      label: "Project Keys",
+      description: "Settings",
+      keywords: ["api", "keys", "credentials", "secret", "project keys"],
+      onAction: { type: "navigate", href: `/projects/${projectId}/project-settings/keys` },
       preview: null,
     });
 

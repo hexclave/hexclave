@@ -1,10 +1,10 @@
 import PageClient from "./page-client";
 
 export const metadata = {
-  title: "Settings",
+  title: "Payments Settings",
 };
 
-export default async function Page() {
+export default function Page() {
   return (
     <PageClient />
   );

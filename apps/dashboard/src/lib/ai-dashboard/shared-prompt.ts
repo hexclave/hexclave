@@ -12,9 +12,12 @@ export function buildAvailableRoutes(enabledAppIds: AppId[]): string {
   // Static routes that are always available
   routes.push({ path: "/", label: "Overview" });
   routes.push({ path: "/dashboards", label: "Dashboards" });
-  routes.push({ path: "/explore-apps", label: "Explore Apps" });
-  routes.push({ path: "/project-keys", label: "Project Keys" });
+  routes.push({ path: "/app-configuration", label: "App Configuration" });
   routes.push({ path: "/project-settings", label: "Project Settings" });
+  routes.push({ path: "/project-settings/keys", label: "Project Keys" });
+  routes.push({ path: "/project-settings/domains", label: "Domains" });
+  routes.push({ path: "/project-settings/oauth", label: "OAuth credentials" });
+  routes.push({ path: "/project-settings/usage", label: "Billing & Usage" });
 
   // Dynamic routes from enabled apps
   for (const appId of enabledAppIds) {

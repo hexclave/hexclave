@@ -30,12 +30,12 @@ import {
   CaretRightIcon,
   DatabaseIcon,
   ChartBarIcon,
-  CubeIcon,
   GearIcon,
   GlobeIcon,
   ListIcon,
   PlusIcon,
   SidebarIcon,
+  TreeStructureIcon,
   UsersIcon,
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
@@ -67,24 +67,6 @@ type AppSection = {
   firstItemExternal?: boolean,
 };
 
-type BottomItem = {
-  name: string,
-  href: string,
-  icon: PhosphorIcon,
-  external?: boolean,
-  regex?: RegExp,
-};
-
-// Bottom navigation items (always visible)
-const bottomItems: BottomItem[] = [
-  {
-    name: 'Explore Apps',
-    href: '/apps',
-    icon: CubeIcon,
-    regex: /^\/projects\/[^\/]+\/apps(\/.*)?$/,
-  },
-];
-
 // Overview item (always at top)
 const overviewItem: Item = {
   name: "Overview",
@@ -110,6 +92,22 @@ const dashboardsItem: Item = {
   type: 'item',
 };
 
+const appConfigurationItem: Item = {
+  name: "App Configuration",
+  href: "/app-configuration",
+  regex: /^\/projects\/[^\/]+\/app-configuration(\/.*)?$/,
+  icon: TreeStructureIcon,
+  type: "item",
+};
+
+const projectSettingsItem: Item = {
+  name: "Project Settings",
+  href: "/project-settings",
+  regex: /^\/projects\/[^\/]+\/(project-settings|project-keys)(\/.*)?$/,
+  icon: GearIcon,
+  type: "item",
+};
+
 // Internal-only pages that are rendered solely for the internal project.
 const internalToolsItem: AppSection = {
   name: "Internal tools",
@@ -130,34 +128,6 @@ const internalToolsItem: AppSection = {
       name: "Newly Created Projects",
       href: "/newly-created-projects",
       match: (fullUrl: URL) => /^\/projects\/[^\/]+\/newly-created-projects(\/.*)?$/.test(fullUrl.pathname),
-    },
-  ],
-};
-
-const projectSettingsItem: AppSection = {
-  name: "Project Settings",
-  icon: GearIcon,
-  firstItemHref: "/project-settings",
-  items: [
-    {
-      name: "General",
-      href: "/project-settings",
-      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/project-settings\/?$/.test(fullUrl.pathname),
-    },
-    {
-      name: "Billing & Usage",
-      href: "/project-settings/usage",
-      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/project-settings\/usage(\/.*)?$/.test(fullUrl.pathname),
-    },
-    {
-      name: "Project Keys",
-      href: "/project-keys",
-      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/project-keys(\/.*)?$/.test(fullUrl.pathname),
-    },
-    {
-      name: "Trusted Domains",
-      href: "/domains",
-      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/domains(\/.*)?$/.test(fullUrl.pathname),
     },
   ],
 };
@@ -444,6 +414,11 @@ function AppNavItem({
         external: navItem.external,
         match: (fullUrl: URL) => testItemPath(projectId, navigableFrontend, navItem, fullUrl),
       }));
+    // Config-only apps end up with zero ops nav items after the App Configuration /
+    // Environment hub migration — hide them from the sidebar entirely.
+    if (items.length === 0) {
+      return null;
+    }
     return {
       name: app.displayName,
       appId,
@@ -511,9 +486,6 @@ function SidebarContent({
   }, [enabledApps, pathname, projectId]);
 
   const [expandedSections, setExpandedSections] = useState<Set<AppId>>(() => getDefaultExpandedSections());
-  const [isProjectSettingsExpanded, setIsProjectSettingsExpanded] = useState(() =>
-    /^\/projects\/[^\/]+\/(project-settings|project-keys|domains)(\/.*)?$/.test(pathname)
-  );
   const [isInternalToolsExpanded, setIsInternalToolsExpanded] = useState(() =>
     /^\/projects\/[^\/]+\/(platform-analytics|external-db-sync|newly-created-projects)(\/.*)?$/.test(pathname)
   );
@@ -521,14 +493,6 @@ function SidebarContent({
     ...internalToolsItem,
     firstItemHref: `/projects/${projectId}${internalToolsItem.firstItemHref ?? "/platform-analytics"}`,
     items: internalToolsItem.items.map((item) => ({
-      ...item,
-      href: `/projects/${projectId}${item.href}`,
-    })),
-  }), [projectId]);
-  const projectSettingsSection = useMemo<AppSection>(() => ({
-    ...projectSettingsItem,
-    firstItemHref: `/projects/${projectId}${projectSettingsItem.firstItemHref ?? "/project-settings"}`,
-    items: projectSettingsItem.items.map((item) => ({
       ...item,
       href: `/projects/${projectId}${item.href}`,
     })),
@@ -610,7 +574,7 @@ function SidebarContent({
               size="sm"
               className="mt-2 w-full justify-center gap-1.5 rounded-lg bg-transparent px-1.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/75 transition-colors duration-150 hover:bg-transparent hover:text-foreground hover:transition-none focus-visible:ring-border"
             >
-              <Link href={`/projects/${projectId}/apps`} onClick={onNavigate} className="justify-center">
+              <Link href={`/projects/${projectId}/app-configuration/apps`} onClick={onNavigate} className="justify-center">
                 <PlusIcon className="h-3.5 w-3.5" />
                 <span>Install apps</span>
               </Link>
@@ -627,26 +591,16 @@ function SidebarContent({
         isCollapsed ? "px-2" : "px-3",
       )}>
         <div className="space-y-2">
-          {bottomItems.map((item) => (
-            <NavItem
-              key={item.name}
-              onClick={onNavigate}
-              item={{
-                name: item.name,
-                type: "item",
-                href: item.href,
-                icon: item.icon,
-                regex: item.regex,
-              }}
-              href={item.external ? item.href : `/projects/${projectId}${item.href}`}
-              isCollapsed={isCollapsed}
-            />
-          ))}
           <NavItem
-            item={projectSettingsSection}
+            item={projectSettingsItem}
             onClick={onNavigate}
-            isExpanded={isProjectSettingsExpanded}
-            onToggle={() => setIsProjectSettingsExpanded((prev) => !prev)}
+            href={`/projects/${projectId}${projectSettingsItem.href}`}
+            isCollapsed={isCollapsed}
+          />
+          <NavItem
+            item={appConfigurationItem}
+            onClick={onNavigate}
+            href={`/projects/${projectId}${appConfigurationItem.href}`}
             isCollapsed={isCollapsed}
           />
         </div>

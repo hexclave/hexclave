@@ -79,6 +79,8 @@ const DASHBOARD_ROUTE_PATTERNS = [
   // Main dashboard routes (match your actual dashboard URLs)
   // Users
   { pattern: /\/users(?:\/.*)?$/, docPage: 'users' },
+  { pattern: /\/app-configuration\/authentication(?:\/.*)?$/, docPage: 'auth-methods' },
+  { pattern: /\/project-settings\/oauth(?:\/.*)?$/, docPage: 'auth-methods' },
   { pattern: /\/auth-methods(?:\/.*)?$/, docPage: 'auth-methods' },
 
   // Teams
@@ -92,7 +94,9 @@ const DASHBOARD_ROUTE_PATTERNS = [
   // TODO: Add Docs for payments here
 
   // Configuration
+  { pattern: /\/project-settings\/domains(?:\/.*)?$/, docPage: 'domains' },
   { pattern: /\/domains(?:\/.*)?$/, docPage: 'domains' },
+  { pattern: /\/app-configuration(?:\/.*)?$/, docPage: 'project-settings' },
   { pattern: /\/webhooks(?:\/.*)?$/, docPage: 'webhooks' },
   { pattern: /\/api-keys(?:\/.*)?$/, docPage: 'hexclave-keys' },
   { pattern: /\/project-settings(?:\/.*)?$/, docPage: 'project-settings' },

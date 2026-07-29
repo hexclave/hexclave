@@ -125,9 +125,9 @@ export function ConfigUpdateDialogProvider({ children }: { children: React.React
             title="Configuration Managed by CLI"
             description="This project's configuration was pushed via the Hexclave CLI."
             okButton={{
-              label: "Go to Project Settings",
+              label: "Go to App Configuration",
               onClick: async () => {
-                window.location.href = `/projects/${projectId}/project-settings`;
+                window.location.href = `/projects/${projectId}/app-configuration`;
               },
             }}
             cancelButton={{
@@ -143,7 +143,7 @@ export function ConfigUpdateDialogProvider({ children }: { children: React.React
               </p>
               <ul className="list-disc list-inside space-y-1 ml-2">
                 <li>Push updates through the Hexclave CLI</li>
-                <li>Unlink the CLI in Project Settings to edit directly on this dashboard</li>
+                <li>Unlink the CLI in App Configuration to edit directly on this dashboard</li>
               </ul>
             </div>
           </ActionDialog>

@@ -4,11 +4,7 @@ export const metadata = {
   title: "Products & Items",
 };
 
-type Params = {
-  projectId: string,
-};
-
-export default async function Page() {
+export default function Page() {
   return (
     <PageClient />
   );

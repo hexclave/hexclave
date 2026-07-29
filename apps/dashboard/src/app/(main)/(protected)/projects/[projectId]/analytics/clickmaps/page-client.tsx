@@ -199,7 +199,7 @@ export default function PageClient() {
               </span>
               <Button
                 className="shrink-0 gap-1.5"
-                onClick={() => router.push(`/projects/${project.id}/domains`)}
+                onClick={() => router.push(`/projects/${project.id}/project-settings/domains`)}
               >
                 Go to trusted domains
                 <ArrowRight className="h-4 w-4" />

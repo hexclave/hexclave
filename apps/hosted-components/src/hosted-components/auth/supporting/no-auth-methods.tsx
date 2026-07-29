@@ -23,7 +23,7 @@ export function HostedNoAuthMethods(props: {
   projectId: string,
   projectDisplayName?: string,
 }) {
-  const authMethodsUrl = `${HOSTED_DASHBOARD_URL}/projects/${encodeURIComponent(props.projectId)}/auth-methods`;
+  const authMethodsUrl = `${HOSTED_DASHBOARD_URL}/projects/${encodeURIComponent(props.projectId)}/app-configuration/authentication`;
 
   return (
     <HostedAuthShell fullPage={props.fullPage} paddedFullPage={false}>

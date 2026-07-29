@@ -364,7 +364,6 @@ export default function PageClient() {
 
   return (
     <PageLayout
-      title="Billing & Usage"
       description={`Usage for ${planUsage.ownerTeamDisplayName} across all projects owned by this team.`}
       width={1050}
     >

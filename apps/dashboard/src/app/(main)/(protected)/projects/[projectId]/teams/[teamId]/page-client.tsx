@@ -252,7 +252,7 @@ function TeamPage({ team }: { team: ServerTeam }) {
                 className="h-8 justify-center gap-1.5 rounded-lg bg-transparent px-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/75 transition-colors duration-150 hover:bg-transparent hover:text-foreground hover:transition-none"
               >
                 <Link
-                  href={`/projects/${encodeURIComponent(hexclaveAdminApp.projectId)}/apps`}
+                  href={`/projects/${encodeURIComponent(hexclaveAdminApp.projectId)}/app-configuration/apps`}
                   className="inline-flex items-center justify-center"
                 >
                   <PlusIcon className="h-3.5 w-3.5" />

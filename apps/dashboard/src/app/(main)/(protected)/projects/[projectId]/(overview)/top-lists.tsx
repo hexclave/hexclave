@@ -75,13 +75,13 @@ function SetupAppPromptInline({
         <Typography variant="secondary" className="text-xs">
           Enable{" "}
           <span className="font-semibold text-foreground">{appLabel}</span>{" "}
-          in Explore Apps to track {metricLabel}.
+          in App Configuration to track {metricLabel}.
         </Typography>
         <Link
-          href={`/projects/${projectId}/apps/${appId}`}
+          href={`/projects/${projectId}/app-configuration/apps/${appId}`}
           className="inline-flex items-center rounded-md bg-foreground/[0.08] px-3 py-1.5 text-[11px] font-medium text-foreground transition-colors duration-150 hover:bg-foreground/[0.12] hover:transition-none"
         >
-          Open Explore Apps
+          Open App Configuration
         </Link>
       </div>
     </div>

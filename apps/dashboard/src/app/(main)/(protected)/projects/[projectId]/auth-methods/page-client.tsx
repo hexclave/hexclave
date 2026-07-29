@@ -44,11 +44,14 @@ import { resolvePlanId } from "@hexclave/shared/dist/plans";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { ErrorBoundary } from "next/dist/client/components/error-boundary";
 import { Suspense, useEffect, useId, useMemo, useState } from "react";
+import { Link } from "@/components/link";
 import { AppEnabledGuard } from "../app-enabled-guard";
 import { PageLayout } from "../page-layout";
-import { useAdminApp } from "../use-admin-app";
+import { useAdminApp, useProjectId } from "../use-admin-app";
 import { getNewProviderCallbackUrl, resolveProviderCallbackUrl } from "./oauth-callback-url";
 import { ProviderIcon, ProviderSettingDialog, ProviderSettingSwitch, TurnOffProviderDialog } from "./providers";
+
+export type AuthMethodsPageVariant = "full" | "branch" | "oauth";
 
 type AdminOAuthProviderConfig = AdminProject['config']['oauthProviders'][number];
 
@@ -970,12 +973,18 @@ function useEmailVerificationToggle() {
 
 // ─── Page ─────────────────────────────────────────────────────────────────
 
-export default function PageClient() {
+export default function PageClient(props: { variant?: AuthMethodsPageVariant, embedded?: boolean }) {
+  const variant = props.variant ?? "full";
+  const embedded = props.embedded === true;
   const hexclaveAdminApp = useAdminApp();
+  const projectId = useProjectId();
   const project = hexclaveAdminApp.useProject();
   const config = project.useConfig();
   const oauthProviders = project.config.oauthProviders;
   const updateConfig = useUpdateConfig();
+  const showBranchSections = variant === "full" || variant === "branch";
+  const showOauthSections = variant === "full" || variant === "oauth";
+  const environmentOauthHref = `/projects/${projectId}/project-settings/oauth`;
   const [confirmSignUpEnabled, setConfirmSignUpEnabled] = useState(false);
   const [confirmSignUpDisabled, setConfirmSignUpDisabled] = useState(false);
   const [disabledProvidersDialogOpen, setDisabledProvidersDialogOpen] = useState(false);
@@ -1124,26 +1133,110 @@ export default function PageClient() {
 
   return (
     <AppEnabledGuard appId="authentication">
-      <PageLayout title="Auth Methods" description="Configure how users can sign in to your app">
+      <PageLayout
+        title={embedded ? undefined : (variant === "oauth" ? "OAuth credentials" : "Auth Methods")}
+        description={
+          embedded
+            ? undefined
+            : variant === "oauth"
+              ? "Provider credentials and shared OAuth apps for this environment."
+              : "Configure how users can sign in to your app"
+        }
+      >
         <section className="flex flex-col gap-4">
-          <div className="flex gap-4">
+          {showBranchSections && (
+            <div className="flex gap-4">
+              <DesignCard
+                title="Sign-in methods"
+                subtitle="Each method below is independently toggleable"
+                icon={UserCircleIcon}
+                className="flex-grow"
+                gradient="default"
+              >
+                <div className="flex flex-col gap-2">
+                  <MethodToggleRow icon={AsteriskIcon} label="Email/password authentication" hint="Classic email + password credentials." checked={passwordEnabled} onCheckedChange={onPasswordChange} density="default" />
+                  <MethodToggleRow icon={LinkIcon} label="Magic link (Email OTP)" hint="One-time codes delivered by email." checked={otpEnabled} onCheckedChange={onOtpChange} density="default" />
+                  <MethodToggleRow icon={KeyIcon} label="Passkey" hint="Phishing-resistant device-bound credentials." checked={passkeyEnabled} onCheckedChange={onPasskeyChange} density="default" />
+                </div>
+                <InlineSaveDiscard hasChanges={authMethodsHasChanges} onSave={handleAuthMethodsSave} onDiscard={handleAuthMethodsDiscard} />
+
+                {variant === "branch" ? (
+                  <>
+                    <div className="mt-5 mb-3">
+                      <div className="text-xs font-semibold uppercase tracking-wider text-foreground">SSO Providers</div>
+                    </div>
+                    <DesignAlert
+                      variant="info"
+                      title="OAuth credentials live in Project Settings"
+                      description={
+                        enabledProvidersList.length === 0 && customOidcProviders.length === 0
+                          ? "Enable and configure SSO providers under Project Settings → OAuth."
+                          : `${enabledProvidersList.length + customOidcProviders.length} provider(s) enabled. Manage credentials and shared apps in Project Settings.`
+                      }
+                    />
+                    <div className="mt-3">
+                      <DesignButton asChild variant="secondary" size="sm">
+                        <Link href={environmentOauthHref}>Manage OAuth credentials</Link>
+                      </DesignButton>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="mt-5 mb-3">
+                      <div className="text-xs font-semibold uppercase tracking-wider text-foreground">SSO Providers</div>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      {enabledProvidersList.map(provider => (
+                        <ProviderInlineRow key={provider.id} provider={provider} />
+                      ))}
+                      {customOidcProviders.map(provider => (
+                        <CustomOidcProviderInlineRow key={provider.id} provider={provider} />
+                      ))}
+                      {enabledProvidersList.length === 0 && customOidcProviders.length === 0 && (
+                        <DesignAlert
+                          variant="info"
+                          description="No SSO providers enabled. Add one to let users sign in with their existing accounts."
+                        />
+                      )}
+                    </div>
+                    <div className="flex gap-2 mt-4 flex-wrap">
+                      <DesignButton
+                        onClick={() => setDisabledProvidersDialogOpen(true)}
+                        variant="secondary"
+                      >
+                        <PlusCircleIcon size={16} className="mr-1.5" />
+                        Add SSO providers
+                      </DesignButton>
+                      <AddCustomOidcButton onClick={() => setCustomOidcDialogOpen(true)} />
+                    </div>
+                  </>
+                )}
+              </DesignCard>
+              <DesignCard
+                title="Live preview"
+                icon={EyeIcon}
+                className="hidden lg:flex"
+                gradient="default"
+              >
+                <LivePreviewBody
+                  config={project.config}
+                  projectDisplayName={project.displayName}
+                  passwordEnabled={passwordEnabled}
+                  otpEnabled={otpEnabled}
+                  passkeyEnabled={passkeyEnabled}
+                  enabledProviders={enabledProvidersList}
+                />
+              </DesignCard>
+            </div>
+          )}
+
+          {showOauthSections && !showBranchSections && (
             <DesignCard
-              title="Sign-in methods"
-              subtitle="Each method below is independently toggleable"
-              icon={UserCircleIcon}
-              className="flex-grow"
+              title="SSO Providers"
+              subtitle="Enable providers and manage client credentials for this environment"
+              icon={GlobeIcon}
               gradient="default"
             >
-              <div className="flex flex-col gap-2">
-                <MethodToggleRow icon={AsteriskIcon} label="Email/password authentication" hint="Classic email + password credentials." checked={passwordEnabled} onCheckedChange={onPasswordChange} density="default" />
-                <MethodToggleRow icon={LinkIcon} label="Magic link (Email OTP)" hint="One-time codes delivered by email." checked={otpEnabled} onCheckedChange={onOtpChange} density="default" />
-                <MethodToggleRow icon={KeyIcon} label="Passkey" hint="Phishing-resistant device-bound credentials." checked={passkeyEnabled} onCheckedChange={onPasskeyChange} density="default" />
-              </div>
-              <InlineSaveDiscard hasChanges={authMethodsHasChanges} onSave={handleAuthMethodsSave} onDiscard={handleAuthMethodsDiscard} />
-
-              <div className="mt-5 mb-3">
-                <div className="text-xs font-semibold uppercase tracking-wider text-foreground">SSO Providers</div>
-              </div>
               <div className="flex flex-col gap-2">
                 {enabledProvidersList.map(provider => (
                   <ProviderInlineRow key={provider.id} provider={provider} />
@@ -1169,105 +1262,102 @@ export default function PageClient() {
                 <AddCustomOidcButton onClick={() => setCustomOidcDialogOpen(true)} />
               </div>
             </DesignCard>
-            <DesignCard
-              title="Live preview"
-              icon={EyeIcon}
-              className="hidden lg:flex"
-              gradient="default"
-            >
-              <LivePreviewBody
-                config={project.config}
-                projectDisplayName={project.displayName}
-                passwordEnabled={passwordEnabled}
-                otpEnabled={otpEnabled}
-                passkeyEnabled={passkeyEnabled}
-                enabledProviders={enabledProvidersList}
-              />
-            </DesignCard>
-          </div>
+          )}
 
-          <DesignCard title="Sign-up" subtitle="Account creation policies for new users" icon={UserPlusIcon} gradient="default">
-            <div className="flex flex-col gap-2">
-              <MethodToggleRow
-                icon={SignInIcon}
-                label="Allow new user sign-ups"
-                hint="Existing users can still sign in when sign-up is disabled. You can always create new accounts manually via the dashboard."
-                checked={allowSignUp}
-                onCheckedChange={onAllowSignUpChange}
-                density="compact"
-              />
-              <MethodToggleRow
-                icon={EnvelopeSimpleIcon}
-                label="Require email verification"
-                hint="Users must verify their primary email before they can use your application. Unverified users will be restricted."
-                checked={emailVerification.checked}
-                onCheckedChange={emailVerification.onCheckedChange}
-                density="compact"
-              />
-              <Label
-                className="flex items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-foreground/[0.03] transition-colors duration-150 hover:transition-none cursor-pointer"
-              >
-                <div className="p-2 rounded-lg bg-foreground/[0.06] dark:bg-foreground/[0.04] shrink-0">
-                  <UserCircleIcon size={18} className="text-foreground/70 dark:text-muted-foreground" aria-hidden="true" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-foreground truncate">Same-email social login policy</div>
-                  <div className="text-xs text-muted-foreground mt-0.5">Determines what happens when a user uses a new social login provider with an email that&apos;s already connected to an account</div>
-                </div>
-                <DesignSelectorDropdown
-                  value={mergeStrategy}
-                  onValueChange={onMergeStrategyChange}
-                  options={[
-                    { value: "link_method", label: MERGE_STRATEGY_SHORT.link_method },
-                    { value: "allow_duplicates", label: MERGE_STRATEGY_SHORT.allow_duplicates },
-                    { value: "raise_error", label: MERGE_STRATEGY_SHORT.raise_error },
-                  ]}
-                  size="sm"
-                  className="w-[180px]"
+          {showBranchSections && (
+            <DesignCard title="Sign-up" subtitle="Account creation policies for new users" icon={UserPlusIcon} gradient="default">
+              <div className="flex flex-col gap-2">
+                <MethodToggleRow
+                  icon={SignInIcon}
+                  label="Allow new user sign-ups"
+                  hint="Existing users can still sign in when sign-up is disabled. You can always create new accounts manually via the dashboard."
+                  checked={allowSignUp}
+                  onCheckedChange={onAllowSignUpChange}
+                  density="compact"
                 />
-              </Label>
-            </div>
-            <InlineSaveDiscard hasChanges={signUpHasChanges} onSave={handleSignUpSave} onDiscard={handleSignUpDiscard} />
-          </DesignCard>
+                <MethodToggleRow
+                  icon={EnvelopeSimpleIcon}
+                  label="Require email verification"
+                  hint="Users must verify their primary email before they can use your application. Unverified users will be restricted."
+                  checked={emailVerification.checked}
+                  onCheckedChange={emailVerification.onCheckedChange}
+                  density="compact"
+                />
+                <Label
+                  className="flex items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-foreground/[0.03] transition-colors duration-150 hover:transition-none cursor-pointer"
+                >
+                  <div className="p-2 rounded-lg bg-foreground/[0.06] dark:bg-foreground/[0.04] shrink-0">
+                    <UserCircleIcon size={18} className="text-foreground/70 dark:text-muted-foreground" aria-hidden="true" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-foreground truncate">Same-email social login policy</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">Determines what happens when a user uses a new social login provider with an email that&apos;s already connected to an account</div>
+                  </div>
+                  <DesignSelectorDropdown
+                    value={mergeStrategy}
+                    onValueChange={onMergeStrategyChange}
+                    options={[
+                      { value: "link_method", label: MERGE_STRATEGY_SHORT.link_method },
+                      { value: "allow_duplicates", label: MERGE_STRATEGY_SHORT.allow_duplicates },
+                      { value: "raise_error", label: MERGE_STRATEGY_SHORT.raise_error },
+                    ]}
+                    size="sm"
+                    className="w-[180px]"
+                  />
+                </Label>
+              </div>
+              <InlineSaveDiscard hasChanges={signUpHasChanges} onSave={handleSignUpSave} onDiscard={handleSignUpDiscard} />
+            </DesignCard>
+          )}
 
-          <DesignCard title="User deletion" subtitle="Self-service account removal" icon={TrashIcon} gradient="default">
-            <MethodToggleRow
-              icon={TrashIcon}
-              label="Allow users to delete their own accounts on the client-side"
-              hint="A delete button will also be added to the account settings page."
-              checked={allowClientDeletion}
-              onCheckedChange={onAllowClientDeletionChange}
-              density="default"
-            />
-            <InlineSaveDiscard hasChanges={userDeletionHasChanges} onSave={handleUserDeletionSave} onDiscard={handleUserDeletionDiscard} />
-          </DesignCard>
+          {showBranchSections && (
+            <DesignCard title="User deletion" subtitle="Self-service account removal" icon={TrashIcon} gradient="default">
+              <MethodToggleRow
+                icon={TrashIcon}
+                label="Allow users to delete their own accounts on the client-side"
+                hint="A delete button will also be added to the account settings page."
+                checked={allowClientDeletion}
+                onCheckedChange={onAllowClientDeletionChange}
+                density="default"
+              />
+              <InlineSaveDiscard hasChanges={userDeletionHasChanges} onSave={handleUserDeletionSave} onDiscard={handleUserDeletionDiscard} />
+            </DesignCard>
+          )}
 
           <div className="h-5 shrink-0" aria-hidden="true" />
         </section>
 
-        <ConfirmSignUpEnabledDialog
-          open={confirmSignUpEnabled}
-          onOpenChange={setConfirmSignUpEnabled}
-          onConfirm={async () => {
-            await handleSignUpConfirmed(true);
-          }}
-        />
-        <ConfirmSignUpDisabledDialog
-          open={confirmSignUpDisabled}
-          onOpenChange={setConfirmSignUpDisabled}
-          onConfirm={async () => {
-            await handleSignUpConfirmed(false);
-          }}
-        />
-        <DisabledProvidersDialog
-          open={disabledProvidersDialogOpen}
-          onOpenChange={(x) => setDisabledProvidersDialogOpen(x)}
-        />
-        <CustomOidcProviderDialog
-          open={customOidcDialogOpen}
-          onClose={() => setCustomOidcDialogOpen(false)}
-        />
-        {emailVerification.dialog}
+        {showBranchSections && (
+          <>
+            <ConfirmSignUpEnabledDialog
+              open={confirmSignUpEnabled}
+              onOpenChange={setConfirmSignUpEnabled}
+              onConfirm={async () => {
+                await handleSignUpConfirmed(true);
+              }}
+            />
+            <ConfirmSignUpDisabledDialog
+              open={confirmSignUpDisabled}
+              onOpenChange={setConfirmSignUpDisabled}
+              onConfirm={async () => {
+                await handleSignUpConfirmed(false);
+              }}
+            />
+          </>
+        )}
+        {showOauthSections && (
+          <>
+            <DisabledProvidersDialog
+              open={disabledProvidersDialogOpen}
+              onOpenChange={(x) => setDisabledProvidersDialogOpen(x)}
+            />
+            <CustomOidcProviderDialog
+              open={customOidcDialogOpen}
+              onClose={() => setCustomOidcDialogOpen(false)}
+            />
+          </>
+        )}
+        {showBranchSections && emailVerification.dialog}
       </PageLayout>
     </AppEnabledGuard>
   );

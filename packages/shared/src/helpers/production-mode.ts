@@ -9,7 +9,7 @@ export type ProductionModeError = {
 
 export function getProductionModeErrors(project: ProjectsCrud["Admin"]["Read"]): ProductionModeError[] {
   const errors: ProductionModeError[] = [];
-  const domainsFixUrl = `/projects/${project.id}/domains` as const;
+  const domainsFixUrl = `/projects/${project.id}/project-settings/domains` as const;
 
   if (project.config.allow_localhost) {
     errors.push({

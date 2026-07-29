@@ -4,9 +4,8 @@ export const metadata = {
   title: "Product Lines",
 };
 
-export default async function Page() {
+export default function Page() {
   return (
     <PageClient />
   );
 }
-

@@ -4,13 +4,8 @@ export const metadata = {
   title: "Edit Product",
 };
 
-export default async function Page({
-  params,
-}: {
-  params: Promise<{ productId: string }>,
-}) {
-  const awaitedParams = await params;
+export default function Page() {
   return (
-    <PageClient productId={awaitedParams.productId} />
+    <PageClient />
   );
 }

@@ -128,7 +128,7 @@ export default function PageClient() {
           configUpdate: {
             'emails.selectedThemeId': dialogSelectedThemeId,
           },
-          pushable: false,
+          pushable: true,
         });
         if (!didUpdate) {
           setDialogError("Theme not saved. Please try again.");
@@ -301,7 +301,7 @@ function ThemeOption({
             configUpdate: {
               'emails.selectedThemeId': DEFAULT_EMAIL_THEME_ID,
             },
-            pushable: false,
+            pushable: true,
           });
           if (!didUpdate) {
             resolve("prevent-close");

@@ -101,11 +101,11 @@ export default function PageClient() {
           <div className="flex items-center gap-3 mb-2">
             <SquaresFourIcon className="h-8 w-8 text-blue-600 dark:text-blue-400" />
             <h1 className="text-3xl font-semibold text-gray-900 dark:text-gray-100">
-              Apps
+              Installed apps
             </h1>
           </div>
           <p className="text-gray-600 dark:text-gray-400">
-            Extend your project with powerful features and integrations
+            Enable apps for this project. Enabling an app updates hexclave.config.ts.
           </p>
         </div>
 

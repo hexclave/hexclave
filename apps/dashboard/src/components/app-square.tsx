@@ -62,7 +62,7 @@ export function AppSquare({
   const router = useRouter();
 
   const isEnabled = isAppEnabled(config.apps.installed, appId);
-  const appDetailsPath = `/projects/${projectId}/apps/${appId}`;
+  const appDetailsPath = `/projects/${projectId}/app-configuration/apps/${appId}`;
   const appFrontend = ALL_APPS_FRONTEND[appId];
   const parentAppId = getParentAppId(appId);
   const parentApp = parentAppId == null ? null : ALL_APPS[parentAppId];
@@ -72,7 +72,7 @@ export function AppSquare({
     ? null
     : parentAppEnabled
       ? getAppPath(projectId, appFrontend)
-      : `/projects/${projectId}/apps/${parentAppId}`;
+      : `/projects/${projectId}/app-configuration/apps/${parentAppId}`;
 
   const handleToggleEnabled = async () => {
     // Show warning modal for alpha/beta apps when enabling
@@ -223,7 +223,7 @@ export function AppListItem({
   const isEnabled = isAppEnabled(config.apps.installed, appId);
   const appPath = getAppPath(project.id, appFrontend);
   const appDestinationPath = getDocumentationHref(appFrontend) ?? appPath;
-  const appDetailsPath = `/projects/${project.id}/apps/${appId}`;
+  const appDetailsPath = `/projects/${project.id}/app-configuration/apps/${appId}`;
   const router = useRouter();
   const parentAppId = getParentAppId(appId);
   const parentApp = parentAppId == null ? null : ALL_APPS[parentAppId];
@@ -233,7 +233,7 @@ export function AppListItem({
     ? null
     : parentAppEnabled
       ? appPath
-      : `/projects/${project.id}/apps/${parentAppId}`;
+      : `/projects/${project.id}/app-configuration/apps/${parentAppId}`;
 
   const handleEnable = async (e: React.MouseEvent) => {
     e.preventDefault();

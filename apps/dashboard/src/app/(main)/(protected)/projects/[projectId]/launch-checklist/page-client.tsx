@@ -344,7 +344,7 @@ export default function PageClient() {
     subtitle: "Lock callbacks to trusted production URLs.",
     status: domainTaskItems.every((item) => item.done) ? "done" : "action",
     actionLabel: "Open domain settings",
-    onAction: () => router.push(`${baseProjectPath}/domains`),
+    onAction: () => router.push(`${baseProjectPath}/project-settings/domains`),
     items: domainTaskItems,
   };
 

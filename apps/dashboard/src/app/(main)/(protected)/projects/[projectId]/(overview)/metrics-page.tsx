@@ -297,13 +297,13 @@ function SetupAppPrompt({
           <span className="font-semibold text-foreground">
             {appLabel}
           </span>{" "}
-          in Explore Apps to track {metricLabel}.
+          in App Configuration to track {metricLabel}.
         </Typography>
         <Link
-          href={`/projects/${projectId}/apps/${appId}`}
+          href={`/projects/${projectId}/app-configuration/apps/${appId}`}
           className="inline-flex items-center rounded-md bg-foreground/[0.08] px-3 py-1.5 text-[11px] font-medium text-foreground transition-colors duration-150 hover:bg-foreground/[0.12] hover:transition-none"
         >
-          Open Explore Apps
+          Open App Configuration
         </Link>
       </div>
     </div>
@@ -1396,7 +1396,7 @@ function QuickAccessApps({ projectId, installedApps }: { projectId: string, inst
             })}
 
             <Link
-              href={`/projects/${projectId}/apps`}
+              href={`/projects/${projectId}/app-configuration/apps`}
               className="group flex flex-col items-center gap-2.5 pt-3 pb-2 rounded-xl hover:bg-foreground/[0.03] transition-all duration-150 hover:transition-none"
               title="Explore apps"
             >

@@ -63,6 +63,11 @@ const urlPrefetchers: Record<string, ((match: RegExpMatchArray, query: URLSearch
       useAdminApp(projectId).useTeamPermissionDefinitions();
     },
   ],
+  "/projects/*/app-configuration/teams": [
+    ([_, projectId]) => {
+      useAdminApp(projectId).useTeamPermissionDefinitions();
+    },
+  ],
   "/projects/*/team-permissions": [
     ([_, projectId]) => {
       useAdminApp(projectId).useTeamPermissionDefinitions();
