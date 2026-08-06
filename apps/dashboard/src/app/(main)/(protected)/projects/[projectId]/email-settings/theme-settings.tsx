@@ -10,7 +10,8 @@ import { ArrowRightIcon, CheckIcon, PaintBrush } from "@phosphor-icons/react";
 import { previewTemplateSource } from "@hexclave/shared/dist/helpers/emails";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import React, { useMemo } from "react";
-import { useAdminApp } from "../use-admin-app";
+import { useAdminApp, useProjectId } from "../use-admin-app";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 
 const PREVIEW_SCALE = 0.42;
 
@@ -64,6 +65,7 @@ function ThemePreviewFrame({ children, className, active, activeLabel, style }: 
 
 export function ThemeSettings() {
   const router = useRouter();
+  const projectId = useProjectId();
   const hexclaveAdminApp = useAdminApp();
   const config = hexclaveAdminApp.useProject().useConfig();
   const themes = hexclaveAdminApp.useEmailThemes();
@@ -113,7 +115,7 @@ export function ThemeSettings() {
           className="gap-1.5 hover:bg-accent"
           onClick={(e) => {
             e.stopPropagation();
-            router.push("email-themes");
+            router.push(urlString`/projects/${projectId}/app-configuration/emails/themes`);
           }}
         >
           Manage Themes

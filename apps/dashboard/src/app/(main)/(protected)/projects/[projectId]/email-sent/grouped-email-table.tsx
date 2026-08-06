@@ -11,7 +11,8 @@ import {
   type DataGridColumnDef,
 } from "@hexclave/dashboard-ui-components";
 import { useEffect, useMemo, useState } from "react";
-import { useAdminApp } from "../use-admin-app";
+import { useAdminApp, useProjectId } from "../use-admin-app";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { StatsBar, StatsBarData } from "./stats-bar";
 
 type GroupedEmailRow = {
@@ -180,6 +181,7 @@ const groupedEmailGridColumns: DataGridColumnDef<GroupedEmailRow>[] = [
 
 export function GroupedEmailTable() {
   const hexclaveAdminApp = useAdminApp();
+  const projectId = useProjectId();
   const router = useRouter();
   const [emails, setEmails] = useState<AdminEmailOutbox[]>([]);
   const [loading, setLoading] = useState(true);
@@ -272,7 +274,7 @@ export function GroupedEmailTable() {
         if (row.sourceType === "draft" && row.sourceId) {
           router.push(`email-drafts/${row.sourceId}?stage=sent`);
         } else if (row.sourceType === "template" && row.sourceId) {
-          router.push(`email-templates/${row.sourceId}/sent`);
+          router.push(urlString`/projects/${projectId}/app-configuration/emails/templates/${row.sourceId}/sent`);
         } else {
           router.push(`email-sent/no-source`);
         }

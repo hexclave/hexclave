@@ -135,10 +135,9 @@ export function testItemPath(projectId: string, appFrontend: NavigableAppFronten
 export const ALL_APPS_FRONTEND = {
   authentication: {
     icon: FingerprintSimpleIcon,
-    href: "auth-methods",
+    href: "sign-up-rules",
     navigationItems: [
-      { displayName: "Auth Methods", href: "." },
-      { displayName: "Sign-up Rules", href: "../sign-up-rules" },
+      { displayName: "Sign-up Rules", href: "." },
     ],
     screenshots: getScreenshots('auth', 6),
     storeDescription: (
@@ -218,11 +217,9 @@ export const ALL_APPS_FRONTEND = {
     href: "payments",
     navigationItems: [
       { displayName: "Product Lines", href: "./product-lines" },
-      { displayName: "Products & Items", href: "./products" },
       { displayName: "Customers", href: "./customers" },
       { displayName: "Transactions", href: "./transactions" },
       { displayName: "Payouts", href: "./payouts" },
-      { displayName: "Settings", href: "./settings" },
     ],
     screenshots: getScreenshots('payments', 7),
     storeDescription: (
@@ -239,8 +236,6 @@ export const ALL_APPS_FRONTEND = {
     navigationItems: [
       { displayName: "Sent", href: "." },
       { displayName: "Drafts", href: "../email-drafts", getBreadcrumbItems: getEmailDraftBreadcrumbItems },
-      { displayName: "Templates", href: "../email-templates", getBreadcrumbItems: getEmailTemplatesBreadcrumbItems },
-      { displayName: "Email Settings", href: "../email-settings" },
     ],
     screenshots: getScreenshots('emails', 8),
     storeDescription: (
@@ -283,7 +278,10 @@ export const ALL_APPS_FRONTEND = {
   },
   "data-vault": {
     icon: VaultIcon,
-    href: "app-configuration/data-vault",
+    href: "data-vault",
+    navigationItems: [
+      { displayName: "Stores", href: "." },
+    ],
     screenshots: getScreenshots('data-vault', 4),
     storeDescription: (
       <>
@@ -542,34 +540,6 @@ function createSvgIcon(ChildrenComponent: () => React.ReactNode): (props: any) =
   );
   Result.displayName = `SvgIcon(${ChildrenComponent.name})`;
   return Result;
-}
-
-async function getEmailTemplatesBreadcrumbItems(hexclaveAdminApp: StackAdminApp<false>, relativePart: string) {
-  const normalized = relativePart || "/";
-  const baseCrumbs = [{ item: "Templates", href: "." }];
-  if (normalized === "/" || normalized === "") {
-    return baseCrumbs;
-  }
-
-  const match = normalized.match(/^\/([^/]+)(?:\/.*)?$/);
-  if (!match) {
-    return baseCrumbs;
-  }
-
-  const templateId = decodeURIComponent(match[1]);
-  const templates = await hexclaveAdminApp.listEmailTemplates();
-  const template = templates.find(({ id }) => id === templateId);
-  if (!template) {
-    return baseCrumbs;
-  }
-
-  return [
-    ...baseCrumbs,
-    {
-      item: template.displayName,
-      href: `./${encodeURIComponent(template.id)}`,
-    },
-  ];
 }
 
 async function getTeamBreadcrumbItems(hexclaveAdminApp: StackAdminApp<false>, relativePart: string) {

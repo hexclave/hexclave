@@ -45,6 +45,7 @@ import {
   type RuleNode,
 } from "@/lib/cel-visual-parser";
 import { useUpdateConfig } from "@/components/config-update";
+import { Link } from "@/components/link";
 import { hexclaveAppInternalsSymbol } from "@/lib/hexclave-app-internals";
 import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
@@ -79,6 +80,7 @@ import { standardProviders } from "@hexclave/shared/dist/utils/oauth";
 import { typedEntries } from "@hexclave/shared/dist/utils/objects";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import React, { useMemo, useRef, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
 import { AppEnabledGuard } from "../app-enabled-guard";
@@ -530,11 +532,16 @@ function RecentTriggerRow({
   );
 }
 
-function RecentTriggersCard({
+export type RecentTriggersRuleOption = {
+  id: string,
+  displayName: string,
+};
+
+export function RecentTriggersCard({
   signUpRules,
   hexclaveAdminApp,
 }: {
-  signUpRules: SignUpRuleEntry[],
+  signUpRules: RecentTriggersRuleOption[],
   hexclaveAdminApp: ReturnType<typeof useAdminApp>,
 }) {
   const [emailSearchInput, setEmailSearchInput] = useState("");
@@ -552,14 +559,14 @@ function RecentTriggersCard({
   const isLoadingMoreRef = useRef(false);
 
   const ruleDisplayNameById = useMemo(
-    () => new Map(signUpRules.map((entry) => [entry.id, entry.rule.displayName ?? entry.id] as const)),
+    () => new Map(signUpRules.map((entry) => [entry.id, entry.displayName] as const)),
     [signUpRules],
   );
   const ruleFilterOptions = useMemo(() => [
     { value: ALL_FILTER_VALUE, label: "All rules" },
     ...signUpRules.map((entry) => ({
       value: entry.id,
-      label: entry.rule.displayName || entry.id,
+      label: entry.displayName || entry.id,
     })),
   ], [signUpRules]);
 
@@ -2080,10 +2087,6 @@ function PageBody(props: PageBodyProps) {
         />
 
         <div className="pt-10">
-          <RecentTriggersCard signUpRules={props.signUpRules} hexclaveAdminApp={props.hexclaveAdminApp} />
-        </div>
-
-        <div className="pt-10">
           <TestRulesPanel hexclaveAdminApp={props.hexclaveAdminApp} />
         </div>
 
@@ -2281,15 +2284,23 @@ export default function PageClient() {
     <AppEnabledGuard appId="authentication">
       <PageLayout
         title="Sign-up Rules"
-        description="Create rules to control who can sign up. Rules are evaluated in order from top to bottom."
+        description="Create rules to control who can sign up. Rules are evaluated in order from top to bottom. Recent trigger activity lives under Authentication → Sign-up Rules."
         actions={
-          <DesignButton
-            onClick={handleAddRule}
-            disabled={isAnyEditing || hasOrderChanges}
-          >
-            <PlusIcon className="h-4 w-4 mr-2" />
-            Add rule
-          </DesignButton>
+          <div className="flex items-center gap-2">
+            <DesignButton asChild variant="secondary">
+              <Link href={urlString`/projects/${hexclaveAdminApp.projectId}/sign-up-rules`}>
+                <PulseIcon className="h-4 w-4 mr-2" />
+                Recent triggers
+              </Link>
+            </DesignButton>
+            <DesignButton
+              onClick={handleAddRule}
+              disabled={isAnyEditing || hasOrderChanges}
+            >
+              <PlusIcon className="h-4 w-4 mr-2" />
+              Add rule
+            </DesignButton>
+          </div>
         }
       >
         <PageBody

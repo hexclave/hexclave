@@ -175,6 +175,31 @@ const urlPrefetchers: Record<string, ((match: RegExpMatchArray, query: URLSearch
       }
     },
   ],
+  "/projects/*/app-configuration/emails/templates": [
+    ([_, projectId]) => {
+      useAdminApp(projectId).useEmailTemplates();
+    },
+  ],
+  "/projects/*/app-configuration/emails/templates/*": [
+    ([_, projectId]) => {
+      useAdminApp(projectId).useEmailTemplates();
+    },
+    ([_, projectId]) => {
+      useAdminApp(projectId).useEmailThemes();
+    },
+    ([_, projectId, templateId]) => {
+      const adminApp = useAdminApp(projectId);
+      const template = adminApp.useEmailTemplates().find((t) => t.id === templateId);
+      if (template) {
+        return [() => {
+          adminApp.useEmailPreview({
+            themeId: template.themeId,
+            templateTsxSource: template.tsxSource,
+          });
+        }];
+      }
+    },
+  ],
   "/projects/*/email-themes": [
     ([_, projectId]) => {
       useAdminApp(projectId).useProject().useConfig();
@@ -208,6 +233,44 @@ const urlPrefetchers: Record<string, ((match: RegExpMatchArray, query: URLSearch
       }];
     },
   ],
+  "/projects/*/app-configuration/emails/themes": [
+    ([_, projectId]) => {
+      useAdminApp(projectId).useProject().useConfig();
+    },
+    ([_, projectId]) => {
+      useAdminApp(projectId).useEmailThemes();
+    },
+    ([_, projectId]) => {
+      const adminApp = useAdminApp(projectId);
+      const themes = adminApp.useEmailThemes();
+      return themes.map((theme) => () => {
+        adminApp.useEmailPreview({
+          themeId: theme.id,
+          templateTsxSource: previewTemplateSource,
+        });
+      });
+    },
+  ],
+  "/projects/*/app-configuration/emails/themes/*": [
+    ([_, projectId, themeId]) => {
+      useAdminApp(projectId).useEmailTheme(themeId);
+    },
+    ([_, projectId, themeId]) => {
+      const adminApp = useAdminApp(projectId);
+      const theme = adminApp.useEmailTheme(themeId);
+      return [() => {
+        adminApp.useEmailPreview({
+          themeTsxSource: theme.tsxSource,
+          templateTsxSource: previewTemplateSource,
+        });
+      }];
+    },
+  ],
+  "/projects/*/app-configuration/emails": [
+    ([_, projectId]) => {
+      useAdminApp(projectId).useEmailThemes();
+    },
+  ],
   "/projects/*/project-settings": [
     ([_, projectId]) => {
       useAdminApp(projectId).useProject();
@@ -220,6 +283,11 @@ const urlPrefetchers: Record<string, ((match: RegExpMatchArray, query: URLSearch
     },
   ],
   "/projects/*/payments/**": [
+    ([_, projectId]) => {
+      useAdminApp(projectId).useStripeAccountInfo();
+    },
+  ],
+  "/projects/*/app-configuration/payments/**": [
     ([_, projectId]) => {
       useAdminApp(projectId).useStripeAccountInfo();
     },

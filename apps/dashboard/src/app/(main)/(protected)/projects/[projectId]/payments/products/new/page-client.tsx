@@ -405,7 +405,7 @@ export default function PageClient() {
       if (window.history.length > 1) {
         window.history.back();
       } else {
-        router.push(`/projects/${projectId}/payments/products`);
+        router.push(`/projects/${projectId}/app-configuration/payments/products`);
       }
     } else {
       setHasSelectedCustomerType(false);
@@ -502,7 +502,7 @@ export default function PageClient() {
       });
       if (success) {
         toast({ title: "Product created" });
-        router.push(`/projects/${projectId}/payments/products`);
+        router.push(`/projects/${projectId}/app-configuration/payments/products`);
       }
     } finally {
       setIsSaving(false);
@@ -533,7 +533,7 @@ export default function PageClient() {
     if (window.history.length > 1) {
       window.history.back();
     } else {
-      router.push(`/projects/${projectId}/payments/products`);
+      router.push(`/projects/${projectId}/app-configuration/payments/products`);
     }
   };
 

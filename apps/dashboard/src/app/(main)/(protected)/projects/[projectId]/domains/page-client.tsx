@@ -17,7 +17,6 @@ import React, { useMemo, useState } from "react";
 import * as yup from "yup";
 import { AppEnabledGuard } from "../app-enabled-guard";
 import { PageLayout } from "../page-layout";
-import { ProductionModeCard } from "../project-settings/production-mode-card";
 import { useAdminApp } from "../use-admin-app";
 
 type DomainEntry = {
@@ -444,7 +443,6 @@ export default function PageClient() {
   return (
     <AppEnabledGuard appId="authentication">
       <PageLayout>
-        <ProductionModeCard />
         <SettingCard
           title="Trusted domains"
           description="Features that will redirect to your app, such as SSO and e-mail verification, will refuse to redirect to domains other than the ones listed here. Please make sure that you trust all domains listed here, as they can be used to access user data."

@@ -1,5 +1,9 @@
-import { redirect } from "next/navigation";
-export default async function Page({ params }: { params: Promise<{ projectId: string }> }) {
-  const { projectId } = await params;
-  redirect(`/projects/${projectId}/app-configuration/data-vault`);
+import PageClient from "./page-client";
+
+export const metadata = {
+  title: "Data Vault",
+};
+
+export default function Page() {
+  return <PageClient />;
 }

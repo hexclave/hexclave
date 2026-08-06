@@ -2,11 +2,12 @@
 
 import { Switch, Typography } from "@/components/ui";
 import { DesignCard } from "@/components/design-components";
-import { Link } from "@/components/link";
+import { useRouter } from "@/components/router";
 import { useUpdateConfig } from "@/components/config-update";
 import { cn } from "@/lib/utils";
-import { LockIcon, PackageIcon } from "@phosphor-icons/react";
+import { ArrowRightIcon, LockIcon, PackageIcon } from "@phosphor-icons/react";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { useRef, useState } from "react";
 import { PageLayout } from "../../page-layout";
 import { useAdminApp, useProjectId } from "../../use-admin-app";
@@ -14,6 +15,7 @@ import { useAdminApp, useProjectId } from "../../use-admin-app";
 export default function PageClient() {
   const adminApp = useAdminApp();
   const projectId = useProjectId();
+  const router = useRouter();
   const project = adminApp.useProject();
   const paymentsConfig = project.useConfig().payments;
   const updateConfig = useUpdateConfig();
@@ -21,6 +23,8 @@ export default function PageClient() {
   const [optimisticBlocked, setOptimisticBlocked] = useState<boolean | null>(null);
   const latestRequestIdRef = useRef(0);
   const blocked = optimisticBlocked ?? paymentsConfig.blockNewPurchases;
+
+  const productsHref = urlString`/projects/${projectId}/app-configuration/payments/products`;
 
   const handleBlockChange = (checked: boolean) => {
     setOptimisticBlocked(checked);
@@ -43,30 +47,17 @@ export default function PageClient() {
   return (
     <PageLayout
       title="Payments catalog"
-      description="Products, product lines, and checkout controls from hexclave.config.ts."
+      description="Products, items, and checkout controls from hexclave.config.ts."
     >
       <div className="space-y-5 max-w-3xl pb-[20px]">
         <DesignCard
-          title="Catalog"
-          subtitle="Define product lines, products, and items."
+          title="Products & items"
+          subtitle="Define products and items in this branch."
           icon={PackageIcon}
-        >
-          <div className="flex flex-wrap gap-2">
-            <Link
-              href={`/projects/${projectId}/app-configuration/payments/product-lines`}
-              className="text-sm font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-400"
-            >
-              Product lines
-            </Link>
-            <span className="text-muted-foreground">·</span>
-            <Link
-              href={`/projects/${projectId}/app-configuration/payments/products`}
-              className="text-sm font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-400"
-            >
-              Products &amp; items
-            </Link>
-          </div>
-        </DesignCard>
+          className="cursor-pointer"
+          onClick={() => router.push(productsHref)}
+          actions={<ArrowRightIcon className="h-4 w-4 text-muted-foreground" />}
+        />
 
         <DesignCard
           title="Checkout Controls"

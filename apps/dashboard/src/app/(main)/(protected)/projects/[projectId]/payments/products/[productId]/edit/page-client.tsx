@@ -76,7 +76,7 @@ export default function PageClient({ productId }: { productId: string }) {
         <PackageIcon className="h-12 w-12 text-muted-foreground/50" />
         <Typography className="text-muted-foreground">Product not found</Typography>
         <Button variant="outline" asChild>
-          <Link href={`/projects/${projectId}/payments/products`}>
+          <Link href={`/projects/${projectId}/app-configuration/payments/products`}>
             Back to Products
           </Link>
         </Button>
@@ -232,7 +232,7 @@ function EditProductForm({ productId, existingProduct }: { productId: string, ex
       });
       if (success) {
         toast({ title: "Product updated" });
-        router.push(`/projects/${projectId}/payments/products`);
+        router.push(`/projects/${projectId}/app-configuration/payments/products`);
       }
     } finally {
       setIsSaving(false);
@@ -263,7 +263,7 @@ function EditProductForm({ productId, existingProduct }: { productId: string, ex
     if (window.history.length > 1) {
       window.history.back();
     } else {
-      router.push(`/projects/${projectId}/payments/products`);
+      router.push(`/projects/${projectId}/app-configuration/payments/products`);
     }
   };
 

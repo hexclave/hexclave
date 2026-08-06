@@ -6,6 +6,7 @@ import { Badge, Button, ScrollArea } from "@/components/ui";
 import { ALL_APPS_FRONTEND, getAppPath, getItemPath, hasNavigationItems, type NavigableAppFrontend } from "@/lib/apps-frontend";
 import { getUninstalledAppIds } from "@/lib/apps-utils";
 import { classifyClickHouseSqlVsPrompt } from "@/lib/classify-query";
+import { getPublicEnvVar } from "@/lib/env";
 import { cn } from "@/lib/utils";
 import { ChartBarIcon, CheckIcon, CubeIcon, DownloadSimpleIcon, GearIcon, GlobeIcon, HardDriveIcon, InfoIcon, KeyIcon, LayoutIcon, LightningIcon, Palette, PlayIcon, PlusIcon, ShieldCheckIcon, SparkleIcon, UsersIcon } from "@phosphor-icons/react";
 import { ALL_APPS, ALL_APP_TAGS, getParentAppId, type AppId } from "@hexclave/shared/dist/apps/apps-config";
@@ -253,6 +254,8 @@ type ProjectShortcutDefinition = {
   href: string,
   keywords: string[],
   requiredApps?: AppId[],
+  /** Env-level Project Settings sections are hidden in development environments. */
+  hideInDevelopmentEnvironment?: boolean,
 };
 
 const PROJECT_SHORTCUTS: ProjectShortcutDefinition[] = [
@@ -280,13 +283,14 @@ const PROJECT_SHORTCUTS: ProjectShortcutDefinition[] = [
     href: "/project-settings/domains",
     keywords: ["domains", "trusted domains", "custom domain", "handler", "allowlist"],
     requiredApps: ["authentication"],
+    hideInDevelopmentEnvironment: true,
   },
   {
     id: "emails/themes",
     icon: Palette,
     label: "Email Themes",
-    description: "Emails",
-    href: "/email-themes",
+    description: "App Configuration",
+    href: "/app-configuration/emails/themes",
     keywords: ["email themes", "themes", "branding", "style", "templates"],
     requiredApps: ["emails"],
   },
@@ -294,8 +298,8 @@ const PROJECT_SHORTCUTS: ProjectShortcutDefinition[] = [
     id: "data-vault/stores",
     icon: HardDriveIcon,
     label: "Data Vault Stores",
-    description: "App Configuration",
-    href: "/app-configuration/data-vault",
+    description: "Data Vault",
+    href: "/data-vault",
     keywords: ["data vault", "stores", "vault", "secrets", "encrypted storage"],
     requiredApps: ["data-vault"],
   },
@@ -304,7 +308,7 @@ const PROJECT_SHORTCUTS: ProjectShortcutDefinition[] = [
     icon: PlusIcon,
     label: "Create Product",
     description: "Payments",
-    href: "/payments/products/new",
+    href: "/app-configuration/payments/products/new",
     keywords: ["create product", "new product", "payments", "pricing", "catalog"],
     requiredApps: ["payments"],
   },
@@ -410,8 +414,12 @@ export function useCmdKCommands({
     });
 
     // Core navigation and power-tool shortcuts
+    const isDevelopmentEnvironment = getPublicEnvVar("NEXT_PUBLIC_STACK_IS_REMOTE_DEVELOPMENT_ENVIRONMENT") === "true";
     for (const shortcut of PROJECT_SHORTCUTS) {
       if (shortcut.requiredApps != null && !shortcut.requiredApps.every((appId) => enabledApps.includes(appId))) {
+        continue;
+      }
+      if (isDevelopmentEnvironment && shortcut.hideInDevelopmentEnvironment === true) {
         continue;
       }
 

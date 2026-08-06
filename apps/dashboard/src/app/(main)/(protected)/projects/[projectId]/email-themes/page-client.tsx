@@ -15,7 +15,8 @@ import { useEffect, useRef, useState, type ElementType } from "react";
 import * as yup from "yup";
 import { AppEnabledGuard } from "../app-enabled-guard";
 import { PageLayout } from "../page-layout";
-import { useAdminApp } from "../use-admin-app";
+import { useAdminApp, useProjectId } from "../use-admin-app";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { DesignAnalyticsCard } from "@/components/design-components";
 
 // Section header with icon following design guide
@@ -282,6 +283,7 @@ function ThemeOption({
   onDialogThemeDeleted: (deletedThemeId: string) => void,
 }) {
   const hexclaveAdminApp = useAdminApp();
+  const projectId = useProjectId();
   const project = hexclaveAdminApp.useProject();
   const config = project.useConfig();
   const updateConfig = useUpdateConfig();
@@ -348,7 +350,7 @@ function ThemeOption({
               className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm hover:bg-primary hover:text-primary-foreground"
               onClick={(e) => {
                 e.stopPropagation();
-                router.push(`email-themes/${theme.id}`);
+                router.push(urlString`/projects/${projectId}/app-configuration/emails/themes/${theme.id}`);
               }}
             >
               <PencilSimple className="h-4 w-4" />
@@ -397,11 +399,12 @@ function ThemeOption({
 
 function NewThemeButton() {
   const hexclaveAdminApp = useAdminApp();
+  const projectId = useProjectId();
   const router = useRouter();
 
   const handleCreateNewTheme = async (values: { name: string }) => {
     const { id } = await hexclaveAdminApp.createEmailTheme(values.name);
-    router.push(`email-themes/${id}`);
+    router.push(urlString`/projects/${projectId}/app-configuration/emails/themes/${id}`);
   };
 
   return (

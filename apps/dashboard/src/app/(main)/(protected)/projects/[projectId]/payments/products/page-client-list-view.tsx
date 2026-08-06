@@ -409,7 +409,7 @@ function ProductsList({
                     isEven={isEven}
                     isHighlighted={isHighlighted}
                     itemRef={productRefs?.[id]}
-                    onClick={() => router.push(`/projects/${projectId}/payments/products/${id}`)}
+                    onClick={() => router.push(`/projects/${projectId}/app-configuration/payments/products/${id}`)}
                     onMouseEnter={() => onProductMouseEnter(id)}
                     onMouseLeave={onProductMouseLeave}
                     actionItems={[
@@ -637,7 +637,7 @@ function ProductsWithoutPricesAlert({
           {preview.map(({ id, displayName }) => (
             <li key={id}>
               <Link
-                href={urlString`/projects/${projectId}/payments/products/${id}/edit`}
+                href={urlString`/projects/${projectId}/app-configuration/payments/products/${id}/edit`}
                 className="underline hover:no-underline"
               >
                 {displayName}
@@ -701,7 +701,7 @@ function ProductsWithInvalidPricesAlert({
           {preview.map(({ id, displayName, issues }) => (
             <li key={id}>
               <Link
-                href={`/projects/${projectId}/payments/products/${id}/edit`}
+                href={`/projects/${projectId}/app-configuration/payments/products/${id}/edit`}
                 className="underline hover:no-underline"
               >
                 {displayName}
@@ -862,7 +862,7 @@ export default function PageClient() {
   // Check if there are no products and no items
   // Handler for create product button
   const handleCreateProduct = () => {
-    router.push(`/projects/${projectId}/payments/products/new`);
+    router.push(`/projects/${projectId}/app-configuration/payments/products/new`);
   };
 
   // Handler for create item button

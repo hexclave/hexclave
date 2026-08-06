@@ -10,10 +10,12 @@ import { useState } from "react";
 import * as yup from "yup";
 import { AppEnabledGuard } from "../app-enabled-guard";
 import { PageLayout } from "../page-layout";
-import { useAdminApp } from "../use-admin-app";
+import { useAdminApp, useProjectId } from "../use-admin-app";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 
 export default function PageClient() {
   const hexclaveAdminApp = useAdminApp();
+  const projectId = useProjectId();
   const project = hexclaveAdminApp.useProject();
   const config = project.useConfig();
   const emailConfig = config.emails.server;
@@ -82,7 +84,7 @@ export default function PageClient() {
                       if (emailConfig.isShared) {
                         setSharedSmtpWarningDialogOpen(template.id);
                       } else {
-                        router.push(`email-templates/${template.id}`);
+                        router.push(urlString`/projects/${projectId}/app-configuration/emails/templates/${template.id}`);
                       }
                     }}
                   >
@@ -122,7 +124,10 @@ export default function PageClient() {
           title="Shared Email Server"
           okButton={{
             label: "Edit Templates Anyway", onClick: async () => {
-              router.push(`email-templates/${sharedSmtpWarningDialogOpen}`);
+              if (sharedSmtpWarningDialogOpen == null) {
+                return;
+              }
+              router.push(urlString`/projects/${projectId}/app-configuration/emails/templates/${sharedSmtpWarningDialogOpen}`);
             }
           }}
           cancelButton={{ label: "Cancel" }}
@@ -182,6 +187,7 @@ export default function PageClient() {
 
 function NewTemplateButton() {
   const hexclaveAdminApp = useAdminApp();
+  const projectId = useProjectId();
   const project = hexclaveAdminApp.useProject();
   const config = project.useConfig();
   const emailConfig = config.emails.server;
@@ -190,7 +196,7 @@ function NewTemplateButton() {
 
   const handleCreateNewTemplate = async (values: { name: string }) => {
     const { id } = await hexclaveAdminApp.createEmailTemplate(values.name);
-    router.push(`email-templates/${id}`);
+    router.push(urlString`/projects/${projectId}/app-configuration/emails/templates/${id}`);
   };
 
   if (emailConfig.isShared) {
@@ -207,7 +213,7 @@ function NewTemplateButton() {
           okButton={{
             label: "Configure Email Server",
             onClick: async () => {
-              router.push("emails");
+              router.push(urlString`/projects/${projectId}/project-settings/email`);
             }
           }}
           cancelButton={{ label: "Cancel" }}

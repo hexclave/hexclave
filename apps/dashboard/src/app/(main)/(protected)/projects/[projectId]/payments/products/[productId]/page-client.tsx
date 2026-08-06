@@ -96,7 +96,7 @@ export default function PageClient({ productId }: { productId: string }) {
           <PackageIcon className="h-12 w-12 text-muted-foreground/50" />
           <Typography className="text-muted-foreground">Product not found</Typography>
           <Button variant="outline" asChild>
-            <Link href={`/projects/${adminApp.projectId}/payments/products`}>
+            <Link href={`/projects/${adminApp.projectId}/app-configuration/payments/products`}>
               Back to Products
             </Link>
           </Button>
@@ -358,7 +358,7 @@ function ProductHeader({ productId, product, productLineName }: ProductHeaderPro
                   id: "edit",
                   label: "Edit full details",
                   icon: <PencilSimpleIcon className="h-4 w-4" />,
-                  onClick: () => router.push(`/projects/${projectId}/payments/products/${productId}/edit`),
+                  onClick: () => router.push(`/projects/${projectId}/app-configuration/payments/products/${productId}/edit`),
                 },
               ]}
             />
@@ -388,7 +388,7 @@ function ProductHeader({ productId, product, productLineName }: ProductHeaderPro
               {addOnParents.map((parent, index) => (
                 <span key={parent.id} className="inline-flex items-center">
                   {index > 0 && <span className="mr-1 text-muted-foreground/50">,</span>}
-                  <StyledLink href={`/projects/${adminApp.projectId}/payments/products/${parent.id}`}>
+                  <StyledLink href={`/projects/${adminApp.projectId}/app-configuration/payments/products/${parent.id}`}>
                     {parent.displayName}
                   </StyledLink>
                 </span>

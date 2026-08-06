@@ -93,7 +93,7 @@ export function CreateCheckoutDialog(props: Props) {
     ? (fixedProduct?.displayName ? `${fixedProduct.displayName} (${props.productId})` : props.productId)
     : null;
 
-  const createProductHref = urlString`/projects/${hexclaveAdminApp.projectId}/payments/products/new?customerType=${activeType}`;
+  const createProductHref = urlString`/projects/${hexclaveAdminApp.projectId}/app-configuration/payments/products/new?customerType=${activeType}`;
 
   const createCheckoutUrl = async () => {
     if (!activeCustomer) {

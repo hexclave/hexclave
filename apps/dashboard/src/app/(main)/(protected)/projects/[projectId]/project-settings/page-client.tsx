@@ -30,6 +30,7 @@ import { useCallback, useMemo, useState } from "react";
 import * as yup from "yup";
 import { PageLayout } from "../page-layout";
 import { useAdminApp } from "../use-admin-app";
+import { ProductionModeCard } from "./production-mode-card";
 
 const projectInformationSchema = yup.object().shape({
   displayName: yup.string().defined(),
@@ -244,6 +245,10 @@ export default function PageClient() {
         okButton={{ label: "Save" }}
         cancelButton
       />
+
+      {/* Lived on Domains during the hub WIP; General is the right home so it
+          stays reachable when Domains is hidden on development environments. */}
+      <ProductionModeCard />
 
       <DesignCard
         title="Access"

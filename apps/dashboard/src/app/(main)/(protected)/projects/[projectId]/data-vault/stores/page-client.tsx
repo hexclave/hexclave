@@ -66,7 +66,7 @@ export default function PageClient() {
     <AppEnabledGuard appId="data-vault">
       <PageLayout
         title="Data Vault Stores"
-        description="Securely store and manage encrypted data in isolated stores"
+        description="Create and manage encrypted data stores for this branch (hexclave.config.ts)."
         actions={
           <DesignButton onClick={() => setIsCreateDialogOpen(true)}>
             <PlusIcon className="h-4 w-4 mr-2" />

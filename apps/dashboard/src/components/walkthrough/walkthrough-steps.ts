@@ -56,7 +56,7 @@ export const WALKTHROUGH_STEPS: WalkthroughStep[] = [
   },
   {
     id: 'payments-products',
-    path: '/payments/products',
+    path: '/app-configuration/payments/products',
     cmdkSearch: 'Products',
     title: 'Products & Pricing',
     description: 'Products, prices, and subscriptions wired straight to Stripe.',

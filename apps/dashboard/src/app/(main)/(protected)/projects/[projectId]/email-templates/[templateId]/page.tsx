@@ -1,11 +1,10 @@
-import PageClient from "./page-client";
+import { redirect } from "next/navigation";
 
 export const metadata = {
-  title: 'Email Template',
+  title: "Email Template",
 };
 
-export default async function Page(props: { params: Promise<{ templateId: string }> }) {
-  const params = await props.params;
-
-  return <PageClient templateId={params.templateId} />;
+export default async function Page(props: { params: Promise<{ projectId: string, templateId: string }> }) {
+  const { projectId, templateId } = await props.params;
+  redirect(`/projects/${encodeURIComponent(projectId)}/app-configuration/emails/templates/${encodeURIComponent(templateId)}`);
 }

@@ -17,6 +17,9 @@ export function AppConfigurationLayoutClient(props: {
           <Typography type="h2" className="text-xl font-semibold tracking-tight sm:text-2xl">
             App Configuration
           </Typography>
+          <Typography variant="secondary" className="text-sm">
+            Edits here update <span className="font-mono text-[13px]">hexclave.config.ts</span> for this branch.
+          </Typography>
         </header>
         <ConfigurationSourceBanner />
         <AppConfigurationHubNav />

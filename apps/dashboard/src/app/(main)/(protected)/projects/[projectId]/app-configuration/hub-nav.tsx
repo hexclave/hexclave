@@ -20,8 +20,11 @@ type Section = {
 
 const SECTIONS: Section[] = [
   { id: "apps", label: "Apps", path: "apps", icon: SquaresFourIcon },
+  { id: "authentication", label: "Authentication", path: "authentication", icon: ALL_APPS_FRONTEND.authentication.icon, requiredAppId: "authentication" },
   { id: "onboarding", label: "Onboarding", path: "onboarding", icon: ALL_APPS_FRONTEND.onboarding.icon, requiredAppId: "onboarding" },
   { id: "teams", label: "Teams", path: "teams", icon: ALL_APPS_FRONTEND.teams.icon, requiredAppId: "teams" },
+  { id: "payments", label: "Payments", path: "payments", icon: ALL_APPS_FRONTEND.payments.icon, requiredAppId: "payments" },
+  { id: "emails", label: "Emails", path: "emails", icon: ALL_APPS_FRONTEND.emails.icon, requiredAppId: "emails" },
   { id: "api-keys", label: "API Keys", path: "api-keys", icon: ALL_APPS_FRONTEND["api-keys"].icon, requiredAppId: "api-keys" },
   { id: "data-vault", label: "Data Vault", path: "data-vault", icon: ALL_APPS_FRONTEND["data-vault"].icon, requiredAppId: "data-vault" },
   { id: "deployments", label: "Deployments", path: "deployments", icon: ALL_APPS_FRONTEND["deployments-alpha"].icon, requiredAppId: "deployments-alpha" },

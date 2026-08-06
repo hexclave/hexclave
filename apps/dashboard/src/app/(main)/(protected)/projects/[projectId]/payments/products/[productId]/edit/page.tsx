@@ -1,11 +1,10 @@
-import PageClient from "./page-client";
+import { redirect } from "next/navigation";
 
 export const metadata = {
   title: "Edit Product",
 };
 
-export default function Page() {
-  return (
-    <PageClient />
-  );
+export default async function Page(props: { params: Promise<{ projectId: string, productId: string }> }) {
+  const { projectId, productId } = await props.params;
+  redirect(`/projects/${encodeURIComponent(projectId)}/app-configuration/payments/products/${encodeURIComponent(productId)}/edit`);
 }

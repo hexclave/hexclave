@@ -17,6 +17,7 @@ import {
 import { DesignMenu, type DesignMenuActionItem } from "@/components/design-components/menu";
 import { DesignSelectorDropdown } from "@/components/design-components/select";
 import {
+  ArrowRightIcon,
   AsteriskIcon,
   EnvelopeSimpleIcon,
   EyeIcon,
@@ -27,6 +28,7 @@ import {
   MagnifyingGlassIcon,
   PlusCircleIcon,
   PowerIcon,
+  ShieldCheckIcon,
   SignInIcon,
   TrashIcon,
   UserCircleIcon,
@@ -41,10 +43,12 @@ import { captureError, HexclaveAssertionError, throwErr } from "@hexclave/shared
 import { allProviders } from "@hexclave/shared/dist/utils/oauth";
 import { typedFromEntries, typedEntries } from "@hexclave/shared/dist/utils/objects";
 import { resolvePlanId } from "@hexclave/shared/dist/plans";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { ErrorBoundary } from "next/dist/client/components/error-boundary";
 import { Suspense, useEffect, useId, useMemo, useState } from "react";
 import { Link } from "@/components/link";
+import { useRouter } from "@/components/router";
 import { AppEnabledGuard } from "../app-enabled-guard";
 import { PageLayout } from "../page-layout";
 import { useAdminApp, useProjectId } from "../use-admin-app";
@@ -976,6 +980,7 @@ function useEmailVerificationToggle() {
 export default function PageClient(props: { variant?: AuthMethodsPageVariant, embedded?: boolean }) {
   const variant = props.variant ?? "full";
   const embedded = props.embedded === true;
+  const router = useRouter();
   const hexclaveAdminApp = useAdminApp();
   const projectId = useProjectId();
   const project = hexclaveAdminApp.useProject();
@@ -985,6 +990,7 @@ export default function PageClient(props: { variant?: AuthMethodsPageVariant, em
   const showBranchSections = variant === "full" || variant === "branch";
   const showOauthSections = variant === "full" || variant === "oauth";
   const environmentOauthHref = `/projects/${projectId}/project-settings/oauth`;
+  const signUpRulesHref = urlString`/projects/${projectId}/app-configuration/authentication/sign-up-rules`;
   const [confirmSignUpEnabled, setConfirmSignUpEnabled] = useState(false);
   const [confirmSignUpDisabled, setConfirmSignUpDisabled] = useState(false);
   const [disabledProvidersDialogOpen, setDisabledProvidersDialogOpen] = useState(false);
@@ -1144,6 +1150,16 @@ export default function PageClient(props: { variant?: AuthMethodsPageVariant, em
         }
       >
         <section className="flex flex-col gap-4">
+          {variant === "branch" && (
+            <DesignCard
+              title="Sign-up Rules"
+              subtitle="Create, reorder, and test rules that run at sign-up."
+              icon={ShieldCheckIcon}
+              className="cursor-pointer"
+              onClick={() => router.push(signUpRulesHref)}
+              actions={<ArrowRightIcon className="h-4 w-4 text-muted-foreground" />}
+            />
+          )}
           {showBranchSections && (
             <div className="flex gap-4">
               <DesignCard

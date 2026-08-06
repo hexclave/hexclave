@@ -1,10 +1,10 @@
-import PageClient from "./page-client";
+import { redirect } from "next/navigation";
 
 export const metadata = {
   title: "Email Theme Editor",
 };
 
-export default async function Page(props: { params: Promise<{ themeId: string }> }) {
-  const params = await props.params;
-  return <PageClient themeId={params.themeId} />;
+export default async function Page(props: { params: Promise<{ projectId: string, themeId: string }> }) {
+  const { projectId, themeId } = await props.params;
+  redirect(`/projects/${encodeURIComponent(projectId)}/app-configuration/emails/themes/${encodeURIComponent(themeId)}`);
 }

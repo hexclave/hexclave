@@ -903,7 +903,7 @@ function ProductCard({ id, product, allProducts, existingItems, onSave, onDelete
     if (target.closest('button') || target.closest('a') || target.closest('[role="menuitem"]') || target.closest('[data-radix-collection-item]')) {
       return;
     }
-    router.push(`/projects/${projectId}/payments/products/${id}`);
+    router.push(`/projects/${projectId}/app-configuration/payments/products/${id}`);
   };
 
   const viewingContent = (
@@ -975,7 +975,7 @@ function ProductCard({ id, product, allProducts, existingItems, onSave, onDelete
               <DropdownMenuContent align="end">
                 <DropdownMenuItem
                   icon={<EyeIcon className="h-4 w-4" />}
-                  onClick={() => router.push(`/projects/${projectId}/payments/products/${id}`)}
+                  onClick={() => router.push(`/projects/${projectId}/app-configuration/payments/products/${id}`)}
                 >
                   View Details
                 </DropdownMenuItem>
@@ -988,7 +988,7 @@ function ProductCard({ id, product, allProducts, existingItems, onSave, onDelete
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   icon={<PencilSimpleIcon className="h-4 w-4" />}
-                  onClick={() => router.push(`/projects/${projectId}/payments/products/${id}/edit`)}
+                  onClick={() => router.push(`/projects/${projectId}/app-configuration/payments/products/${id}/edit`)}
                 >
                   Edit
                 </DropdownMenuItem>
@@ -1002,7 +1002,7 @@ function ProductCard({ id, product, allProducts, existingItems, onSave, onDelete
                       displayName: `${product.displayName || id} Copy`,
                     };
                     sessionStorage.setItem(duplicateKey, JSON.stringify(duplicateData));
-                    router.push(`/projects/${projectId}/payments/products/new?duplicate=${duplicateKey}`);
+                    router.push(`/projects/${projectId}/app-configuration/payments/products/new?duplicate=${duplicateKey}`);
                   }}
                 >
                   Duplicate
@@ -1222,9 +1222,9 @@ function ProductLineView({ groupedProducts, groups, existingItems, onSaveProduct
   const lastHandledDraftRequestRef = useRef<string | undefined>(undefined);
   const getCreateProductHref = (productLineId: string | undefined, customerType: 'user' | 'team' | 'custom' | undefined) => {
     if (productLineId == null || customerType == null) {
-      return urlString`/projects/${projectId}/payments/products/new`;
+      return urlString`/projects/${projectId}/app-configuration/payments/products/new`;
     }
-    return urlString`/projects/${projectId}/payments/products/new?productLineId=${productLineId}&customerType=${customerType}`;
+    return urlString`/projects/${projectId}/app-configuration/payments/products/new?productLineId=${productLineId}&customerType=${customerType}`;
   };
 
   useEffect(() => {

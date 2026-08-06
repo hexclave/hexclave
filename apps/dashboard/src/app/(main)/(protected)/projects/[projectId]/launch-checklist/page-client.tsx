@@ -357,7 +357,7 @@ export default function PageClient() {
     subtitle: "Use your own credentials for every provider.",
     status: sharedOAuthProviders.length === 0 ? "done" : "action",
     actionLabel: "Configure providers",
-    onAction: () => router.push(`${baseProjectPath}/auth-methods`),
+    onAction: () => router.push(`${baseProjectPath}/app-configuration/authentication`),
     items: [
       {
         id: "custom-keys",

@@ -803,7 +803,7 @@ function OnboardingSlideshow() {
         </div>
 
         {/* Create button - always rendered but invisible when not on last slide to prevent layout shift */}
-        <Link href={`/projects/${projectId}/payments/products/new`}>
+        <Link href={`/projects/${projectId}/app-configuration/payments/products/new`}>
           <Button size="lg" className={cn("mb-4 md:mb-6", !isLastSlide && "invisible")}>
             <PlusIcon className="h-4 w-4 md:h-5 md:w-5 mr-2" />
             Create Your First Product
