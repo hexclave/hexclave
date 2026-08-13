@@ -1,4 +1,4 @@
-import { decodeBase64, encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
+import { decodeBase64, encodeBase64, isBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { shouldSuppressPeriodicBulldozerLogs } from "../../logging.js";
 import { traceSpan, traceSpanHot } from "../../otel.js";
@@ -11,6 +11,12 @@ export type PiledriverHeapObject = {
   get(): Promise<PiledriverObject>,
   [isPiledriverHeapObjectSymbol]: true,
 };
+
+export class InvalidPiledriverSerializedObjectError extends Error {
+  constructor() {
+    super("Invalid serialized Piledriver object");
+  }
+}
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -59,8 +65,15 @@ export function piledriverObjectEquals(a: PiledriverObject, b: PiledriverObject)
 
 export type PiledriverDatabase = Database & {
   getRootObject(key: ArrayBuffer): Promise<{ object: PiledriverObject, seq: DatabaseSeq }>,
+  getSerializedRootObject(key: ArrayBuffer): Promise<{ buffer: ArrayBuffer, seq: DatabaseSeq }>,
   setRootObject(key: ArrayBuffer, value: PiledriverObject): Promise<{ seq: DatabaseSeq }>,
   deleteRootObject(key: ArrayBuffer): Promise<{ seq: DatabaseSeq }>,
+  deserializeSerializedObject(buffer: ArrayBuffer, seq?: DatabaseSeq): Promise<{ object: PiledriverObject, seq: DatabaseSeq }>,
+  getSerializedHeapObject(key: ArrayBuffer): Promise<{ buffer: ArrayBuffer | null, seq: DatabaseSeq }>,
+  listHeapEntries(options: { startAfter?: ArrayBuffer, limit?: number }): Promise<{
+    entries: Array<{ key: ArrayBuffer, value: ArrayBuffer }>,
+    hasMore: boolean,
+  }>,
   getGarbageCollectionProcessStartedAtMillis(): number,
   collectGarbage(cutoffTimestampMillis: number, maxObjects?: number): Promise<PiledriverGarbageCollectionResult>,
   debugSnapshot?(): Promise<PiledriverDatabaseDebugSnapshot>,
@@ -79,6 +92,24 @@ export type PiledriverDatabaseOptions = {
    */
   garbageCollectionProcessStartedAtMillis?: number,
 };
+
+export function collectSerializedHeapReferences(jsonableObject: unknown, references: string[] = []): string[] {
+  if (Array.isArray(jsonableObject)) {
+    const tag = jsonableObject[0];
+    if (tag === "heap-reference") {
+      if (jsonableObject.length !== 2 || typeof jsonableObject[1] !== "string" || !isBase64(jsonableObject[1])) throw new InvalidPiledriverSerializedObjectError();
+      references.push(jsonableObject[1]);
+    } else if (tag === "array") {
+      if (jsonableObject.length !== 2 || !Array.isArray(jsonableObject[1])) throw new InvalidPiledriverSerializedObjectError();
+      for (const item of jsonableObject[1]) collectSerializedHeapReferences(item, references);
+    } else if (tag !== "NaN" && tag !== "Infinity" && tag !== "-Infinity" && tag !== "-0") {
+      throw new InvalidPiledriverSerializedObjectError();
+    }
+  } else if (jsonableObject !== null && typeof jsonableObject === "object") {
+    for (const item of Object.values(jsonableObject)) collectSerializedHeapReferences(item, references);
+  }
+  return references;
+}
 
 // Tracks the chain of *heap objects* currently being serialized, so heap cycles fail fast with
 // a clear error instead of deadlocking on their own memoized promise. Sibling/DAG sharing is
@@ -633,27 +664,33 @@ export function declarePiledriverDatabase(lowLevelDb: LowLevelDatabase, options:
             case "array": {
               // any: JSON.parse output is structurally validated by the surrounding switch; a malformed
               // payload would throw in the recursive call rather than silently passing through.
-              return jsonableObject[1].map((o: any) => deserializePiledriverObjectFromJsonableObject(o, enclosingSeq, seqs));
+              if (!Array.isArray(jsonableObject[1])) throw new InvalidPiledriverSerializedObjectError();
+              return jsonableObject[1].map((o: unknown) => deserializePiledriverObjectFromJsonableObject(o, enclosingSeq, seqs));
             }
             case "heap-reference": {
+              if (typeof jsonableObject[1] !== "string" || !isBase64(jsonableObject[1])) throw new InvalidPiledriverSerializedObjectError();
               const heapObjAndSeq = getHeapObjectByKey(decodeBase64(jsonableObject[1]).buffer, enclosingSeq);
               seqs.push(heapObjAndSeq.seq);
               return heapObjAndSeq.object;
             }
             case "NaN": {
+              if (jsonableObject.length !== 1) throw new InvalidPiledriverSerializedObjectError();
               return NaN;
             }
             case "Infinity": {
+              if (jsonableObject.length !== 1) throw new InvalidPiledriverSerializedObjectError();
               return Infinity;
             }
             case "-Infinity": {
+              if (jsonableObject.length !== 1) throw new InvalidPiledriverSerializedObjectError();
               return -Infinity;
             }
             case "-0": {
+              if (jsonableObject.length !== 1) throw new InvalidPiledriverSerializedObjectError();
               return -0;
             }
             default: {
-              throw new Error("Assertion error: Serialized Piledriver JSONable object array has unknown type " + jsonableObject[0]);
+              throw new InvalidPiledriverSerializedObjectError();
             }
           }
         } else {
@@ -665,14 +702,20 @@ export function declarePiledriverDatabase(lowLevelDb: LowLevelDatabase, options:
         }
       }
       default: {
-        throw new Error("Assertion error: Unknown type of serialized Piledriver JSONable object " + typeof jsonableObject);
+        throw new InvalidPiledriverSerializedObjectError();
       }
     }
   };
-
   const deserializePiledriverObject = async (buffer: ArrayBuffer, enclosingSeq: DatabaseSeq): Promise<{ object: PiledriverObject, seq: DatabaseSeq }> => {
     const seqs: DatabaseSeq[] = [];
-    const object = deserializePiledriverObjectFromJsonableObject(JSON.parse(textDecoder.decode(buffer)), enclosingSeq, seqs);
+    let jsonableObject: unknown;
+    try {
+      jsonableObject = JSON.parse(textDecoder.decode(buffer));
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new InvalidPiledriverSerializedObjectError();
+      throw error;
+    }
+    const object = deserializePiledriverObjectFromJsonableObject(jsonableObject, enclosingSeq, seqs);
     return { object, seq: combineSeqsDeduped(seqs) };
   };
 
@@ -801,6 +844,13 @@ export function declarePiledriverDatabase(lowLevelDb: LowLevelDatabase, options:
         heapReadCacheDisabled: options.disableHeapReadCache === true,
       };
     },
+    async getSerializedRootObject(key): Promise<{ buffer: ArrayBuffer, seq: DatabaseSeq }> {
+      return await traceSpan("bulldozer-js.piledriver.getSerializedRootObject", async () => {
+        const { buffer, seq: rootSeq } = await rootStore.get(key);
+        if (buffer === null) throw new Error("Root object not found");
+        return { buffer, seq: rootSeq };
+      });
+    },
     async getRootObject(key): Promise<{ object: PiledriverObject, seq: DatabaseSeq }> {
       return await traceSpan("bulldozer-js.piledriver.getRootObject", async () => {
         await garbageCollector.initialize();
@@ -928,6 +978,15 @@ export function declarePiledriverDatabase(lowLevelDb: LowLevelDatabase, options:
       return await traceSpan("bulldozer-js.piledriver.collectGarbage", async () => {
         return await garbageCollector.collectGarbage(cutoffTimestampMillis, maxObjects);
       });
+    },
+    async deserializeSerializedObject(buffer, seq = lowLevelDb.initialSeq) {
+      return await deserializePiledriverObject(buffer, seq);
+    },
+    async getSerializedHeapObject(key) {
+      return await heapDump.get(key);
+    },
+    async listHeapEntries(options) {
+      return await heapDump.listEntries(options);
     },
     combineSeqs(...seqs) {
       return lowLevelDb.combineSeqs(...seqs);

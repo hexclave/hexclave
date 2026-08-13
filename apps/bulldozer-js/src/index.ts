@@ -23,6 +23,7 @@ import { parseManualTransactionsListQuery } from "./manual-transactions-http.js"
 import { instrumentation, traceSpan } from "./otel.js";
 import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf } from "./payments/schema/index.js";
 import type { CustomerType, Json, ManualTransactionRow, SubscriptionRow, TransactionRow } from "./payments/schema/types.js";
+import { handleVerifyDataIntegrityRequest, verifyDataIntegrity } from "./payments/verify-data-integrity.js";
 import { initSentry, resolveBulldozerSentryEnvironment } from "./sentry.js";
 
 const sentryEnabled = initSentry();
@@ -982,6 +983,7 @@ const app = new Elysia({ adapter: node() })
     await bulldozerDb.waitUntilCurrentStateDurable();
     return ok();
   }))
+  .post("/internal/payments/verify-data-integrity", ({ body }) => handler("verify-data-integrity", async () => await handleVerifyDataIntegrityRequest(body, request => verifyDataIntegrity(bulldozerDb, request))))
   .post("/internal/piledriver-gc", ({ body }) => handler("piledriver-gc", async () => {
     const request = readObjectBody(body);
     const cutoffTimestampMillis = readNonNegativeSafeIntegerField(request, "cutoffTimestampMillis");
@@ -996,7 +998,6 @@ const app = new Elysia({ adapter: node() })
       request.maxObjects === undefined ? undefined : readPositiveSafeIntegerField(request, "maxObjects"),
     );
   }))
-  .post("/internal/payments/verify-data-integrity", () => handler("verify-data-integrity", async () => ok()))
   .get("/v1/:tenancyId/transactions", ({ params, query }) => handler("list-transactions", async () => {
     const parsedLimit = Number.parseInt(typeof query.limit === "string" ? query.limit : "50", 10);
     const result = await listTransactions({

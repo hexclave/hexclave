@@ -889,6 +889,7 @@ function createTablesStateFromMigrations(migrations: readonly BulldozerDatabaseM
 
 export type BulldozerDatabase = {
   getDebugInfo(): any,
+  getPiledriverDatabase(): PiledriverDatabase,
   listTables(): BulldozerDatabaseTableDescriptor[],
   debugPiledriverSnapshot?(): Promise<PiledriverDatabaseDebugSnapshot>,
   debugLowLevelSnapshot?(): Promise<LowLevelDatabaseDebugSnapshot>,
@@ -1025,6 +1026,7 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
         closePromise,
       };
     },
+    getPiledriverDatabase: () => piledriverDatabase,
     listTables: () => Object.entries(tablesState.tables).map(([tableId, tableState]) => ({
       tableId,
       inputTableIds: { ...tableState.inputTableIds },

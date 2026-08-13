@@ -170,10 +170,56 @@ async function main() {
   }
 
   await recurse(`[bulldozer] verifying data integrity across all payments tables`, async () => {
-    await fetchBulldozerServerJson<{ success: true }>({
-      method: "POST",
-      path: "/internal/payments/verify-data-integrity",
-    });
+    type VerificationIssue = {
+      phase: string,
+      code: string,
+      message: string,
+      context?: Record<string, string | number | boolean | null>,
+    };
+    type VerificationResponse = {
+      success: boolean,
+      done: boolean,
+      next_cursor: string | null,
+      steps_taken: number,
+      errors: VerificationIssue[],
+      errors_truncated: boolean,
+      skipped_checks: VerificationIssue[],
+    };
+    const findings: VerificationIssue[] = [];
+    let continuation: string | undefined;
+    let pageCount = 0;
+    while (true) {
+      if (++pageCount > 10_000) throw new Error("Bulldozer integrity verifier exceeded the maximum page count");
+      const response = await fetchBulldozerServerJson<VerificationResponse>({
+        method: "POST",
+        path: "/internal/payments/verify-data-integrity",
+        body: {
+          step_count: 500,
+          ...(continuation === undefined ? {} : { continue: continuation }),
+        },
+      });
+      findings.push(...response.errors);
+      for (const finding of response.skipped_checks) {
+        console.error(`[bulldozer] skipped ${finding.phase}/${finding.code}: ${finding.message}`, finding.context ?? {});
+      }
+      if (response.errors_truncated) {
+        console.error("[bulldozer] integrity verifier truncated findings");
+      }
+      for (const finding of response.errors) {
+        console.error(`[bulldozer] ${finding.phase}/${finding.code}: ${finding.message}`, finding.context ?? {});
+      }
+      if (response.done) break;
+      if (response.next_cursor === null) {
+        throw new Error("Bulldozer integrity verifier returned no cursor before completion");
+      }
+      if (response.next_cursor === continuation) {
+        throw new Error("Bulldozer integrity verifier returned a non-advancing cursor");
+      }
+      continuation = response.next_cursor;
+    }
+    if (findings.length > 0) {
+      throw new Error(`Bulldozer integrity verification found ${findings.length} issue(s)`);
+    }
   });
 
   const endAt = Math.min(startAt + count, projects.length);
@@ -426,4 +472,3 @@ main().catch((...args) => {
   console.error(...args);
   process.exit(1);
 });
-

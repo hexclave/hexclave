@@ -1,4 +1,28 @@
+/**
+ * Database sequences contain only strings and finite numbers other than -0 so their JSON representation is lossless.
+ */
 export type DatabaseSeq = (readonly (string | number)[] & { __brand: "hexclave-low-level-kv-store-seq" });
+
+export function serializeDatabaseSeq(seq: DatabaseSeq): string {
+  if (!seq.every(item => typeof item === "string" || (Number.isFinite(item) && !Object.is(item, -0)))) {
+    throw new Error("Database sequences must contain only strings and finite numbers other than -0 for lossless JSON serialization");
+  }
+  return JSON.stringify(seq);
+}
+
+export function deserializeDatabaseSeq(value: string): DatabaseSeq {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Invalid database sequence");
+  }
+  if (!Array.isArray(parsed) || !parsed.every(item => typeof item === "string" || (Number.isFinite(item) && !Object.is(item, -0)))) {
+    throw new Error("Invalid database sequence");
+  }
+  // The validation above establishes the finite-numbers-and-strings contract represented by DatabaseSeq.
+  return parsed as unknown as DatabaseSeq;
+}
 
 export type Database = {
   getDebugInfo(): any,

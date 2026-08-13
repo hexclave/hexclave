@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { isPiledriverHeapObjectSymbol, PiledriverHeapObject } from "../index.js";
+import { isPiledriverHeapObjectSymbol, PiledriverHeapObject, PiledriverObject } from "../index.js";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
-import { AugmentedTreeMap, AugmentedTreeMultiMap } from "./augmented-tree-map.js";
+import { AugmentedTreeMap, AugmentedTreeMultiMap, treeVerificationNodeLoadBudget } from "./augmented-tree-map.js";
 
 type Range = { lte?: number, gte?: number, lt?: number, gt?: number };
 type Entry = [number, number];
@@ -217,23 +217,29 @@ async function build(size: number, arity = 32) {
 }
 
 async function checkStructuralInvariants(tree: AugmentedTreeMap<number, number, number>, arity: number) {
-  const root = (tree.toPiledriverObject() as { root: { ref: PiledriverHeapObject, entryCount: number } | null }).root;
-  if (!root) return;
-  const maxEntries = Math.max(3, arity) - 1;
-  const minEntries = Math.floor(maxEntries / 2);
+  expect(await tree.verifyDataIntegrity(), `tree arity ${arity} should satisfy persisted invariants`).toEqual([]);
+}
 
-  const walk = async (child: { ref: PiledriverHeapObject, entryCount: number }, isRoot: boolean): Promise<number> => {
-    const node = await child.ref.get();
-    if (!isNode(node)) throw new Error("Expected a node");
-    expect(node.entries.length, "node must not exceed maxEntries").toBeLessThanOrEqual(maxEntries);
-    if (!isRoot) expect(node.entries.length, "non-root node must have at least minEntries").toBeGreaterThanOrEqual(minEntries);
-    if (node.children.length === 0) return 1;
-    expect(node.children.length).toBe(node.entries.length + 1);
-    const heights = await Promise.all(node.children.map(grandchild => walk(grandchild as never, false)));
-    expect(new Set(heights).size, "all children must have the same height").toBe(1);
-    return heights[0] + 1;
+async function corruptedTree(
+  tree: AugmentedTreeMap<number, number, number>,
+  mutate: (node: Record<string, unknown>) => Record<string, unknown>,
+) {
+  const serialized = tree.toPiledriverObject();
+  const root = serialized.root;
+  if (root === null) throw new Error("Expected a non-empty tree");
+  const originalGet = root.ref.get;
+  const corruptedRoot = {
+    ...root,
+    ref: {
+      ...root.ref,
+      async get(): Promise<PiledriverObject> {
+        const node = await originalGet();
+        if (typeof node !== "object" || node === null || Array.isArray(node)) throw new Error("Expected a tree node");
+        return mutate(node as Record<string, unknown>) as PiledriverObject;
+      },
+    },
   };
-  await walk(root, true);
+  return AugmentedTreeMap.fromPiledriverObject({ ...serialized, root: corruptedRoot }, options(3));
 }
 
 describe("AugmentedTreeMap", () => {
@@ -278,6 +284,51 @@ describe("AugmentedTreeMap", () => {
     for (const key of [4, 5, 6, 7, 8, 1, 2, 3]) tree = await tree.set(key, key);
     tree = await tree.delete(5);
     await checkStructuralInvariants(tree, 3);
+  });
+
+  it("reports a wrong aggregate through the production checker", async () => {
+    const tree = await build(20, 3);
+    const wrongAggregate = await corruptedTree(tree, node => ({ ...node, augmentation: 999 }));
+    expect(await wrongAggregate.verifyDataIntegrity()).toContainEqual(expect.objectContaining({ code: "augmentation" }));
+  });
+
+  it("reports a wrong entry count through the production checker", async () => {
+    const tree = await build(20, 3);
+    const wrongEntryCount = await corruptedTree(tree, node => ({ ...node, entries: [...(node.entries as unknown[]), [999, 999]] }));
+    expect(await wrongEntryCount.verifyDataIntegrity()).toContainEqual(expect.objectContaining({ code: "entry_count" }));
+  });
+
+  it("reports unbalanced child heights through the production checker", async () => {
+    const tree = await build(20, 3);
+    const unbalanced = await corruptedTree(tree, node => ({ ...node, children: [] }));
+    expect(await unbalanced.verifyDataIntegrity()).toContainEqual(expect.objectContaining({ code: "size" }));
+  });
+
+  it("reports a persisted child cycle without exhausting memory", async () => {
+    const tree = await build(20, 3);
+    const serialized = tree.toPiledriverObject();
+    const root = serialized.root;
+    if (root === null) throw new Error("Expected a non-empty tree");
+    let rootLoads = 0;
+    const makeCorruptedRootRef = (): PiledriverHeapObject => ({
+      ...root.ref,
+      async get(): Promise<PiledriverObject> {
+        rootLoads++;
+        const node = await root.ref.get();
+        if (typeof node !== "object" || node === null || Array.isArray(node)) throw new Error("Expected a tree node");
+        const children = (node as { children: Array<Record<string, unknown>> }).children.map(child => ({ ...child, ref: makeCorruptedRootRef() }));
+        return { ...node, children } as PiledriverObject;
+      },
+    });
+    const corruptedRootRef = makeCorruptedRootRef();
+    const cyclic = AugmentedTreeMap.fromPiledriverObject({ ...serialized, root: { ...root, ref: corruptedRootRef } }, options(3));
+    expect(await cyclic.verifyDataIntegrity()).toContainEqual(expect.objectContaining({ code: "cycle" }));
+    expect(rootLoads).toBeLessThan(200);
+  });
+
+  it("scales the cycle guard with the persisted size", () => {
+    expect(treeVerificationNodeLoadBudget(30_000)).toBeGreaterThan(100_000);
+    expect(treeVerificationNodeLoadBudget(Number.MAX_SAFE_INTEGER)).toBe(10_000_000);
   });
 
   it("round-trips through piledriver objects", async () => {
