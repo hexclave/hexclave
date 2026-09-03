@@ -193,7 +193,7 @@ export default function PageClient() {
           </div>
         )}
         {rows != null && rows.length === 0 && (
-          <DesignAlert variant="info" description="No secrets set. Set a value for every secret() key used by the services export of your hexclave.deploy.ts — hexclave deploy fails and lists any that are still missing." />
+          <DesignAlert variant="info" description="No secrets set. Set a value for every secret() key used by the deploy export of your hexclave.deploy.ts — hexclave deploy fails and lists any that are still missing." />
         )}
         {rows != null && rows.length > 0 && (
           <div className="divide-y divide-border/60">

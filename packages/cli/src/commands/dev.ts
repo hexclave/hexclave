@@ -102,7 +102,7 @@ function splitDevCommandArgs(commandArgs: string[]): ChildCommand {
 }
 
 /**
- * Wraps a devCommand string (from the config's `services` export) for
+ * Wraps a devCommand string (from the deploy file's `deploy` export) for
  * execution through the platform shell — unlike the `-- <command> [args...]`
  * form, a devCommand is a single command LINE (e.g. "pnpm dev --port 3000")
  * and may use shell syntax. Exported for unit tests.
@@ -952,8 +952,8 @@ export function registerDevCommand(program: Command) {
 
       const configFilePath = resolveConfigFilePathOption(opts.configFile, { mustExist: opts.serviceId != null });
 
-      // Evaluate the services export BEFORE starting the dashboard so config
-      // mistakes fail fast (and without a half-started session).
+      // Evaluate the deploy file's services BEFORE starting the dashboard so a
+      // mistake there fails fast (and without a half-started session).
       let devService: EvaluatedService | undefined;
       if (opts.serviceId != null) {
         // Services live in the DEPLOY file, not the config file: --config-file
@@ -992,7 +992,7 @@ export function registerDevCommand(program: Command) {
           }
         })();
         if (rootDirectoryStats == null || !rootDirectoryStats.isDirectory()) {
-          throw new CliError(`The rootDirectory of the service ${JSON.stringify(opts.serviceId)} is ${devService.absoluteRootDirectory}, which ${rootDirectoryStats == null ? "does not exist" : "is not a directory"}. Fix \`rootDirectory\` in the config file's services export — it is where the service's devCommand runs.`);
+          throw new CliError(`The rootDirectory of the service ${JSON.stringify(opts.serviceId)} is ${devService.absoluteRootDirectory}, which ${rootDirectoryStats == null ? "does not exist" : "is not a directory"}. Fix \`rootDirectory\` in the deploy file's \`deploy\` export — it is where the service's devCommand runs.`);
         }
       }
       // The selection guard above makes these modes mutually exclusive.

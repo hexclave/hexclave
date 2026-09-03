@@ -270,6 +270,13 @@ export const BUILD_ENV_DIR = "/marshal-build-env";
 // everywhere in a build log, and redacting them would leave a page of <redacted> with no
 // secret actually protected (nothing that short is a credential worth hiding).
 export const MIN_REDACTED_ENV_VALUE_LENGTH = 8;
+// The one family of env vars that is NOT scrubbed. These carry the commit a deploy shipped
+// (CI_COMMIT_SHA and friends), which is provenance rather than a credential — and scrubbing
+// it does active damage: the values are matched as plain substrings, so an 8-hex short sha
+// blacks out every unrelated 8-hex run in the log (image digests, BuildKit layer ids) as
+// well as the places the build legitimately prints its own revision. The control plane only
+// ever admits this namespace for that field, so nothing sensitive can enter through it.
+export const UNREDACTED_ENV_KEY_REGEX = /^CI_[A-Z0-9_]+$/;
 // Where Marshal-generated Dockerfiles (and Dockerfile suffixes) are injected on
 // the builder machine, one directory per target. Kept out of the build CONTEXT
 // (/ctx, the extracted upload) on purpose: a file placed there would be part of

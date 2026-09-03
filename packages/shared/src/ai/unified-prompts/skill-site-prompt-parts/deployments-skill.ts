@@ -11,7 +11,7 @@ export const deploymentsSkillSection = deindent`
 
   Every service is either a \`"server"\` or a \`"serverless"\`. A \`server\` is a single always-available instance, and it is the only type that may have a persistent disk. A \`serverless\` scales out between \`minInstances\` and \`maxInstances\` and STOPS on scale-down, so each start is a cold start and it can have no disk. Use \`server\` for anything stateful (a database, a queue, anything writing to a volume) and \`serverless\` for stateless web apps and APIs.
 
-  Enable the app by adding \`"deploy"\` under \`apps.installed\` in your config (quote it — it contains a hyphen). Services themselves are NOT part of the \`config\` export: they live in their own file, \`hexclave.deploy.ts\`, next to \`hexclave.config.ts\`.
+  Enable the app by adding \`"deploy"\` under \`apps.installed\` in your config (quote it — it contains a hyphen). Services themselves are NOT part of the \`config\` export and cannot be declared in \`hexclave.config.ts\`: they live in their own file, \`hexclave.deploy.ts\`, next to it.
 
   ## The deploy export
 
@@ -58,6 +58,8 @@ export const deploymentsSkillSection = deindent`
   A \`server\` holds exactly one instance and requires a PAID PLAN whatever its \`minInstances\`: it runs from deploy until you tear it down, and \`minInstances: 0\` is accepted but does not scale it to zero, because a persistent server has no request-triggered suspend. For a \`serverless\`, \`minInstances\` above 0 also requires a paid plan. On the Free plan the deploy fails up front naming the offending services, so use a \`serverless\` with \`minInstances: 0\`.
 
   Every service automatically receives \`HEXCLAVE_PROJECT_ID\`, \`HEXCLAVE_API_URL\`, \`HEXCLAVE_PUBLISHABLE_CLIENT_KEY\` and \`HEXCLAVE_SECRET_SERVER_KEY\`, plus \`NEXT_PUBLIC_\`/\`VITE_\` copies of the first three so client bundles can read them. An API key set is created for the project if it has none. Declaring an env var of the same name overrides the injected one.
+
+  \`CI\` is \`"true"\` during every remote build. If \`hexclave deploy\` was itself run in CI, the GitLab-style \`CI_COMMIT_SHA\`, \`CI_COMMIT_SHORT_SHA\`, \`CI_COMMIT_REF_NAME\`, \`CI_COMMIT_BRANCH\`, \`CI_COMMIT_TAG\` and \`CI_REPOSITORY_URL\` are passed through to the service too (GitHub Actions' \`GITHUB_*\` are translated into the same names); one that nothing can answer is absent rather than empty. Declaring an env var of the same name overrides these as well.
 
   ## Network model: HTTP and private TCP
 
@@ -145,7 +147,7 @@ export const deploymentsSkillSection = deindent`
 
   A sync is the whole truth about its own deploy file: a service you REMOVE from \`services\` is torn down on the next deploy, keeping its persistent volume and any custom domain (unattached) so a config edit can never destroy data. Services of other deployment sources are never touched.
 
-  Options: \`--service-id <id>\` (deploy just one service; its connections resolve against already-deployed services), \`--deploy-file <path>\` (default: auto-discover \`hexclave.deploy.ts\` in the current directory; a deploy file is required), \`--cloud-project-id <id>\` (default: the \`HEXCLAVE_PROJECT_ID\` env var), \`--config-push\` (also push \`hexclave.config.ts\`'s \`config\` export; off by default, since several repositories can deploy into one project and each push replaces the whole config), \`--no-build-logs\` (status lines only).
+  Options: \`--service-id <id>\` (deploy just one service; its connections resolve against already-deployed services), \`--deploy-file <path>\` (default: auto-discover \`hexclave.deploy.ts\` in the current directory; a deploy file is required), \`--cloud-project-id <id>\` (default: the \`HEXCLAVE_PROJECT_ID\` env var), \`--no-build-logs\` (status lines only). It never publishes your project configuration — that is \`hexclave config push\`, a separate command, because several repositories can deploy into one project and each push replaces the whole config.
 
   GitHub Actions example:
 

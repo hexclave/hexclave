@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { BASE_IMAGE, MAX_BUILD_ENV_BYTES } from "./config.js";
 import { buildEnvByteLength, buildHarnessScript, buildTimeEnv, createMockBuilder, generatedDockerfile, type BuildTarget } from "./builds.js";
-import { validateDeploymentRequest, validateServiceSpec } from "./services.js";
+import { deploymentLogRedactionValues, validateDeploymentRequest, validateServiceSpec } from "./services.js";
 import { targetIsBuilt, targetUsesGeneratedDockerfile } from "./types.js";
 
 // The mock builder needs only the webhook secret. The real GCP builder is covered by the
@@ -160,11 +160,52 @@ describe("buildTimeEnv", () => {
       PLAIN: { value: "keep-me" },
       SECRET: { value: "sk-also-keep-me" },
       CONNECTION: { ref: "api.internal_url" },
-    })).toEqual({ PLAIN: "keep-me", SECRET: "sk-also-keep-me" });
+    })).toEqual({ CI: "true", PLAIN: "keep-me", SECRET: "sk-also-keep-me" });
+  });
+
+  it("sets CI=true, and lets a declared CI win", () => {
+    // Every build is a non-interactive one, so the tools that read CI should see
+    // it whether or not the deploy file says so — but a service that sets its
+    // own value has said what it means and must keep it.
+    expect(buildTimeEnv({})).toEqual({ CI: "true" });
+    expect(buildTimeEnv({ CI: { value: "false" } })).toEqual({ CI: "false" });
   });
 
   it("measures keys and values in utf-8 bytes", () => {
     expect(buildEnvByteLength({ K: "é" })).toBe(3);
+  });
+});
+
+describe("deploymentLogRedactionValues", () => {
+  const deployment = (env: Record<string, { value: string }>) => ({
+    id: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+    ns: "ns",
+    targets: [{ service_key: "web", spec: { env } }],
+  }) as any;
+
+  it("scrubs tenant env values but never CI provenance", () => {
+    // The CI values are the deploy's own commit, which is what the build log
+    // exists to show. Scrubbing them would black out the revision the build
+    // prints — and, because these are matched as plain substrings, an 8-hex
+    // short sha would take every unrelated 8-hex run in the log with it.
+    const values = deploymentLogRedactionValues(deployment({
+      DATABASE_URL: { value: "postgres://user:hunter2@db:5432/app" },
+      CI_COMMIT_SHA: { value: "0123456789abcdef0123456789abcdef01234567" },
+      CI_COMMIT_SHORT_SHA: { value: "01234567" },
+      CI_REPOSITORY_URL: { value: "https://github.com/acme/app.git" },
+    }));
+    expect(values).toContain("postgres://user:hunter2@db:5432/app");
+    expect(values).not.toContain("0123456789abcdef0123456789abcdef01234567");
+    expect(values).not.toContain("01234567");
+    expect(values).not.toContain("https://github.com/acme/app.git");
+  });
+
+  it("still scrubs a service's OWN env var that merely starts with CI", () => {
+    // The exemption is the CI_ namespace the control plane admits for ci_env,
+    // not "any name beginning with CI" — CIPHER_KEY is an ordinary secret.
+    expect(deploymentLogRedactionValues(deployment({
+      CIPHER_KEY: { value: "sk-cipher-key-value" },
+    }))).toContain("sk-cipher-key-value");
   });
 });
 

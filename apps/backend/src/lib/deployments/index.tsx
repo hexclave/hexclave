@@ -6,8 +6,9 @@
 // The shape of the world, because it is easy to mix up:
 //
 // - A DEPLOYMENT SOURCE is one deploy file: hexclave.deploy.ts, named by its own
-//   `id` export (or hexclave.config.ts, whose services belong to a source named
-//   after the file). It is the unit one `hexclave deploy` ships — one upload,
+//   `deploymentGroupId` export. (Projects deployed before services moved out of
+//   hexclave.config.ts still have a stored source named after that file; nothing
+//   writes one any more.) It is the unit one `hexclave deploy` ships — one upload,
 //   one build — which is what lets several repositories deploy into one project
 //   without touching each other's services.
 // - A "service id" is the user-facing key of the record returned by that file's
@@ -56,6 +57,7 @@ import {
   SERVICE_OUTPUT_KEYS,
   deploymentPortEntries,
   deploymentPortEntry,
+  deploymentServiceIsBuilt,
   formatConnectionValue,
   parseConnectionValue,
   parseSourceManifest,
@@ -871,6 +873,10 @@ const SERVICE_OUTPUT_KEY_TO_MARSHAL = {
  * - the Hexclave credentials are injected first, so a service can reach its own
  *   project with no configuration — and any explicitly declared var of the same
  *   name overrides them,
+ * - the deploy's `CI_*` variables are injected next, on the same terms, and
+ *   only for a service built from source (they describe the commit that was
+ *   built, and putting them on an unchanged prebuilt service would re-roll it
+ *   on every deploy),
  * - plain vars pass through as literal `{ value }`s,
  * - secret vars are filled from the project's stored secrets (dashboard →
  *   Project Settings → Secrets), falling back to `secretDefaults` — the deploy
@@ -903,11 +909,16 @@ export async function resolveEnvVars(options: {
   // Deploy-request-only fallbacks for `secret()` env vars, keyed by ENV VAR
   // key (see deploymentSecretDefaultsSchema). Never read from the database.
   secretDefaults: Record<string, string>,
+  // The GitLab-style CI variables this deploy was invoked with (see
+  // deploymentCiEnvSchema). Also request-scoped, and the same for every service
+  // in the deploy — they describe the commit, not the service. Applied only to
+  // services BUILT from this commit's source; see the injection site.
+  ciEnv?: Record<string, string>,
 }): Promise<{
   resolvedEnv: Record<string, MarshalEnvValue>,
   redactionSecrets: string[],
 }> {
-  const { tenancy, prisma, serviceId, definition, secretDefaults } = options;
+  const { tenancy, prisma, serviceId, definition, secretDefaults, ciEnv = {} } = options;
   const env = definition.env;
   const existingServices = await prisma.deploymentService.findMany({
     where: { tenancyId: tenancy.id },
@@ -932,6 +943,31 @@ export async function resolveEnvVars(options: {
   }))) {
     resolvedEnv.set(envVarKey, { value: injected.value });
     if (injected.secret) redactionSecrets.add(injected.value);
+  }
+
+  // The deploy's CI provenance, injected after the credentials and before the
+  // declared vars: the CI namespace cannot collide with the injected
+  // HEXCLAVE_* names (deploymentCiEnvSchema is what guarantees that), and a
+  // service that declares a CI_* var of its own still wins. Deliberately not
+  // added to `redactionSecrets`: a commit sha is the opposite of a secret.
+  // (Marshal skips them in its own build-log scrubbing for the same reason —
+  // see UNREDACTED_ENV_KEY_REGEX; both sides have to agree or the value is
+  // blacked out anyway.)
+  //
+  // ONLY for a service built from source, and that restriction is load-bearing
+  // rather than cosmetic. These values change on every commit, and Marshal
+  // hashes a service's env into its REVISION — so injecting them everywhere
+  // would give every service a new revision on every deploy, which for a
+  // `server` means its VM is deleted and recreated. A stateful sibling that
+  // nothing touched (`image: "postgres:16"` next to the web app being deployed)
+  // would go down on each unrelated deploy. A built service is already rolling:
+  // its image is tagged with the deployment id, so its revision changes anyway
+  // and these add no churn. It is also the only service the values DESCRIBE — a
+  // prebuilt image has no relationship to the commit being deployed.
+  if (deploymentServiceIsBuilt(definition)) {
+    for (const [envVarKey, value] of Object.entries(ciEnv)) {
+      resolvedEnv.set(envVarKey, { value });
+    }
   }
 
   // Cache per-secret reads so N env vars filled from the same secret don't

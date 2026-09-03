@@ -1602,8 +1602,8 @@ model DeletedRow {
 // plaintext never touches this table. Only the feature consuming a secret
 // decrypts it, server-side.
 //
-// Deployments are the only consumer today (`secret()` env vars in the config
-// file's `services` export name a key here), but the store deliberately isn't
+// Deployments are the only consumer today (`secret()` env vars in the deploy
+// file's `deploy` export name a key here), but the store deliberately isn't
 // deployments-specific — see @/lib/project-secrets.
 //
 // Keyed by project, not tenancy: these are infrastructure credentials that
@@ -1635,7 +1635,7 @@ model ProjectSecret {
 //
 // A project owns DEPLOYMENT SOURCES; a source is deployed one or more times;
 // each deployment ships a set of SERVICES. A source is one deploy file
-// (hexclave.deploy.ts, named by its own `id` export) and what one
+// (hexclave.deploy.ts, named by its own `deploymentGroupId` export) and what one
 // `hexclave deploy` ships — one upload, one build — so a project deployed from
 // several repositories gives each of them a source of its own. Service ids stay
 // unique per PROJECT, so a reference never has to name a source.
@@ -1662,10 +1662,11 @@ model DeploymentSource {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // The deploy file's own `id` export — which deploy file (and so which
-  // repository) these services were deployed from. Deployments declared in
-  // hexclave.config.ts, which has no id of its own, belong to a source named
-  // after that file. Created implicitly by the first deploy that names it.
+  // The deploy file's own `deploymentGroupId` export — which deploy file (and so
+  // which repository) these services were deployed from. Created implicitly by
+  // the first deploy that names it. Projects deployed before services moved out
+  // of hexclave.config.ts still have a source named after that file; nothing
+  // writes one any more.
   sourceId String
 
   tenancy     Tenancy             @relation(fields: [tenancyId], references: [id], onDelete: Cascade)

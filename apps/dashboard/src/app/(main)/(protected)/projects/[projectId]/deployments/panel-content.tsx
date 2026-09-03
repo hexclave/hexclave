@@ -152,7 +152,7 @@ function DeployCodeHint({ service, project }: { service: BoardService, project: 
         Deploy your code
       </div>
       <p className="text-xs text-muted-foreground">
-        This service has no deployment yet. Deploy it with the Hexclave CLI — its configuration comes from the <span className="font-mono">services</span> member of the <span className="font-mono">deployment</span> export of your <span className="font-mono">hexclave.deploy.ts</span> (omit <span className="font-mono">--service-id</span> to deploy every service):
+        This service has no deployment yet. Deploy it with the Hexclave CLI — its configuration comes from the <span className="font-mono">services</span> member of the <span className="font-mono">deploy</span> export of your <span className="font-mono">hexclave.deploy.ts</span> (omit <span className="font-mono">--service-id</span> to deploy every service):
       </p>
       <CodeSnippet code={deployCommands} />
     </div>
@@ -247,7 +247,7 @@ export function VariablesContent({ service, services, isHexclave }: {
   return (
     <div className="h-full space-y-3 overflow-y-auto p-4">
       <p className="text-[11px] text-muted-foreground">
-        Variables are defined in the <span className="font-mono">services</span> member of the <span className="font-mono">deployment</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced when you run <span className="font-mono">hexclave deploy</span>. Secret values are entered under Project Settings &gt; Secrets.
+        Variables are defined in the <span className="font-mono">services</span> member of the <span className="font-mono">deploy</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced when you run <span className="font-mono">hexclave deploy</span>. Secret values are entered under Project Settings &gt; Secrets. A build also sees <span className="font-mono">CI=true</span>, and a deploy run in CI passes its <span className="font-mono">CI_COMMIT_*</span> variables through to the services it builds.
       </p>
 
       {service.envVars.length === 0 && (
@@ -1258,7 +1258,7 @@ export function SettingsContent({ service, isHexclave }: {
       <div className="space-y-3">
         <SectionLabel>Container</SectionLabel>
         <p className="text-[11px] text-muted-foreground">
-          Container settings are defined in the <span className="font-mono">services</span> member of the <span className="font-mono">deployment</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced when you run <span className="font-mono">hexclave deploy</span>. {!isBuilt
+          Container settings are defined in the <span className="font-mono">services</span> member of the <span className="font-mono">deploy</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced when you run <span className="font-mono">hexclave deploy</span>. {!isBuilt
             ? <>This service runs an already-built image, so nothing is built for it. A tag is resolved when the image is pulled, so pin it by digest if a deploy must always run the same bytes.</>
             // The Dockerfile comes FIRST: it describes a complete build, so a
             // build command alongside it is appended to it rather than deciding

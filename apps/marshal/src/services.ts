@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { buildEnvByteLength, buildTimeEnv, computeWebhookToken, type Builder } from "./builds.js";
-import { BASE_IMAGE, BUILD_TIMEOUT_SECONDS, MAX_BUILD_ENV_BYTES, MAX_COMMAND_LENGTH, MAX_INSTANCES_CAP, MAX_PERSISTENT_VOLUMES_PER_SERVICE, MAX_PORTS_PER_SERVICE, MAX_UPLOAD_BYTES, MAX_VOLUME_ID_LENGTH, MAX_VOLUME_SIZE_GB, MIN_REDACTED_ENV_VALUE_LENGTH, MIN_VOLUME_SIZE_GB, VOLUME_ID_REGEX, getConfig } from "./config.js";
+import { BASE_IMAGE, BUILD_TIMEOUT_SECONDS, MAX_BUILD_ENV_BYTES, MAX_COMMAND_LENGTH, MAX_INSTANCES_CAP, MAX_PERSISTENT_VOLUMES_PER_SERVICE, MAX_PORTS_PER_SERVICE, MAX_UPLOAD_BYTES, MAX_VOLUME_ID_LENGTH, MAX_VOLUME_SIZE_GB, MIN_REDACTED_ENV_VALUE_LENGTH, MIN_VOLUME_SIZE_GB, UNREDACTED_ENV_KEY_REGEX, VOLUME_ID_REGEX, getConfig } from "./config.js";
 import { applyErrorMessage } from "./apply-error.js";
 import { domainVerificationRecord } from "./domain-verification.js";
 import { MarshalError, badRequest, conflict, notFound } from "./errors.js";
@@ -73,9 +73,10 @@ export function validateNamespace(ns: string): string {
 
 /**
  * A deployment source id. Looser than a service key because the backend's ids
- * may contain dots (deployments declared in hexclave.config.ts belong to a
- * source named after the file), and it reaches an S3 key prefix only through the
- * lease, so traversal characters are what matter.
+ * may contain dots (projects deployed before services moved out of
+ * hexclave.config.ts still have a source named after that file), and it reaches
+ * an S3 key prefix only through the lease, so traversal characters are what
+ * matter.
  */
 export function validateSourceId(sourceId: string): string {
   if (!SOURCE_ID_REGEX.test(sourceId)) throw badRequest(`invalid deployment source id ${JSON.stringify(sourceId)}`);
@@ -1363,15 +1364,19 @@ async function persistDeploymentLog(deployment: StoredDeployment): Promise<void>
  * from current specs, so a value edited after the build is still scrubbed from
  * that build's log.
  *
- * Values shorter than MIN_REDACTED_ENV_VALUE_LENGTH are the one exception, and it is
+ * Values shorter than MIN_REDACTED_ENV_VALUE_LENGTH are one exception, and it is
  * about legibility rather than secrecy: "1", "true" and "3000" occur all over an
  * ordinary build log, so scrubbing them turns it into a wall of <redacted> that hides
  * the build's actual output while protecting nothing worth hiding.
+ *
+ * UNREDACTED_ENV_KEY_REGEX is the other: CI provenance is the deploy's own commit, which
+ * the build log exists to show, and scrubbing it costs far more than it protects.
  */
 export function deploymentLogRedactionValues(deployment: StoredDeployment): string[] {
   const values = [computeWebhookToken(deployment.id, deployment.ns)];
   for (const target of deployment.targets) {
-    for (const value of Object.values(buildTimeEnv(target.spec.env))) {
+    for (const [key, value] of Object.entries(buildTimeEnv(target.spec.env))) {
+      if (UNREDACTED_ENV_KEY_REGEX.test(key)) continue;
       if (value.length >= MIN_REDACTED_ENV_VALUE_LENGTH) values.push(value);
     }
   }

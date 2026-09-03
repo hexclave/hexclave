@@ -93,10 +93,12 @@ export type AdminDeploymentJson = {
   id: string,
   // The user-facing "#47", monotonic per project.
   number: number,
-  // WHICH deploy file this came from: the `id` export of the hexclave.deploy.ts
-  // that ran, or "hexclave.config.ts" for deployments declared there. A project
-  // deployed from several repositories has one source per repository, and this
-  // is what tells their deployments apart in a single list.
+  // WHICH deploy file this came from: the `deploymentGroupId` export of the
+  // hexclave.deploy.ts that ran. (A project deployed before services moved out
+  // of hexclave.config.ts may still show a source named after that file; nothing
+  // writes one any more.) A project deployed from several repositories has one
+  // source per repository, and this is what tells their deployments apart in a
+  // single list.
   deployment_source_id: string,
   status: "queued" | "building" | "deploying" | "deployed" | "failed" | "canceled",
   triggered_by: string,

@@ -1,4 +1,4 @@
-import { CONFIG_FILE_DEPLOYMENT_SOURCE_ID, buildSourceManifest, connectionRequiresTargetDeployed, deploymentPortEntries, deploymentPortOwnsStandardPorts, deploymentServiceIsBuilt, deploymentServiceUsesGeneratedDockerfile, parseConnectionValue, type DeploymentSourceManifest } from "@hexclave/shared/dist/deployments";
+import { buildSourceManifest, connectionRequiresTargetDeployed, deploymentPortEntries, deploymentPortOwnsStandardPorts, deploymentServiceIsBuilt, deploymentServiceUsesGeneratedDockerfile, parseConnectionValue, type DeploymentSourceManifest } from "@hexclave/shared/dist/deployments";
 import { Command } from "commander";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,13 +9,7 @@ import { AuthError, CliError, errorMessage } from "../lib/errors.js";
 import { followBuildLogs, type FollowBuildLogsOptions } from "../lib/build-logs.js";
 import { packageSourceDirectory } from "../lib/source-packaging.js";
 import { formatDuration, uploadSource, uploadSourceMultipart, type MultipartUploadSlot } from "../lib/source-upload.js";
-import { collectSecretDefaults, computeDeploymentLevels, evaluateDeploymentConfig, hasDeployFile, importConfigModule, importDeployModule, resolveDeployFilePath, type EvaluatedService } from "../lib/deployment-config.js";
-import { buildConfigPushSource, parseConfigOverride, pushConfigToProject } from "./config-file.js";
-
-// The names checked (in order) when --config-file is not passed with
-// --config-push; same preference order as `hexclave config push`'s pull-side
-// resolution.
-const CONFIG_FILE_CANDIDATES = ["hexclave.config.ts", "hexclave.config.js", "stack.config.ts", "stack.config.js"];
+import { collectSecretDefaults, computeDeploymentLevels, evaluateDeploymentConfig, importDeployModule, resolveDeployFilePath, type EvaluatedService } from "../lib/deployment-config.js";
 
 const RUN_POLL_INTERVAL_MS = 3_000;
 // Generous cap so a wedged remote build doesn't hang CI forever; the remote
@@ -30,39 +24,11 @@ const BUILD_LOG_DRAIN_TIMEOUT_MS = 15_000;
 export type DeployOptions = {
   serviceId?: string,
   deployFile?: string,
-  configFile?: string,
   cloudProjectId?: string,
-  // Opt-in: pushing the project's configuration is a separate concern from
-  // deploying this repository's services, and several repositories can deploy
-  // into one project — so a deploy must not silently publish whichever config
-  // file happens to sit next to the deploy file.
-  configPush?: boolean,
   // Commander's `--no-build-logs`: undefined/true stream the remote build's
   // output into this terminal, false leaves the deploy reporting status only.
   buildLogs?: boolean,
 };
-
-/**
- * Resolves the project config file for `--config-push`: --config-file wins (and
- * must exist); otherwise the first existing candidate in cwd. Returns null when
- * nothing was passed and no candidate exists. Exported for unit tests.
- */
-export function resolveConfigPushPath(configOption: string | undefined, cwd: string): string | null {
-  if (configOption != null && configOption !== "") {
-    const resolved = path.resolve(cwd, configOption);
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-      throw new CliError(`Config file not found: ${resolved}`);
-    }
-    return resolved;
-  }
-  for (const candidate of CONFIG_FILE_CANDIDATES) {
-    const resolved = path.resolve(cwd, candidate);
-    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-      return resolved;
-    }
-  }
-  return null;
-}
 
 /**
  * The secret keys that MUST have a stored value for these services to deploy:
@@ -513,32 +479,57 @@ function collectTransitiveDependents(failedServiceId: string, services: Map<stri
 }
 
 /**
- * What this deploy ships: a deploy file when there is one, otherwise the config
- * file, for a project small enough to keep its services there. The config file
- * has no `deploymentGroupId` export, so its deployments belong to a group named
- * after the file itself — which is what lets them coexist with the deploy files
- * of other repositories deploying into the same project.
+ * The environment a `hexclave deploy` inherits, reduced to the GitLab-style
+ * `CI_*` variables that describe the commit being deployed. Sent with the deploy
+ * request and injected into every service's env, so a build can stamp the
+ * revision it came from without the deploy file having to name a CI provider.
+ *
+ * GitLab already sets these, so they pass straight through; GitHub Actions gets
+ * translated into the same names, and anything else that exports them by hand
+ * wins over both. A variable nothing can answer is simply absent — never an
+ * empty string, which a service would read as "set, but blank".
+ *
+ * Exported for unit tests.
+ */
+export function collectCiEnv(rawEnv: NodeJS.ProcessEnv): Record<string, string> {
+  // GitHub Actions exports the variables it has no answer for as EMPTY strings
+  // rather than leaving them unset — GITHUB_HEAD_REF is "" on a push. Folding
+  // those to undefined first is what makes the `??` chains below fall through
+  // to the next candidate instead of stopping on a blank.
+  const env: Record<string, string | undefined> = Object.fromEntries(
+    Object.entries(rawEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""),
+  );
+  const ciEnv: Record<string, string | undefined> = {
+    CI_COMMIT_SHA: env.CI_COMMIT_SHA ?? env.GITHUB_SHA,
+    CI_COMMIT_SHORT_SHA: env.CI_COMMIT_SHORT_SHA ?? env.GITHUB_SHA?.slice(0, 8),
+    CI_COMMIT_REF_NAME: env.CI_COMMIT_REF_NAME ?? env.GITHUB_HEAD_REF ?? env.GITHUB_REF_NAME,
+    // The branch a commit is ON, which a pull-request build is not: GITHUB_REF_NAME
+    // is the merge ref there, so GITHUB_HEAD_REF being set rules this out.
+    CI_COMMIT_BRANCH: env.CI_COMMIT_BRANCH ?? (env.GITHUB_REF_TYPE === "branch" && !env.GITHUB_HEAD_REF ? env.GITHUB_REF_NAME : undefined),
+    CI_COMMIT_TAG: env.CI_COMMIT_TAG ?? (env.GITHUB_REF_TYPE === "tag" ? env.GITHUB_REF_NAME : undefined),
+    CI_REPOSITORY_URL: env.CI_SERVER_URL && env.CI_PROJECT_PATH
+      ? `${env.CI_SERVER_URL}/${env.CI_PROJECT_PATH}.git`
+      : env.GITHUB_SERVER_URL && env.GITHUB_REPOSITORY
+        ? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}.git`
+        : undefined,
+  };
+  return Object.fromEntries(
+    Object.entries(ciEnv).filter((entry): entry is [string, string] => entry[1] !== undefined && entry[1] !== ""),
+  );
+}
+
+/**
+ * What this deploy ships: the `deploy` export of a deploy file. Deployments live
+ * in their OWN file — hexclave.config.ts holds the project's configuration and
+ * nothing else — so a project with no deploy file has nothing to deploy.
  */
 async function resolveDeploySource(deployFileOption: string | undefined, cwd: string): Promise<{
   path: string,
   deploymentGroupIdExport: unknown,
-  // The deploy file's `id` export, if it still uses that old name. Only a deploy
-  // file can have one; the config file's group id is the file name.
+  // The deploy file's `id` export, if it still uses that old name.
   legacyIdExport?: unknown,
   deployExport: unknown,
 }> {
-  if (deployFileOption == null || deployFileOption === "") {
-    const configPath = resolveConfigPushPath(undefined, cwd);
-    // Only if there is no deploy file at all: a repository that has both keeps
-    // its services in the deploy file, and silently preferring the config file's
-    // would deploy something other than what the author is editing.
-    if (configPath !== null && !hasDeployFile(cwd)) {
-      const configModule = await importConfigModule(configPath);
-      if (configModule.deploy !== undefined) {
-        return { path: configPath, deploymentGroupIdExport: CONFIG_FILE_DEPLOYMENT_SOURCE_ID, deployExport: configModule.deploy };
-      }
-    }
-  }
   const deployFilePath = resolveDeployFilePath(deployFileOption, cwd);
   const deployModule = await importDeployModule(deployFilePath);
   return { path: deployFilePath, deploymentGroupIdExport: deployModule.deploymentGroupId, legacyIdExport: deployModule.legacyId, deployExport: deployModule.deploy };
@@ -550,8 +541,6 @@ export function registerDeployCommand(program: Command) {
     .description("Deploy the services defined by the `deploy` export of your hexclave.deploy.ts. Syncs the service definitions, then deploys every service in dependency order and waits for the remote builds to finish.")
     .option("--service-id <id>", "Deploy only this service (its connections resolve against already-deployed services)")
     .option("--deploy-file <path>", "Path to the deploy file (default: auto-discover hexclave.deploy.ts in the current directory)")
-    .option("--config-push", "Also push the project config file's `config` export to the project before deploying")
-    .option("--config-file <path>", "Path to the project config file for --config-push (default: auto-discover hexclave.config.ts in the current directory)")
     .option("--cloud-project-id <id>", "Hexclave project ID to deploy to (defaults to the HEXCLAVE_PROJECT_ID env var)")
     .option("--no-build-logs", "Don't stream the remote build's output; report service status only")
     .addHelpText("after", "\nAuthentication: uses HEXCLAVE_SECRET_SERVER_KEY if set (recommended for CI), otherwise your `hexclave login` session.\nSecrets: values for secret() env vars are read from the dashboard (Project Settings > Secrets); the deploy fails up front and lists every secret that still needs a value there.")
@@ -559,9 +548,7 @@ export function registerDeployCommand(program: Command) {
       const auth = resolveAuth(resolveProjectId(opts.cloudProjectId));
       const authHeaders = await buildAuthHeadersFactory(auth);
 
-      // A deploy file if there is one; otherwise the config file, for a project
-      // that keeps its services there. The config file has no `deploymentGroupId`
-      // export, so its deployments belong to a group named after the file itself.
+      // Always the deploy file: services live there, never in hexclave.config.ts.
       const deploySource = await resolveDeploySource(opts.deployFile, process.cwd());
       const { sourceId, services } = evaluateDeploymentConfig({
         deployFilePath: deploySource.path,
@@ -612,32 +599,6 @@ export function registerDeployCommand(program: Command) {
             "All of them must be set in the dashboard under Project Settings > Secrets before this deploy can run.",
           ].join("\n"));
         }
-      }
-
-      // Config push is OPT-IN. A project can be deployed from several
-      // repositories, and each push replaces the project's whole configuration —
-      // so a deploy that published it by default would let any of those
-      // repositories silently overwrite the others' config with its own.
-      if (opts.configPush === true) {
-        const configPath = resolveConfigPushPath(opts.configFile, process.cwd());
-        if (configPath == null) {
-          throw new CliError(`--config-push was passed, but no config file was found in ${process.cwd()} (looked for ${CONFIG_FILE_CANDIDATES.join(", ")}). Pass --config-file <path>, or drop --config-push to deploy without publishing the project config.`);
-        }
-        const configModule = await importConfigModule(configPath);
-        if (configModule.config === undefined) {
-          throw new CliError(`--config-push was passed, but ${configPath} has no \`config\` export. Add one, or drop --config-push.`);
-        }
-        const config = parseConfigOverride(configModule.config);
-        if (config == null) {
-          throw new CliError(`The \`config\` export of ${configPath} must be a plain object (or "show-onboarding"). Fix it, or drop --config-push to deploy without pushing the config.`);
-        }
-        console.error("Pushing config...");
-        // The GitHub-Actions auto-detection inside buildConfigPushSource
-        // records this path verbatim as the repo-relative config_file_path,
-        // so pass a cwd-relative posix path, not the resolved absolute one
-        // (which would bake the runner's filesystem layout into the source).
-        const relativeConfigPath = path.relative(process.cwd(), configPath).split(path.sep).join("/");
-        await pushConfigToProject(auth, config, buildConfigPushSource(relativeConfigPath, {}));
       }
 
       // Sync ALL definitions (even for a --service-id deploy) so the server sees
@@ -706,6 +667,11 @@ export function registerDeployCommand(program: Command) {
               throw new CliError(`Internal error: deploy set contains unknown service ${JSON.stringify(serviceId)}.`);
             })()),
           ])),
+          // The GitLab-style CI variables this deploy was invoked with. Request-
+          // scoped like the secret defaults: they describe THIS deploy, so
+          // storing them on the definition would leave a stale commit sha on
+          // every service the next deploy doesn't ship.
+          ci_env: collectCiEnv(process.env),
           triggered_by: "cli",
         },
       });

@@ -28,9 +28,9 @@ export const DEPLOYMENT_ENV_VAR_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // never has to name a source: two sources declaring the same service id is a
 // conflict, refused at sync.
 //
-// Dots are allowed because deployments declared in hexclave.config.ts belong to
-// a source whose id IS the file name (see CONFIG_FILE_DEPLOYMENT_SOURCE_ID) —
-// they appear in no reference, so nothing has to parse them.
+// Dots are allowed: a source id appears in no reference, so nothing has to
+// parse one, and projects deployed before services moved out of
+// hexclave.config.ts still have a stored source id named after that file.
 export const DEPLOYMENT_SOURCE_ID_REGEX = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/;
 export const MAX_DEPLOYMENT_SOURCE_ID_LENGTH = 63;
 
@@ -176,11 +176,6 @@ export function sourceManifestEntriesForService(
   return { entries, truncated: manifest.file_count > manifest.entries.length, prefix };
 }
 
-// The source id of deployments declared in hexclave.config.ts, which has no
-// `deploymentGroupId` export of its own. Named after the file so the dashboard
-// can show where those services came from without a special case.
-export const CONFIG_FILE_DEPLOYMENT_SOURCE_ID = "hexclave.config.ts";
-
 // A connection value is `<serviceId>.<outputKey>` — a typed pointer to another
 // service's output — or `hexclave.<outputKey>` for the managed service. The
 // backend resolves it at deploy time. This is deliberately its own env var TYPE
@@ -197,7 +192,7 @@ export const DEPLOYMENT_CONNECTION_VALUE_REGEX = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*\.[
 
 /**
  * The managed Hexclave service's slot on the deployments board. A service in
- * the config's `services` export must never shadow it — `service("hexclave")`
+ * the deploy file's `deploy` export must never shadow it — `service("hexclave")`
  * doesn't exist (the `hexclave` context object replaces it), but the id stays
  * reserved so connection values like "hexclave.projectId" are unambiguous.
  */
@@ -880,6 +875,44 @@ export const deploymentEnvVarSchema = yupObject({
 export const deploymentSecretDefaultsSchema = yupRecord(
   yupString().matches(DEPLOYMENT_ENV_VAR_KEY_REGEX, "deployment secret default keys must be env var keys"),
   yupString().defined(),
+);
+
+// The GitLab-style CI variables describing the commit a deploy ships (see
+// collectCiEnv in the CLI). Sent with a DEPLOY request and never stored: they
+// describe one deploy, so persisting them on the definition would leave a stale
+// commit sha on every service the next deploy doesn't ship.
+//
+// Restricted to the CI_ namespace, so this channel can only ever add CI metadata:
+// a deploy must not be able to reach the injected Hexclave credentials (or any
+// other env var the definition owns) through a field meant for provenance.
+//
+// Bare `CI` is deliberately NOT in the namespace. The runtime sets CI=true for
+// every remote build, and accepting it here would let a caller send CI=false and
+// turn that guarantee off — while also setting CI at RUNTIME, which is the one
+// thing that flag should never say.
+const DEPLOYMENT_CI_ENV_VAR_KEY_REGEX = /^CI_[A-Z0-9_]+$/;
+// A bound on the whole field, checked at the front door. Without one the only
+// backstop is the runtime's build-env cap, which fires after the deploy has
+// already read secrets, consumed the upload and burned a deployment number —
+// so an oversized ci_env would fail late and leave a failed row behind. Ten
+// short provenance variables need well under a kilobyte.
+export const MAX_DEPLOYMENT_CI_ENV_BYTES = 4 * 1024;
+export const deploymentCiEnvSchema = yupRecord(
+  yupString().matches(DEPLOYMENT_CI_ENV_VAR_KEY_REGEX, "ci_env keys must be CI variable names: CI_ followed by upper-case letters, digits and underscores"),
+  yupString().defined(),
+).test(
+  "ci-env-within-size-limit",
+  `ci_env may be at most ${MAX_DEPLOYMENT_CI_ENV_BYTES} bytes in total (keys plus values)`,
+  (value: Record<string, string> | undefined) => {
+    if (value === undefined) return true;
+    let total = 0;
+    for (const [key, entry] of Object.entries(value)) {
+      // Measured in UTF-8 rather than UTF-16 code units: this bounds what
+      // travels to the runtime and onto the builder machine, which is bytes.
+      total += Buffer.byteLength(key, "utf8") + Buffer.byteLength(String(entry), "utf8");
+    }
+    return total <= MAX_DEPLOYMENT_CI_ENV_BYTES;
+  },
 );
 
 export const deploymentServiceDefinitionSchema = yupObject({
@@ -1640,6 +1673,38 @@ import.meta.vitest?.test("deploymentSecretDefaultsSchema accepts env-var-keyed d
   await expect(deploymentSecretDefaultsSchema.validate({
     "1BAD": "x",
   }, { abortEarly: false })).rejects.toThrow(/env var keys/);
+});
+
+import.meta.vitest?.test("deploymentCiEnvSchema only accepts CI variable names", async ({ expect }) => {
+  await expect(deploymentCiEnvSchema.validate({
+    CI_COMMIT_SHA: "abc123",
+    CI_COMMIT_SHORT_SHA: "abc123de",
+  }, { abortEarly: false })).resolves.toEqual({ CI_COMMIT_SHA: "abc123", CI_COMMIT_SHORT_SHA: "abc123de" });
+  // The whole point of the namespace: a deploy cannot reach the injected
+  // credentials (or anything else the definition owns) through this field.
+  await expect(deploymentCiEnvSchema.validate({
+    HEXCLAVE_SECRET_SERVER_KEY: "ssk_evil",
+  }, { abortEarly: false })).rejects.toThrow(/CI variable names/);
+  await expect(deploymentCiEnvSchema.validate({
+    CI_lowercase: "x",
+  }, { abortEarly: false })).rejects.toThrow(/CI variable names/);
+  // Bare CI is excluded on purpose: it is the runtime's to set for the build,
+  // and accepting it here would let a caller send CI=false to switch that off.
+  await expect(deploymentCiEnvSchema.validate({
+    CI: "false",
+  }, { abortEarly: false })).rejects.toThrow(/CI variable names/);
+});
+
+import.meta.vitest?.test("deploymentCiEnvSchema bounds the whole field", async ({ expect }) => {
+  await expect(deploymentCiEnvSchema.validate({
+    CI_COMMIT_MESSAGE: "x".repeat(MAX_DEPLOYMENT_CI_ENV_BYTES),
+  }, { abortEarly: false })).rejects.toThrow(/at most/);
+  // Measured across every entry, not per value: many small vars must not add up
+  // to more than one large one is allowed to be.
+  await expect(deploymentCiEnvSchema.validate(
+    Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`CI_VAR_${index}`, "x".repeat(500)])),
+    { abortEarly: false },
+  )).rejects.toThrow(/at most/);
 });
 
 // Type-level check that the yup schema stays assignable to the hand-written

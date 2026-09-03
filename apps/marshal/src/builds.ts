@@ -168,7 +168,13 @@ export type StartBuildOptions = {
 // rolled out yet, so at build time there is nothing to resolve it to. Nothing to flag or
 // reject — it simply isn't there.
 export function buildTimeEnv(env: Record<string, EnvValue>): Record<string, string> {
-  const entries: [string, string][] = [];
+  // CI=true is what every package manager, test runner and framework reads to
+  // decide it is not talking to a human: no progress spinners, no interactive
+  // prompts, no "run this again with --fix" offers. It is set here rather than
+  // on the spec because it is only ever true of the BUILD — the service this
+  // produces then runs as an ordinary process, not as a CI job. First in the
+  // list, so a service that declares its own CI still wins.
+  const entries: [string, string][] = [["CI", "true"]];
   for (const [key, value] of Object.entries(env)) {
     if ("value" in value) entries.push([key, value.value]);
   }

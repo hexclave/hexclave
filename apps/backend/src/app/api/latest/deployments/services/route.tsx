@@ -41,7 +41,7 @@ export const GET = createSmartRouteHandler({
 export const PUT = createSmartRouteHandler({
   metadata: {
     summary: "Sync a deployment source's service definitions",
-    description: "Upserts the service definitions evaluated from ONE deploy file's `services` export, and removes the services that file no longer declares. Called by `hexclave deploy` before deploying. Scoped to the deployment source named by `source_id` (the deploy file's own `id` export): services of other sources are never touched, which is what lets several repositories deploy into one project. A service id already owned by another source is refused. Removing a service tears down its containers but keeps its persistent volume and any custom domain, unattached.",
+    description: "Upserts the service definitions evaluated from ONE deploy file's `deploy` export, and removes the services that file no longer declares. Called by `hexclave deploy` before deploying. Scoped to the deployment source named by `source_id` (the deploy file's own `deploymentGroupId` export): services of other sources are never touched, which is what lets several repositories deploy into one project. A service id already owned by another source is refused. Removing a service tears down its containers but keeps its persistent volume and any custom domain, unattached.",
     tags: ["Deploy"],
     hidden: true,
   },

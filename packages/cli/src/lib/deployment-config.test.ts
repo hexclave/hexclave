@@ -577,8 +577,9 @@ describe("the deployment envelope", () => {
     expect(evaluateExports(7, deployExport)).toThrow("must be a string");
     expect(evaluateExports("-nope", deployExport)).toThrow("Invalid deployment group id");
     expect(evaluateExports("backend", deployExport)().sourceId).toBe("backend");
-    // Dots are legal: deployments declared in hexclave.config.ts belong to a
-    // group named after the file.
+    // Dots are legal: a group id appears in no reference, so nothing has to
+    // parse one — and projects that predate the move of services out of
+    // hexclave.config.ts still have a stored group named after that file.
     expect(evaluateExports("hexclave.config.ts", deployExport)().sourceId).toBe("hexclave.config.ts");
   });
 

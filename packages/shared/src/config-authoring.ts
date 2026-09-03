@@ -306,7 +306,7 @@ export type HexclaveService = HexclaveServerService | HexclaveServerlessService;
 
 /**
  * The `deploy` export of a deploy file (hexclave.deploy.ts) — the services
- * deployed together by one `hexclave deploy` — or of hexclave.config.ts.
+ * deployed together by one `hexclave deploy`.
  *
  * It is a FUNCTION of the deployment context, so it can reach secrets,
  * connections and the managed backend's outputs:
@@ -332,11 +332,10 @@ export type HexclaveService = HexclaveServerService | HexclaveServerlessService;
  * });
  * ```
  *
- * Deployments normally live in their own file so that one Hexclave project can
- * be deployed from several repositories, each shipping the services it owns and
- * each deploying on its own schedule. The same export is accepted in
- * hexclave.config.ts for a project that has only one; those services belong to a
- * deployment group named after that file.
+ * Deployments live in their own file, never in hexclave.config.ts, so that one
+ * Hexclave project can be deployed from several repositories, each shipping the
+ * services it owns and each deploying on its own schedule — while at most one of
+ * them owns the project's configuration.
  */
 export type HexclaveDeploymentConfig = (context: HexclaveDeploymentContext) => {
   services: Record<string, HexclaveService>,

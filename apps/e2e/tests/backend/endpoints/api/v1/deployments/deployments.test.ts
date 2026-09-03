@@ -1013,6 +1013,77 @@ describe("deploys against the Marshal runtime", () => {
     for (const line of replayed.lines) expect(line.at_millis).toBeGreaterThanOrEqual(oldestAtMillis);
   });
 
+  it("injects the deploy request's CI variables, and refuses keys outside the CI namespace", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await InternalApiKey.createAndSetProjectKeys();
+    const serviceId = uniqueServiceId("ci-env");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId, {
+      // A service that declares one of these names has said what it means, so
+      // its own value must survive the injection.
+      env: { CI_COMMIT_REF_NAME: { value: "declared-in-the-deploy-file" } },
+    });
+
+    // `ci_env` is request-scoped: it describes the commit this deploy ships, so
+    // it reaches the running service without ever being stored on the definition.
+    const deploymentId = await startDeploy({
+      sourceId,
+      uploadId,
+      definitionSyncId,
+      levels: [[serviceId]],
+      extraBody: { ci_env: { CI_COMMIT_SHA: "0123456789abcdef", CI_COMMIT_REF_NAME: "from-the-deploy-request" } },
+    });
+    await pollDeploymentToStatus(deploymentId, "deployed");
+    const { service: cloudRun } = await findMockCloudRun(serviceId);
+    expect(cloudRunEnv(cloudRun)).toMatchObject({
+      CI_COMMIT_SHA: "0123456789abcdef",
+      CI_COMMIT_REF_NAME: "declared-in-the-deploy-file",
+    });
+    // CI=true belongs to the BUILD, not to the service: the container this
+    // produced runs as an ordinary process, so the flag must not survive into
+    // its runtime env.
+    expect(cloudRunEnv(cloudRun)).not.toHaveProperty("CI");
+
+    // Not stored: the next deploy of this source must not inherit this deploy's
+    // commit sha, so the definition still names only what the deploy file wrote.
+    const serviceResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((serviceResponse.body as any).env.map((entry: any) => entry.key)).toEqual(["CI_COMMIT_REF_NAME"]);
+
+    // A service with nothing to build gets NO CI variables. They describe the
+    // commit that was built, and a prebuilt image has no relationship to it —
+    // but the load-bearing reason is churn: these values change on every commit
+    // and the runtime hashes env into a service's revision, so injecting them
+    // here would delete and recreate an untouched `postgres:16` on every deploy
+    // of its neighbours.
+    const prebuiltId = uniqueServiceId("ci-env-prebuilt");
+    const { syncId: prebuiltSyncId, sourceId: prebuiltSourceId } = await syncServices({
+      [prebuiltId]: { type: "serverless", ports: { 5432: { protocol: "http" } }, image: "postgres:16", env: {} },
+    });
+    const prebuiltDeploymentId = await startDeploy({
+      sourceId: prebuiltSourceId,
+      definitionSyncId: prebuiltSyncId,
+      levels: [[prebuiltId]],
+      extraBody: { ci_env: { CI_COMMIT_SHA: "0123456789abcdef" } },
+    });
+    await pollDeploymentToStatus(prebuiltDeploymentId, "deployed");
+    expect(cloudRunEnv((await findMockCloudRun(prebuiltId)).service)).not.toHaveProperty("CI_COMMIT_SHA");
+
+    // The namespace is the guard: without it this field could overwrite the
+    // injected Hexclave credentials, which are not the caller's to set.
+    const badResponse = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: {
+        source_id: sourceId,
+        upload_id: (await createUpload()).uploadId,
+        definition_sync_id: definitionSyncId,
+        levels: [[serviceId]],
+        ci_env: { HEXCLAVE_SECRET_SERVER_KEY: "ssk_not_yours" },
+      },
+    });
+    expect(badResponse.status).toBe(400);
+    expect(JSON.stringify(badResponse.body)).toContain("CI variable names");
+  });
+
   it("refuses runtime logs for a service that was never deployed, and for one that does not exist", async ({ expect }) => {
     await Project.createAndSwitch();
     await InternalApiKey.createAndSetProjectKeys();

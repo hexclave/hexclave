@@ -1,9 +1,10 @@
 // Evaluates the `deploy` export of hexclave.deploy.ts.
 //
-// Deployments live in their OWN file, separate from hexclave.config.ts: one
-// Hexclave project can be deployed from several repositories, each shipping the
-// services it owns, and each of those repositories has a deploy file of its own
-// while only one of them (if any) owns the project's configuration.
+// Deployments live in their OWN file, separate from hexclave.config.ts, which
+// holds the project's configuration and nothing else: one Hexclave project can
+// be deployed from several repositories, each shipping the services it owns,
+// and each of those repositories has a deploy file of its own while only one of
+// them (if any) owns the project's configuration.
 //
 // The export is a FUNCTION of the deployment context returning `{ services }`.
 // The context is where `secret()`, `service()` and `hexclave.*` come from.
@@ -92,14 +93,6 @@ import { CliError, errorMessage } from "./errors.js";
 
 // The names checked (in order) when --deploy-file is not passed.
 export const DEPLOY_FILE_CANDIDATES = ["hexclave.deploy.ts", "hexclave.deploy.js"];
-
-/** Whether `cwd` contains a deploy file at all. */
-export function hasDeployFile(cwd: string): boolean {
-  return DEPLOY_FILE_CANDIDATES.some((candidate) => {
-    const resolved = path.resolve(cwd, candidate);
-    return fs.existsSync(resolved) && fs.statSync(resolved).isFile();
-  });
-}
 
 /**
  * Resolves the deploy file path: --deploy-file wins (and must exist); otherwise
@@ -601,9 +594,7 @@ const EXAMPLE_DEPLOYMENT_EXPORT = `  export const deploymentGroupId = "my-app";
  */
 export function evaluateDeploymentConfig(options: {
   deployFilePath: string,
-  // The file's `deploymentGroupId` export — the deployment group id. Required in
-  // a deploy file; the caller passes CONFIG_FILE_DEPLOYMENT_SOURCE_ID for
-  // deployments declared in hexclave.config.ts, which has no id of its own.
+  // The file's `deploymentGroupId` export — the deployment group id.
   deploymentGroupIdExport: unknown,
   // The file's `id` export, which is what this used to be called. Passed so a
   // file still using the old name fails with the rename instead of the
@@ -1141,9 +1132,9 @@ function resolveHexclaveOutputFromSessionEnv(envVarKey: string, outputKey: Hexcl
 }
 
 /**
- * Loads a TypeScript/JavaScript module via jiti. Shared by the deploy-file and
- * config-file loaders below so both fail with the same error on an unloadable
- * file; `description` names which of the two it was.
+ * Loads a TypeScript/JavaScript module via jiti, reporting an unloadable file as
+ * a CliError rather than whatever jiti threw. `description` is how the file is
+ * named in that error.
  */
 async function importModule(filePath: string, description: string): Promise<Record<string, unknown>> {
   const { createJiti } = await import("jiti");
@@ -1166,15 +1157,3 @@ export async function importDeployModule(deployFilePath: string): Promise<{ depl
   return { deploymentGroupId: module.deploymentGroupId, legacyId: module.id, deploy: module.deploy };
 }
 
-/**
- * Loads a config file (hexclave.config.ts) and returns its `config` export, plus
- * a `deploy` export if it has one — a project small enough to keep its
- * services in the config file may declare them there instead of in a deploy
- * file. Those services belong to a deployment group named after the file (the
- * config file has no `deploymentGroupId` export of its own), so they can coexist
- * with the deploy files of other repositories deploying into the same project.
- */
-export async function importConfigModule(configPath: string): Promise<{ config: unknown, deploy: unknown }> {
-  const module = await importModule(configPath, "config file");
-  return { config: module.config, deploy: module.deploy };
-}
