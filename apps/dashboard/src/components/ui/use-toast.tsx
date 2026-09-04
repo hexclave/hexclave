@@ -192,5 +192,10 @@ function useToast() {
   };
 }
 
-export { useToast, toast };
+function clearToasts() {
+  for (const timeout of toastTimeouts.values()) clearTimeout(timeout);
+  toastTimeouts.clear();
+  dispatch({ type: "REMOVE_TOAST" });
+}
 
+export { clearToasts, useToast, toast };

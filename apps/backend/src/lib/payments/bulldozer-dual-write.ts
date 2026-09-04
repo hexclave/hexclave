@@ -80,6 +80,11 @@ export function subscriptionInvoiceToStoredRow(inv: {
   status: string | null,
   amountTotal: number | null,
   hostedInvoiceUrl: string | null,
+  paidAt?: Date | null,
+  markedUncollectibleAt?: Date | null,
+  voidedAt?: Date | null,
+  currency?: string | null,
+  amountPaid?: number | null,
   createdAt: Date,
 }): Record<string, unknown> {
   return {
@@ -91,6 +96,11 @@ export function subscriptionInvoiceToStoredRow(inv: {
     status: inv.status,
     amountTotal: inv.amountTotal,
     hostedInvoiceUrl: inv.hostedInvoiceUrl,
+    paidAtMillis: dateToMillis(inv.paidAt),
+    markedUncollectibleAtMillis: dateToMillis(inv.markedUncollectibleAt),
+    voidedAtMillis: dateToMillis(inv.voidedAt),
+    currency: inv.currency ?? null,
+    amountPaid: inv.amountPaid ?? null,
     createdAtMillis: dateToMillis(inv.createdAt),
   };
 }
@@ -105,6 +115,9 @@ export function oneTimePurchaseToStoredRow(p: {
   product: unknown,
   quantity: number,
   stripePaymentIntentId: string | null,
+  amountReceived?: number | null,
+  currency?: string | null,
+  paidAt?: Date | null,
   revokedAt: Date | null,
   refundedAt: Date | null,
   creationSource: string,
@@ -120,6 +133,9 @@ export function oneTimePurchaseToStoredRow(p: {
     product: p.product,
     quantity: p.quantity,
     stripePaymentIntentId: p.stripePaymentIntentId,
+    amountReceived: p.amountReceived ?? null,
+    currency: p.currency ?? null,
+    paidAtMillis: dateToMillis(p.paidAt),
     revokedAtMillis: dateToMillis(p.revokedAt),
     refundedAtMillis: dateToMillis(p.refundedAt),
     creationSource: p.creationSource,
