@@ -1,0 +1,37 @@
+[Unit]
+Description=Hexclave TV Box kiosk
+Requires=hexclave-tv-box-network.service
+After=hexclave-tv-box-network.service systemd-user-sessions.service
+Conflicts=getty@tty1.service hexclave-tv-box-setup-display.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+StartLimitAction=reboot
+
+[Service]
+Type=simple
+User=hexclave-tv
+Group=hexclave-tv
+SupplementaryGroups=video render input hexclave-tv-runtime
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+RuntimeDirectory=hexclave-tv-box-browser-cache
+RuntimeDirectoryMode=0700
+ExecStart=/usr/lib/hexclave-tv-box/kiosk-launch
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/run/hexclave-tv-box
+ReadWritePaths=/run/hexclave-tv-box-browser-cache /var/lib/hexclave-tv-box/browser
+
+[Install]
+WantedBy=multi-user.target

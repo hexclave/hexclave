@@ -1,0 +1,18 @@
+[Unit]
+Description=Initialize unique Hexclave TV Box state
+RequiresMountsFor=/var/lib/hexclave-tv-box
+Before=NetworkManager.service ssh.service hexclave-tv-box-network.service
+
+[Service]
+Type=oneshot
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m hexclave_tv_box.firstboot --apply-system
+RemainAfterExit=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/hostname /var/lib/hexclave-tv-box
+
+[Install]
+WantedBy=multi-user.target

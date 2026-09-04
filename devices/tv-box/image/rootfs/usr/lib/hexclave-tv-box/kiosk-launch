@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+url_file=/run/hexclave-tv-box/kiosk-url
+cookie_dir=/var/lib/hexclave-tv-box/browser
+cache_dir=/run/hexclave-tv-box-browser-cache
+data_dir=/run/hexclave-tv-box-browser-cache/data
+config_dir=/run/hexclave-tv-box-browser-cache/config
+timezone_file=/var/lib/hexclave-tv-box/identity/timezone
+
+install -d -m 0700 "$cookie_dir" "$cache_dir" "$data_dir" "$config_dir"
+for _attempt in $(seq 1 60); do
+  if [ -s "$url_file" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ ! -s "$url_file" ]; then
+  printf '%s\n' 'TV Box kiosk URL was not prepared.' >&2
+  exit 1
+fi
+
+if [ -s "$timezone_file" ]; then
+  TZ=$(tr -d '\r\n' < "$timezone_file")
+  case "$TZ" in
+    /*|*..*) printf '%s\n' 'Invalid TV Box timezone.' >&2; exit 1 ;;
+  esac
+  export TZ
+fi
+
+export COG_PLATFORM_WL_VIEW_FULLSCREEN=1
+export XDG_CACHE_HOME="$cache_dir"
+export XDG_DATA_HOME="$data_dir"
+export XDG_CONFIG_HOME="$config_dir"
+url=$(tr -d '\r\n' < "$url_file")
+
+exec cage -- cog \
+  --cookie-jar="sqlite:$cookie_dir/cookies.sqlite" \
+  --webprocess-failure=exit \
+  --enable-write-console-messages-to-stdout=false \
+  "$url"

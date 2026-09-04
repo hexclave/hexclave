@@ -3,7 +3,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import IndependentTvPageClient, { getTvDisplayRequestHeaders } from "./page-client";
+import IndependentTvPageClient, { getTvDisplayRequestHeaders, resolveTvDisplayApiBase } from "./page-client";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
@@ -27,6 +27,36 @@ afterEach(() => {
 });
 
 describe("independent TV display requests", () => {
+  it("keeps the configured API origin when the Quick Tunnel opt-in is disabled", () => {
+    expect(resolveTvDisplayApiBase({
+      browserOrigin: "https://phase-one-box.trycloudflare.com",
+      configuredApiUrl: "http://localhost:8102",
+      configuredBrowserApiUrl: undefined,
+      nodeEnvironment: "development",
+      quickTunnelEnabled: false,
+    })).toBe("http://localhost:8102");
+  });
+
+  it("uses the current browser origin only for an explicitly enabled development tunnel", () => {
+    expect(resolveTvDisplayApiBase({
+      browserOrigin: "https://phase-one-box.trycloudflare.com",
+      configuredApiUrl: "http://localhost:8102",
+      configuredBrowserApiUrl: undefined,
+      nodeEnvironment: "development",
+      quickTunnelEnabled: true,
+    })).toBe("https://phase-one-box.trycloudflare.com");
+  });
+
+  it("refuses to use the Quick Tunnel client transport in production", () => {
+    expect(() => resolveTvDisplayApiBase({
+      browserOrigin: "https://phase-one-box.trycloudflare.com",
+      configuredApiUrl: "https://api.hexclave.com",
+      configuredBrowserApiUrl: undefined,
+      nodeEnvironment: "production",
+      quickTunnelEnabled: true,
+    })).toThrowError(/cannot be used outside development/);
+  });
+
   it("does not advertise JSON for a bodyless pairing or refresh request", () => {
     const headers = getTvDisplayRequestHeaders({ method: "POST" });
     expect(headers.has("content-type")).toBe(false);

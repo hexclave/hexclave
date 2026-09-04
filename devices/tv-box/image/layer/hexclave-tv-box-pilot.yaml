@@ -1,0 +1,135 @@
+# METABEGIN
+# X-Env-Layer-Name: hexclave-tv-box-pilot
+# X-Env-Layer-Category: product
+# X-Env-Layer-Desc: Hexclave TV Box pilot appliance layer.
+# X-Env-Layer-Version: 0.1.0
+# X-Env-Layer-Requires: raspbian-trixie-armhf,rpi-debian-trixie,
+#  rpi-misc-utils,rpi-essential-base,rpi-misc-skel,systemd-min,
+#  systemd-timesyncd,wireless-regulatory
+# X-Env-Layer-Provides: network-activator
+#
+# X-Env-VarPrefix: tvbox
+#
+# X-Env-Var-wifi_country:
+# X-Env-Var-wifi_country-Desc: ISO 3166-1 alpha-2 Wi-Fi regulatory country
+# X-Env-Var-wifi_country-Required: y
+# X-Env-Var-wifi_country-Valid: regex:^[A-Z]{2}$
+# X-Env-Var-wifi_country-Set: y
+#
+# X-Env-Var-support_ca_key:
+# X-Env-Var-support_ca_key-Desc: Offline support CA public-key file
+# X-Env-Var-support_ca_key-Required: y
+# X-Env-Var-support_ca_key-Valid: string
+# X-Env-Var-support_ca_key-Set: y
+#
+# X-Env-Var-source_commit:
+# X-Env-Var-source_commit-Desc: Hexclave source commit represented by the image
+# X-Env-Var-source_commit-Required: y
+# X-Env-Var-source_commit-Valid: regex:^[0-9a-f]{40}$
+# X-Env-Var-source_commit-Set: y
+#
+# X-Env-Var-test_image:
+# X-Env-Var-test_image-Desc: Mark this as a non-shippable test image that may read a Quick Tunnel origin from the boot partition
+# X-Env-Var-test_image-Required: y
+# X-Env-Var-test_image-Valid: keywords:true,false
+# X-Env-Var-test_image-Set: y
+# METAEND
+---
+mmdebstrap:
+  # The pinned Raspbian armhf layer supplies repositories and architecture but
+  # does not select a suite, so bind this appliance to the intended release.
+  suite: trixie
+  packages:
+    - ca-certificates
+    - cage
+    - cog
+    - dnsmasq-base
+    - fake-hwclock
+    - fonts-inter
+    - iw
+    - libwpewebkit-2.0-1
+    - network-manager
+    - nftables
+    - openssh-server
+    - python3-minimal
+    - sudo
+    - util-linux
+    - wpasupplicant
+    - zram-tools
+  customize-hooks:
+    # Trixie's fake-hwclock package enables its split load/save/timer units in
+    # postinst. The pinned builder's layer still enables the removed umbrella
+    # unit, so seed the bootstrap clock here without using that obsolete hook.
+    - date -d "@${SOURCE_DATE_EPOCH}" > "$1/etc/fake-hwclock.data"
+    - |-
+      set -eu
+      cp -a "${SRCROOT}/rootfs/." "$1/"
+      install -d -m 0755 "$1/usr/lib/python3/dist-packages"
+      cp -a "${SRCROOT}/../src/hexclave_tv_box" "$1/usr/lib/python3/dist-packages/"
+      install -d -m 0755 "$1/usr/share/hexclave-tv-box/setup-ui"
+      cp -a "${SRCROOT}/../setup-ui/." "$1/usr/share/hexclave-tv-box/setup-ui/"
+      install -m 0644 "${IGconf_tvbox_support_ca_key}" "$1/etc/ssh/hexclave-support-ca.pub"
+      printf '%s\n' "${IGconf_tvbox_wifi_country}" > "$1/etc/hexclave-tv-box-country"
+      case "${IGconf_tvbox_test_image}" in
+        true)
+          image_channel=test
+          printf '%s\n' 'test' > "$1/etc/hexclave-tv-box-test-image"
+          ;;
+        false)
+          image_channel=production
+          rm -f "$1/etc/hexclave-tv-box-test-image"
+          ;;
+        *)
+          printf '%s\n' 'IGconf_tvbox_test_image must be true or false.' >&2
+          exit 1
+          ;;
+      esac
+      sed -i "s/BUILD_SOURCE_COMMIT/${IGconf_tvbox_source_commit}/; s/BUILD_WIFI_REGION/${IGconf_tvbox_wifi_country}/; s/BUILD_IMAGE_CHANNEL/${image_channel}/" "$1/etc/hexclave-tv-box-release"
+    - |-
+      set -eu
+      chroot "$1" groupadd --system hexclave-tv-runtime
+      chroot "$1" groupadd --system hexclave-tv
+      chroot "$1" useradd --system --gid hexclave-tv --groups hexclave-tv-runtime --home-dir /nonexistent --shell /usr/sbin/nologin hexclave-tv
+      chroot "$1" groupadd --system hexclave-tv-portal
+      chroot "$1" useradd --system --gid hexclave-tv-portal --groups hexclave-tv-runtime --home-dir /nonexistent --shell /usr/sbin/nologin hexclave-tv-portal
+      # OpenSSH rejects a leading-! locked account before certificate
+      # authentication when UsePAM is disabled. *NP* is deliberately not a
+      # usable password hash and is not a Linux lock marker; with every
+      # password method disabled, the support CA remains the only entry path.
+      chroot "$1" useradd --system --password '*NP*' --home-dir /nonexistent --shell /bin/sh hexclave-support
+      chmod 0755 "$1/usr/lib/hexclave-tv-box/kiosk-launch" "$1/usr/lib/hexclave-tv-box/forced-support-command" "$1/usr/lib/hexclave-tv-box/support"
+      chmod 0440 "$1/etc/sudoers.d/hexclave-tv-box-support"
+      chroot "$1" systemctl mask \
+        getty@tty1.service serial-getty@ttyAMA0.service ssh-hostkeys-generate.service \
+        bluetooth.service hciuart.service \
+        apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
+      # The network agent starts exactly one tty1 owner for the active mode;
+      # neither the setup display nor the kiosk starts independently at boot.
+      chroot "$1" systemctl enable hexclave-tv-box-firstboot.service hexclave-tv-box-network.service ssh.service nftables.service zramswap.service systemd-timesyncd.service
+    - |-
+      set -eu
+      printf '%s\n' 'flush ruleset' 'include "/etc/nftables.d/*.nft"' > "$1/etc/nftables.conf"
+      rm -f "$1"/etc/ssh/ssh_host_*key "$1"/etc/ssh/ssh_host_*key.pub
+      # An empty machine-id makes systemd create a unique identity on the
+      # first boot of every flashed card instead of cloning the build host.
+      : > "$1/etc/machine-id"
+      : > "$1/etc/hostname"
+      chmod 0644 "$1/etc/hostname"
+      rm -f "$1/var/lib/dbus/machine-id" "$1/var/lib/systemd/random-seed"
+      ln -s /etc/machine-id "$1/var/lib/dbus/machine-id"
+      install -d -m 0700 "$1/var/lib/hexclave-tv-box"
+      chroot "$1" install -d -m 2755 -o root -g systemd-journal /var/lib/hexclave-tv-box/journal /var/log/journal
+      install -d -m 0700 "$1/var/lib/hexclave-tv-box/network-connections"
+      rm -rf "$1/etc/NetworkManager/system-connections"
+      ln -s /var/lib/hexclave-tv-box/network-connections "$1/etc/NetworkManager/system-connections"
+      cmdline="$1/boot/firmware/cmdline.txt"
+      if [ -f "$cmdline" ]; then
+        sed -Ei '1 s/(^| )console=(serial0|ttyAMA0|ttyS0),[^ ]+//g' "$cmdline"
+        sed -i '1 s/$/ consoleblank=0 vt.global_cursor_default=0 video=HDMI-A-1:1920x1080M@60D/' "$cmdline"
+      fi
+      config="$1/boot/firmware/config.txt"
+      if [ -f "$config" ]; then
+        grep -qxF 'disable_overscan=1' "$config" || printf '%s\n' 'disable_overscan=1' >> "$config"
+        grep -qxF 'dtoverlay=vc4-kms-v3d' "$config" || printf '%s\n' 'dtoverlay=vc4-kms-v3d' >> "$config"
+        grep -qxF 'dtoverlay=disable-bt' "$config" || printf '%s\n' 'dtoverlay=disable-bt' >> "$config"
+      fi

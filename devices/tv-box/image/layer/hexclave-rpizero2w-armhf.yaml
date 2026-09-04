@@ -1,0 +1,23 @@
+# METABEGIN
+# X-Env-Layer-Name: hexclave-rpizero2w-armhf
+# X-Env-Layer-Category: device
+# X-Env-Layer-Desc: Raspberry Pi Zero 2 W with the qualified 32-bit v7 kernel.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: linux-base,rpi-device-base,rpi-linux-v7
+# X-Env-Layer-Provides: rpi-device
+#
+# X-Env-VarPrefix: device
+#
+# X-Env-Var-class: zero2w
+# X-Env-Var-class-Desc: Device class
+# X-Env-Var-class-Required: n
+# X-Env-Var-class-Valid: keywords:zero2w
+# X-Env-Var-class-Set: y
+#
+# X-Env-Var-storage_type: sd
+# X-Env-Var-storage_type-Desc: Device storage type
+# X-Env-Var-storage_type-Required: n
+# X-Env-Var-storage_type-Valid: keywords:sd
+# X-Env-Var-storage_type-Set: y
+# METAEND
+---

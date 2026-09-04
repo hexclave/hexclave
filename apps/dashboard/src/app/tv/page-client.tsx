@@ -18,10 +18,42 @@ const PAIRING_RETRY_INTERVAL_MS = 5_000;
 const PAIRING_STATUS_TIMEOUT_MS = 12_000;
 const PAIRING_REQUEST_TIMEOUT_MS = 12_000;
 
+export function resolveTvDisplayApiBase({
+  browserOrigin,
+  configuredApiUrl,
+  configuredBrowserApiUrl,
+  nodeEnvironment,
+  quickTunnelEnabled,
+}: {
+  browserOrigin: string | null,
+  configuredApiUrl: string | undefined,
+  configuredBrowserApiUrl: string | undefined,
+  nodeEnvironment: string | undefined,
+  quickTunnelEnabled: boolean,
+}): string {
+  if (quickTunnelEnabled) {
+    if (nodeEnvironment !== "development") {
+      throw new Error("The TV Quick Tunnel transport cannot be used outside development.");
+    }
+    if (browserOrigin == null) {
+      throw new Error("The TV Quick Tunnel transport requires a browser origin.");
+    }
+    return browserOrigin;
+  }
+
+  const configuredBase = configuredBrowserApiUrl ?? configuredApiUrl;
+  if (configuredBase == null) throw new Error("TV display API URL is not configured.");
+  return configuredBase;
+}
+
 function apiUrl(path: string): string {
-  const base = getPublicEnvVar("NEXT_PUBLIC_BROWSER_STACK_API_URL")
-    ?? getPublicEnvVar("NEXT_PUBLIC_STACK_API_URL");
-  if (base == null) throw new Error("TV display API URL is not configured.");
+  const base = resolveTvDisplayApiBase({
+    browserOrigin: typeof window === "undefined" ? null : window.location.origin,
+    configuredApiUrl: getPublicEnvVar("NEXT_PUBLIC_STACK_API_URL"),
+    configuredBrowserApiUrl: getPublicEnvVar("NEXT_PUBLIC_BROWSER_STACK_API_URL"),
+    nodeEnvironment: process.env.NODE_ENV,
+    quickTunnelEnabled: getPublicEnvVar("NEXT_PUBLIC_HEXCLAVE_TV_QUICK_TUNNEL_ENABLED") === "true",
+  });
   return new URL(`/api/latest${path}`, base).toString();
 }
 

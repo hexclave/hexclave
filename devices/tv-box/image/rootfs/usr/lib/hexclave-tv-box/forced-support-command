@@ -1,0 +1,4 @@
+#!/usr/bin/python3 -B
+from hexclave_tv_box.support import forced_command_main
+
+forced_command_main()

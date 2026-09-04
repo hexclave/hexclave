@@ -1,0 +1,101 @@
+image <IMAGE_NAME>.<IMAGE_SUFFIX>.sparse {
+  android-sparse {
+    image = <IMAGE_NAME>.<IMAGE_SUFFIX>
+  }
+}
+
+image boot.vfat.sparse {
+  android-sparse {
+    image = boot.vfat
+  }
+}
+
+image root.ext4.sparse {
+  android-sparse {
+    image = root.ext4
+  }
+}
+
+image state.ext4.sparse {
+  android-sparse {
+    image = state.ext4
+  }
+}
+
+image tvbox.swap.sparse {
+  android-sparse {
+    image = tvbox.swap
+  }
+}
+
+image <IMAGE_NAME>.<IMAGE_SUFFIX> {
+  hdimage {
+    align = 8M
+    partition-table-type = "mbr"
+    fill = true
+  }
+
+  partition boot {
+    in-partition-table = true
+    partition-type = 0xC
+    image = boot.vfat
+    bootable = true
+  }
+
+  partition root {
+    in-partition-table = true
+    partition-type = 0x83
+    image = root.ext4
+  }
+
+  partition tvbox-state {
+    in-partition-table = true
+    partition-type = 0x83
+    image = state.ext4
+  }
+
+  partition tvbox-swap {
+    in-partition-table = true
+    partition-type = 0x82
+    image = tvbox.swap
+  }
+}
+
+image boot.vfat {
+  vfat {
+    label = "BOOT"
+    extraargs = "<VFAT_ARGS>"
+  }
+  size = <BOOT_SIZE>
+  mountpoint = "/boot/firmware"
+  exec-pre = "<SETUP> BOOT"
+}
+
+image root.ext4 {
+  ext4 {
+    label = "ROOT"
+    use-mke2fs = true
+    mke2fs-conf = <MKE2FS_CONF>
+    extraargs = "<ROOT_ARGS>"
+  }
+  size = <ROOT_SIZE>
+  mountpoint = "/"
+  exec-pre = "<SETUP> ROOT"
+}
+
+image state.ext4 {
+  ext4 {
+    label = "TVBOX_STATE"
+    use-mke2fs = true
+    mke2fs-conf = <MKE2FS_CONF>
+    extraargs = "<STATE_ARGS>"
+  }
+  size = <STATE_SIZE>
+  mountpoint = "/var/lib/hexclave-tv-box"
+}
+
+image tvbox.swap {
+  file {
+    name = "tvbox.swap"
+  }
+}

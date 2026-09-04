@@ -1,0 +1,20 @@
+table inet hexclave_tv_box {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state established,related accept
+    iifname "lo" accept
+    ip protocol icmp accept
+    ip6 nexthdr ipv6-icmp accept
+    iifname "wlan0" tcp dport 22 accept
+    iifname "wlan0" udp dport 67 accept
+    iifname "wlan0" udp sport 67 udp dport 68 accept
+    iifname "wlan0" ip saddr 10.42.0.0/24 udp dport 53 accept
+    iifname "wlan0" ip saddr 10.42.0.0/24 tcp dport { 53, 80 } accept
+  }
+
+  # The setup AP is a local provisioning surface, not a router. NetworkManager
+  # may install shared-mode NAT rules, so keep forwarding explicitly closed.
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+}

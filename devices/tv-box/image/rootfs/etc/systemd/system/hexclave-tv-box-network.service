@@ -1,0 +1,34 @@
+[Unit]
+Description=Hexclave TV Box network recovery agent
+Requires=NetworkManager.service hexclave-tv-box-firstboot.service
+After=NetworkManager.service hexclave-tv-box-firstboot.service
+Before=hexclave-tv-box-kiosk.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+StartLimitAction=reboot
+
+[Service]
+Type=simple
+Group=hexclave-tv-runtime
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m hexclave_tv_box.network_agent
+Restart=always
+RestartSec=3
+RuntimeDirectory=hexclave-tv-box
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/run/hexclave-tv-box /var/lib/hexclave-tv-box /etc/NetworkManager/system-connections
+
+[Install]
+WantedBy=multi-user.target
