@@ -281,17 +281,33 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
         --ring: 240 4.9% 83.9%;
       }
       :root, .dark { --page-background: transparent; }
-      html, body {
+      html {
+        width: 100%;
+        height: 100%;
+        overflow-x: hidden;
+      }
+      body {
         margin: 0;
         padding: 0;
         width: 100%;
-        height: 100%;
+        min-height: 100%;
         overflow-x: hidden;
         font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
         background: var(--page-background);
         color: hsl(var(--foreground));
+        /* Flex column so #root fills remaining height when content is short, and
+           the add-component button (last body child) sits naturally at the bottom
+           of the scrollable region when content is tall. Without flex, #root's
+           height:100% would push the button below the viewport unreachable. */
+        display: flex;
+        flex-direction: column;
       }
-      #root { width: 100%; height: 100%; overflow-x: hidden; }
+      #root {
+        width: 100%;
+        overflow-x: hidden;
+        flex: 1 0 auto;
+        min-height: 0;
+      }
       * { box-sizing: border-box; }
       .dark { color-scheme: dark; }
       html, body, #root { scrollbar-width: none; }
@@ -329,6 +345,39 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
       }
       .widget-overlay-btn:hover { transform: scale(1.08); }
       .widget-overlay.active .widget-overlay-btn { opacity: 1; }
+
+      /* "Add a component" affordance — sits at the bottom of the dashboard content,
+         inside the iframe so it scrolls naturally with the page (NOT sticky). Dashed
+         border matches the widget overlay so it reads as part of the same editor
+         language. Visible only in edit mode (chat open) — toggled via
+         window.__chatOpen. */
+      .add-component-btn {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        flex-shrink: 0;
+        width: calc(100% - 48px);
+        max-width: calc(80rem - 48px);
+        margin: 16px auto 12px;
+        padding: 14px 16px;
+        background: transparent;
+        border: 2px dashed hsl(var(--primary) / 0.35);
+        border-radius: 12px;
+        color: hsl(var(--muted-foreground));
+        font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+      }
+      .add-component-btn.visible { display: flex; }
+      .add-component-btn:hover {
+        border-color: hsl(var(--primary) / 0.6);
+        color: hsl(var(--primary));
+        background: hsl(var(--primary) / 0.04);
+      }
+      .add-component-btn .plus-icon { width: 16px; height: 16px; }
     </style>
   </head>
   <body>
@@ -380,6 +429,13 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
       // Controls visibility flag — only true in the full dashboard viewer (not cmd+K preview)
       window.__showControls = ${showControls};
       window.__chatOpen = ${initialChatOpen};
+      // Inline <script> tags earlier in <body> (widget overlay, add-component button) run
+      // synchronously as the parser hits them — BEFORE this text/babel block runs on
+      // DOMContentLoaded. Those scripts install listeners for 'chat-state-change' and
+      // call their syncVisibility() once at install time, where window.__chatOpen is
+      // still undefined. Re-dispatch the event now so they pick up the real flag and
+      // show/hide themselves correctly on first mount.
+      window.dispatchEvent(new Event('chat-state-change'));
 
       // Theme syncing and chat state from parent window
       window.addEventListener('message', (event) => {
@@ -498,7 +554,7 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
         render() {
           if (this.state.hasError) {
             return (
-              <div className="p-6 text-red-500">
+              <div className="p-6 text-red-500" data-stack-no-widget="true">
                 <h2 className="text-xl font-bold mb-2">Dashboard Error</h2>
                 <pre className="text-sm bg-red-950/20 p-4 rounded overflow-auto">
                   {this.state.error?.message || 'Unknown error'}
@@ -577,18 +633,19 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
         const Dashboard = new Function('React', 'ReactDOM', 'DashboardUI', 'Recharts', 'hexclaveServerApp', compiledSource + '\\nreturn Dashboard;')(
           React, ReactDOM, DashboardUI, Recharts, window.hexclaveServerApp,
         );
-        
+
+
         if (typeof Dashboard !== 'function') {
           throw new Error('Dashboard component not found in generated code');
         }
-        
+
         const root = ReactDOM.createRoot(rootElement);
         root.render(
           <ErrorBoundary>
             <Dashboard />
           </ErrorBoundary>
         );
-        
+
         parent.postMessage({ type: "stack-ai-dashboard-ready" }, "*");
       }).catch(error => {
         const message = error instanceof Error ? error.message : "Failed to initialize dashboard";
@@ -600,7 +657,7 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
         
         const root = ReactDOM.createRoot(rootElement);
         root.render(
-          <div className="p-6 text-red-500">
+          <div className="p-6 text-red-500" data-stack-no-widget="true">
             <h2 className="text-xl font-bold mb-2">Failed to load dashboard</h2>
             <pre className="text-sm bg-red-950/20 p-4 rounded">
               {message}
@@ -635,10 +692,19 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
       function findWidget(el) {
         var current = el;
         var root = document.getElementById('root');
+        // Error screens (ErrorBoundary fallback, init-failure UI) are marked with
+        // data-stack-no-widget so the user can't "chip" an error widget — that would
+        // just round-trip the rendered error text back to the AI, which is useless.
+        if (el && typeof el.closest === 'function' && el.closest('[data-stack-no-widget]')) {
+          return null;
+        }
         while (current && current !== root && current !== document.body) {
           if (current === overlay || overlay.contains(current)) {
             current = current.parentElement;
             continue;
+          }
+          if (current.hasAttribute && current.hasAttribute('data-stack-no-widget')) {
+            return null;
           }
           var rect = current.getBoundingClientRect();
           if (rect.width < 80 || rect.height < 50) { current = current.parentElement; continue; }
@@ -678,7 +744,10 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
         currentWidget = null;
       }
 
+      var lastCursor = null;
+
       document.addEventListener('mousemove', function (e) {
+        lastCursor = { x: e.clientX, y: e.clientY };
         if (!window.__chatOpen) return;
         if (overlay.contains(e.target)) return;
         var widget = findWidget(e.target);
@@ -686,8 +755,62 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
         else if (!widget) hideOverlay();
       });
 
+      /* Scroll doesn't fire mousemove, so without this the overlay stays pinned at
+         the old viewport coordinates while the widget underneath scrolls away. Use
+         elementFromPoint at the cursor's last known position to figure out what's
+         actually under the cursor now and re-target or hide accordingly. Captured
+         on scroll with passive:true so it doesn't slow scrolling. */
+      function reevaluateFromScroll() {
+        if (!window.__chatOpen) { hideOverlay(); return; }
+        if (!lastCursor) { hideOverlay(); return; }
+        var el = document.elementFromPoint(lastCursor.x, lastCursor.y);
+        if (!el || overlay.contains(el)) return;
+        var widget = findWidget(el);
+        if (widget) showOverlay(widget);
+        else hideOverlay();
+      }
+      window.addEventListener('scroll', reevaluateFromScroll, { passive: true, capture: true });
+
       document.addEventListener('mouseleave', function () { hideOverlay(); });
       window.addEventListener('chat-state-change', function () { if (!window.__chatOpen) hideOverlay(); });
+
+      /* Build a CSS-ish selector path from #root down to the widget, capped at 10
+         segments so it stays AI-digestible. Each segment is the tag plus the first
+         className token (if any), plus a nth-of-type suffix only when the parent has
+         sibling tags of the same name. The path lets the AI ground the patch on a
+         real chunk of structure rather than inferring from heading text alone. */
+      function buildSelectorPath(el) {
+        var rootEl = document.getElementById('root');
+        var segments = [];
+        var node = el;
+        while (node && node !== rootEl && node !== document.body && segments.length < 10) {
+          var tag = node.tagName.toLowerCase();
+          var classToken = '';
+          if (typeof node.className === 'string') {
+            var firstClass = node.className.trim().split(/\s+/)[0];
+            if (firstClass && !/^widget-overlay/.test(firstClass)) {
+              classToken = '.' + firstClass;
+            }
+          }
+          var nthSelector = '';
+          var parent = node.parentElement;
+          if (parent) {
+            var sameTagSiblings = [];
+            for (var i = 0; i < parent.children.length; i++) {
+              if (parent.children[i].tagName === node.tagName) {
+                sameTagSiblings.push(parent.children[i]);
+              }
+            }
+            if (sameTagSiblings.length > 1) {
+              var idx = sameTagSiblings.indexOf(node) + 1;
+              nthSelector = ':nth-of-type(' + idx + ')';
+            }
+          }
+          segments.unshift(tag + classToken + nthSelector);
+          node = node.parentElement;
+        }
+        return segments.join(' > ');
+      }
 
       /* ── Send DOM metadata to parent ── */
       btn.addEventListener('click', function (e) {
@@ -695,19 +818,46 @@ function getSandboxDocument(artifact: DashboardArtifact, baseUrl: string, dashbo
         e.preventDefault();
         if (!currentWidget) return;
 
-        var heading = currentWidget.querySelector('h1,h2,h3,h4,h5,h6');
+        var heading = currentWidget.querySelector('h1,h2,h3,h4,h5,h6')
+          || currentWidget.querySelector('span.font-semibold');
         var widgetRect = currentWidget.getBoundingClientRect();
+        var outerHTML = '';
+        try { outerHTML = (currentWidget.outerHTML || '').slice(0, 300); } catch (_) {}
         var metadata = {
           heading: heading ? heading.textContent.trim() : null,
           tagName: currentWidget.tagName.toLowerCase(),
           classes: (typeof currentWidget.className === 'string' ? currentWidget.className : '').slice(0, 300),
           textPreview: (currentWidget.textContent || '').trim().slice(0, 500),
           rect: { width: Math.round(widgetRect.width), height: Math.round(widgetRect.height) },
+          selectorPath: buildSelectorPath(currentWidget),
+          outerHTMLSnippet: outerHTML,
         };
 
         window.parent.postMessage({ type: 'dashboard-widget-selected', metadata: metadata }, '*');
         hideOverlay();
       });
+    })();
+    </script>
+
+    <!-- "Add a component" button — appended as a sibling of #root so it sits at the
+         bottom of the dashboard content and scrolls into view (NOT sticky/fixed).
+         Visibility tracks window.__chatOpen so it only appears in edit mode. -->
+    <script>
+    (function () {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'add-component-btn';
+      btn.innerHTML = '<svg class="plus-icon" viewBox="0 0 256 256" fill="currentColor"><path d="M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z"/></svg><span>Add a component</span>';
+      function syncVisibility() {
+        if (window.__chatOpen) btn.classList.add('visible');
+        else btn.classList.remove('visible');
+      }
+      btn.addEventListener('click', function () {
+        window.parent.postMessage({ type: 'dashboard-add-component-clicked' }, '*');
+      });
+      document.body.appendChild(btn);
+      syncVisibility();
+      window.addEventListener('chat-state-change', syncVisibility);
     })();
     </script>
   </body>
@@ -737,6 +887,12 @@ export type WidgetSelection = {
     classes: string,
     textPreview: string,
     rect: { width: number, height: number },
+    /** CSS-style selector chain from #root down to the clicked widget. Capped at 10
+        segments. Lets the AI ground a patch on a real chunk of structure. */
+    selectorPath: string,
+    /** First ~300 chars of the widget's outerHTML — verbatim rendered markup the AI
+        can match against when locating the JSX node in source. */
+    outerHTMLSnippet: string,
   },
 };
 
@@ -748,6 +904,7 @@ export const DashboardSandboxHost = memo(function DashboardSandboxHost({
   onReady,
   onRuntimeError,
   onWidgetSelected,
+  onAddComponentClicked,
   isChatOpen,
 }: {
   artifact: DashboardArtifact,
@@ -760,6 +917,9 @@ export const DashboardSandboxHost = memo(function DashboardSandboxHost({
   onRuntimeError?: (err: DashboardRuntimeError) => void,
   /** Fires when the user clicks "Add to chat" on a widget overlay in the iframe. */
   onWidgetSelected?: (selection: WidgetSelection) => void,
+  /** Fires when the user clicks the in-iframe "Add a component" button at the bottom
+      of the dashboard. Parent pushes an action chip into the composer chip bar. */
+  onAddComponentClicked?: () => void,
   isChatOpen?: boolean,
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -775,6 +935,8 @@ export const DashboardSandboxHost = memo(function DashboardSandboxHost({
   onRuntimeErrorRef.current = onRuntimeError;
   const onWidgetSelectedRef = useRef(onWidgetSelected);
   onWidgetSelectedRef.current = onWidgetSelected;
+  const onAddComponentClickedRef = useRef(onAddComponentClicked);
+  onAddComponentClickedRef.current = onAddComponentClicked;
   const user = useDashboardUser();
   const { resolvedTheme } = useTheme();
 
@@ -907,8 +1069,15 @@ export const DashboardSandboxHost = memo(function DashboardSandboxHost({
               width: typeof event.data.metadata?.rect?.width === "number" ? event.data.metadata.rect.width : 0,
               height: typeof event.data.metadata?.rect?.height === "number" ? event.data.metadata.rect.height : 0,
             },
+            selectorPath: typeof event.data.metadata?.selectorPath === "string" ? event.data.metadata.selectorPath : "",
+            outerHTMLSnippet: typeof event.data.metadata?.outerHTMLSnippet === "string" ? event.data.metadata.outerHTMLSnippet : "",
           },
         });
+        return;
+      }
+
+      if (type === "dashboard-add-component-clicked") {
+        onAddComponentClickedRef.current?.();
         return;
       }
 
