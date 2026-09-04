@@ -1,4 +1,5 @@
 import { BooleanTrue, Prisma } from "@/generated/prisma/client";
+import { buildCreatedFieldsAuditMetadata, buildUpdatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit, type AuditActorSource } from "@/lib/audit-log";
 import { getRenderedOrganizationConfigQuery, getRenderedProjectConfigQuery } from "@/lib/config";
 import { demoteAllContactChannelsToNonPrimary, setContactChannelAsPrimaryByValue } from "@/lib/contact-channel";
 import { normalizeEmail } from "@/lib/emails";
@@ -29,6 +30,109 @@ import { has } from "@hexclave/shared/dist/utils/objects";
 import { createLazyProxy } from "@hexclave/shared/dist/utils/proxies";
 import { isUuid } from "@hexclave/shared/dist/utils/uuids";
 import { teamPrismaToCrud, teamsCrudHandlers } from "../teams/crud";
+
+// Secrets / opaque credentials — never put these in audit metadata (paths or values).
+const USER_UPDATE_AUDIT_EXCLUDED_FIELDS = new Set([
+  "password",
+  "password_hash",
+  "totp_secret_base64",
+]);
+
+async function recordUserDirectoryAuditsFromUpdate(options: {
+  auth: AuditActorSource & { tenancy: Tenancy },
+  targetUserId: string,
+  data: UsersCrud["Admin"]["Update"],
+  beforeUser: UsersCrud["Admin"]["Read"],
+  afterUser: UsersCrud["Admin"]["Read"],
+}): Promise<void> {
+  if (!shouldRecordAdminAudit(options.auth)) {
+    return;
+  }
+
+  const { auth, targetUserId, data } = options;
+  const coveredBySpecializedAction = new Set<string>();
+
+  if (data.restricted_by_admin === true) {
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "user.restricted",
+      targetUserId,
+      reason: typeof data.restricted_by_admin_reason === "string" ? data.restricted_by_admin_reason : null,
+      metadata: { source: "users.update" },
+    });
+    coveredBySpecializedAction.add("restricted_by_admin");
+    coveredBySpecializedAction.add("restricted_by_admin_reason");
+    coveredBySpecializedAction.add("restricted_by_admin_private_details");
+  } else if (data.restricted_by_admin === false) {
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "user.unrestricted",
+      targetUserId,
+      metadata: { source: "users.update" },
+    });
+    coveredBySpecializedAction.add("restricted_by_admin");
+    coveredBySpecializedAction.add("restricted_by_admin_reason");
+    coveredBySpecializedAction.add("restricted_by_admin_private_details");
+  }
+
+  if (data.password !== undefined || data.password_hash !== undefined) {
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "user.password.set",
+      targetUserId,
+      metadata: { source: "users.update" },
+    });
+    coveredBySpecializedAction.add("password");
+    coveredBySpecializedAction.add("password_hash");
+  }
+
+  if (data.totp_secret_base64 === null) {
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "user.mfa.removed",
+      targetUserId,
+      metadata: { source: "users.update" },
+    });
+    coveredBySpecializedAction.add("totp_secret_base64");
+  } else if (data.totp_secret_base64 !== undefined) {
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "user.mfa.enabled",
+      targetUserId,
+      metadata: { source: "users.update" },
+    });
+    coveredBySpecializedAction.add("totp_secret_base64");
+  }
+
+  // Secrets stay out of the patch entirely; non-sensitive leaves get before/after
+  // from the pre/post CRUD snapshots so the Compliance details column can render them.
+  const patchForAudit: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (USER_UPDATE_AUDIT_EXCLUDED_FIELDS.has(key)) continue;
+    if (coveredBySpecializedAction.has(key)) continue;
+    patchForAudit[key] = value;
+  }
+  const metadata = buildUpdatedFieldsAuditMetadata({
+    source: "users.update",
+    patch: patchForAudit,
+    beforeRoot: options.beforeUser,
+    afterRoot: options.afterUser,
+  });
+  if (metadata != null) {
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "user.updated",
+      targetUserId,
+      metadata,
+    });
+  }
+}
 
 export const userFullInclude = {
   projectUserOAuthAccounts: true,
@@ -900,16 +1004,50 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
       data: result,
     }));
 
+    if (shouldRecordAdminAudit(auth)) {
+      // Persist the submitted create fields (not the full user read model) so the
+      // Compliance details column can show a red/green diff. Password stays
+      // path-only via sensitive-leaf filtering.
+      const metadata = buildCreatedFieldsAuditMetadata({
+        source: "users.create",
+        fields: data,
+      }) ?? {
+          source: "users.create",
+          is_anonymous: result.is_anonymous,
+        };
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "user.created",
+        targetUserId: result.id,
+        metadata,
+      });
+    }
+
     return result;
   },
   onUpdate: async ({ auth, data, params }) => {
     const primaryEmail = data.primary_email ? normalizeEmail(data.primary_email) : data.primary_email;
     const passwordHash = await getPasswordHashFromData(data);
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
-    const { user, wasAnonymousUpgrade } = await retryTransaction(prisma, async (tx) => {
+    const { user, beforeUser, wasAnonymousUpgrade } = await retryTransaction(prisma, async (tx) => {
       await ensureUserExists(tx, { tenancyId: auth.tenancy.id, userId: params.user_id });
 
       const config = auth.tenancy.config;
+
+      const oldUser = await tx.projectUser.findUnique({
+        where: {
+          tenancyId_projectUserId: {
+            tenancyId: auth.tenancy.id,
+            projectUserId: params.user_id,
+          },
+        },
+        include: userFullInclude,
+      });
+
+      if (!oldUser) {
+        throw new HexclaveAssertionError("User not found");
+      }
 
       if (data.selected_team_id !== undefined) {
         if (data.selected_team_id !== null) {
@@ -961,20 +1099,6 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
             });
           }
         }
-      }
-
-      const oldUser = await tx.projectUser.findUnique({
-        where: {
-          tenancyId_projectUserId: {
-            tenancyId: auth.tenancy.id,
-            projectUserId: params.user_id,
-          },
-        },
-        include: userFullInclude,
-      });
-
-      if (!oldUser) {
-        throw new HexclaveAssertionError("User not found");
       }
 
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
@@ -1297,10 +1421,14 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
         include: userFullInclude,
       });
 
+      // Snapshot the pre-update row before converting the post-update result —
+      // audit diffs need both sides (path-only was showing as "Hidden" in the UI).
+      const beforeUser = userPrismaToCrud(oldUser, auth.tenancy.config);
       const user = userPrismaToCrud(db, auth.tenancy.config);
       await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "user.updated", payload: user });
       return {
         user,
+        beforeUser,
         wasAnonymousUpgrade,
       };
     });
@@ -1329,6 +1457,14 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
       projectId: auth.project.id,
       data: user,
     }));
+
+    await recordUserDirectoryAuditsFromUpdate({
+      auth,
+      targetUserId: params.user_id,
+      data,
+      beforeUser,
+      afterUser: user,
+    });
 
     return user;
   },
@@ -1434,6 +1570,16 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
         })),
       },
     }));
+
+    if (shouldRecordAdminAudit(auth)) {
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "user.deleted",
+        targetUserId: params.user_id,
+        metadata: { source: "users.delete" },
+      });
+    }
   }
 }));
 

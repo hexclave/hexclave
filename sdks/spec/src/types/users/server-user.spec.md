@@ -243,10 +243,11 @@ Does not error.
 
 options.expiresInMillis: number? - session expiration
 options.isImpersonation: bool? - mark as impersonation session
+options.reason: string? - optional support-session note; stored on Audit Log events when that app is enabled
 
 Returns: { getTokens(): Promise<{ accessToken, refreshToken }> }
 
-POST /api/v1/users/{userId}/sessions { expires_in_millis, is_impersonation } [server-only]
+POST /api/v1/auth/sessions { user_id, expires_in_millis, is_impersonation, reason? } [server-only]
 
 Creates a new session for this user. Can be used to impersonate them.
 

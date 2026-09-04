@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent, shouldRecordDashboardAudit } from "@/lib/audit-log";
 import { grantProjectPermission, listPermissions, revokeProjectPermission } from "@/lib/permissions";
 import { ensureProjectPermissionExists, ensureUserExists } from "@/lib/request-checks";
 import { sendProjectPermissionCreatedWebhook, sendProjectPermissionDeletedWebhook } from "@/lib/webhooks";
@@ -37,6 +38,28 @@ export const projectPermissionsCrudHandlers = createLazyProxy(() => createCrudHa
       return granted;
     });
 
+    // Dashboard-only: bare admin/server API keys must not write Compliance events.
+    if (shouldRecordDashboardAudit(auth)) {
+      const metadata = buildCreatedFieldsAuditMetadata({
+        source: "project_permissions.create",
+        fields: {
+          user_id: params.user_id,
+          permission_id: params.permission_id,
+        },
+      }) ?? {
+          source: "project_permissions.create",
+          user_id: params.user_id,
+          permission_id: params.permission_id,
+        };
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "project_permission.granted",
+        targetUserId: params.user_id,
+        metadata,
+      });
+    }
+
     runAsynchronouslyAndWaitUntil(sendProjectPermissionCreatedWebhook({
       projectId: auth.project.id,
       data: {
@@ -66,6 +89,20 @@ export const projectPermissionsCrudHandlers = createLazyProxy(() => createCrudHa
       await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "project_permission.deleted", payload: { id: params.permission_id, user_id: params.user_id } });
       return revoked;
     });
+
+    if (shouldRecordDashboardAudit(auth)) {
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "project_permission.revoked",
+        targetUserId: params.user_id,
+        metadata: {
+          source: "project_permissions.delete",
+          user_id: params.user_id,
+          permission_id: params.permission_id,
+        },
+      });
+    }
 
     runAsynchronouslyAndWaitUntil(sendProjectPermissionDeletedWebhook({
       projectId: auth.project.id,

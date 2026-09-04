@@ -231,8 +231,17 @@ function getFieldSchema(field: yup.SchemaFieldDescription, crudOperation?: Capit
   switch (field.type) {
     case 'string': {
       const oneOf = (field as any).oneOf as unknown[] | undefined;
-      // `enum` is an additional constraint, so it must permit null whenever the type does.
-      const enumValues = oneOf && isFieldNullable(field) && !oneOf.includes(null) ? [...oneOf, null] : oneOf;
+      // yup.describe() often yields `oneOf: []` for unconstrained strings.
+      // Treating that as an enum and appending null produces `"enum": [null]`,
+      // which rejects every actual string (including optional `reason` notes).
+      const constrainedOneOf = Array.isArray(oneOf)
+        ? oneOf.filter((value) => value !== undefined)
+        : [];
+      const enumValues = constrainedOneOf.length === 0
+        ? undefined
+        : (isFieldNullable(field) && !constrainedOneOf.includes(null)
+          ? [...constrainedOneOf, null]
+          : constrainedOneOf);
       return {
         type: getOpenApiType(field, 'string'),
         ...enumValues && enumValues.length > 0 ? { enum: enumValues } : {},

@@ -1,4 +1,5 @@
 import { getApiUrlForRequest } from "@/lib/request-api-url";
+import { recordAuditEvent } from "@/lib/audit-log";
 import { createBrowserAction, DEFAULT_BROWSER_ACTION_TTL_MS, DEFAULT_IMPERSONATION_SESSION_TTL_MS, MAX_BROWSER_ACTION_TTL_MS } from "@/lib/browser-actions";
 import { MAX_AUTH_SESSION_EXPIRATION_MS } from "@/lib/tokens";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -14,6 +15,7 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: serverOrHigherAuthTypeSchema,
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema,
     }).defined(),
     body: yupObject({
       type: yupString().oneOf(["impersonation", "clickmap-overlay"]).defined().meta({
@@ -46,6 +48,8 @@ export const POST = createSmartRouteHandler({
           exampleValue: "user_123",
         },
       }),
+      // Optional support-session note stored on the admin audit trail.
+      reason: yupString().max(500).nullable().optional(),
     }).defined(),
   }),
   response: yupObject({
@@ -72,7 +76,8 @@ export const POST = createSmartRouteHandler({
       }),
     }).defined(),
   }),
-  handler: async ({ auth: { tenancy }, body: { type, origin, expires_in_millis, session_expires_in_millis, user_id } }, fullReq) => {
+  handler: async ({ auth, body: { type, origin, expires_in_millis, session_expires_in_millis, user_id, reason } }, fullReq) => {
+    const { tenancy } = auth;
     if (type === "impersonation" && user_id == null) {
       throw new StatusError(StatusError.BadRequest, "Invalid browser action");
     }
@@ -87,6 +92,23 @@ export const POST = createSmartRouteHandler({
       apiUrl: getApiUrlForRequest(fullReq),
       ...actionParams,
     });
+
+    if (type === "impersonation") {
+      await recordAuditEvent({
+        tenancy,
+        auth,
+        action: "impersonation.started",
+        targetUserId: user_id ?? throwErr(new StatusError(StatusError.BadRequest, "Invalid browser action")),
+        reason,
+        metadata: {
+          refresh_token_id: action.refreshTokenId ?? null,
+          expires_at_millis: Date.now() + session_expires_in_millis,
+          origin,
+          source: "browser-actions",
+        },
+      });
+    }
+
     return {
       statusCode: 200,
       bodyType: "json",

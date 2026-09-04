@@ -1,3 +1,4 @@
+import { buildUpdatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { ensureCustomerExists } from "@/lib/payments";
 import { bulldozerWriteItemQuantityChange } from "@/lib/payments/bulldozer-dual-write";
 import { getItemQuantityForCustomer } from "@/lib/payments/customer-data";
@@ -20,6 +21,7 @@ export const POST = createSmartRouteHandler({
       type: serverOrHigherAuthTypeSchema.defined(),
       project: adaptSchema.defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     params: yupObject({
       customer_type: yupString().oneOf(["user", "team", "custom"]).defined().meta({
@@ -127,6 +129,36 @@ export const POST = createSmartRouteHandler({
       return change;
     });
     await bulldozerWriteItemQuantityChange(change);
+
+    // Dashboard-only via recordAuditEvent (adminUser).
+    // Quantity before/after is racy (concurrent grants, already-expired rows);
+    // persist the requested delta instead of a synthetic balance.
+    if (shouldRecordAdminAudit(req.auth)) {
+      const metadata = buildUpdatedFieldsAuditMetadata({
+        source: "payments.items.update_quantity",
+        patch: { delta: req.body.delta },
+        beforeRoot: {},
+        afterRoot: { delta: req.body.delta },
+      }) ?? {
+          source: "payments.items.update_quantity",
+        };
+      await recordAuditEvent({
+        tenancy,
+        auth: req.auth,
+        action: "payment.item_quantity.changed",
+        targetUserId: req.params.customer_type === "user" ? req.params.customer_id : null,
+        metadata: {
+          ...metadata,
+          customer_type: req.params.customer_type,
+          customer_id: req.params.customer_id,
+          item_id: req.params.item_id,
+          delta: req.body.delta,
+          allow_negative: allowNegative,
+          ...(req.body.expires_at != null ? { expires_at: req.body.expires_at } : {}),
+          ...(req.body.description != null ? { description: req.body.description } : {}),
+        },
+      });
+    }
 
     return {
       statusCode: 200,

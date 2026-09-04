@@ -573,7 +573,12 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
     return await response.json();
   }
 
-  async createServerUserSession(userId: string, expiresInMillis: number, isImpersonation: boolean): Promise<{ accessToken: string, refreshToken: string }> {
+  async createServerUserSession(
+    userId: string,
+    expiresInMillis: number,
+    isImpersonation: boolean,
+    reason?: string | null,
+  ): Promise<{ accessToken: string, refreshToken: string }> {
     const response = await this.sendServerRequest(
       "/auth/sessions",
       {
@@ -585,6 +590,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
           user_id: userId,
           expires_in_millis: expiresInMillis,
           is_impersonation: isImpersonation,
+          ...(reason != null && reason.trim() !== "" ? { reason: reason.trim() } : {}),
         }),
       },
       null,

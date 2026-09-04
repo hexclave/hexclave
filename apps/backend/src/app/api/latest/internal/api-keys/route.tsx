@@ -1,9 +1,8 @@
-import { globalPrismaClient } from "@/prisma-client";
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
+import { createApiKeySet } from "@/lib/internal-api-keys";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { internalApiKeysCreateInputSchema, internalApiKeysCreateOutputSchema } from "@hexclave/shared/dist/interface/crud/internal-api-keys";
 import { adaptSchema, adminAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
-import { generateSecureRandomString } from "@hexclave/shared/dist/utils/crypto";
-import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { internalApiKeyCrudHandlers } from "./crud";
 
 export const GET = internalApiKeyCrudHandlers.listHandler;
@@ -16,6 +15,8 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: adminAuthTypeSchema,
       project: adaptSchema.defined(),
+      tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: internalApiKeysCreateInputSchema.defined(),
     method: yupString().oneOf(["POST"]).defined(),
@@ -26,16 +27,32 @@ export const POST = createSmartRouteHandler({
     body: internalApiKeysCreateOutputSchema.defined(),
   }),
   handler: async ({ auth, body }) => {
-    const set = await globalPrismaClient.apiKeySet.create({
-      data: {
-        id: generateUuid(),
-        projectId: auth.project.id,
-        description: body.description,
-        expiresAt: new Date(body.expires_at_millis),
-        publishableClientKey: body.has_publishable_client_key ? `pck_${generateSecureRandomString()}` : undefined,
-        secretServerKey: body.has_secret_server_key ? `ssk_${generateSecureRandomString()}` : undefined,
-        superSecretAdminKey: body.has_super_secret_admin_key ? `sak_${generateSecureRandomString()}` : undefined,
+    const set = await createApiKeySet({
+      projectId: auth.project.id,
+      ...body,
+    });
+
+    // Full key material is returned to the caller once; audit only records
+    // which key kinds were minted plus non-secret description/expiry.
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "api_keys.create",
+      fields: {
+        api_key_id: set.id,
+        description: set.description,
+        expires_at_millis: set.expires_at_millis,
+        has_publishable_client_key: set.has_publishable_client_key,
+        has_secret_server_key: set.has_secret_server_key,
+        has_super_secret_admin_key: set.has_super_secret_admin_key,
       },
+    }) ?? {
+        source: "api_keys.create",
+        api_key_id: set.id,
+      };
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "project_api_key.created",
+      metadata,
     });
 
     return {
@@ -44,13 +61,13 @@ export const POST = createSmartRouteHandler({
       body: {
         id: set.id,
         description: set.description,
-        publishable_client_key: set.publishableClientKey || undefined,
-        secret_server_key: set.secretServerKey || undefined,
-        super_secret_admin_key: set.superSecretAdminKey || undefined,
-        created_at_millis: set.createdAt.getTime(),
-        expires_at_millis: set.expiresAt.getTime(),
-        manually_revoked_at_millis: set.manuallyRevokedAt?.getTime(),
-      }
+        publishable_client_key: set.publishable_client_key,
+        secret_server_key: set.secret_server_key,
+        super_secret_admin_key: set.super_secret_admin_key,
+        created_at_millis: set.created_at_millis,
+        expires_at_millis: set.expires_at_millis,
+        manually_revoked_at_millis: set.manually_revoked_at_millis,
+      },
     } as const;
   },
 });

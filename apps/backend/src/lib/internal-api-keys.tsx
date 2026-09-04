@@ -176,5 +176,9 @@ export const createApiKeySet = async (data: {
     created_at_millis: set.createdAt.getTime(),
     expires_at_millis: set.expiresAt.getTime(),
     manually_revoked_at_millis: set.manuallyRevokedAt?.getTime(),
+    // Flags for audit metadata — never persist the raw key material itself.
+    has_publishable_client_key: set.publishableClientKey != null,
+    has_secret_server_key: set.secretServerKey != null,
+    has_super_secret_admin_key: set.superSecretAdminKey != null,
   };
 };

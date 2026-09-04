@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { grantTeamPermission, listPermissions, revokeTeamPermission } from "@/lib/permissions";
 import { ensureTeamMembershipExists, ensureUserTeamPermissionExists } from "@/lib/request-checks";
 import { sendTeamPermissionCreatedWebhook, sendTeamPermissionDeletedWebhook } from "@/lib/webhooks";
@@ -28,6 +29,18 @@ export const teamPermissionsCrudHandlers = createLazyProxy(() => createCrudHandl
     const result = await retryTransaction(prisma, async (tx) => {
       await ensureTeamMembershipExists(tx, { tenancyId: auth.tenancy.id, teamId: params.team_id, userId: params.user_id });
 
+      const existingGrant = await tx.teamMemberDirectPermission.findUnique({
+        where: {
+          tenancyId_projectUserId_teamId_permissionId: {
+            tenancyId: auth.tenancy.id,
+            projectUserId: params.user_id,
+            teamId: params.team_id,
+            permissionId: params.permission_id,
+          },
+        },
+        select: { id: true },
+      });
+
       const granted = await grantTeamPermission(tx, {
         tenancy: auth.tenancy,
         teamId: params.team_id,
@@ -37,8 +50,31 @@ export const teamPermissionsCrudHandlers = createLazyProxy(() => createCrudHandl
       // Workflow platform events ride the entity transaction (transactional
       // outbox); the Svix webhook below stays fire-and-forget post-commit.
       await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "team_permission.created", payload: { id: params.permission_id, team_id: params.team_id, user_id: params.user_id } });
-      return granted;
+      return { granted, created: existingGrant == null };
     });
+
+    if (shouldRecordAdminAudit(auth) && result.created) {
+      const metadata = buildCreatedFieldsAuditMetadata({
+        source: "team_permissions.create",
+        fields: {
+          team_id: params.team_id,
+          user_id: params.user_id,
+          permission_id: params.permission_id,
+        },
+      }) ?? {
+          source: "team_permissions.create",
+          team_id: params.team_id,
+          user_id: params.user_id,
+          permission_id: params.permission_id,
+        };
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "team_permission.granted",
+        targetUserId: params.user_id,
+        metadata,
+      });
+    }
 
     runAsynchronouslyAndWaitUntil(sendTeamPermissionCreatedWebhook({
       projectId: auth.project.id,
@@ -49,7 +85,7 @@ export const teamPermissionsCrudHandlers = createLazyProxy(() => createCrudHandl
       }
     }));
 
-    return result;
+    return result.granted;
   },
   async onDelete({ auth, params }) {
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
@@ -72,6 +108,21 @@ export const teamPermissionsCrudHandlers = createLazyProxy(() => createCrudHandl
       await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "team_permission.deleted", payload: { id: params.permission_id, team_id: params.team_id, user_id: params.user_id } });
       return revoked;
     });
+
+    if (shouldRecordAdminAudit(auth)) {
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "team_permission.revoked",
+        targetUserId: params.user_id,
+        metadata: {
+          source: "team_permissions.delete",
+          team_id: params.team_id,
+          user_id: params.user_id,
+          permission_id: params.permission_id,
+        },
+      });
+    }
 
     runAsynchronouslyAndWaitUntil(sendTeamPermissionDeletedWebhook({
       projectId: auth.project.id,

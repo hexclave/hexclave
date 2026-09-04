@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { recordExternalDbSyncDeletion, recordExternalDbSyncTeamPermissionDeletionsForTeamMember, withExternalDbSyncUpdate } from "@/lib/external-db-sync";
 import { grantDefaultTeamPermissions } from "@/lib/permissions";
 import { ensureTeamExists, ensureTeamMembershipDoesNotExist, ensureTeamMembershipExists, ensureUserExists, ensureUserTeamPermissionExists } from "@/lib/request-checks";
@@ -101,6 +102,32 @@ export const teamMembershipsCrudHandlers = createLazyProxy(() => createCrudHandl
       user_id: params.user_id,
     };
 
+    // Membership create is server/admin-only at the CRUD schema layer; still gate
+    // so programmatic helpers never write admin audit noise.
+    if (shouldRecordAdminAudit(auth)) {
+      const metadata = buildCreatedFieldsAuditMetadata({
+        source: "team_memberships.create",
+        fields: {
+          team_id: params.team_id,
+          user_id: params.user_id,
+          ...(result.directPermissionIds.length > 0
+            ? { granted_permission_ids: result.directPermissionIds }
+            : {}),
+        },
+      }) ?? {
+          source: "team_memberships.create",
+          team_id: params.team_id,
+          user_id: params.user_id,
+        };
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "team_membership.created",
+        targetUserId: params.user_id,
+        metadata,
+      });
+    }
+
     runAsynchronouslyAndWaitUntil((async () => {
       await sendTeamMembershipCreatedWebhook({
         projectId: auth.project.id,
@@ -174,6 +201,21 @@ export const teamMembershipsCrudHandlers = createLazyProxy(() => createCrudHandl
 
       await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "team_membership.deleted", payload: { team_id: params.team_id, user_id: params.user_id } });
     });
+
+    // Skip client self-remove / client $remove_members — Compliance covers dashboard/admin.
+    if (shouldRecordAdminAudit(auth)) {
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "team_membership.deleted",
+        targetUserId: params.user_id,
+        metadata: {
+          source: "team_memberships.delete",
+          team_id: params.team_id,
+          user_id: params.user_id,
+        },
+      });
+    }
 
     runAsynchronouslyAndWaitUntil(sendTeamMembershipDeletedWebhook({
       projectId: auth.project.id,

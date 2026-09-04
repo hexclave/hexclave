@@ -470,7 +470,7 @@ export const ALL_APPS_FRONTEND = {
     storeDescription: (
       <>
         <p>Compliance Center surfaces authentication, access-denial, and restricted-user activity.</p>
-        <p>Review security posture and access assignments, then export the Compliance Center data for further analysis.</p>
+        <p>Review the admin audit trail for impersonation and project settings changes, then export Compliance Center data for further analysis.</p>
       </>
     ),
   },

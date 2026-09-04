@@ -1,4 +1,5 @@
 import { CustomerType } from "@/generated/prisma/client";
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { customerOwnsProduct, ensureClientCanAccessCustomer, ensureProductIdOrInlineProduct } from "@/lib/payments";
 import { getOwnedProductsForCustomer } from "@/lib/payments/customer-data";
 import { validateRedirectUrl } from "@/lib/redirect-urls";
@@ -23,6 +24,7 @@ export const POST = createSmartRouteHandler({
       type: clientOrHigherAuthTypeSchema.defined(),
       project: adaptSchema.defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       customer_type: yupString().oneOf(["user", "team", "custom"]).defined().meta({
@@ -156,6 +158,30 @@ export const POST = createSmartRouteHandler({
         throw new KnownErrors.RedirectUrlNotWhitelisted(req.body.return_url);
       }
       url.searchParams.set("return_url", req.body.return_url);
+    }
+
+    // Dashboard-only via recordAuditEvent (adminUser). Never persist URL/code.
+    if (shouldRecordAdminAudit(req.auth)) {
+      const metadata = buildCreatedFieldsAuditMetadata({
+        source: "payments.create_purchase_url",
+        fields: {
+          customer_type: req.body.customer_type,
+          customer_id: req.body.customer_id,
+          ...(req.body.product_id != null ? { product_id: req.body.product_id } : {}),
+          has_product_inline: req.body.product_inline != null,
+        },
+      }) ?? {
+          source: "payments.create_purchase_url",
+          customer_type: req.body.customer_type,
+          customer_id: req.body.customer_id,
+        };
+      await recordAuditEvent({
+        tenancy,
+        auth: req.auth,
+        action: "payment.checkout.created",
+        targetUserId: req.body.customer_type === "user" ? req.body.customer_id : null,
+        metadata,
+      });
     }
 
     return {

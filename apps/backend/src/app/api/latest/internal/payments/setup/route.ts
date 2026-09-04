@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { getHexclaveStripe } from "@/lib/stripe";
 import { globalPrismaClient } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -13,6 +14,7 @@ export const POST = createSmartRouteHandler({
       type: adminAuthTypeSchema.defined(),
       project: adaptSchema.defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
   }),
   response: yupObject({
@@ -32,6 +34,7 @@ export const POST = createSmartRouteHandler({
     });
 
     let stripeAccountId = project?.stripeAccountId || null;
+    const stripeAccountCreated = stripeAccountId == null;
     const returnToUrl = project?.onboardingStatus === "payments_setup"
       ? (() => {
         const onboardingUrl = new URL("/new-project", dashboardBaseUrl);
@@ -67,6 +70,23 @@ export const POST = createSmartRouteHandler({
       refresh_url: returnToUrl,
       return_url: returnToUrl,
       type: "account_onboarding",
+    });
+
+    // Dashboard-only via recordAuditEvent. Never persist the Account Link URL.
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "payments.setup",
+      fields: {
+        stripe_account_created: stripeAccountCreated,
+      },
+    }) ?? {
+        source: "payments.setup",
+        stripe_account_created: stripeAccountCreated,
+      };
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "payment.stripe.setup_started",
+      metadata,
     });
 
     return {

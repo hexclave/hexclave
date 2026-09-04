@@ -209,7 +209,10 @@ export async function niceBackendFetch(url: string | URL, options?: Omit<NiceReq
         "x-stack-publishable-client-key": omitPublishableClientKey ? undefined : projectKeys.publishableClientKey,
         "x-stack-secret-server-key": projectKeys.secretServerKey,
         "x-stack-super-secret-admin-key": projectKeys.superSecretAdminKey,
-        'x-stack-admin-access-token': projectKeys.adminAccessToken,
+        // Only attach the dashboard actor on admin requests. Sending it on
+        // server/client would short-circuit API-key auth in smart-request and
+        // incorrectly attribute Compliance audits to every access type.
+        "x-stack-admin-access-token": accessType === "admin" ? projectKeys.adminAccessToken : undefined,
       } : {},
       "x-stack-branch-id": backendContext.value.currentBranchId ?? undefined,
       "x-stack-access-token": userAuth?.accessToken,
@@ -1531,8 +1534,14 @@ export namespace Project {
       userAuth: null
     });
     const { projectKeys } = await InternalApiKey.create(createResult.adminAccessToken);
+    // Keep the dashboard admin token on project keys so accessType:"admin"
+    // requests authenticate as the creating dashboard user (Compliance audits
+    // require adminUser). InternalApiKey.create's returned keys omit it.
     backendContext.set({
-      projectKeys,
+      projectKeys: {
+        ...projectKeys,
+        adminAccessToken: createResult.adminAccessToken,
+      },
       userAuth: null
     });
     return createResult;

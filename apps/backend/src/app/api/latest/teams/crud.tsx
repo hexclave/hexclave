@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, buildUpdatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { recordExternalDbSyncDeletion, recordExternalDbSyncTeamInvitationDeletionsForTeam, recordExternalDbSyncTeamMemberDeletionsForTeam, recordExternalDbSyncTeamPermissionDeletionsForTeam, withExternalDbSyncUpdate } from "@/lib/external-db-sync";
 import { bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { createFreePlanSubscriptionRow } from "@/lib/payments/ensure-free-plan";
@@ -149,6 +150,34 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
 
     const result = teamPrismaToCrud(db);
 
+    // Dashboard/admin + server-key only — client self-service team creation is not audited.
+    // Personal teams created via programmatic adminCreate are skipped by shouldRecordAdminAudit.
+    if (shouldRecordAdminAudit(auth)) {
+      // Prefer the persisted CRUD snapshot over the request body so we never store
+      // raw base64 profile images from create payloads (result has the uploaded URL).
+      const metadata = buildCreatedFieldsAuditMetadata({
+        source: "teams.create",
+        fields: {
+          team_id: result.id,
+          display_name: result.display_name,
+          profile_image_url: result.profile_image_url,
+          client_metadata: result.client_metadata,
+          client_read_only_metadata: result.client_read_only_metadata,
+          server_metadata: result.server_metadata,
+          ...(addUserId != null ? { creator_user_id: addUserId } : {}),
+        },
+      }) ?? {
+          source: "teams.create",
+          team_id: result.id,
+        };
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "team.created",
+        metadata,
+      });
+    }
+
     runAsynchronouslyAndWaitUntil(sendTeamCreatedWebhook({
       projectId: auth.project.id,
       data: result,
@@ -184,7 +213,7 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
   },
   onUpdate: async ({ params, auth, data }) => {
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
-    const db = await retryTransaction(prisma, async (tx) => {
+    const { beforeTeam, afterTeam } = await retryTransaction(prisma, async (tx) => {
       if (auth.type === 'client' && data.profile_image_url && !validateBase64Image(data.profile_image_url)) {
         throw new StatusError(400, "Invalid profile image URL");
       }
@@ -202,6 +231,18 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
 
       await ensureTeamExists(tx, { tenancyId: auth.tenancy.id, teamId: params.team_id });
 
+      const oldTeam = await tx.team.findUnique({
+        where: {
+          tenancyId_teamId: {
+            tenancyId: auth.tenancy.id,
+            teamId: params.team_id,
+          },
+        },
+      });
+      if (!oldTeam) {
+        throw new KnownErrors.TeamNotFound(params.team_id);
+      }
+
       const updated = await tx.team.update({
         where: {
           tenancyId_teamId: {
@@ -217,22 +258,45 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
           profileImageUrl: await uploadAndGetUrl(data.profile_image_url, "team-profile-images"),
         }),
       });
-      await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "team.updated", payload: teamPrismaToCrud(updated) });
-      return updated;
+      const beforeTeam = teamPrismaToCrud(oldTeam);
+      const afterTeam = teamPrismaToCrud(updated);
+      await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "team.updated", payload: afterTeam });
+      return { beforeTeam, afterTeam };
     });
 
-    const result = teamPrismaToCrud(db);
+    // Renames, profile image, and client / client-read-only / server metadata share
+    // one team.updated event with field-level before/after (same shape as user.updated).
+    if (shouldRecordAdminAudit(auth)) {
+      const patchForAudit: Record<string, unknown> = { ...data };
+      const metadata = buildUpdatedFieldsAuditMetadata({
+        source: "teams.update",
+        patch: patchForAudit,
+        beforeRoot: beforeTeam,
+        afterRoot: afterTeam,
+      });
+      if (metadata != null) {
+        await recordAuditEvent({
+          tenancy: auth.tenancy,
+          auth,
+          action: "team.updated",
+          metadata: {
+            ...metadata,
+            team_id: params.team_id,
+          },
+        });
+      }
+    }
 
     runAsynchronouslyAndWaitUntil(sendTeamUpdatedWebhook({
       projectId: auth.project.id,
-      data: result,
+      data: afterTeam,
     }));
 
-    return result;
+    return afterTeam;
   },
   onDelete: async ({ params, auth }) => {
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
-    await retryTransaction(prisma, async (tx) => {
+    const deletedTeam = await retryTransaction(prisma, async (tx) => {
       if (auth.type === 'client') {
         await ensureUserTeamPermissionExists(tx, {
           tenancy: auth.tenancy,
@@ -244,6 +308,18 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
         });
       }
       await ensureTeamExists(tx, { tenancyId: auth.tenancy.id, teamId: params.team_id });
+
+      const existing = await tx.team.findUnique({
+        where: {
+          tenancyId_teamId: {
+            tenancyId: auth.tenancy.id,
+            teamId: params.team_id,
+          },
+        },
+      });
+      if (!existing) {
+        throw new KnownErrors.TeamNotFound(params.team_id);
+      }
 
       await recordExternalDbSyncTeamPermissionDeletionsForTeam(tx, {
         tenancyId: auth.tenancy.id,
@@ -276,7 +352,21 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
       });
 
       await enqueueWorkflowEvent(tx, { tenancy: auth.tenancy, type: "team.deleted", payload: { id: params.team_id } });
+      return teamPrismaToCrud(existing);
     });
+
+    if (shouldRecordAdminAudit(auth)) {
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "team.deleted",
+        metadata: {
+          source: "teams.delete",
+          team_id: params.team_id,
+          display_name: deletedTeam.display_name,
+        },
+      });
+    }
 
     runAsynchronouslyAndWaitUntil(sendTeamDeletedWebhook({
       projectId: auth.project.id,

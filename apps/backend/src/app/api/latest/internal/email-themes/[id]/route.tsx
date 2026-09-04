@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, buildUpdatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
@@ -13,6 +14,7 @@ export const PATCH = createSmartRouteHandler({
     auth: yupObject({
       type: yupString().oneOf(["admin"]).defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     params: yupObject({
       id: yupString().defined(),
@@ -28,9 +30,9 @@ export const PATCH = createSmartRouteHandler({
       display_name: yupString().defined(),
     }).defined(),
   }),
-  async handler({ auth: { tenancy }, params: { id }, body }) {
+  async handler({ auth, params: { id }, body }) {
     const result = await internalEmailThemesCudHandlers.adminUpdate({
-      tenancy,
+      tenancy: auth.tenancy,
       allowedErrorTypes: [StatusError],
       id,
       data: [{
@@ -42,6 +44,27 @@ export const PATCH = createSmartRouteHandler({
     if (!updated) {
       throw new HexclaveAssertionError("Theme was updated but could not be found afterwards", { id });
     }
+
+    // Never persist TSX source.
+    const metadata = buildUpdatedFieldsAuditMetadata({
+      source: "email_themes.update",
+      patch: { tsx_source_updated: true },
+      beforeRoot: { tsx_source_updated: false },
+      afterRoot: { tsx_source_updated: true },
+    }) ?? {
+        source: "email_themes.update",
+      };
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "email.theme.updated",
+      metadata: {
+        ...metadata,
+        theme_id: id,
+        display_name: updated.display_name,
+      },
+    });
+
     return {
       statusCode: 200,
       bodyType: "json",
@@ -60,6 +83,7 @@ export const DELETE = createSmartRouteHandler({
     auth: yupObject({
       type: yupString().oneOf(["admin"]).defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     params: yupObject({
       id: yupString().uuid().defined(),
@@ -70,12 +94,30 @@ export const DELETE = createSmartRouteHandler({
     bodyType: yupString().oneOf(["json"]).defined(),
     body: yupObject({}).defined(),
   }),
-  async handler({ auth: { tenancy }, params: { id } }) {
+  async handler({ auth, params: { id } }) {
+    const existingTheme = auth.tenancy.config.emails.themes[id];
     await internalEmailThemesCudHandlers.adminDelete({
-      tenancy,
+      tenancy: auth.tenancy,
       allowedErrorTypes: [StatusError],
       id,
       data: [],
+    });
+
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "email_themes.delete",
+      fields: {
+        theme_id: id,
+        display_name: existingTheme.displayName,
+      },
+    }) ?? {
+        source: "email_themes.delete",
+        theme_id: id,
+      };
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "email.theme.deleted",
+      metadata,
     });
 
     return {

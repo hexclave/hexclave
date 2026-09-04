@@ -1,3 +1,4 @@
+import { buildUpdatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { globalPrismaClient } from "@/prisma-client";
 import { createPrismaCrudHandlers } from "@/route-handlers/prisma-handler";
 import { KnownErrors } from "@hexclave/shared";
@@ -33,22 +34,21 @@ export const internalApiKeyCrudHandlers = createLazyProxy(() => createPrismaCrud
       createdAt: 'desc',
     };
   },
-  crudToPrisma: async (crud, { auth, type, params }) => {
-    let old;
-    if (type === 'create') {
-      old = await globalPrismaClient.apiKeySet.findUnique({
-        where: {
-          projectId_id: {
-            projectId: auth.project.id,
-            id: params.api_key_id ?? throwErr('params.apiKeyId is required for update')
-          },
+  crudToPrisma: async (crud, { auth, params }) => {
+    // Need the prior row so re-PATCH with revoked:true does not overwrite the
+    // original revoke timestamp (create is handled by a separate route).
+    const old = await globalPrismaClient.apiKeySet.findUnique({
+      where: {
+        projectId_id: {
+          projectId: auth.project.id,
+          id: params.api_key_id ?? throwErr('params.apiKeyId is required for update'),
         },
-      });
-    }
+      },
+    });
 
     return {
       description: crud.description,
-      manuallyRevokedAt: old?.manuallyRevokedAt ? undefined : (crud.revoked ? new Date() : undefined),
+      manuallyRevokedAt: old?.manuallyRevokedAt != null ? undefined : (crud.revoked ? new Date() : undefined),
     };
   },
   prismaToCrud: async (prisma) => {
@@ -68,5 +68,44 @@ export const internalApiKeyCrudHandlers = createLazyProxy(() => createPrismaCrud
       expires_at_millis: prisma.expiresAt.getTime(),
       manually_revoked_at_millis: prisma.manuallyRevokedAt?.getTime(),
     };
+  },
+  onUpdate: async (prisma, { auth }, { previous }) => {
+    if (!shouldRecordAdminAudit(auth)) {
+      return;
+    }
+
+    // First revoke wins a dedicated action; description edits are a separate update event.
+    if (previous.manuallyRevokedAt == null && prisma.manuallyRevokedAt != null) {
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "project_api_key.revoked",
+        metadata: {
+          source: "api_keys.update",
+          api_key_id: prisma.id,
+          description: prisma.description,
+        },
+      });
+    }
+
+    if (previous.description !== prisma.description) {
+      const metadata = buildUpdatedFieldsAuditMetadata({
+        source: "api_keys.update",
+        patch: { description: prisma.description },
+        beforeRoot: { description: previous.description },
+        afterRoot: { description: prisma.description },
+      });
+      if (metadata != null) {
+        await recordAuditEvent({
+          tenancy: auth.tenancy,
+          auth,
+          action: "project_api_key.updated",
+          metadata: {
+            ...metadata,
+            api_key_id: prisma.id,
+          },
+        });
+      }
+    }
   },
 }));

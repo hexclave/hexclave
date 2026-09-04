@@ -1,3 +1,4 @@
+import { recordAuditEvent } from "@/lib/audit-log";
 import { sendEmailFromDefaultTemplate } from "@/lib/emails";
 import { validateRedirectUrl } from "@/lib/redirect-urls";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -15,6 +16,7 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: serverOrHigherAuthTypeSchema,
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       email: emailSchema.defined(),
@@ -43,6 +45,16 @@ export const POST = createSmartRouteHandler({
         teamDisplayName: auth.tenancy.project.display_name,
       },
       shouldSkipDeliverabilityCheck: true,
+    });
+
+    // Invitee may not exist yet — no target user. Email is PII; omit from metadata.
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "user.sign_in_invitation.sent",
+      metadata: {
+        source: "send_sign_in_invitation",
+      },
     });
 
     return {

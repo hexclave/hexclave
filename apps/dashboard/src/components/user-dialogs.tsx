@@ -1,10 +1,10 @@
 import type { StackAdminApp } from "@hexclave/next";
 import { ServerUser } from '@hexclave/next';
-import { ActionDialog, Alert, Button, CopyField, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Spinner, Typography } from "@/components/ui";
+import { ActionDialog, Alert, Button, CopyField, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Spinner, Textarea, Typography } from "@/components/ui";
 import { generateImpersonateSnippet } from "@hexclave/shared/dist/utils/browser-action-snippets";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
-import { runAsynchronously, runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import { useEffect, useMemo, useState } from "react";
 import { openBrowserActionInNewTab } from "@/lib/browser-actions";
 import { getTrustedOriginOptions, normalizeTrustedOrigin } from "@/lib/trusted-origins";
 import { Link } from './link';
@@ -68,14 +68,10 @@ export function ImpersonateUserDialog(props: {
   );
   const [selectedOrigin, setSelectedOrigin] = useState("");
   const [customOrigin, setCustomOrigin] = useState("");
+  const [reason, setReason] = useState("");
   const [fallbackSnippet, setFallbackSnippet] = useState<string | null>(null);
   const [fallbackSnippetLoading, setFallbackSnippetLoading] = useState(false);
   const [fallbackSnippetError, setFallbackSnippetError] = useState<string | null>(null);
-  const snippetRequestGeneration = useRef(0);
-  const userRef = useRef(props.user);
-  const adminAppRef = useRef(props.adminApp);
-  userRef.current = props.user;
-  adminAppRef.current = props.adminApp;
   const canUseCustomOrigin = config.domains.allowLocalhost;
 
   useEffect(() => {
@@ -87,37 +83,32 @@ export function ImpersonateUserDialog(props: {
       setFallbackSnippet(null);
       setFallbackSnippetError(null);
       setFallbackSnippetLoading(false);
-      return;
+      setReason("");
     }
-    const requestGeneration = snippetRequestGeneration.current + 1;
-    snippetRequestGeneration.current = requestGeneration;
-    setFallbackSnippet(null);
+  }, [props.open]);
+
+  async function generateConsoleSnippet() {
     setFallbackSnippetError(null);
     setFallbackSnippetLoading(true);
-    runAsynchronously((async () => {
+    try {
       const expiresInMillis = 2 * 60 * 60 * 1000;
-      const session = await userRef.current.createSession({ expiresInMillis, isImpersonation: true });
+      const session = await props.user.createSession({
+        expiresInMillis,
+        isImpersonation: true,
+        reason: reason.trim() === "" ? null : reason.trim(),
+      });
       const tokens = await session.getTokens();
-      if (snippetRequestGeneration.current === requestGeneration) {
-        setFallbackSnippet(generateImpersonateSnippet(
-          adminAppRef.current.projectId,
-          tokens.refreshToken ?? throwErr("Expected refresh token for newly created impersonation session"),
-          new Date(Date.now() + expiresInMillis),
-        ));
-        setFallbackSnippetLoading(false);
-      }
-    })(), {
-      onError: (error) => {
-        if (snippetRequestGeneration.current === requestGeneration) {
-          setFallbackSnippetError(error.message);
-          setFallbackSnippetLoading(false);
-        }
-      },
-    });
-    return () => {
-      snippetRequestGeneration.current = requestGeneration + 1;
-    };
-  }, [props.open, props.user.id]);
+      setFallbackSnippet(generateImpersonateSnippet(
+        props.adminApp.projectId,
+        tokens.refreshToken ?? throwErr("Expected refresh token for newly created impersonation session"),
+        new Date(Date.now() + expiresInMillis),
+      ));
+    } catch (error) {
+      setFallbackSnippetError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFallbackSnippetLoading(false);
+    }
+  }
 
   async function openBrowserAction() {
     const origin = normalizeTrustedOrigin(customOrigin.trim() || selectedOrigin);
@@ -130,6 +121,7 @@ export function ImpersonateUserDialog(props: {
       origin,
       userId: props.user.id,
       sessionExpiresInMillis: 2 * 60 * 60 * 1000,
+      reason: reason.trim() === "" ? undefined : reason.trim(),
     });
     if (opened) {
       props.onClose();
@@ -196,6 +188,17 @@ export function ImpersonateUserDialog(props: {
             )}
           </>
         )}
+        <div className="space-y-2">
+          <Label htmlFor="impersonate-reason">Reason (optional)</Label>
+          <Textarea
+            id="impersonate-reason"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Why are you impersonating this user?"
+            maxLength={500}
+            rows={2}
+          />
+        </div>
         <div className="flex items-center justify-center">
           <div className="flex-1">
             <Separator />
@@ -217,7 +220,11 @@ export function ImpersonateUserDialog(props: {
           <Alert variant="destructive">{fallbackSnippetError}</Alert>
         ) : fallbackSnippet != null ? (
           <CopyField type="textarea" monospace height={100} value={fallbackSnippet} isSecret />
-        ) : null}
+        ) : (
+          <Button onClick={async () => { await generateConsoleSnippet(); }}>
+            Generate console snippet
+          </Button>
+        )}
       </div>
     </ActionDialog>
   );

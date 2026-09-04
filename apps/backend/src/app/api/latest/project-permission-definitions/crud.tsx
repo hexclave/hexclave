@@ -4,6 +4,11 @@ import { createCrudHandlers } from "@/route-handlers/crud-handler";
 import { projectPermissionDefinitionsCrud } from '@hexclave/shared/dist/interface/crud/project-permissions';
 import { permissionDefinitionIdSchema, yupObject } from "@hexclave/shared/dist/schema-fields";
 import { createLazyProxy } from "@hexclave/shared/dist/utils/proxies";
+import {
+  permissionDefinitionResultToSnapshot,
+  readPermissionDefinitionSnapshot,
+  recordPermissionDefinitionAudit,
+} from "../permission-definition-audit";
 
 
 export const projectPermissionDefinitionsCrudHandlers = createLazyProxy(() => createCrudHandlers(projectPermissionDefinitionsCrud, {
@@ -11,7 +16,7 @@ export const projectPermissionDefinitionsCrudHandlers = createLazyProxy(() => cr
     permission_id: permissionDefinitionIdSchema.defined(),
   }),
   async onCreate({ auth, data }) {
-    return await createPermissionDefinition(
+    const result = await createPermissionDefinition(
       globalPrismaClient,
       {
         scope: "project",
@@ -19,10 +24,19 @@ export const projectPermissionDefinitionsCrudHandlers = createLazyProxy(() => cr
         data,
       }
     );
+    await recordPermissionDefinitionAudit({
+      auth,
+      scope: "project",
+      action: "permission_definition.created",
+      source: "project_permission_definitions.create",
+      after: permissionDefinitionResultToSnapshot(result, "project"),
+    });
+    return result;
   },
   async onUpdate({ auth, data, params }) {
+    const before = readPermissionDefinitionSnapshot(auth.tenancy, params.permission_id, "project");
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
-    return await updatePermissionDefinition(
+    const result = await updatePermissionDefinition(
       globalPrismaClient,
       prisma,
       {
@@ -32,10 +46,25 @@ export const projectPermissionDefinitionsCrudHandlers = createLazyProxy(() => cr
         data,
       }
     );
+    await recordPermissionDefinitionAudit({
+      auth,
+      scope: "project",
+      action: "permission_definition.updated",
+      source: "project_permission_definitions.update",
+      before,
+      after: permissionDefinitionResultToSnapshot(result, "project"),
+      patch: {
+        id: data.id,
+        description: data.description,
+        contained_permission_ids: data.contained_permission_ids,
+      },
+    });
+    return result;
   },
   async onDelete({ auth, params }) {
+    const before = readPermissionDefinitionSnapshot(auth.tenancy, params.permission_id, "project");
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
-    return await deletePermissionDefinition(
+    const result = await deletePermissionDefinition(
       globalPrismaClient,
       prisma,
       {
@@ -44,6 +73,14 @@ export const projectPermissionDefinitionsCrudHandlers = createLazyProxy(() => cr
         permissionId: params.permission_id
       }
     );
+    await recordPermissionDefinitionAudit({
+      auth,
+      scope: "project",
+      action: "permission_definition.deleted",
+      source: "project_permission_definitions.delete",
+      before,
+    });
+    return result;
   },
   async onList({ auth }) {
     return {

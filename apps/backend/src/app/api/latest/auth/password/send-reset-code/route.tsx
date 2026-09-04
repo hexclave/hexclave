@@ -1,3 +1,4 @@
+import { recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { getAuthContactChannelWithEmailNormalization } from "@/lib/contact-channel";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -17,6 +18,7 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: clientOrHigherAuthTypeSchema,
       tenancy: adaptSchema,
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       email: emailSchema.defined(),
@@ -30,7 +32,8 @@ export const POST = createSmartRouteHandler({
       success: yupString().oneOf(["maybe, only if user with e-mail exists"]).defined(),
     }).defined(),
   }),
-  async handler({ auth: { tenancy }, body: { email, callback_url: callbackUrl } }, fullReq) {
+  async handler({ auth, body: { email, callback_url: callbackUrl } }) {
+    const { tenancy } = auth;
     if (!tenancy.config.auth.password.allowSignIn) {
       throw new KnownErrors.PasswordAuthenticationNotEnabled();
     }
@@ -73,6 +76,20 @@ export const POST = createSmartRouteHandler({
     }, {
       user,
     });
+
+    // Client-initiated forgot-password is end-user self-service — only audit
+    // when an admin/server actor triggers the reset from the dashboard/API.
+    if (shouldRecordAdminAudit(auth)) {
+      await recordAuditEvent({
+        tenancy,
+        auth,
+        action: "user.password_reset.sent",
+        targetUserId: user.id,
+        metadata: {
+          source: "auth.password.send_reset_code",
+        },
+      });
+    }
 
     return {
       statusCode: 200,
