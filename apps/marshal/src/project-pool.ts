@@ -21,7 +21,7 @@
 //   gcp-project-pool/<projectId>.json — pool membership and provisioning state
 //   gcp-project-pool-ledger.json      — the creation-rate ledger
 
-import { getConfig } from "./config.js";
+import { gcpConfig, getConfig } from "./config.js";
 import { createTenantProjectManager } from "./gcp/manager.js";
 import { pooledProjectId, type TenantProject, TenantProjectManager } from "./gcp/projects.js";
 import { RECONCILIATION_TAKEOVER_GRACE_MS } from "./mutation-safety.js";
@@ -268,7 +268,7 @@ async function consumeCreationBudget(wanted: number, now: number, lease: Reconci
 
 async function createAndAdvance(manager: TenantProjectManager, deadline: number, lease: ReconciliationLeaseGuard): Promise<AdvanceOutcome | "collided"> {
   const config = getConfig();
-  const projectId = pooledProjectId({ envId: config.envId, projectPrefix: config.gcp.projectPrefix });
+  const projectId = pooledProjectId({ envId: config.envId, projectPrefix: gcpConfig().projectPrefix });
   // THE record comes first. Nothing exists in GCP yet, so an id that is somehow already taken
   // costs nothing to abandon — unlike the old order, where a collision meant tearing a real
   // project back down and a freeze meant leaking one.
@@ -296,7 +296,7 @@ function tally(outcomes: string[]): Record<string, number> {
 export async function stepProjectPool(): Promise<PoolStepResult> {
   const result = await withProjectPoolLease(async (lease) => {
     const deadline = performance.now() + TICK_BUDGET_MILLIS;
-    const size = getConfig().gcp.projectPoolSize;
+    const size = gcpConfig().projectPoolSize;
     const manager = createTenantProjectManager();
 
     const inFlight = (await listPoolProjects()).filter(({ entry }) => isInFlight(entry.state));

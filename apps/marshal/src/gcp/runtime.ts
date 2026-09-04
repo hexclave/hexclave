@@ -1,4 +1,4 @@
-import { getConfig } from "../config.js";
+import { DEFAULT_SERVERLESS_MEMORY_MB, getConfig, serverMachineTypeFor, serverlessCpuFor, serviceMemoryMb } from "../config.js";
 import { badRequest } from "../errors.js";
 import { pinToDigest } from "../image-ref.js";
 import { diskNameForVolume, instanceNameForService, serviceName } from "../naming.js";
@@ -45,6 +45,37 @@ function soleHttpPortOrNull(spec: ServiceSpec): number | null {
   return entries.length === 1 ? entries[0].port : null;
 }
 
+/**
+ * The machine shape a server runs on, from the memory its spec asks for.
+ *
+ * A spec that names no size resolves to the type's default, which is the shape
+ * every server ran on before sizes existed — and since the absence also leaves
+ * the revision unchanged, such a service is not replaced on the apply that first
+ * goes through this.
+ *
+ * The fallback is unreachable through the API (validateServiceSpec refuses any
+ * size that is not a key of this table) and exists because a stored spec is
+ * replayed on every reconcile: one written by a future Marshal must not create
+ * an instance with an empty machine type.
+ */
+/**
+ * The container resources a serverless service runs with.
+ *
+ * The CPU comes from the memory rather than being chosen: Cloud Run accepts only
+ * certain pairs, so keeping them together here is what makes an illegal
+ * combination unrepresentable instead of merely rejected.
+ *
+ * Unreachable fallback for the same reason as serverMachineType's.
+ */
+function serverlessResources(spec: ServiceSpec): { memoryMb: number, cpu: number } {
+  const memoryMb = serviceMemoryMb("gcp", spec);
+  return { memoryMb, cpu: serverlessCpuFor(memoryMb) };
+}
+
+function serverMachineType(spec: ServiceSpec): string {
+  return serverMachineTypeFor(serviceMemoryMb("gcp", spec));
+}
+
 function hostnameFromUrl(url: string | null): string | null {
   return url === null ? null : new URL(url).hostname;
 }
@@ -78,6 +109,12 @@ async function ensureServerGateway(stored: StoredSpec, instance: ComputeInstance
     revision: stored.revision,
     startCommand: gatewayCommand(),
     serviceKeyHash: serviceKeyHash(stored.key),
+    // Fixed at the smallest shape, and deliberately NOT the sized server's: this
+    // is an nginx proxy in front of the VM, not the service. Sizing it with the
+    // service would bill a second machine for every gigabyte the author asked
+    // the first one for, and buy nothing — it forwards bytes.
+    memoryMb: DEFAULT_SERVERLESS_MEMORY_MB,
+    cpu: serverlessCpuFor(DEFAULT_SERVERLESS_MEMORY_MB),
   });
 }
 
@@ -107,6 +144,7 @@ export async function applyRuntimeService(stored: StoredSpec, image: string, env
       revision: stored.revision,
       startCommand: stored.spec.config.start_command ?? null,
       serviceKeyHash: serviceKeyHash(stored.key),
+      ...serverlessResources(stored.spec),
     });
     return observation.ready && observation.imageDigest !== null ? pinToDigest(image, observation.imageDigest) : null;
   }
@@ -137,6 +175,11 @@ export async function applyRuntimeService(stored: StoredSpec, image: string, env
     startCommand: stored.spec.config.start_command ?? null,
     volume: volume === null ? null : { diskName: volume.diskName, path: volume.path },
     serviceKeyHash: serviceKeyHash(stored.key),
+    // Derived from the spec's memory. Absent memory resolves to the type's
+    // default, so a service that has never named a size keeps the shape it has
+    // always run on — and, because the same absence keeps its revision
+    // unchanged, this apply does not replace it either.
+    machineType: serverMachineType(stored.spec),
   });
   // A custom domain routes through the SAME gateway (see ensureDomainGateway), so a private
   // server that owns one still needs it. Deleting it here on every apply is what silently

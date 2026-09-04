@@ -25,7 +25,7 @@ function isDnsNotFound(error: unknown): boolean {
 export async function hasDomainVerificationRecord(hostname: string, token: string): Promise<boolean> {
   // The GCP simulator already uses this suffix to model an active managed certificate. Keep
   // its DNS side deterministic too, but only when mock mode is explicitly configured.
-  if (getConfig().gcp.mockUrl !== null && hostname.endsWith(".verified.test")) return true;
+  if (getConfig().gcp?.mockUrl != null && hostname.endsWith(".verified.test")) return true;
   const expected = domainVerificationRecord(hostname, token);
   try {
     const records = await resolveTxt(expected.name);

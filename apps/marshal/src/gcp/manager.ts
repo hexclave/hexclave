@@ -1,22 +1,22 @@
 // One place that knows how to construct a TenantProjectManager: both the per-request tenant
 // context and the background pool replenishment (which runs outside any request) build one.
-import { getConfig } from "../config.js";
+import { gcpConfig, getConfig } from "../config.js";
 import { GcpClient } from "./client.js";
 import { TenantProjectManager } from "./projects.js";
 
 export function createGcpClient(): GcpClient {
-  const config = getConfig();
-  return new GcpClient(config.gcp.mockUrl === null || config.gcp.mockToken === null
+  const config = gcpConfig();
+  return new GcpClient(config.mockUrl === null || config.mockToken === null
     ? undefined
-    : { url: config.gcp.mockUrl, token: config.gcp.mockToken });
+    : { url: config.mockUrl, token: config.mockToken });
 }
 
 export function createTenantProjectManager(): TenantProjectManager {
-  const config = getConfig();
+  const gcp = gcpConfig();
   return new TenantProjectManager(createGcpClient(), {
-    envId: config.envId,
-    billingAccount: config.gcp.billingAccount,
-    parent: config.gcp.projectParent,
-    projectPrefix: config.gcp.projectPrefix,
+    envId: getConfig().envId,
+    billingAccount: gcp.billingAccount,
+    parent: gcp.projectParent,
+    projectPrefix: gcp.projectPrefix,
   });
 }

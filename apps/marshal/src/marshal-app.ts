@@ -7,17 +7,18 @@
 import { node } from "@elysiajs/node";
 import { Elysia } from "elysia";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { INTERNAL_COMPLETE_PATH_PREFIX, createGcpBuilder, createMockBuilder, verifyWebhookToken, type Builder } from "./builds.js";
+import { INTERNAL_COMPLETE_PATH_PREFIX, createMockBuilder, verifyWebhookToken, type Builder } from "./builds.js";
 import { MAX_UPLOAD_BYTES, MAX_WEBHOOK_BODY_BYTES, getConfig } from "./config.js";
 import { attachDomain, detachDomain, normalizeHostnameOrThrow, readDomain } from "./domains.js";
 import { MarshalError } from "./errors.js";
 import { MutationOutcomeUnknownError } from "./mutation-safety.js";
 import { ReconciliationLeaseLostError } from "./reconciliation-lock.js";
+import { FlyApiError } from "./fly/client.js";
 import { recordHostIdentityAssertion } from "./gcp/auth.js";
 import { GcpApiError } from "./gcp/client.js";
 import { reapProjectPool, stepProjectPool } from "./project-pool.js";
-import { tenantContext } from "./gcp/context.js";
-import { runtimeLogs } from "./gcp/runtime.js";
+import { providerForNamespace, type RuntimeProvider } from "./provider.js";
+import { validateRequestedRuntime } from "./runtime.js";
 import {
   BUILD_ID_REGEX,
   advanceDeployment,
@@ -28,7 +29,6 @@ import {
   getServiceState,
   listServices,
   maybeFinalizeStaleDeployment,
-  redactBuildLogLines,
   startSourceDeployment,
   validateNamespace,
   validateServiceKey,
@@ -74,8 +74,13 @@ function errorResponse(error: unknown): Response {
     console.error("runtime mutation outcome unknown", error);
     return jsonResponse(503, { error: "mutation_outcome_unknown", message: "a runtime mutation did not confirm; re-read the service state before retrying" });
   }
-  if (error instanceof GcpApiError) {
-    console.error("Google Cloud API error", error);
+  if (error instanceof FlyApiError || error instanceof GcpApiError) {
+    // Report an upstream failure without describing it: the provider's 4xxes on OUR
+    // requests are our bug or an infra failure from the caller's perspective, never
+    // theirs, so its wording, its status code, and the org/app/project identifiers its
+    // endpoints embed all stay in the server log — none of them belong in a response that
+    // can be relayed onward to an end user.
+    console.error(error instanceof FlyApiError ? "Fly API error" : "Google Cloud API error", error);
     return jsonResponse(502, { error: "upstream_api_error", message: "the runtime could not complete the request" });
   }
   console.error("unhandled marshal error", error);
@@ -134,7 +139,10 @@ function parseOptionalMillis(value: unknown): number | undefined {
 // `Elysia` type, and nothing downstream needs the route types.
 export function createMarshalApp() {
   const config = getConfig();
-  const builder: Builder = config.builderKind === "mock" ? createMockBuilder(completeBuild) : createGcpBuilder();
+  // The builder is chosen once the namespace's runtime is: the mock one completes in-process
+  // whatever the runtime, and otherwise each runtime starts its own machine.
+  const mockBuilder: Builder | null = config.builderKind === "mock" ? createMockBuilder(completeBuild) : null;
+  const builderFor = (provider: RuntimeProvider): Builder => mockBuilder ?? provider.createBuilder();
 
   const app = new Elysia({ adapter: node() })
     .onRequest(({ request }) => {
@@ -247,11 +255,15 @@ export function createMarshalApp() {
       return { services: await listServices(ns) };
     }))
 
+    // The body may name the `runtime` the caller wants this namespace on; see runtime.ts for
+    // how that is reconciled with the namespace's pin. Absent means whatever it already is.
     .put("/v1/namespaces/:ns/services/:key", ({ params, body }) => handle(async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
-      const spec = validateServiceSpec(body);
-      const result = await applyServiceSpec(ns, key, spec);
+      const runtime = validateRequestedRuntime((body as Record<string, unknown> | null)?.runtime);
+      const provider = await providerForNamespace(ns, runtime);
+      const spec = validateServiceSpec(body, provider.kind);
+      const result = await applyServiceSpec(ns, key, spec, { runtime: provider.kind });
       return { revision: result.revision, changed: result.changed, state: result.state };
     }))
 
@@ -273,7 +285,8 @@ export function createMarshalApp() {
     .post("/v1/namespaces/:ns/sources/:sourceId/deployments", ({ params, body }) => handle(async () => {
       const ns = validateNamespace(params.ns);
       const sourceId = validateSourceId(params.sourceId);
-      return await startSourceDeployment(ns, sourceId, body, builder) as unknown as Record<string, unknown>;
+      const runtime = validateRequestedRuntime((body as Record<string, unknown> | null)?.runtime);
+      return await startSourceDeployment(ns, sourceId, body, builderFor, runtime) as unknown as Record<string, unknown>;
     }))
 
     // Reading a deployment is also what ADVANCES it: there is no background
@@ -336,21 +349,9 @@ export function createMarshalApp() {
       if (checked.builder_app === null || checked.builder_machine_id === null) {
         return { lines: [], next_since_millis: sinceMillis ?? checked.started_at_millis, complete: liveIsFinal };
       }
-      const output = await (await tenantContext(ns)).compute.getSerialOutput(checked.builder_machine_id);
-      const redactionValues = deploymentLogRedactionValues(checked);
-      const allLines = redactBuildLogLines(output, redactionValues).map((text, index) => ({
-        at_millis: checked.started_at_millis + index,
-        stream: "stdout" as const,
-        instance: null,
-        text,
-      }));
-      const lines = allLines.filter((line) => sinceMillis === undefined || line.at_millis >= sinceMillis);
-      const lastAtMillis = lines.length === 0 ? null : lines[lines.length - 1].at_millis;
-      return {
-        lines,
-        next_since_millis: lastAtMillis === null ? sinceMillis ?? checked.started_at_millis : lastAtMillis + 1,
-        complete: liveIsFinal,
-      };
+      const provider = await providerForNamespace(ns);
+      const page = await provider.builderLogsLive(checked, sinceMillis, deploymentLogRedactionValues(provider, checked));
+      return { lines: page.lines, next_since_millis: page.nextSinceMillis, complete: liveIsFinal };
     }))
 
     .get("/v1/namespaces/:ns/services/:key/logs", ({ params, query }) => handle(async () => {
@@ -359,9 +360,8 @@ export function createMarshalApp() {
       const stored = await readSpec(ns, key);
       if (stored === null) throw new MarshalError(404, "not_found", `service ${JSON.stringify(key)} not found`);
       const sinceMillis = parseOptionalMillis(query.since_millis);
-      const lines = await runtimeLogs(stored, sinceMillis, typeof query.instance === "string" && query.instance !== "" ? query.instance : undefined);
-      const lastAtMillis = lines.length === 0 ? null : lines[lines.length - 1].at_millis;
-      return { lines, next_since_millis: lastAtMillis === null ? sinceMillis ?? Date.now() : lastAtMillis + 1 };
+      const page = await (await providerForNamespace(ns)).serviceLogs(stored, sinceMillis, typeof query.instance === "string" && query.instance !== "" ? query.instance : undefined);
+      return { lines: page.lines, next_since_millis: page.nextSinceMillis };
     }))
 
     // Read-only: the "re-check verification now" primitive. A PUT would repoint the hostname,
@@ -423,5 +423,5 @@ export function createMarshalApp() {
       return { ok: true };
     }), { parse: "text" });
 
-  return { app, builder };
+  return { app, builderFor };
 }

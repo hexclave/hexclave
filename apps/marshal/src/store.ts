@@ -2,7 +2,7 @@ import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMult
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getConfig, MAX_UPLOAD_BYTES, MULTIPART_UPLOAD_THRESHOLD_BYTES, UPLOAD_EXPIRY_SECONDS, UPLOAD_PART_SIZE_BYTES } from "./config.js";
 import { authenticateControlPlaneState, decryptString, encryptString, verifyControlPlaneStateAuthentication } from "./spec-crypto.js";
-import { POOL_PROJECT_STATES, type DomainClaim, type EnvValue, type PendingDomainClaim, type PoolProjectEntry, type PoolProjectState, type ReconciliationLease, type ServiceSpec, type StoredDeployment, type StoredSpec, type TenantProjectAssignment } from "./types.js";
+import { POOL_PROJECT_STATES, type DomainClaim, type EnvValue, type PendingDomainClaim, type PoolProjectEntry, type PoolProjectState, type ReconciliationLease, type ServiceSpec, type StoredDeployment, type StoredSpec, type TenantRecord } from "./types.js";
 
 // The bucket is Marshal's only state. Layout:
 //   specs/<ns>/<key>.json                 — current desired spec + revision; env is AES-GCM encrypted
@@ -13,7 +13,7 @@ import { POOL_PROJECT_STATES, type DomainClaim, type EnvValue, type PendingDomai
 //   builds/<ns>/<key>/log/<ulid>.jsonl    — durable build logs (LogLine per line), written at terminal state
 //   domains/<hostname>.json               — GLOBAL hostname-uniqueness registry (conditional-PUT claims)
 //   domain-index/<ns>/<key>/<hostname>    — per-service index of claims, so deletes can release hostnames
-//   tenants/<ns>.json                     — namespace → tenant GCP project assignment (conditional-PUT, once)
+//   tenants/<ns>.json                     — namespace record: runtime pin (absent = fly) + tenant GCP project assignment
 //   gcp-project-pool/<projectId>.json     — pre-provisioned tenant projects awaiting assignment
 
 let cachedClient: S3Client | null = null;
@@ -783,33 +783,70 @@ export async function listDomainClaimsForService(ns: string, key: string): Promi
 // provisioner retries for up to ten minutes), and batch-enabling its APIs can
 // take fifteen minutes — far past every request budget in the deploy path.
 
-const TENANT_PROJECT_ASSIGNMENT_PREFIX = "tenants/";
+const TENANT_RECORD_PREFIX = "tenants/";
 
-function tenantProjectAssignmentKey(ns: string): string {
-  return `${TENANT_PROJECT_ASSIGNMENT_PREFIX}${ns}.json`;
+function tenantRecordKey(ns: string): string {
+  return `${TENANT_RECORD_PREFIX}${ns}.json`;
+}
+
+function parseTenantRecord(ns: string, value: unknown): TenantRecord {
+  if (!isRecord(value)) throw new Error(`authenticated tenant record for ${JSON.stringify(ns)} is malformed`);
+  // Records written before the runtime pin existed carry only `project_id` — and a record
+  // existed only for a GCP namespace, so its absence of a runtime means "gcp".
+  const runtime = value.runtime === undefined ? "gcp" : value.runtime;
+  if (runtime !== "fly" && runtime !== "gcp") throw new Error(`authenticated tenant record for ${JSON.stringify(ns)} names an unknown runtime`);
+  const projectId = value.project_id === undefined || value.project_id === null ? null : value.project_id;
+  if (projectId !== null && typeof projectId !== "string") throw new Error(`authenticated tenant record for ${JSON.stringify(ns)} is malformed`);
+  return { runtime, project_id: projectId };
+}
+
+async function readTenantRecordVersioned(ns: string): Promise<Versioned<TenantRecord> | null> {
+  const key = tenantRecordKey(ns);
+  const stored = await getJsonVersioned<unknown>(key);
+  if (stored === null) return null;
+  return { etag: stored.etag, value: parseTenantRecord(ns, readAuthenticatedControlPlaneState(key, stored.value)) };
+}
+
+/** The namespace's record, or null for a namespace nothing has ever pinned (a Fly namespace). */
+export async function readTenantRecord(ns: string): Promise<TenantRecord | null> {
+  return (await readTenantRecordVersioned(ns))?.value ?? null;
+}
+
+/**
+ * Pins the namespace to a runtime. The GCP project assignment, if any, is carried across a
+ * re-pin: a namespace that moves off GCP and back again reuses the project it already had
+ * rather than claiming a second one.
+ */
+export async function pinTenantRuntime(ns: string, runtime: TenantRecord["runtime"]): Promise<void> {
+  const key = tenantRecordKey(ns);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const current = await readTenantRecordVersioned(ns);
+    const next: TenantRecord = { runtime, project_id: current?.value.project_id ?? null };
+    const written = await putJsonConditionally(key, authenticatedControlPlaneState(key, next), current === null ? { ifNoneMatch: true } : { ifMatch: current.etag });
+    if (written !== null) return;
+  }
+  throw new Error(`the runtime pin for ${JSON.stringify(ns)} changed too frequently to update`);
 }
 
 export async function readTenantProjectAssignment(ns: string): Promise<string | null> {
-  const key = tenantProjectAssignmentKey(ns);
-  const stored = await getJson<unknown>(key);
-  if (stored === null) return null;
-  const value = readAuthenticatedControlPlaneState(key, stored);
-  if (!isRecord(value) || typeof value.project_id !== "string") throw new Error(`authenticated tenant project assignment for ${JSON.stringify(ns)} is malformed`);
-  return value.project_id;
+  return (await readTenantRecord(ns))?.project_id ?? null;
 }
 
 // Returns the authoritative assignment no matter who won the race: the caller's
-// projectId when the create succeeded, or the pre-existing winner's otherwise. The
-// retry loop covers the create losing while a concurrent delete removed the winner —
+// projectId when the write succeeded, or the pre-existing winner's otherwise. The
+// retry loop covers the write losing while a concurrent delete removed the winner —
 // only possible around namespace teardown, which does not exist yet.
 export async function assignTenantProject(ns: string, projectId: string): Promise<string> {
+  const key = tenantRecordKey(ns);
   for (;;) {
-    const key = tenantProjectAssignmentKey(ns);
-    const assignment = { project_id: projectId } satisfies TenantProjectAssignment;
-    const created = await putJsonConditionally(key, authenticatedControlPlaneState(key, assignment), { ifNoneMatch: true });
-    if (created !== null) return projectId;
-    const existing = await readTenantProjectAssignment(ns);
-    if (existing !== null) return existing;
+    const current = await readTenantRecordVersioned(ns);
+    if (current?.value.project_id != null) return current.value.project_id;
+    // The pin is normally written before the first deploy reaches here; a record that is
+    // still missing (a legacy namespace, or a test that skipped the request layer) is a
+    // GCP one by the fact of a project being assigned to it.
+    const next: TenantRecord = { runtime: current?.value.runtime ?? "gcp", project_id: projectId };
+    const written = await putJsonConditionally(key, authenticatedControlPlaneState(key, next), current === null ? { ifNoneMatch: true } : { ifMatch: current.etag });
+    if (written !== null) return projectId;
   }
 }
 

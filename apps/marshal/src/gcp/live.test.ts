@@ -80,6 +80,8 @@ describe("live disposable GCP tenant", () => {
         revision: "live-1",
         startCommand: "echo marshal-live-cloud-run && sed -i 's/listen[[:space:]]*80;/listen 8080;/' /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
         serviceKeyHash: "live-web",
+        memoryMb: 512,
+        cpu: 1,
       });
       expect(first.ready).toBe(true);
       expect(first.uri).not.toBeNull();
@@ -97,6 +99,8 @@ describe("live disposable GCP tenant", () => {
         revision: "live-2",
         startCommand: "echo marshal-live-cloud-run-updated && sed -i 's/listen[[:space:]]*80;/listen 8080;/' /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
         serviceKeyHash: "live-web",
+        memoryMb: 512,
+        cpu: 1,
       });
       expect(updated.targetRevision).toBe("live-2");
 
@@ -121,6 +125,7 @@ describe("live disposable GCP tenant", () => {
         startCommand: "echo marshal-live-server && sed -i 's/listen[[:space:]]*80;/listen 8080;/' /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
         volume: { diskName: "live-data", path: "/data" },
         serviceKeyHash: "live-server",
+        machineType: "e2-micro",
       });
       expect(server.status).toMatch(/RUNNING|STAGING/);
       const updatedServer = await compute.applyInstance({
@@ -132,6 +137,7 @@ describe("live disposable GCP tenant", () => {
         startCommand: "echo marshal-live-server-updated && sed -i 's/listen[[:space:]]*80;/listen 8080;/' /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
         volume: { diskName: "live-data", path: "/data" },
         serviceKeyHash: "live-server",
+        machineType: "e2-micro",
       });
       expect(updatedServer.revision).toBe("server-2");
       await compute.deleteInstance("live-server");

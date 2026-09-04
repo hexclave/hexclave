@@ -12,6 +12,7 @@ describe("Compute Engine startup scripts", () => {
       startCommand: "node server.js",
       volume: { diskName: "hxv-data", path: "/data" },
       serviceKeyHash: "service-key",
+      machineType: "e2-micro",
     });
     expect(script).toContain("google-hxv-data");
     expect(script).toContain('resize2fs "$DATA_DEVICE"');
@@ -45,6 +46,7 @@ describe("Compute Engine startup scripts", () => {
       startCommand: null,
       volume: null,
       serviceKeyHash: "service-key",
+      machineType: "e2-micro",
     });
     expect(script).toContain("docker-credential-gcr configure-docker");
     expect(script).toContain("us-central1-docker.pkg.dev");

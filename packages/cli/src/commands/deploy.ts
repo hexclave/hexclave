@@ -1,4 +1,4 @@
-import { buildSourceManifest, connectionRequiresTargetDeployed, deploymentPortEntries, deploymentPortOwnsStandardPorts, deploymentServiceIsBuilt, deploymentServiceUsesGeneratedDockerfile, parseConnectionValue, type DeploymentSourceManifest } from "@hexclave/shared/dist/deployments";
+import { buildSourceManifest, connectionRequiresTargetDeployed, deploymentPortEntries, deploymentPortEntry, deploymentPortOwnsStandardPorts, deploymentServiceIsBuilt, deploymentServiceUsesGeneratedDockerfile, parseConnectionValue, type DeploymentRuntime, type DeploymentSourceManifest } from "@hexclave/shared/dist/deployments";
 import { Command } from "commander";
 import fs from "node:fs";
 import path from "node:path";
@@ -446,7 +446,7 @@ async function waitForDeployment(options: {
 }
 
 /** Transitive dependents of `failedServiceId`, by connection edges within this deploy. */
-function collectTransitiveDependents(failedServiceId: string, services: Map<string, EvaluatedService>): Set<string> {
+function collectTransitiveDependents(failedServiceId: string, services: Map<string, EvaluatedService>, runtime: DeploymentRuntime): Set<string> {
   const directDependents = new Map<string, Set<string>>();
   for (const [serviceId, service] of services) {
     for (const value of Object.values(service.env)) {
@@ -455,10 +455,14 @@ function collectTransitiveDependents(failedServiceId: string, services: Map<stri
       if (parsed === null) continue;
       // Services of another deployment source are not part of this deploy, so
       // they can neither fail in it nor be skipped by it.
-      if (!services.has(parsed.serviceId)) continue;
+      const target = services.get(parsed.serviceId);
+      if (target === undefined) continue;
+      const targetIsPublic = parsed.port === null || deploymentPortEntry(target.definition.ports, parsed.port) === null
+        ? null
+        : target.definition.public === true;
       // Same rule as computeDeploymentLevels: only a reference that needed its
       // target deployed makes its holder a dependent of it.
-      if (!connectionRequiresTargetDeployed(parsed.outputKey)) continue;
+      if (!connectionRequiresTargetDeployed(runtime, parsed.outputKey, parsed.port, targetIsPublic)) continue;
       const dependents = directDependents.get(parsed.serviceId) ?? new Set<string>();
       dependents.add(serviceId);
       directDependents.set(parsed.serviceId, dependents);
@@ -529,10 +533,12 @@ async function resolveDeploySource(deployFileOption: string | undefined, cwd: st
   // The deploy file's `id` export, if it still uses that old name.
   legacyIdExport?: unknown,
   deployExport: unknown,
+  // The internal `version` export, if any.
+  versionExport: unknown,
 }> {
   const deployFilePath = resolveDeployFilePath(deployFileOption, cwd);
   const deployModule = await importDeployModule(deployFilePath);
-  return { path: deployFilePath, deploymentGroupIdExport: deployModule.deploymentGroupId, legacyIdExport: deployModule.legacyId, deployExport: deployModule.deploy };
+  return { path: deployFilePath, deploymentGroupIdExport: deployModule.deploymentGroupId, legacyIdExport: deployModule.legacyId, deployExport: deployModule.deploy, versionExport: deployModule.version };
 }
 
 export function registerDeployCommand(program: Command) {
@@ -550,11 +556,12 @@ export function registerDeployCommand(program: Command) {
 
       // Always the deploy file: services live there, never in hexclave.config.ts.
       const deploySource = await resolveDeploySource(opts.deployFile, process.cwd());
-      const { sourceId, services } = evaluateDeploymentConfig({
+      const { sourceId, services, builder, runtime, version } = evaluateDeploymentConfig({
         deployFilePath: deploySource.path,
         deploymentGroupIdExport: deploySource.deploymentGroupIdExport,
         legacyIdExport: deploySource.legacyIdExport,
         deployExport: deploySource.deployExport,
+        versionExport: deploySource.versionExport,
         mode: "deploy",
       });
 
@@ -569,9 +576,20 @@ export function registerDeployCommand(program: Command) {
         }
         levels = [[opts.serviceId]];
       } else {
-        levels = computeDeploymentLevels(services);
+        levels = computeDeploymentLevels(services, runtime);
       }
       const deploySet = levels.flat();
+
+      // A builder size with nothing to build is a note, not an error: the deploy
+      // is still exactly what the author asked for, and a `--service-id` deploy
+      // of one prebuilt service out of a file whose other services DO build is
+      // an entirely ordinary thing to do.
+      if (builder?.memory !== undefined && !deploySet.some((serviceId) => {
+        const service = services.get(serviceId);
+        return service !== undefined && deploymentServiceIsBuilt(service.definition);
+      })) {
+        console.error(`Note: deploy.builder sets memory ${JSON.stringify(builder.memory)}, but ${opts.serviceId != null ? `services.${opts.serviceId} runs` : "every service in this deploy runs"} an already-built image, so no builder machine starts and the size has no effect here.`);
+      }
 
       // Pre-flight: every secret without a default must have a stored value
       // BEFORE anything is packaged or uploaded. The backend re-checks this
@@ -611,6 +629,14 @@ export function registerDeployCommand(program: Command) {
         jsonBody: {
           source_id: sourceId,
           services: Object.fromEntries([...services.values()].map((service) => [service.serviceId, service.definition])),
+          // Synced with the definitions rather than sent with the deploy: the
+          // builder is part of what the deploy file says, so it belongs inside
+          // the same sync fence — a deploy cannot then pair one checkout's
+          // source with another checkout's builder size.
+          ...(builder === undefined ? {} : { builder }),
+          // The internal `version` export, when set: which infrastructure runtime the
+          // project runs on. Synced with the definitions for the same reason the builder is.
+          ...(version === undefined ? {} : { version }),
         },
       });
       if (typeof syncResponse?.sync_id !== "string") {

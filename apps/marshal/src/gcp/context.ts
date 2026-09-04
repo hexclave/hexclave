@@ -1,4 +1,4 @@
-import { getConfig } from "../config.js";
+import { gcpConfig, getConfig } from "../config.js";
 import { tenantProjectForNamespace } from "../project-pool.js";
 import { CloudRunClient } from "./cloud-run.js";
 import { ComputeClient } from "./compute.js";
@@ -34,22 +34,23 @@ export async function tenantContext(ns: string): Promise<TenantContext> {
 
 async function createTenantContext(ns: string): Promise<TenantContext> {
   const config = getConfig();
+  const gcp = gcpConfig();
   const client = createGcpClient();
   const manager = new TenantProjectManager(client, {
     envId: config.envId,
-    billingAccount: config.gcp.billingAccount,
-    parent: config.gcp.projectParent,
-    projectPrefix: config.gcp.projectPrefix,
+    billingAccount: gcp.billingAccount,
+    parent: gcp.projectParent,
+    projectPrefix: gcp.projectPrefix,
   });
-  const project = config.gcp.existingProjectIdForTests === null
+  const project = gcp.existingProjectIdForTests === null
     ? await tenantProjectForNamespace(ns, manager)
-    : await manager.describeExistingProject(config.gcp.existingProjectIdForTests);
+    : await manager.describeExistingProject(gcp.existingProjectIdForTests);
   const computeConfig = {
     projectId: project.projectId,
-    region: config.gcp.region,
-    zone: config.gcp.zone,
-    network: config.gcp.network,
-    subnetwork: config.gcp.subnetwork,
+    region: gcp.region,
+    zone: gcp.zone,
+    network: gcp.network,
+    subnetwork: gcp.subnetwork,
   };
   const compute = new ComputeClient(client, computeConfig);
   await compute.ensureNetwork();
@@ -57,12 +58,12 @@ async function createTenantContext(ns: string): Promise<TenantContext> {
     project,
     compute,
     cloudRun: new CloudRunClient(client, computeConfig),
-    artifactRegistry: new ArtifactRegistryClient(client, project.projectId, config.gcp.region),
+    artifactRegistry: new ArtifactRegistryClient(client, project.projectId, gcp.region),
     domains: new DomainLoadBalancerClient(client, {
       tenantProjectId: project.projectId,
-      platformProjectId: config.gcp.platformProjectId,
+      platformProjectId: gcp.platformProjectId,
       environmentId: config.envId,
-      region: config.gcp.region,
+      region: gcp.region,
     }),
     logging: new GcpLoggingClient(client, project.projectId),
   };

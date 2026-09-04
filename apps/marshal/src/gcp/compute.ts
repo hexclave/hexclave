@@ -33,6 +33,10 @@ export type ComputeInstanceSpec = {
   startCommand: string | null,
   volume: { diskName: string, path: string } | null,
   serviceKeyHash: string,
+  // The shape to run on, derived from the spec's memory by the caller. A whole
+  // machine from a fixed catalog, so the CPU that comes with it is whatever that
+  // shape carries — the smaller ones are shared-core and burstable.
+  machineType: string,
 };
 
 export type BuilderVmSpec = {
@@ -394,7 +398,7 @@ export class ComputeClient {
       method: "POST",
       body: {
         name: spec.name,
-        machineType: this.projectUrl(`/zones/${this.config.zone}/machineTypes/e2-micro`),
+        machineType: this.projectUrl(`/zones/${this.config.zone}/machineTypes/${spec.machineType}`),
         tags: { items: ["hexclave-service"] },
         labels: { "hexclave-managed": "true", "hexclave-revision": spec.revision, "hexclave-service-key": spec.serviceKeyHash },
         disks: [

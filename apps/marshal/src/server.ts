@@ -12,4 +12,4 @@ app.listen(config.port);
 // (apps/marshal/vercel.json in production, apps/backend/scripts/run-cron-jobs.ts locally), so
 // that provisioning survives a hosting platform that freezes the process at response time.
 
-console.log(`Marshal listening on http://localhost:${config.port} (env=${config.envId}, builder=${config.builderKind}, gcp region=${config.gcp.region})`);
+console.log(`Marshal listening on http://localhost:${config.port} (env=${config.envId}, builder=${config.builderKind}, runtimes=${[config.fly === null ? null : "fly", config.gcp === null ? null : `gcp:${config.gcp.region}`].filter((runtime) => runtime !== null).join(",")})`);

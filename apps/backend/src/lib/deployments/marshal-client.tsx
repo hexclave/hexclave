@@ -1,8 +1,10 @@
 import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
+import type { DeploymentRuntime } from "@hexclave/shared/dist/deployments";
 
-// Thin client for Marshal, the GCP-backed deployments runtime (apps/marshal).
+// Thin client for Marshal, the deployments runtime (apps/marshal), which runs a project's
+// services on Fly (the default) or Google Cloud (opted into per project).
 // Marshal implements the Hexclave Runtime API: stateless, namespace-scoped
 // (the namespace is the tenancy id), single bearer credential. This module is
 // the only place backend code talks to it.
@@ -95,6 +97,16 @@ export type MarshalServiceSpec = {
     // machine configuration rather than image content, so it takes effect on a
     // roll and never causes a build.
     start_command?: string,
+    // How much memory the container gets, in megabytes. Marshal derives the CPU
+    // and the machine shape from it — the pair is a property of what the
+    // provider will accept, so the backend does not get to name a CPU.
+    //
+    // ABSENT means the type's default, and the backend deliberately omits the
+    // field when the definition asks for that default: Marshal hashes this into
+    // the service revision, and a spec that spells out the size the service is
+    // already running on must hash identically to one that leaves it out (a
+    // changed revision replaces a "server" VM).
+    memory_mb?: number,
   },
   // A spec always names an already-built image: images are produced by the
   // deployment's single build, which builds every service of the deployment
@@ -237,7 +249,9 @@ const LIST_TIMEOUT_MS = 2 * 60 * 1000;
 // Deliberately BELOW the 800s Vercel maxDuration both services declare (see
 // `src/index.ts` in each): this has to fire first, so the caller gets a clean
 // 504 from here rather than a platform-killed invocation with no body at all.
-const DEPLOY_START_TIMEOUT_MS = 13 * 60 * 1000;
+// Per runtime: a GCP deploy into a fresh namespace may provision a tenant project
+// synchronously when the pool is empty, which takes minutes; Fly has nothing of the kind.
+const DEPLOY_START_TIMEOUT_MS_BY_RUNTIME: Record<DeploymentRuntime, number> = { fly: 5 * 60 * 1000, gcp: 13 * 60 * 1000 };
 
 export class MarshalClient {
   constructor(private readonly config: MarshalDeploymentsConfig) {}
@@ -311,13 +325,21 @@ export class MarshalClient {
     // Omitted when every target names an already-built image: nothing is built,
     // so the runtime needs no source archive and starts no builder machine.
     upload_id?: string,
+    // The builder machine for this deployment. One machine builds every target,
+    // so this is deployment-level rather than per-target. Omitted = the runtime
+    // picks the size the build shape needs, which only it can know (an
+    // auto-detected build needs more than one driven by a Dockerfile).
+    builder?: { memory_mb: number },
     targets: MarshalDeploymentTarget[],
     // Service keys grouped into dependency levels: everything in one level is
     // applied concurrently, and a level starts only once the previous one has
     // converged (a `url` ref can only resolve after its target is up).
     order: string[][],
+    // The runtime the project's deploy file selects; Marshal pins the namespace to it on
+    // first use and refuses a later deploy that disagrees (see apps/marshal/src/runtime.ts).
+    runtime: DeploymentRuntime,
   }): Promise<MarshalDeployment> {
-    return await this.fetchMarshal(urlString`/v1/namespaces/${ns}/sources/${sourceId}/deployments`, { method: "POST", body, timeoutMs: DEPLOY_START_TIMEOUT_MS });
+    return await this.fetchMarshal(urlString`/v1/namespaces/${ns}/sources/${sourceId}/deployments`, { method: "POST", body, timeoutMs: DEPLOY_START_TIMEOUT_MS_BY_RUNTIME[body.runtime] });
   }
 
   async getDeployment(ns: string, deploymentId: string): Promise<MarshalDeployment> {

@@ -1249,6 +1249,21 @@ export function SettingsContent({ service, isHexclave }: {
     // service that declares only `minInstances: 3` really does run with a max of 3, so a
     // flat "1" here would contradict the fleet the user gets.
     { label: "Max instances", value: service.api?.max_instances?.toString(), fallback: Math.max(service.api?.min_instances ?? 0, 1).toString() },
+    // The size the service RUNS at, which the API resolves — unlike the two
+    // bounds above there is no "not set" to show, because a service that names
+    // no size is running its type's default rather than running nothing.
+    { label: "Memory", value: service.api?.memory, fallback: "Not synced yet" },
+    // Stated because it is DERIVED from memory rather than chosen, and because
+    // on the smaller server sizes it is a burstable fraction of a core: a 4GB
+    // server that turns out to have one shared CPU is worth saying out loud
+    // here rather than leaving to be discovered under load.
+    {
+      label: "CPU",
+      value: service.api?.cpu == null
+        ? undefined
+        : `${service.api.cpu.count} vCPU${service.api.cpu.shared ? " · shared, burstable" : ""}`,
+      fallback: "Not synced yet",
+    },
     // No "Dev command" row: `devCommand` is consumed locally by `hexclave dev`
     // and never sent to the server, so there is nothing here to show.
   ];

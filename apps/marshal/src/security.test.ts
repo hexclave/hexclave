@@ -151,7 +151,7 @@ describe("mock safety", () => {
   });
 
   it("derives the local GCP mock port from the development port prefix", () => {
-    expect(resolveGcpMockUrl("local", "93")).toBe("http://localhost:9348");
+    expect(resolveGcpMockUrl("local", "93")).toBe("http://localhost:9349");
     expect(resolveGcpMockUrl("http://gcp-mock:8080/", "93")).toBe("http://gcp-mock:8080");
     expect(resolveGcpMockUrl(undefined, "93")).toBeNull();
   });

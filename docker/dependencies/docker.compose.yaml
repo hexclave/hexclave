@@ -277,6 +277,21 @@ services:
     ports:
       - "${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}26:8080"       # mock of the Vercel REST API for the Deployments app
 
+  # ================= Fly mock =================
+
+  fly-mock:
+    build:
+      context: ./fly-mock
+      dockerfile: Dockerfile
+    image: fly-mock
+    restart: unless-stopped                                    # a guarded handler shouldn't crash, but recover the container if it ever does
+    ports:
+      # Bound to LOOPBACK, unlike the other mocks: this one's /__mock introspection returns
+      # each machine's resolved environment, which in a deployments test run holds decrypted
+      # project secrets. Only Marshal (on the host) needs to reach it, so there is nothing to
+      # gain from publishing it to every interface.
+      - "127.0.0.1:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}48:8080"  # mock of the Fly.io Machines/GraphQL/logs APIs for Marshal (the default runtime)
+
   # ================= GCP mock =================
 
   gcp-mock:
@@ -288,11 +303,8 @@ services:
     environment:
       HEXCLAVE_GCP_MOCK_TOKEN: ${HEXCLAVE_MARSHAL_GCP_MOCK_TOKEN:-mock_hexclave_gcp_key}
     ports:
-      # Bound to LOOPBACK, unlike the other mocks: /__mock introspection returns
-      # deployed container environment, which in a deployments test run holds decrypted
-      # project secrets. Only Marshal (on the host) needs to reach it, so there is nothing to
-      # gain from publishing it to every interface.
-      - "127.0.0.1:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}48:8080"  # mock of the Google Cloud REST APIs used by Marshal
+      # Loopback for the same reason as the Fly mock above.
+      - "127.0.0.1:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}49:8080"  # mock of the Google Cloud REST APIs used by Marshal (the opt-in "gcp-beta-1" runtime)
 
   # ================= Stripe =================
   

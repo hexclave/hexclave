@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { BASE_IMAGE, MAX_BUILD_ENV_BYTES } from "./config.js";
 import { buildEnvByteLength, buildHarnessScript, buildTimeEnv, createMockBuilder, generatedDockerfile, type BuildTarget } from "./builds.js";
+import { providerFor } from "./provider.js";
 import { deploymentLogRedactionValues, validateDeploymentRequest, validateServiceSpec } from "./services.js";
 import { targetIsBuilt, targetUsesGeneratedDockerfile } from "./types.js";
 
@@ -188,7 +189,7 @@ describe("deploymentLogRedactionValues", () => {
     // exists to show. Scrubbing them would black out the revision the build
     // prints — and, because these are matched as plain substrings, an 8-hex
     // short sha would take every unrelated 8-hex run in the log with it.
-    const values = deploymentLogRedactionValues(deployment({
+    const values = deploymentLogRedactionValues(providerFor("gcp"), deployment({
       DATABASE_URL: { value: "postgres://user:hunter2@db:5432/app" },
       CI_COMMIT_SHA: { value: "0123456789abcdef0123456789abcdef01234567" },
       CI_COMMIT_SHORT_SHA: { value: "01234567" },
@@ -203,7 +204,7 @@ describe("deploymentLogRedactionValues", () => {
   it("still scrubs a service's OWN env var that merely starts with CI", () => {
     // The exemption is the CI_ namespace the control plane admits for ci_env,
     // not "any name beginning with CI" — CIPHER_KEY is an ordinary secret.
-    expect(deploymentLogRedactionValues(deployment({
+    expect(deploymentLogRedactionValues(providerFor("gcp"), deployment({
       CIPHER_KEY: { value: "sk-cipher-key-value" },
     }))).toContain("sk-cipher-key-value");
   });
@@ -223,6 +224,7 @@ describe("createMockBuilder", () => {
       targets: ["web", "api", "worker-queue"].map((serviceKey) => ({
         serviceKey, pushTarget: `us-central1-docker.pkg.dev/project/marshal/hx-test-ns-${serviceKey}:tag`, dockerfilePath: null, rootDirectory: null, baseImage: null, buildCommand: null, buildEnv: {},
       })),
+      builderMemoryMb: null,
     }, { assertOwned: async () => {} } as any);
     await vi.waitFor(() => expect(completions.length).toBe(1));
 

@@ -1,10 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { BASE_IMAGE, BASE_IMAGE_WORKDIR, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, RAILPACK_BUILDKIT_TMPFS_SIZE, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, getConfig } from "./config.js";
-import { builderInstanceName } from "./naming.js";
-import { presignValidatedUploadGet } from "./store.js";
+import { BASE_IMAGE, BASE_IMAGE_WORKDIR, getConfig } from "./config.js";
 import type { ReconciliationLeaseGuard } from "./reconciliation-lock.js";
 import type { EnvValue } from "./types.js";
-import { tenantContext } from "./gcp/context.js";
 
 // The completion webhook's path, in one place. app.ts authenticates /internal/* in
 // onRequest, BEFORE any handler runs, by matching this prefix — so a path that only the
@@ -20,7 +17,9 @@ export function buildCompletionPath(deploymentId: string): string {
 // Builders start a build for an uploaded source tarball; completion always flows through
 // the webhook path (POST /internal/deployments/:deploymentId/complete →
 // services.completeBuild), so the two implementations stay behaviorally identical:
-//  - gcp:  ephemeral per-build Compute Engine VM running BuildKit; it calls the webhook.
+//  - fly:  ephemeral per-build Fly Machine running BuildKit (fly/provider.ts).
+//  - gcp:  ephemeral per-build Compute Engine VM running BuildKit (gcp/provider.ts).
+//          Either one calls the webhook.
 //  - mock: dev/e2e only; "completes" in-process on the next tick with a deterministic
 //          fake digest.
 
@@ -155,6 +154,10 @@ export type StartBuildOptions = {
   // Built in this order, in ONE machine. The first failure aborts the rest: the
   // whole deployment fails, so there is no half-built cluster to salvage.
   targets: BuildTarget[],
+  // The builder size the deployment asked for, or null to let the build shape
+  // decide. One value per build, because there is one machine — see
+  // builderMachineFor, which also applies the floor this must not skip.
+  builderMemoryMb: number | null,
 };
 
 // ONE env channel, Vercel-style: every declared env var goes to both the build and the
@@ -257,7 +260,10 @@ echo "MARSHAL_BUILD_START"
 #
 # It is still far better than the third outcome: on the native snapshotter a build does not
 # fail, it silently gets slow enough to time out.
-BUILDKIT_DISK_DIR=/.marshal-buildkit-disk
+# Set by the builder that started this machine: the disk-backed directory differs per
+# runtime (Fly mounts its rootfs overlay device at /.fly-upper-layer; the GCP startup script
+# mounts a data disk at /.marshal-buildkit-disk).
+BUILDKIT_DISK_DIR="\${BUILDKIT_DISK_DIR:-/.marshal-buildkit-disk}"
 BUILDKIT_ROOT=""
 BUILDKIT_STORE_READY=""
 if [ -n "\${BUILDKIT_TMPFS_SIZE:-}" ]; then
@@ -478,64 +484,8 @@ echo "MARSHAL_BUILD_DONE"
 `;
 }
 
-export function createGcpBuilder(): Builder {
-  return {
-    name: "gcp",
-    async startBuild(options, lease) {
-      const config = getConfig();
-      if (config.publicUrl === null) {
-        throw new Error("MARSHAL_PUBLIC_URL must be set for real GCP builds — the builder VM calls the completion webhook on it");
-      }
-      const context = await tenantContext(options.ns);
-      await lease.assertOwned();
-      await context.artifactRegistry.ensureRepository();
-      const tarballUrl = await presignValidatedUploadGet(options.ns, options.deploymentId, BUILD_TIMEOUT_SECONDS + 60);
-      const webhookToken = computeWebhookToken(options.deploymentId, options.ns);
-      const webhookUrl = `${config.publicUrl}${buildCompletionPath(options.deploymentId)}?ns=${encodeURIComponent(options.ns)}`;
-      const targetsManifest = options.targets
-        .map((target) => [target.serviceKey, target.pushTarget, target.dockerfilePath ?? "", target.rootDirectory ?? ""].join("\t"))
-        .join("\n");
-      const isRailpackBuild = options.targets.some((target) => target.dockerfilePath === null && target.baseImage === null);
-      const files = [
-        { path: "/marshal-build.sh", contentsBase64: Buffer.from(buildHarnessScript()).toString("base64") },
-        { path: "/marshal-targets.tsv", contentsBase64: Buffer.from(`${targetsManifest}\n`, "utf8").toString("base64") },
-        ...options.targets.flatMap((target) => Object.entries(target.buildEnv).flatMap(([key, value]) => value === "" ? [] : [{
-          path: `${BUILD_ENV_DIR}/${target.serviceKey}/${key}`,
-          contentsBase64: Buffer.from(value, "utf8").toString("base64"),
-        }])),
-        ...options.targets.flatMap((target) => {
-          const generated = generatedDockerfile(target);
-          return generated === null ? [] : [{
-            path: `${BUILD_DOCKERFILE_DIR}/${target.serviceKey}/${generated.path}`,
-            contentsBase64: Buffer.from(generated.contents, "utf8").toString("base64"),
-          }];
-        }),
-      ];
-      await lease.assertOwned();
-      const machine = await context.compute.createBuilder({
-        name: builderInstanceName(config.envId, options.deploymentId),
-        image: BUILDER_IMAGE,
-        machineType: isRailpackBuild ? "e2-standard-4" : "e2-standard-2",
-        diskSizeGb: isRailpackBuild ? 50 : 30,
-        files,
-        env: {
-          BUILD_ENV_DIR,
-          BUILD_DOCKERFILE_DIR,
-          TARBALL_URL: tarballUrl,
-          REGISTRY_HOST: context.artifactRegistry.registryHost,
-          WEBHOOK_URL: webhookUrl,
-          WEBHOOK_TOKEN: webhookToken,
-          BUILD_TIMEOUT_SECONDS: String(BUILD_TIMEOUT_SECONDS),
-          RAILPACK_CLI_URL,
-          RAILPACK_CLI_SHA256,
-          RAILPACK_FRONTEND_IMAGE,
-          ...(isRailpackBuild ? { BUILDKIT_TMPFS_SIZE: RAILPACK_BUILDKIT_TMPFS_SIZE } : {}),
-        },
-      });
-      return { builderApp: context.project.projectId, builderMachineId: machine.name };
-    },
-  };
-}
+// The real builders live with their runtimes: fly/provider.ts and gcp/provider.ts. Both
+// inject the harness above and speak the same completion webhook.
 
 export type CompleteBuildFn = (options: {
   ns: string,

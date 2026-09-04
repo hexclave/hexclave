@@ -1669,6 +1669,24 @@ model DeploymentSource {
   // writes one any more.
   sourceId String
 
+  // How much memory this source's BUILDER machine gets, in megabytes. Null = the
+  // deployment picks the floor its build shape needs.
+  //
+  // On the source rather than on a service because one `hexclave deploy` builds
+  // every service of the source on ONE machine: there is a single builder to
+  // size, and a per-service column could only ever record a request that another
+  // service's request overrode. Written by the same sync that stores the service
+  // definitions, so it rides that sync's fence rather than needing one of its own.
+  builderMemoryMb Int?
+
+  // Which infrastructure runtime this source's services run on: "fly" (the
+  // default, and what an absent `version` export in the deploy file means) or
+  // "gcp" (opted into with an internal `version` token). Written by the same
+  // sync that stores the definitions. Every source of one project must agree —
+  // services share a private network, which cannot span providers — and the
+  // sync route refuses one that does not; see syncSourceServices.
+  runtime String @default("fly")
+
   tenancy     Tenancy             @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
   services    DeploymentService[]
   deployments Deployment[]
@@ -1730,6 +1748,20 @@ model DeploymentService {
   ports         Json   @default("{}")
   minInstances  Int?
   maxInstances  Int?
+  // How much memory the container gets, in megabytes. Null = the type's default
+  // (see defaultDeploymentMemoryForType), which is what every service ran at
+  // before compute was configurable — so an existing row needs no backfill and
+  // deploys the machine it already had.
+  //
+  // Stored as a number rather than the "4GB" token the deploy file writes: the
+  // token is an authoring spelling with exactly one canonical form per size, and
+  // a column that stores it would have to be re-validated against that ladder on
+  // every read. A megabyte count off the ladder reads back as "unset".
+  //
+  // CPU is not stored because it is not declared: it is derived from this by the
+  // runtime, which is what keeps every size valid on both a whole-VM "server"
+  // and a "serverless" container.
+  memoryMb      Int?
   // Where the service's code lives inside the deployment source's upload, relative to the
   // deploy file. The build CONTEXT is the whole upload (a monorepo service
   // usually has to reach shared code above its own directory); this only scopes

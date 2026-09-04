@@ -1,23 +1,27 @@
-import { createHash } from "node:crypto";
 import { buildEnvByteLength, buildTimeEnv, computeWebhookToken, type Builder } from "./builds.js";
-import { BASE_IMAGE, BUILD_TIMEOUT_SECONDS, MAX_BUILD_ENV_BYTES, MAX_COMMAND_LENGTH, MAX_INSTANCES_CAP, MAX_PERSISTENT_VOLUMES_PER_SERVICE, MAX_PORTS_PER_SERVICE, MAX_UPLOAD_BYTES, MAX_VOLUME_ID_LENGTH, MAX_VOLUME_SIZE_GB, MIN_REDACTED_ENV_VALUE_LENGTH, MIN_VOLUME_SIZE_GB, UNREDACTED_ENV_KEY_REGEX, VOLUME_ID_REGEX, getConfig } from "./config.js";
+import { BASE_IMAGE, BUILDER_MACHINE_BY_MEMORY_MB, BUILD_TIMEOUT_SECONDS, MAX_BUILD_ENV_BYTES, MAX_COMMAND_LENGTH, MAX_INSTANCES_CAP, MAX_PERSISTENT_VOLUMES_PER_SERVICE, MAX_PORTS_PER_SERVICE, MAX_UPLOAD_BYTES, MAX_VOLUME_ID_LENGTH, MAX_VOLUME_SIZE_GB, MIN_REDACTED_ENV_VALUE_LENGTH, MIN_VOLUME_SIZE_GB, UNREDACTED_ENV_KEY_REGEX, VOLUME_ID_REGEX, defaultMemoryMbFor, memorySizesFor } from "./config.js";
 import { applyErrorMessage } from "./apply-error.js";
-import { domainVerificationRecord } from "./domain-verification.js";
+import { resolveEnv, type KnownTarget } from "./env-resolution.js";
 import { MarshalError, badRequest, conflict, notFound } from "./errors.js";
-import { privateHostnameForService, serviceName } from "./naming.js";
 import { MutationOutcomeUnknownError, RECONCILIATION_TAKEOVER_GRACE_MS } from "./mutation-safety.js";
-import { redactSecrets } from "./redact.js";
+import { providerFor, providerForNamespace, type RuntimeProvider } from "./provider.js";
 import { ReconciliationLeaseLostError, withReconciliationLease, type ReconciliationLeaseGuard } from "./reconciliation-lock.js";
+import { redactBuildLogLines, redactBuildLogText } from "./redact-build-log.js";
 import { computeRevision } from "./revision.js";
-import { beginDomainClaimDeletion, createDeployment, deletePendingDomainClaim, deleteSpecConditionally, deleteUpload, deleteValidatedUpload, listDomainClaimsForService, listPendingDomainClaimsForService, listSpecKeys, readDeployment, readDeploymentVersioned, readDomainClaimVersioned, readPendingDomainClaimVersioned, readSpec, readSpecVersioned, readUpload, releaseDomainClaim, replaceDeployment, statUpload, writeDeploymentLog, writeSpec, writeValidatedUpload } from "./store.js";
+import { DEFAULT_RUNTIME, type DeploymentRuntime } from "./runtime.js";
+import { assertServiceCanHoldADomain, standardPortsHolderFor } from "./spec-helpers.js";
+import { createDeployment, deleteSpecConditionally, deleteUpload, deleteValidatedUpload, listDomainClaimsForService, listSpecKeys, readDeployment, readDeploymentVersioned, readDomainClaimVersioned, readSpec, readSpecVersioned, readUpload, replaceDeployment, statUpload, writeDeploymentLog, writeSpec, writeValidatedUpload } from "./store.js";
 import { loadAndValidateSourceArchive } from "./source-archive.js";
 import { validateImageRef } from "./image-ref.js";
-import { portEntries, targetIsBuilt, targetUsesGeneratedDockerfile, type Deployment, type DeploymentServiceState, type DeploymentTarget, type EnvValue, type PortsConfig, type ServiceKind, type ServiceSpec, type ServiceState, type StoredDeployment, type StoredSpec, type VolumeConfig } from "./types.js";
+import { portEntries, targetIsBuilt, targetUsesGeneratedDockerfile, type Deployment, type DeploymentServiceState, type DeploymentTarget, type EnvValue, type PortsConfig, type ServiceSpec, type ServiceState, type StoredDeployment, type StoredSpec, type VolumeConfig } from "./types.js";
 import { ulid } from "./ulid.js";
-import { applyRuntimeService, deleteRuntimeService, observeRuntimeService, runtimeAddress } from "./gcp/runtime.js";
-import { tenantContext } from "./gcp/context.js";
-import { projectIdForNamespace } from "./gcp/projects.js";
-import { withPlatformDomainLease } from "./platform-domain-lock.js";
+
+// The pure spec helpers and the env resolver moved to their own modules so the providers can
+// share them; re-exported here so their existing importers (and tests) need not move.
+export { resolveEnv, type KnownTarget } from "./env-resolution.js";
+export { assertServiceCanHoldADomain, soleHttpPort, specIsPublic, specVolume, standardPortsHolderFor } from "./spec-helpers.js";
+export { redactBuildLogLines, redactBuildLogText } from "./redact-build-log.js";
+export { builderOutputIsTerminal, builderStartupScriptFailed } from "./gcp/provider.js";
 
 const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // The optional `:<port>` suffix belongs to `url`, which names the port it means
@@ -93,7 +97,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
 }
 
-export function validateServiceSpec(body: unknown): ServiceSpec {
+/**
+ * Validates a spec. `runtime` decides the memory ladder — the one part of a spec whose
+ * legal values are a fact about the infrastructure rather than about the contract — and
+ * defaults to the default runtime, which is what a spec with no namespace context (a test,
+ * a placeholder) is validated against.
+ */
+export function validateServiceSpec(body: unknown, runtime: DeploymentRuntime = DEFAULT_RUNTIME): ServiceSpec {
   const record = asRecord(body);
   if (record === null) throw badRequest("request body must be a ServiceSpec object");
   const config = asRecord(record.config);
@@ -138,12 +148,41 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
   }
   const portList = portEntries(ports);
 
+  // Memory. Re-validated here rather than trusted, like every other part of a
+  // spec: this is the boundary that turns a request into provider config, and an
+  // unsupported size would otherwise reach a provider API and come back as a
+  // rejection the caller cannot read.
+  //
+  // The ladder is per RUNTIME and per type, because the runtimes' smallest shapes
+  // differ: a Fly machine of either type can carry 512MB, a GCP "server" is a
+  // whole machine and the smallest one carries a full gigabyte.
+  const memoryMbRaw = config.memory_mb;
+  let memoryMb: number | undefined;
+  if (memoryMbRaw !== undefined && memoryMbRaw !== null) {
+    const allowed = memorySizesFor(runtime, serviceKind);
+    if (typeof memoryMbRaw !== "number" || !Number.isInteger(memoryMbRaw) || !allowed.includes(memoryMbRaw)) {
+      throw badRequest(`config.memory_mb must be one of ${allowed.join(", ")} for a ${JSON.stringify(serviceKind)} service`);
+    }
+    // NORMALIZED: the type's own default is dropped rather than carried, so a
+    // spec that spells out the size a service already runs on is byte-identical
+    // to one that says nothing. computeRevision hashes this field, and for a
+    // "server" a changed revision means the machine is replaced — so
+    // without this, restating the default would take a database down for no
+    // change at all.
+    //
+    // The backend normalizes too, but this is the boundary that turns a request
+    // into provider config and it does not trust the one above it (see the
+    // ports note): a replayed older spec, or any other caller, must get the
+    // same guarantee.
+    memoryMb = memoryMbRaw === defaultMemoryMbFor(runtime, serviceKind) ? undefined : memoryMbRaw;
+  }
+
   // Visibility belongs to the CONTAINER, not to a port — see PortConfig in
   // types.ts. A per-port public flag would misdescribe the service-level ingress contract.
   const isPublic = config.public ?? false;
   if (typeof isPublic !== "boolean") throw badRequest("config.public must be a boolean");
   // A public service is all-HTTP. Raw TCP cannot take public ingress: a shared
-  // public gateway is HTTP-layer and cannot route an arbitrary raw stream.
+  // public address tells apps apart by SNI or Host, and a raw TCP stream carries neither.
   const tcpPorts = portList.filter((entry) => entry.protocol === "tcp");
   if (isPublic && tcpPorts.length > 0) {
     throw badRequest(`a public service may not declare a "tcp" port (it declares ${tcpPorts.map((entry) => entry.port).join(", ")}): raw TCP carries no SNI or Host header, so a shared public address cannot tell which service a connection is for`);
@@ -154,11 +193,11 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
     throw badRequest("a public service must declare at least one port: a service with no ports has nothing to serve on the public address it would be given");
   }
   // The standard-ports holder claims external 80 and 443 in ADDITION to its own
-  // number (see externalPortsFor), and `services` entries are listeners on the
-  // whole app. So a different port that is itself numbered 80 or 443 asks for an
-  // external listener the holder has already taken — `{80: public, 443: public}`
-  // makes 80 the holder, which claims 80 and 443, and the declared 443 claims
-  // 443 a second time. The gateway cannot serve one external port from two entries.
+  // number, and listeners are per-app. So a different port that is itself numbered
+  // 80 or 443 asks for an external listener the holder has already taken —
+  // `{80: public, 443: public}` makes 80 the holder, which claims 80 and 443, and
+  // the declared 443 claims 443 a second time. One external port cannot be served
+  // from two entries.
   //
   // Refused rather than resolved by precedence: dropping the holder's standard
   // binding costs the platform URL and the certificate, and dropping the
@@ -172,17 +211,16 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
     }
   }
   // A "server" is a SINGLE instance by definition, so its ceiling is 1 — but its floor is
-  // the caller's choice: 0 suspends the machine when idle (it resumes with its memory
-  // intact) and 1 keeps it up. Rejecting min_instances 1 here would reject the default
-  // every `server` deploys with, and it is exactly the pinning that isServerful() below
-  // reads. Reject rather than coerce: the caller's stated bounds and its stated type would
-  // otherwise disagree in the stored spec.
+  // the caller's choice: 0 lets it suspend when idle (on Fly; a GCP server has no suspend
+  // and simply stays up) and 1 keeps it up. Rejecting min_instances 1 here would reject the
+  // default every `server` deploys with. Reject rather than coerce: the caller's stated
+  // bounds and its stated type would otherwise disagree in the stored spec.
   if (serviceKind === "server" && (minInstances > 1 || maxInstances !== 1)) {
     throw badRequest('config.min_instances must be 0 or 1 and config.max_instances must be 1 when config.type is "server"');
   }
 
-  // A persistent disk attaches to the single Compute Engine VM, so only a "server" can
-  // hold one. The disk survives runtime deletion and a later deployment adopts it.
+  // A persistent disk attaches to the single instance, so only a "server" can hold one.
+  // The disk survives runtime deletion and a later deployment adopts it.
   let persistentVolumes: Record<string, VolumeConfig> | undefined;
   if (config.persistent_volumes !== undefined && config.persistent_volumes !== null) {
     const volumesRecord = asRecord(config.persistent_volumes);
@@ -260,9 +298,9 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
     if (hasRef && !REF_REGEX.test(envValue.ref as string)) throw badRequest(`env.${key}.ref must look like "<service_key>.<output_key>"`);
     validatedEnv.set(key, hasValue ? { value: envValue.value as string } : { ref: envValue.ref as string });
   }
-  // Plain values ride to the builder VM inside its metadata, so their total size is bounded.
-  // Enforced here so an oversized env is a 400 rather than an opaque provider rejection. Refs don't count: they
-  // resolve to machine env only.
+  // Plain values ride to the builder machine inside its config, so their total size is
+  // bounded. Enforced here so an oversized env is a 400 rather than an opaque provider
+  // rejection. Refs don't count: they resolve to machine env only.
   const buildEnvBytes = buildEnvByteLength(buildTimeEnv(Object.fromEntries(validatedEnv)));
   if (buildEnvBytes > MAX_BUILD_ENV_BYTES) {
     throw badRequest(`the env var values total ${buildEnvBytes} bytes, over the ${MAX_BUILD_ENV_BYTES}-byte limit (they are handed to the remote build, which puts them in the builder machine's configuration)`);
@@ -271,254 +309,12 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
   return {
     // Key order is canonical here too (see the source note below). `persistent_volumes` is
     // only present when set; computeRevision mirrors that same conditional spread.
-    config: { type: serviceKind, public: isPublic, min_instances: minInstances, max_instances: maxInstances, ports, ...(persistentVolumes !== undefined ? { persistent_volumes: persistentVolumes } : {}), ...(startCommand !== undefined ? { start_command: startCommand } : {}) },
+    config: { type: serviceKind, public: isPublic, min_instances: minInstances, max_instances: maxInstances, ports, ...(persistentVolumes !== undefined ? { persistent_volumes: persistentVolumes } : {}), ...(startCommand !== undefined ? { start_command: startCommand } : {}), ...(memoryMb !== undefined ? { memory_mb: memoryMb } : {}) },
     // Key order is fixed here on purpose: computeRevision hashes the JSON serialization of
     // this object, so construction must stay canonical.
     source: { image },
     env: Object.fromEntries(validatedEnv),
   };
-}
-
-// ---------------------------------------------------------------------------
-// Env ref resolution
-
-// What a `url` reference needs to know about its target: which ports it declares
-// and whether the SERVICE is public. Kept as one value so the two can never be
-// sourced from different places — see targetOf.
-export type KnownTarget = { type: ServiceKind, ports: PortsConfig, public: boolean };
-
-type ResolvedEnv =
-  | { ok: true, env: Record<string, string> }
-  | { ok: false, blockedRefs: string[] };
-
-// `hostname` is a pure function of the service name. `url` names ONE port, so it
-// needs to know that port's protocol and whether it is public — from the
-// deployment's own targets when the target is part of this deploy (which is what
-// keeps a private url() from depending on deploy ORDER), and otherwise from the
-// target's stored spec.
-export async function resolveEnv(ns: string, env: Record<string, EnvValue>, knownTargets?: Map<string, KnownTarget>): Promise<ResolvedEnv> {
-  const { envId } = getConfig();
-  const resolved = new Map<string, string>();
-  const blockedRefs: string[] = [];
-  const addressCache = new Map<string, Awaited<ReturnType<typeof runtimeAddress>> | null>();
-  const targetCache = new Map<string, KnownTarget | null>();
-  // Ports AND visibility together: they are two halves of one decision (which
-  // address a `url` resolves to), so reading them from different places lets a
-  // service being flipped public→private in this very deploy resolve as public
-  // for a sibling applied before it.
-  const targetOf = async (targetKey: string): Promise<KnownTarget | null> => {
-    const known = knownTargets?.get(targetKey);
-    if (known !== undefined) return known;
-    if (!targetCache.has(targetKey)) {
-      const spec = await readSpec(ns, targetKey);
-      targetCache.set(targetKey, spec === null ? null : { type: spec.spec.config.type, ports: spec.spec.config.ports, public: spec.spec.config.public });
-    }
-    return targetCache.get(targetKey) ?? null;
-  };
-
-  for (const [key, value] of Object.entries(env)) {
-    if ("value" in value) {
-      resolved.set(key, value.value);
-      continue;
-    }
-    const match = REF_REGEX.exec(value.ref);
-    if (match === null) {
-      blockedRefs.push(value.ref);
-      continue;
-    }
-    const [, targetKey, outputKey, namedPortText] = match;
-    // Truthiness, not an undefined check: TS types an optional capture group as
-    // `string` even though it is undefined at run time when it did not match.
-    const namedPort = namedPortText ? Number(namedPortText) : null;
-    switch (outputKey) {
-      case "hostname": {
-        const target = await targetOf(targetKey);
-        if (target === null) {
-          blockedRefs.push(value.ref);
-          break;
-        }
-        if (!addressCache.has(targetKey)) addressCache.set(targetKey, await computeServiceAddress(ns, targetKey));
-        const hostname = addressCache.get(targetKey)?.hostname ?? null;
-        if (hostname === null) blockedRefs.push(value.ref);
-        else resolved.set(key, hostname);
-        break;
-      }
-      case "url": {
-        // Which port the URL means, and what it looks like. The port picks the
-        // number; the TARGET SERVICE's visibility picks the address:
-        //  - a PUBLIC service resolves to its public URL (the platform URL, or a
-        //    verified custom domain), which exists only once the service is up;
-        //  - a PRIVATE service resolves to its internal address, built from the
-        //    target's runtime hostname (a VM's internal IP) and the port itself.
-        // Either way the address comes from the target's ROLLOUT, so both block
-        // until the target has one — which is why every service reference is a
-        // deploy-ordering edge (see connectionRequiresTargetDeployed).
-        const target = await targetOf(targetKey);
-        if (target === null) {
-          // Nothing known about the target: it may not have been deployed yet.
-          blockedRefs.push(value.ref);
-          break;
-        }
-        const ports = target.ports;
-        const port = namedPort === null
-          ? (() => {
-            const sole = soleHttpPort(ports);
-            return sole === null ? null : portEntries(ports).find((entry) => entry.port === sole) ?? null;
-          })()
-          : portEntries(ports).find((entry) => entry.port === namedPort) ?? null;
-        if (port === null || port.protocol !== "http") {
-          // The backend rejects both of these up front against the synced
-          // definition; blocking rather than guessing means a spec that somehow
-          // arrives unresolvable never deploys a container pointed at the wrong
-          // port.
-          blockedRefs.push(value.ref);
-          break;
-        }
-        // Visibility is the TARGET SERVICE's, not the port's: a private service
-        // resolves to its internal address, a public one to its platform URL.
-        // Read from `target`, which prefers this deployment's own specs — see
-        // targetOf. Reading it from the STORED spec instead reintroduced exactly
-        // the deploy-order dependence knownTargets exists to remove.
-        if (!addressCache.has(targetKey)) addressCache.set(targetKey, await computeServiceAddress(ns, targetKey));
-        const address = addressCache.get(targetKey) ?? null;
-        // A private server is addressed by the VM's internal IP and the requested port —
-        // NOT by internalUrl, which only answers for a sole HTTP port and is null for the
-        // tcp-only services (a database, say) that private url() refs exist to reach.
-        if (!target.public) {
-          // A PRIVATE address already carries the port it is reached on, so it is
-          // finished here — it must NOT fall through to the standard-ports suffix
-          // below, which exists only for a public URL that carries no port at all.
-          // Letting it through appended the number a second time and handed the
-          // consumer "http://10.128.0.21:9090:9090".
-          //
-          // A private server is addressed by the VM's internal IP and the requested port —
-          // NOT by internalUrl, which only answers for a sole HTTP port and is null for the
-          // tcp-only services (a database, say) that private url() refs exist to reach. A
-          // private SERVERLESS service is the opposite: its address is the Cloud Run URI,
-          // one port-agnostic HTTPS endpoint that no port number belongs on.
-          const privateUrl = target.type === "server"
-            ? (address?.hostname == null ? null : `http://${address.hostname}:${port.port}`)
-            : address?.internalUrl ?? null;
-          if (privateUrl === null) blockedRefs.push(value.ref);
-          else resolved.set(key, privateUrl);
-          break;
-        }
-        const url = address?.platformUrl ?? null;
-        if (url === null) {
-          blockedRefs.push(value.ref);
-        } else {
-          // The platform URL answers for the port that owns 80/443. Any OTHER
-          // public port of a multi-port service is reachable on its own number
-          // and nowhere else, so the ref has to carry it — otherwise every
-          // public port of one service would resolve to the same URL and quietly
-          // point at whichever one happened to be lowest.
-          const holder = standardPortsHolderFor(ports, target.public);
-          resolved.set(key, port.port === holder ? url : `${url}:${port.port}`);
-        }
-        break;
-      }
-      default: {
-        // Unknown output keys block rather than 400 so adding output keys later is
-        // backward-compatible: the backend re-applies once the runtime learns them.
-        blockedRefs.push(value.ref);
-      }
-    }
-  }
-  if (blockedRefs.length > 0) return { ok: false, blockedRefs };
-  return { ok: true, env: Object.fromEntries(resolved) };
-}
-
-async function computeServiceAddress(ns: string, key: string): Promise<Awaited<ReturnType<typeof runtimeAddress>> | null> {
-  const stored = await readSpec(ns, key);
-  if (stored === null) return null;
-  return await runtimeAddress(ns, key, stored);
-}
-
-// ---------------------------------------------------------------------------
-// Service transport helpers
-export function specIsPublic(spec: ServiceSpec): boolean {
-  return spec.config.public === true;
-}
-
-/**
- * The one HTTP port a bare `url` can name, or null when the service leaves it
- * ambiguous (several HTTP ports) or impossible (none).
- */
-export function soleHttpPort(ports: PortsConfig): number | null {
-  const httpPorts = portEntries(ports).filter((entry) => entry.protocol === "http");
-  return httpPorts.length === 1 ? httpPorts[0].port : null;
-}
-
-/**
- * The port that additionally answers on 80/443, or null when there is no single
- * obvious one.
- *
- * Defined for PRIVATE services too, not just public ones: a private service
- * gets public IPs the moment a custom domain is attached (see attachDomain), and
- * that domain terminates TLS on 443 — so a private service with one HTTP port
- * must bind the standard ports too, or its verified domain would resolve and
- * then refuse the connection.
- *
- * When a public service declares SEVERAL ports exactly one can hold 80/443, and it is the
- * LOWEST-NUMBERED — portEntries sorts numerically, so the winner is a property
- * of the port set rather than of JSON key ordering. Determinism is the point:
- * the holder is the port the service's bare URL names and the only one a custom
- * domain can front, so an arbitrary pick would silently move both. KEPT IN SYNC
- * WITH
- * standardPortsHolderPort in @hexclave/shared's deployments.ts, which
- * is what the backend reports to the CLI and dashboard from.
- */
-export function standardPortsHolderFor(ports: PortsConfig, isPublic: boolean): number | null {
-  if (!isPublic) return soleHttpPort(ports);
-  // Filtered to HTTP defensively: a public service may declare no TCP port, so
-  // on any valid spec this is simply the lowest port.
-  const httpPorts = portEntries(ports).filter((entry) => entry.protocol === "http");
-  return httpPorts.length === 0 ? null : httpPorts[0].port;
-}
-
-/**
- * The port rule for a service that holds (or is about to hold) a custom domain.
- *
- * A custom domain allocates a public load-balancer IP, so it makes the service reachable
- * exactly the way `public: true` does — so a service holding one
- * has to satisfy the same rules a public service does, whether or not it declares itself
- * public.
- *
- * A PRIVATE service with an HTTP port next to a 5432 looks legal at sync time, but attaching
- * a domain must never make an ambiguous sibling port public.
- *
- * STRICTER THAN validateServiceSpec, and deliberately: that rule passes a wholly private
- * multi-port service, because a service nobody can reach leaks nothing. A domain is exactly
- * what makes it reachable, so at attach time those same siblings become the leak. The one
- * port a private service may front with a domain is its ONLY port — publishing it is what the
- * author asked the domain for. A PUBLIC service is fine at any port count: it is already
- * reachable, the domain simply fronts its standard-ports holder.
- *
- * BOTH places that can bring a domain and this port set together must call this: the attach
- * (domains.ts) and the spec write (applyServiceSpecWithLease). Checking only the attach
- * leaves the ports free to move afterwards — attach a domain to a lone HTTP port, then PUT a
- * `tcp` sibling, and the spec is legal at every gate while the proxy publishes it.
- * That is why this is one function and not a rule re-typed at each site.
- */
-export function assertServiceCanHoldADomain(serviceKey: string, ports: PortsConfig, isPublic: boolean, remedy: string): void {
-  const entries = portEntries(ports);
-  if (!entries.some((entry) => entry.protocol === "http")) {
-    throw badRequest(`custom domains need an HTTP port to route to; service ${JSON.stringify(serviceKey)} declares none. ${remedy}`);
-  }
-  if (!isPublic && entries.length > 1) {
-    throw badRequest(`a private service holding a custom domain may not declare more than one port: the domain allocates public IPs, and the proxy serves every declared port on every address the app has, so the others would be published too. Service ${JSON.stringify(serviceKey)} declares ${entries.length} ports; make the service public, or move the others onto their own service and reach them with hostname(). ${remedy}`);
-  }
-  // The domain can only front the port that owns 80/443 — a certificate
-  // terminates TLS there and nowhere else.
-  if (standardPortsHolderFor(ports, isPublic) === null) {
-    throw badRequest(`a custom domain needs one HTTP port to front, and service ${JSON.stringify(serviceKey)} leaves it ambiguous. ${remedy}`);
-  }
-}
-
-export function specVolume(spec: ServiceSpec): { volumeId: string, volume: VolumeConfig } | null {
-  const entries = Object.entries(spec.config.persistent_volumes ?? {});
-  if (entries.length === 0) return null;
-  return { volumeId: entries[0][0], volume: entries[0][1] };
 }
 
 // ---------------------------------------------------------------------------
@@ -557,11 +353,11 @@ async function claimDesiredSpec(ns: string, key: string, spec: ServiceSpec, revi
   throw conflict(`service ${JSON.stringify(key)} was updated too frequently; retry the request`);
 }
 
-async function stateAfterSpecWrite(ns: string, key: string, stored: StoredSpec, previousEtag: string, knownTargets?: Map<string, KnownTarget>): Promise<ServiceState> {
+async function stateAfterSpecWrite(provider: RuntimeProvider, ns: string, key: string, stored: StoredSpec, previousEtag: string, knownTargets?: Map<string, KnownTarget>): Promise<ServiceState> {
   const etag = await writeSpec(stored, { ifMatch: previousEtag });
-  if (etag !== null) return await getServiceState(ns, key, stored, knownTargets);
+  if (etag !== null) return await serviceStateWith(provider, ns, key, stored, knownTargets);
   // Another request (or a delete) owns the desired state now. Never resurrect/overwrite it.
-  return await getServiceState(ns, key, undefined, knownTargets);
+  return await serviceStateWith(provider, ns, key, undefined, knownTargets);
 }
 
 async function specIsStillOwned(ns: string, key: string, etag: string): Promise<boolean> {
@@ -580,23 +376,29 @@ async function currentDomainClaimsForService(ns: string, key: string): Promise<s
     .map(({ hostname }) => hostname);
 }
 
-export async function applyServiceSpec(ns: string, key: string, spec: ServiceSpec, options?: { knownTargets?: Map<string, KnownTarget>, lease?: ReconciliationLeaseGuard }): Promise<ApplyResult> {
+/**
+ * Applies a spec. `runtime` is the runtime the caller asked for (a PUT body's `runtime`),
+ * reconciled against the namespace's pin — see resolveNamespaceRuntime. Absent on the
+ * deployment path, where the deployment has already pinned it.
+ */
+export async function applyServiceSpec(ns: string, key: string, spec: ServiceSpec, options?: { knownTargets?: Map<string, KnownTarget>, lease?: ReconciliationLeaseGuard, runtime?: DeploymentRuntime }): Promise<ApplyResult> {
+  const provider = await providerForNamespace(ns, options?.runtime);
   // A deployment already holds the lease for its whole source, so it passes its
   // own rather than taking a second one per service — the lease is not
   // re-entrant, and waiting on itself is a deadlock.
   if (options?.lease !== undefined) {
-    return await applyServiceSpecWithLease(ns, key, spec, options.lease, options.knownTargets);
+    return await applyServiceSpecWithLease(provider, ns, key, spec, options.lease, options.knownTargets);
   }
-  return await withReconciliationLease(ns, key, async (lease) => await applyServiceSpecWithLease(ns, key, spec, lease, options?.knownTargets));
+  return await withReconciliationLease(ns, key, async (lease) => await applyServiceSpecWithLease(provider, ns, key, spec, lease, options?.knownTargets));
 }
 
-async function applyServiceSpecWithLease(ns: string, key: string, spec: ServiceSpec, lease: ReconciliationLeaseGuard, knownTargets?: Map<string, KnownTarget>): Promise<ApplyResult> {
-  const config = getConfig();
+async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, key: string, spec: ServiceSpec, lease: ReconciliationLeaseGuard, knownTargets?: Map<string, KnownTarget>): Promise<ApplyResult> {
   // A domain-holding service must satisfy the domain port rule on every spec write, not just
-  // at attach time. The domain's public IPs outlive the attach: a later PUT that adds a
+  // at attach time. The domain's public ingress outlives the attach: a later PUT that adds a
   // private sibling port would hand it to the proxy on those IPs, so the whole rule is
   // re-checked here rather than only its HTTP-port half.
-  if ((await currentDomainClaimsForService(ns, key)).length > 0) {
+  const domainClaims = await currentDomainClaimsForService(ns, key);
+  if (domainClaims.length > 0) {
     assertServiceCanHoldADomain(key, spec.config.ports, spec.config.public, "Detach the service's custom domains first if this port set is what you want.");
   }
   const revision = computeRevision(spec);
@@ -609,10 +411,9 @@ async function applyServiceSpecWithLease(ns: string, key: string, spec: ServiceS
   // starting builds — the backend re-applies when the blocking output appears.
   const resolved = await resolveEnv(ns, stored.spec.env, knownTargets);
   if (!resolved.ok) {
-    return { revision, changed, state: await getServiceState(ns, key, stored, knownTargets), imageRef: null };
+    return { revision, changed, state: await serviceStateWith(provider, ns, key, stored, knownTargets), imageRef: null };
   }
 
-  // The runtime must exist before its address and resolved image can be observed.
   // FUTURE (build-time env): env values are handed to the builder too (see buildTimeEnv),
   // because frameworks that inline them (NEXT_PUBLIC_*, VITE_*) need them at BUILD time. So
   // an env-only change rolls the runtime with the new value while the already-built image
@@ -626,14 +427,14 @@ async function applyServiceSpecWithLease(ns: string, key: string, spec: ServiceS
     // Deliberately WITHOUT knownTargets: the spec being reported now belongs to whoever won the
     // race, and resolving someone else's refs against this deployment's targets would report
     // a state their own reads never agree with.
-    return { revision, changed, state: await getServiceState(ns, key), imageRef: null };
+    return { revision, changed, state: await serviceStateWith(provider, ns, key), imageRef: null };
   }
   let imageRef: string | null = null;
   try {
-    // A claimed custom domain routes through the persistent-server gateway, so the apply has to
-    // know about it or it will tear that gateway down as though the service were merely private.
-    const hasDomainClaim = (await listDomainClaimsForService(ns, key)).length > 0;
-    imageRef = await applyRuntimeService(stored, stored.spec.source.image, resolved.env, lease, hasDomainClaim);
+    // A claimed custom domain routes through the persistent-server gateway on GCP, so the
+    // apply has to know about it or it will tear that gateway down as though the service
+    // were merely private.
+    imageRef = await provider.applyService(stored, stored.spec.source.image, resolved.env, lease, domainClaims.length > 0);
     stored.last_apply_error = null;
   } catch (error) {
     if (isReconciliationFencingError(error)) throw error;
@@ -643,7 +444,7 @@ async function applyServiceSpecWithLease(ns: string, key: string, spec: ServiceS
     console.error(`apply failed for service ${stored.ns}/${stored.key}`, error);
     stored.last_apply_error = `deploy failed: ${applyErrorMessage(error)}`;
   }
-  return { revision, changed, state: await stateAfterSpecWrite(ns, key, stored, ownedSpecEtag, knownTargets), imageRef };
+  return { revision, changed, state: await stateAfterSpecWrite(provider, ns, key, stored, ownedSpecEtag, knownTargets), imageRef };
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +478,7 @@ function sourceLeaseKey(sourceId: string): string {
   return `source:${sourceId}`;
 }
 
-export function validateDeploymentRequest(body: unknown): { uploadId: string | null, targets: DeploymentTarget[], order: string[][] } {
+export function validateDeploymentRequest(body: unknown, runtime: DeploymentRuntime = DEFAULT_RUNTIME): { uploadId: string | null, targets: DeploymentTarget[], order: string[][], builderMemoryMb: number | null } {
   const record = asRecord(body);
   if (record === null) throw badRequest("request body must be an object");
   // Optional: a deployment whose every target names a prebuilt image builds
@@ -724,7 +525,7 @@ export function validateDeploymentRequest(body: unknown): { uploadId: string | n
     // 400 on THIS request rather than a failure after a five-minute build.
     const specRecord = asRecord(target.spec);
     if (specRecord === null) throw badRequest(`target ${serviceKey} must have a spec`);
-    const spec = validateServiceSpec({ ...specRecord, source: { image: PLACEHOLDER_IMAGE } });
+    const spec = validateServiceSpec({ ...specRecord, source: { image: PLACEHOLDER_IMAGE } }, runtime);
     // A target built on the runtime's own base image has nothing to start: that
     // base runs a REPL, so without a start command the service would deploy, boot
     // and exit. Refused here as well as upstream, since this is the boundary that
@@ -763,7 +564,29 @@ export function validateDeploymentRequest(body: unknown): { uploadId: string | n
   const buildsFromSource = targets.some(targetIsBuilt);
   if (buildsFromSource && uploadId === null) throw badRequest("upload_id is required: at least one target is built from source");
   if (!buildsFromSource && uploadId !== null) throw badRequest("upload_id must be omitted: every target names an already-built image, so there is nothing to build");
-  return { uploadId, targets, order };
+  // Deployment-level, because a builder is: one machine builds every target of
+  // one deployment, so there is a single size to state. Absent = let the build
+  // shape decide, which is the only thing that CAN decide it (whether the build
+  // is auto-detected is derived from the targets, not declared by the caller).
+  //
+  // Not floored here — the builder does that at the point the machine is
+  // created, where "is this a Railpack build" is already known. The ladder is the
+  // same on both runtimes.
+  const builderRaw = record.builder;
+  let builderMemoryMb: number | null = null;
+  if (builderRaw !== undefined && builderRaw !== null) {
+    const builder = asRecord(builderRaw);
+    if (builder === null) throw badRequest("builder must be an object");
+    const requested = builder.memory_mb;
+    if (requested !== undefined && requested !== null) {
+      if (typeof requested !== "number" || !Number.isInteger(requested) || !Object.hasOwn(BUILDER_MACHINE_BY_MEMORY_MB, requested)) {
+        const sizes = Object.keys(BUILDER_MACHINE_BY_MEMORY_MB).map(Number).sort((a, b) => a - b).join(", ");
+        throw badRequest(`builder.memory_mb must be one of ${sizes}`);
+      }
+      builderMemoryMb = requested;
+    }
+  }
+  return { uploadId, targets, order, builderMemoryMb };
 }
 
 // A relative path with nothing that could break the harness's TSV manifest or
@@ -790,10 +613,14 @@ function validateOptionalRelativePath(value: unknown, label: string): string | u
  * Accepts a deployment: validates it, consumes the upload, and starts the build.
  * Returns as soon as the builder is running — the applies follow, driven by
  * reads (see advanceDeployment).
+ *
+ * `builderFor` picks the builder once the namespace's runtime is known: the mock one in
+ * dev/e2e, and otherwise the runtime's own.
  */
-export async function startSourceDeployment(ns: string, sourceId: string, body: unknown, builder: Builder): Promise<Deployment> {
-  const { uploadId, targets, order } = validateDeploymentRequest(body);
-  const config = getConfig();
+export async function startSourceDeployment(ns: string, sourceId: string, body: unknown, builderFor: (provider: RuntimeProvider) => Builder, requestedRuntime?: DeploymentRuntime): Promise<Deployment> {
+  const provider = await providerForNamespace(ns, requestedRuntime);
+  const builder = builderFor(provider);
+  const { uploadId, targets, order, builderMemoryMb } = validateDeploymentRequest(body, provider.kind);
   // Targets that need the builder, and targets that already have their image.
   // Everything below branches on THIS rather than on "does the target have an
   // image", so that a future source of prebuilt images (one Marshal has to mirror
@@ -801,18 +628,12 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
   const buildTargets = targets.filter(targetIsBuilt);
   const prebuiltTargets = targets.filter((target) => !targetIsBuilt(target));
   return await withReconciliationLease(ns, sourceLeaseKey(sourceId), async (lease) => {
-    const context = await tenantContext(ns);
-    if (buildTargets.length > 0) {
-      await lease.assertOwned();
-      await context.artifactRegistry.ensureRepository();
-    }
-
     // A prebuilt target's image goes into the deployment exactly as the author
     // wrote it, normalized but NOT resolved: Marshal never contacts the image's
-    // registry, and the target platform resolves whatever this names when it pulls.
+    // registry, and the runtime resolves whatever this names when it pulls.
     //
     // What that costs the caller, stated once here because it is the whole contract for a tag:
-    //   - The bytes a tag names are fixed by the provider at deployment time, not by this request.
+    //   - The bytes a tag names are fixed by the provider at pull time, not by this request.
     //   - A redeploy of an unchanged tag is a no-op: the machine config is
     //     identical, so the config hash matches and nothing is pulled again.
     //     Moving forward onto a republished tag means changing the reference.
@@ -885,6 +706,7 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
       images: prebuiltImages,
       builder_app: null,
       builder_machine_id: null,
+      builder_memory_mb: builderMemoryMb,
       upload_id: uploadId,
     };
 
@@ -916,9 +738,9 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
         uploadId,
         // Only the targets that are actually built. A prebuilt sibling has no
         // Dockerfile, nothing to detect, and nothing to push.
-        targets: buildTargets.map((target) => ({
+        targets: await Promise.all(buildTargets.map(async (target) => ({
           serviceKey: target.service_key,
-          pushTarget: `${context.artifactRegistry.imageRepository(serviceName(config.envId, ns, target.service_key))}:${deploymentId.toLowerCase()}`,
+          pushTarget: await provider.pushTarget(ns, target.service_key, deploymentId),
           dockerfilePath: target.dockerfile_path ?? null,
           rootDirectory: target.root_directory ?? null,
           // Null unless the target builds from a GENERATED Dockerfile, which is
@@ -927,7 +749,8 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
           baseImage: targetUsesGeneratedDockerfile(target) ? target.image ?? BASE_IMAGE : null,
           buildCommand: target.build_command ?? null,
           buildEnv: buildTimeEnv(target.spec.env),
-        })),
+        }))),
+        builderMemoryMb,
       }, lease);
       if (started.builderApp !== null || started.builderMachineId !== null) {
         // Attach the builder coordinates (live-log proxy + stale-build backstop need
@@ -1031,6 +854,7 @@ export async function completeBuild(options: {
 }): Promise<void> {
   const existing = await readDeployment(options.ns, options.deploymentId);
   if (existing === null) return;
+  const provider = await providerForNamespace(options.ns);
   try {
     await withReconciliationLease(options.ns, sourceLeaseKey(existing.source_id), async (lease) => {
       const current = await readDeploymentVersioned(options.ns, options.deploymentId);
@@ -1041,12 +865,12 @@ export async function completeBuild(options: {
 
       if (options.status === "failed") {
         await replaceDeployment(failDeployment(current.value, options.errorText ?? "the build failed"), current.etag);
-        await persistDeploymentLog(current.value);
+        await persistDeploymentLog(provider, current.value);
         await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
         return;
       }
 
-      const images = parseBuildImages(options.metadataJson, current.value);
+      const images = parseBuildImages(provider, options.metadataJson, current.value);
       // Only the targets that were BUILT need a digest from the build. A prebuilt
       // target was resolved when the deployment was created and is already in
       // `images`; asking the build for one would fail every mixed deployment.
@@ -1058,7 +882,7 @@ export async function completeBuild(options: {
         // ended in a state Marshal cannot map to images, which is a failure rather
         // than something to half-apply.
         await replaceDeployment(failDeployment(current.value, `the build reported no image for ${missing.join(", ")}`), current.etag);
-        await persistDeploymentLog(current.value);
+        await persistDeploymentLog(provider, current.value);
         await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
         return;
       }
@@ -1071,23 +895,11 @@ export async function completeBuild(options: {
         images: { ...current.value.images, ...images },
         services: Object.fromEntries(Object.entries(current.value.services).map(([key, service]) => [key, { ...service, status: "pending" as const }])),
       }, current.etag);
-      await persistDeploymentLog(current.value);
+      await persistDeploymentLog(provider, current.value);
       await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
     });
   } finally {
-    await deleteBuilderBestEffort(existing);
-  }
-}
-
-async function deleteBuilderBestEffort(deployment: StoredDeployment): Promise<void> {
-  if (deployment.builder_machine_id === null) return;
-  try {
-    await (await tenantContext(deployment.ns)).compute.deleteInstance(deployment.builder_machine_id);
-  } catch (error) {
-    // The VM has automaticRestart disabled and its build process is already terminal. A
-    // cleanup failure must not replace the recorded deployment result; project lifecycle
-    // cleanup remains the final backstop for an orphan.
-    console.error(`deleting builder VM for ${deployment.ns}/${deployment.id} failed`, error);
+    await provider.deleteBuilder(existing);
   }
 }
 
@@ -1095,15 +907,11 @@ async function deleteBuilderBestEffort(deployment: StoredDeployment): Promise<vo
  * The images a completed build produced, keyed by service key.
  *
  * Digests are resolved into fully-qualified image refs here rather than in the
- * harness: the registry host and app name are Marshal's to know, and a harness
- * that composed them would have to be trusted about which app it pushed to.
+ * harness: the registry host and repository name are Marshal's to know, and a
+ * harness that composed them would have to be trusted about which repository it
+ * pushed to.
  */
-function parseBuildImages(metadataJson: string | null, deployment: StoredDeployment): Record<string, string> {
-  const config = getConfig();
-  const tenantProjectId = deployment.builder_app
-    ?? config.gcp.existingProjectIdForTests
-    ?? projectIdForNamespace({ envId: config.envId, projectPrefix: config.gcp.projectPrefix }, deployment.ns);
-  const registryPrefix = `${config.gcp.region}-docker.pkg.dev/${tenantProjectId}/marshal`;
+function parseBuildImages(provider: RuntimeProvider, metadataJson: string | null, deployment: StoredDeployment): Record<string, string> {
   // Prototype-less for the same reason as prebuiltImages: see startSourceDeployment.
   const images: Record<string, string> = Object.create(null);
   let parsed: unknown;
@@ -1122,7 +930,7 @@ function parseBuildImages(metadataJson: string | null, deployment: StoredDeploym
     if (!targetIsBuilt(target)) continue;
     const digest = targets[target.service_key];
     if (typeof digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(digest)) continue;
-    images[target.service_key] = `${registryPrefix}/${serviceName(config.envId, deployment.ns, target.service_key)}@${digest}`;
+    images[target.service_key] = provider.builtImageRef(deployment, target.service_key, digest);
   }
   return images;
 }
@@ -1286,12 +1094,13 @@ async function deleteUploadBestEffort(ns: string, uploadId: string): Promise<voi
   }
 }
 
-// Durable build log: Marshal drains the builder VM's serial output at terminal state,
-// scrubs every credential it handed to the build, and persists JSONL to the bucket.
+// Durable build log: Marshal drains the builder machine's output at terminal state through
+// the provider, scrubs every credential it handed to the build, and persists JSONL to the
+// bucket — outliving the provider's own retention.
 //
 // One log per DEPLOYMENT, covering every service it built: they shared a machine,
 // so their output is interleaved in one stream and there is nothing to split.
-async function persistDeploymentLog(deployment: StoredDeployment): Promise<void> {
+async function persistDeploymentLog(provider: RuntimeProvider, deployment: StoredDeployment): Promise<void> {
   if (deployment.builder_app === null || deployment.builder_machine_id === null) {
     // Mock builds: a canned log so the has_logs contract holds in dev/e2e, and the only
     // vehicle e2e has for the redaction contract — the mock builder starts no machine, so
@@ -1315,7 +1124,7 @@ async function persistDeploymentLog(deployment: StoredDeployment): Promise<void>
       }),
       { at_millis: Date.now(), stream: "stdout" as const, instance: null, text: "MARSHAL_BUILD_DONE (mock builder)" },
     ];
-    const redactionValues = deploymentLogRedactionValues(deployment);
+    const redactionValues = deploymentLogRedactionValues(provider, deployment);
     await writeDeploymentLog(deployment.ns, deployment.id, lines
       .map((line) => ({ ...line, text: redactBuildLogText(line.text, redactionValues) }))
       .map((line) => JSON.stringify(line))
@@ -1323,24 +1132,12 @@ async function persistDeploymentLog(deployment: StoredDeployment): Promise<void>
     return;
   }
   try {
-    const context = await tenantContext(deployment.ns);
-    const output = await context.compute.getSerialOutput(deployment.builder_machine_id);
-    // Redact before splitting: a secret may itself contain newlines, in which case no
-    // individual line contains the whole value and line-by-line redaction leaks every part.
-    const lines = redactBuildLogLines(output, deploymentLogRedactionValues(deployment)).map((text, index) => ({
-      at_millis: deployment.started_at_millis + index,
-      stream: "stdout" as const,
-      instance: deployment.builder_machine_id,
-      text,
-    }));
+    const lines = await provider.builderLogsDrain(deployment, deploymentLogRedactionValues(provider, deployment));
     // Skip persisting an empty log object: a transient logs-API failure (rate limit,
     // ingestion lag) must not freeze `has_logs:true, lines:[], complete:true`. Leaving no
     // object makes the logs route fall back to the live proxy instead.
     if (lines.length === 0) return;
-    const jsonl = lines
-      .map((line) => JSON.stringify(line))
-      .join("\n");
-    await writeDeploymentLog(deployment.ns, deployment.id, jsonl);
+    await writeDeploymentLog(deployment.ns, deployment.id, lines.map((line) => JSON.stringify(line)).join("\n"));
   } catch (error) {
     // Log persistence is best-effort — the record's terminal status must not be blocked
     // on the logs API. The live proxy already served these lines during the build.
@@ -1352,10 +1149,10 @@ async function persistDeploymentLog(deployment: StoredDeployment): Promise<void>
  * Stage-1 redaction values: every credential Marshal handed the build, plus the
  * tenant's own build-time env values.
  *
- * The persisted credential is the per-deployment webhook token (recomputed because it is
- * derived, not stored). The builder's registry token is short-lived and never enters this
- * process. The presigned tarball URL isn't recomputable,
- * so its signature is scrubbed by shape in redactBuildLogText.
+ * The provider contributes its own credentials (the Fly org token and registry auth; nothing
+ * on GCP, whose registry token is minted on the VM). The per-deployment webhook token is
+ * recomputed because it is derived, not stored. The presigned tarball URL isn't
+ * recomputable, so its signature is scrubbed by shape in redactBuildLogText.
  *
  * Every plain env value of every target is scrubbed, not a chosen subset: one env
  * channel with no build/runtime marker means Marshal cannot tell a publishable
@@ -1372,8 +1169,8 @@ async function persistDeploymentLog(deployment: StoredDeployment): Promise<void>
  * UNREDACTED_ENV_KEY_REGEX is the other: CI provenance is the deploy's own commit, which
  * the build log exists to show, and scrubbing it costs far more than it protects.
  */
-export function deploymentLogRedactionValues(deployment: StoredDeployment): string[] {
-  const values = [computeWebhookToken(deployment.id, deployment.ns)];
+export function deploymentLogRedactionValues(provider: RuntimeProvider, deployment: StoredDeployment): string[] {
+  const values = [...provider.buildRedactionValues(), computeWebhookToken(deployment.id, deployment.ns)];
   for (const target of deployment.targets) {
     for (const [key, value] of Object.entries(buildTimeEnv(target.spec.env))) {
       if (UNREDACTED_ENV_KEY_REGEX.test(key)) continue;
@@ -1381,38 +1178,6 @@ export function deploymentLogRedactionValues(deployment: StoredDeployment): stri
     }
   }
   return values;
-}
-
-export function redactBuildLogText(text: string, values: string[]): string {
-  return redactSecrets(text, values)
-    // Presigned URL signatures (the tarball GET) — scrub by shape since the exact URL
-    // isn't persisted anywhere Marshal can recompute.
-    .replace(/X-Amz-Signature=[A-Za-z0-9%]+/gi, "X-Amz-Signature=<redacted>")
-    .replace(/X-Amz-Credential=[A-Za-z0-9%/]+/gi, "X-Amz-Credential=<redacted>");
-}
-
-export function redactBuildLogLines(serialOutput: string, values: string[]): string[] {
-  // This ordering is a security boundary: multiline values must be removed while they are
-  // still contiguous in the original stream, before callers turn it into line records.
-  return redactBuildLogText(serialOutput, values).split("\n").filter((line) => line !== "");
-}
-
-export function builderOutputIsTerminal(serialOutput: string): boolean {
-  return /MARSHAL_BUILD_(?:DONE|FAILED|TIMEOUT)/.test(serialOutput);
-}
-
-/**
- * A builder whose startup script died before the harness ever started.
- *
- * This is terminal even though the VM is still RUNNING, and the distinction matters: the
- * harness arms the build watchdog itself and `shutdown -h now` is the last line of the very
- * script that failed, so nothing on the machine will ever post a webhook, print a
- * MARSHAL_BUILD_* marker, or power it off. Without this the liveness check below sees a
- * RUNNING instance forever and the deployment stays "building" with no timeout that can
- * rescue it. Same signal `waitForServiceReady` already uses for service VMs.
- */
-export function builderStartupScriptFailed(serialOutput: string): boolean {
-  return /Script "startup-script" failed/.test(serialOutput);
 }
 
 /**
@@ -1423,39 +1188,20 @@ export async function maybeFinalizeStaleDeployment(deployment: StoredDeployment)
   if (deployment.status !== "building") return deployment;
   const staleAfterMillis = deployment.started_at_millis + BUILD_TIMEOUT_SECONDS * 1000 + BUILD_STALE_GRACE_MS;
   if (Date.now() < staleAfterMillis) return deployment;
-  let startupScriptFailed = false;
-  let serialTail = "";
-  if (deployment.builder_app !== null && deployment.builder_machine_id !== null) {
-    let machine;
-    let serialOutput = "";
-    try {
-      const compute = (await tenantContext(deployment.ns)).compute;
-      [machine, serialOutput] = await Promise.all([
-        compute.getInstance(deployment.builder_machine_id),
-        compute.getSerialOutput(deployment.builder_machine_id),
-      ]);
-    } catch (error) {
-      // A transient provider error here must not turn a read into a 502 — leave the
-      // deployment as-is until the next read.
-      console.error(`stale-build liveness check for ${deployment.ns}/${deployment.id} failed`, error);
-      return deployment;
-    }
-    // A VM can remain RUNNING briefly after its one-shot builder container exits. Terminal
-    // harness markers take precedence over the VM lifecycle state so a lost webhook cannot
-    // strand the deployment until the entire project is removed.
-    const harnessIsTerminal = builderOutputIsTerminal(serialOutput) || builderStartupScriptFailed(serialOutput);
-    if (!harnessIsTerminal && machine !== null && (machine.status === "RUNNING" || machine.status === "PROVISIONING" || machine.status === "STAGING")) return deployment;
-    startupScriptFailed = builderStartupScriptFailed(serialOutput);
-    serialTail = serialOutput.trim().split("\n").slice(-3).join(" | ").slice(0, 500);
-  }
+  const provider = await providerForNamespace(deployment.ns);
+  const liveness = await provider.builderLiveness(deployment);
+  // A transient provider error must not turn a read into a 502 — leave the deployment
+  // as-is until the next read.
+  if (liveness === null) return deployment;
+  if (liveness.alive) return deployment;
   const current = await readDeploymentVersioned(deployment.ns, deployment.id);
   if (current === null || current.value.status !== "building") return current?.value ?? deployment;
-  const failed = failDeployment(current.value, startupScriptFailed
-    ? `the builder failed to start; last serial output: ${serialTail}`
+  const failed = failDeployment(current.value, liveness.startupFailed
+    ? `the builder failed to start; last output: ${liveness.tail}`
     : "the build did not report a result before its timeout");
   const etag = await replaceDeployment(failed, current.etag);
   const result = etag === null ? (await readDeployment(deployment.ns, deployment.id)) ?? failed : failed;
-  await deleteBuilderBestEffort(result);
+  await provider.deleteBuilder(result);
   return result;
 }
 
@@ -1463,69 +1209,60 @@ export async function maybeFinalizeStaleDeployment(deployment: StoredDeployment)
 // Reads
 
 export async function getServiceState(ns: string, key: string, preloadedSpec?: StoredSpec | null, knownTargets?: Map<string, KnownTarget>): Promise<ServiceState> {
-  const config = getConfig();
-  const storedForGcp = preloadedSpec !== undefined ? preloadedSpec : await readSpec(ns, key);
-  if (storedForGcp === null) throw notFound(`service ${JSON.stringify(key)} not found in namespace ${JSON.stringify(ns)}`);
-  const [observation, resolvedForGcp, claimedDomainHostnames, pendingDomainHostnames] = await Promise.all([
-    observeRuntimeService(storedForGcp),
-    resolveEnv(ns, storedForGcp.spec.env, knownTargets),
-    currentDomainClaimsForService(ns, key),
-    listPendingDomainClaimsForService(ns, key),
+  return await serviceStateWith(await providerForNamespace(ns), ns, key, preloadedSpec, knownTargets);
+}
+
+async function serviceStateWith(provider: RuntimeProvider, ns: string, key: string, preloadedSpec?: StoredSpec | null, knownTargets?: Map<string, KnownTarget>): Promise<ServiceState> {
+  const stored = preloadedSpec !== undefined ? preloadedSpec : await readSpec(ns, key);
+  if (stored === null) throw notFound(`service ${JSON.stringify(key)} not found in namespace ${JSON.stringify(ns)}`);
+
+  // No build lookup: a spec always names an image that has already been built,
+  // so a service is never "building". Building belongs to the DEPLOYMENT that
+  // produced the image, which reports it (see advanceDeployment).
+  const [observation, resolved, domains] = await Promise.all([
+    provider.observeService(stored),
+    // The SAME knownTargets the apply resolved with. Without it this read would re-resolve
+    // from stored specs alone and report `blocked` for a private `url(port)` naming a target
+    // of this deployment that has not been applied yet — failing the deployment over the
+    // very ordering independence knownTargets exists to provide.
+    resolveEnv(ns, stored.spec.env, knownTargets),
+    provider.domains.statesFor(ns, key, stored),
   ]);
-  const domainContext = await tenantContext(ns);
-  const claimedDomains = await Promise.all(claimedDomainHostnames.sort().map(async (hostname) => {
-    const claim = await readDomainClaimVersioned(hostname);
-    if (claim === null || claim.value.ns !== ns || claim.value.service_key !== key) return null;
-    const domain = await domainContext.domains.get(hostname);
-    return domain === null
-      ? { hostname, verified: false, dns_records: [], error: "custom-domain infrastructure is missing" }
-      : { hostname, verified: domain.verified, dns_records: domain.dnsRecords, error: null };
-  }));
-  const pendingDomains = await Promise.all(pendingDomainHostnames.sort().map(async (hostname) => {
-    const pending = await readPendingDomainClaimVersioned(ns, hostname);
-    if (pending === null || pending.value.service_key !== key) return null;
-    const routingRecords = await withPlatformDomainLease(async (platformLease) => {
-      await platformLease.assertOwned();
-      return await domainContext.domains.ensureFrontendDnsRecords(hostname);
-    });
-    return {
-      hostname,
-      verified: false,
-      dns_records: [domainVerificationRecord(hostname, pending.value.verification_token), ...routingRecords],
-      error: null,
-    };
-  }));
-  const domains = [...claimedDomains.filter((domain) => domain !== null), ...pendingDomains.filter((domain) => domain !== null)];
-  const status: ServiceState["status"] = !resolvedForGcp.ok
+
+  const status: ServiceState["status"] = !resolved.ok
     ? "blocked"
-    : storedForGcp.last_apply_error !== null
+    // Checked BEFORE the no-runtime branch: an apply that failed before it created anything
+    // leaves zero instances and a terminal last_apply_error, and reporting that as "pending"
+    // tells callers to keep waiting for a deploy that is already over.
+    : stored.last_apply_error !== null
       ? observation.instances > 0 ? "degraded" : "failed"
       : !observation.exists
         ? "pending"
         : !observation.atTarget
           ? "deploying"
           : observation.instances === 0
-            ? storedForGcp.spec.config.min_instances === 0 ? "idle" : "stopped"
+            ? stored.spec.config.min_instances === 0 ? "idle" : "stopped"
             : observation.ready ? "running" : "degraded";
   return {
     key,
-    type: storedForGcp.spec.config.type,
+    // Echo back the type the caller actually stored.
+    type: stored.spec.config.type,
     status,
     instances: observation.instances,
     revision: observation.revision,
-    target_revision: observation.atTarget ? null : storedForGcp.revision,
+    target_revision: observation.atTarget ? null : stored.revision,
     outputs: {
-      // A service with no running VM has no address. The name-derived value below is a
-      // stable PLACEHOLDER for the API's non-null field, not something that resolves on
-      // GCP — connection refs deliberately no longer use it (see resolveEnv).
-      hostname: observation.hostname ?? privateHostnameForService(config.envId, ns, key),
+      // Non-null by contract. On Fly the hostname is a pure function of the service identity;
+      // on GCP a service with no running VM has none, and the placeholder is a stable
+      // stand-in that connection refs deliberately never use (see resolveEnv).
+      hostname: observation.hostname ?? provider.hostnamePlaceholder(ns, key),
       internal_url: observation.internalUrl,
       url: observation.platformUrl,
     },
     domains,
-    error: !resolvedForGcp.ok
-      ? `blocked on unresolved refs: ${resolvedForGcp.blockedRefs.join(", ")}`
-      : storedForGcp.last_apply_error ?? observation.error,
+    error: !resolved.ok
+      ? `blocked on unresolved refs: ${resolved.blockedRefs.join(", ")}`
+      : stored.last_apply_error ?? observation.error,
     observed_at_millis: Date.now(),
   };
 }
@@ -1549,42 +1286,20 @@ export async function listServices(ns: string): Promise<ServiceState[]> {
 // DELETE /services/{key}
 
 export async function deleteService(ns: string, key: string): Promise<void> {
-  await withReconciliationLease(ns, key, async (lease) => await deleteServiceWithLease(ns, key, lease));
+  const provider = await providerForNamespace(ns);
+  await withReconciliationLease(ns, key, async (lease) => await deleteServiceWithLease(provider, ns, key, lease));
 }
 
-async function deleteServiceWithLease(ns: string, key: string, lease: ReconciliationLeaseGuard): Promise<void> {
-  const config = getConfig();
-  const storedForGcp = await readSpec(ns, key);
-  const domainContext = await tenantContext(ns);
-  for (const hostname of await listDomainClaimsForService(ns, key)) {
-    const claim = await readDomainClaimVersioned(hostname);
-    if (claim !== null && claim.value.ns === ns && claim.value.service_key === key) {
-      await withPlatformDomainLease(async (platformLease) => {
-        await lease.assertOwned();
-        await platformLease.assertOwned();
-        const current = await readDomainClaimVersioned(hostname);
-        if (current === null
-          || current.etag !== claim.etag
-          || current.value.ns !== ns
-          || current.value.service_key !== key) return;
-        const deleting = await beginDomainClaimDeletion(current, Date.now());
-        if (deleting === null) return;
-        await domainContext.domains.delete(hostname);
-        await lease.assertOwned();
-        await platformLease.assertOwned();
-        if (!await releaseDomainClaim(deleting)) throw conflict(`domain ${JSON.stringify(hostname)} cleanup changed concurrently; retry service deletion`);
-      });
-    }
-  }
-  for (const hostname of await listPendingDomainClaimsForService(ns, key)) {
-    const pending = await readPendingDomainClaimVersioned(ns, hostname);
-    if (pending !== null && pending.value.service_key === key) await deletePendingDomainClaim(pending);
-  }
-  await deleteRuntimeService(storedForGcp, ns, key, lease);
-  const versionForGcp = await readSpecVersioned(ns, key);
+async function deleteServiceWithLease(provider: RuntimeProvider, ns: string, key: string, lease: ReconciliationLeaseGuard): Promise<void> {
+  const stored = await readSpec(ns, key);
+  // Release hostname claims first — the bucket registry would otherwise block the hostname
+  // forever — and every runtime resource except persistent disks, which are addressed by
+  // service + volume id and adopted on a later deploy of the same service id.
+  await provider.domains.releaseForService(ns, key, stored, lease);
+  await provider.deleteService(stored, ns, key, lease);
+  const version = await readSpecVersioned(ns, key);
   await lease.assertOwned();
-  if (versionForGcp !== null) await deleteSpecConditionally(ns, key, versionForGcp.etag);
-  return;
+  if (version !== null) await deleteSpecConditionally(ns, key, version.etag);
 }
 
-export { readDeployment, readSpec };
+export { providerFor, providerForNamespace, readDeployment, readSpec };

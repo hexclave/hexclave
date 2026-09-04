@@ -107,6 +107,8 @@ describe("gcp-mock contract", () => {
         revision: "revision-1",
         startCommand: null,
         serviceKeyHash: "contract-web",
+        memoryMb: 512,
+        cpu: 1,
       });
       expect(first).toMatchObject({ exists: true, ready: true, targetRevision: "revision-1", runningInstances: 0 });
       expect(first.uri).toMatch(/^https:\/\/contract-web-.+\.run\.app$/);
@@ -122,6 +124,8 @@ describe("gcp-mock contract", () => {
         revision: "revision-2",
         startCommand: "nginx -g 'daemon off;'",
         serviceKeyHash: "contract-web",
+        memoryMb: 512,
+        cpu: 1,
       });
       expect(updated.targetRevision).toBe("revision-2");
 
@@ -137,6 +141,7 @@ describe("gcp-mock contract", () => {
         startCommand: null,
         volume: { diskName: "contract-data", path: "/data" },
         serviceKeyHash: "contract-server",
+        machineType: "e2-micro",
       });
       expect(instance.imageRef).toMatch(/^registry\.example\.test:5000\/team\/server@sha256:[0-9a-f]{64}$/);
 

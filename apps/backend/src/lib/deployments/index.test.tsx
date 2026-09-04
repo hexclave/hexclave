@@ -15,6 +15,9 @@ const baseRow = {
   // Null = the base decides the build, and the image decides what starts.
   buildCommand: null as string | null,
   startCommand: null as string | null,
+  // Null = the type's default size, which is what every row predating the
+  // column reads as.
+  memoryMb: null as number | null,
   env: [] as [string, { value: string }][],
 };
 

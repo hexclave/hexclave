@@ -1,8 +1,9 @@
 import { assertGlobalDeploymentCapacity, assertServicesAllowedByPlan, createDeployment, definitionFromServiceRow, deploymentToApiShape, encryptDeploymentRedactionSecrets, getServiceVolume, isTerminalDeploymentStatus, refreshDeploymentFromMarshal, resolveEnvVars, startDeployment } from "@/lib/deployments";
 import { getMarshalDeploymentsConfigOrNull } from "@/lib/deployments/marshal-client";
+import { runtimeFromStored } from "@/lib/deployments/runtime";
 import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { DEPLOYMENT_SOURCE_ID_REGEX, MAX_DEPLOYMENT_SOURCE_ID_LENGTH, deploymentCiEnvSchema, deploymentSecretDefaultsSchema, deploymentServiceIsBuilt, parseSourceManifest, type DeploymentServiceDefinition } from "@hexclave/shared/dist/deployments";
+import { DEPLOYMENT_SOURCE_ID_REGEX, MAX_DEPLOYMENT_SOURCE_ID_LENGTH, deploymentCiEnvSchema, deploymentMemoryFromMb, deploymentSecretDefaultsSchema, deploymentServiceIsBuilt, parseSourceManifest, type DeploymentServiceDefinition } from "@hexclave/shared/dist/deployments";
 import type { MarshalEnvValue } from "@/lib/deployments/marshal-client";
 import { adaptSchema, serverOrHigherAuthTypeSchema, userSpecifiedIdSchema, yupArray, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
@@ -155,7 +156,7 @@ export const POST = createSmartRouteHandler({
 
     const source = await prisma.deploymentSource.findUnique({
       where: { tenancyId_sourceId: { tenancyId: auth.tenancy.id, sourceId: body.source_id } },
-      select: { id: true, sourceId: true },
+      select: { id: true, sourceId: true, builderMemoryMb: true, runtime: true },
     });
     if (source == null) {
       throw new StatusError(400, `No deployment source ${JSON.stringify(body.source_id)} exists in this project. Sync its service definitions first (PUT /deployments/services).`);
@@ -203,7 +204,15 @@ export const POST = createSmartRouteHandler({
     // Re-check the plan against the STORED definitions. The sync checks too, but
     // only as CLI UX — this is the actual entitlement boundary, since a stored
     // definition can outlive the plan that was allowed to create it.
-    await assertServicesAllowedByPlan(auth.tenancy, Object.fromEntries(definitionsByServiceId));
+    // The builder rides the same re-check as the services: it was authorised at
+    // sync time under whatever plan was active then, and a stored source can
+    // outlive that plan exactly as a stored definition can.
+    await assertServicesAllowedByPlan(
+      auth.tenancy,
+      Object.fromEntries(definitionsByServiceId),
+      source.builderMemoryMb === null ? undefined : { memory: deploymentMemoryFromMb(source.builderMemoryMb) ?? undefined },
+      runtimeFromStored(source.runtime),
+    );
 
     // Platform capacity, before the upload is consumed and before anything is
     // handed to the runtime. Only services that do not yet hold a Fly app count:

@@ -181,6 +181,7 @@ vi.mock("./gcp/manager.js", () => ({
 
 vi.mock("./config.js", () => ({
   getConfig: vi.fn(() => ({ envId: "dev", gcp: { projectPoolSize, projectPrefix: "hxc-tena" } })),
+  gcpConfig: vi.fn(() => ({ projectPoolSize, projectPrefix: "hxc-tena" })),
 }));
 
 function seed(initials: { pool?: [string, PoolProjectEntry][], assignments?: [string, string][], size?: number } = {}): void {

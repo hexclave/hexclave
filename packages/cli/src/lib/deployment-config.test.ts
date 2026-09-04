@@ -15,6 +15,17 @@ function evaluate(servicesExport: unknown, mode: "deploy" | "dev" = "deploy") {
   return evaluateDeploymentConfig({ deployFilePath: DEPLOY_FILE_PATH, deploymentGroupIdExport: "test-source", deployExport, mode });
 }
 
+// The same deploy file opted into a runtime with the internal `version` export.
+function evaluateWithVersion(servicesExport: unknown, version: unknown, mode: "deploy" | "dev" = "deploy") {
+  const deployExport = (context: ServicesFunctionContext) => ({
+    services: typeof servicesExport === "function" ? (servicesExport as (ctx: ServicesFunctionContext) => unknown)(context) : servicesExport,
+  });
+  return evaluateDeploymentConfig({ deployFilePath: DEPLOY_FILE_PATH, deploymentGroupIdExport: "test-source", deployExport, versionExport: version, mode });
+}
+function evaluateOnGcp(servicesExport: unknown, mode: "deploy" | "dev" = "deploy") {
+  return evaluateWithVersion(servicesExport, "gcp-beta-1", mode);
+}
+
 describe("evaluateDeploymentConfig (deploy mode)", () => {
   it("preserves __proto__ as an environment variable instead of mutating the result prototype", () => {
     const { services } = evaluate(() => ({
@@ -94,6 +105,44 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
       "3000": { protocol: "http" },
       "9090": { protocol: "tcp" },
     });
+  });
+
+  it("reads memory from the ladder its service type actually has machines for", () => {
+    const memoryOf = (service: unknown) => evaluate(() => ({ web: service })).services.get("web")?.definition.memory;
+    expect(memoryOf({ type: "serverless", ports: {}, memory: "8GB" })).toBe("8GB");
+    expect(memoryOf({ type: "server", ports: {}, memory: "4GB" })).toBe("4GB");
+    // Absent stays absent rather than being written out as the default: the
+    // backend normalizes an explicit default back out anyway, and a definition
+    // that states what it already runs must not read differently from one that
+    // says nothing.
+    expect(memoryOf({ type: "serverless", ports: {} })).toBe(undefined);
+    // The ladder is the RUNTIME's. On the default runtime a server may be 512MB (every Fly
+    // service ran on that shape before sizes existed); on GCP no 512MB machine shape exists,
+    // so the rung a serverless may use is not one a server may — and the error names the
+    // ladder for THIS service on THIS runtime.
+    expect(memoryOf({ type: "server", ports: {}, memory: "512MB" })).toBe("512MB");
+    const badGcpMemory = (service: unknown) => () => evaluateOnGcp(() => ({ web: service }));
+    expect(badGcpMemory({ type: "server", ports: {}, memory: "512MB" }))
+      .toThrow(/deploy\.services\.web\.memory must be one of "1GB", "2GB", "4GB", "8GB"/);
+    expect(evaluateOnGcp(() => ({ web: { type: "server", ports: {}, memory: "4GB" } })).services.get("web")?.definition.memory).toBe("4GB");
+    // Sizes only the builder may ask for are not service sizes.
+    const badMemory = (service: unknown) => () => evaluate(() => ({ web: service }));
+    expect(badMemory({ type: "serverless", ports: {}, memory: "32GB" })).toThrow(/must be one of/);
+  });
+
+  it("refuses non-canonical memory spellings but says which one to write", () => {
+    const memory = (value: unknown) => () => evaluate(() => ({ web: { type: "serverless", ports: {}, memory: value } }));
+    // Recognising a spelling is not accepting it: one canonical token per size,
+    // for the same reason a port key may not have a leading zero.
+    expect(memory("4gb")).toThrow(/Write it as "4GB"/);
+    expect(memory("4 GB")).toThrow(/Write it as "4GB"/);
+    expect(memory("4Gi")).toThrow(/Write it as "4GB"/);
+    expect(memory("4096MB")).toThrow(/Write it as "4GB"/);
+    // "Mb" is megabits, so it is called out rather than silently accepted.
+    expect(memory("512Mb")).toThrow(/megabits/);
+    // Unrecognisable values fall back to naming the ladder.
+    expect(memory("3GB")).toThrow(/must be one of/);
+    expect(memory(4096)).toThrow(/must be one of/);
   });
 
   it("rejects port lists it could not serve", () => {
@@ -189,38 +238,41 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
     }))).not.toThrow();
   });
 
-  it("makes a deploy dependency of every reference to another service's address", () => {
-    // REGRESSION: url(<port>) on a private target and hostname() used to be treated as
-    // deterministic and produce NO edge, so a consumer could be ordered ahead of the
-    // service it reads. Neither is derivable from the service id any more — both are the
-    // target's runtime address — so a consumer put first fails the deploy on an
-    // unresolved ref. Every service output orders the deploy now.
-    const wired = () => evaluate(({ service }: ServicesFunctionContext) => ({
+  it("makes a deploy dependency of every reference the runtime cannot answer up front", () => {
+    // Which references wait depends on the RUNTIME (see connectionRequiresTargetDeployed).
+    // On the default runtime a private url(<port>) and hostname() are name-derived and
+    // known before anything runs, so they produce NO edge; on GCP both are the target's
+    // runtime address, so a consumer put first would fail the deploy on an unresolved
+    // ref, and every service output orders the deploy.
+    const deployFile = ({ service }: ServicesFunctionContext) => ({
       web: {
         type: "serverless", public: true, ports: { 3000: { protocol: "http" } },
         env: { API: (service("api") as any).url(8080), DB_HOST: (service("db") as any).hostname() },
       },
       api: { type: "serverless", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } } },
       db: { type: "server", ports: { 5432: { protocol: "tcp" } } },
-    }));
-    expect(wired).not.toThrow();
-    expect(computeDeploymentLevels(wired().services)).toEqual([["api", "db"], ["web"]]);
+    });
+    const onFly = evaluate(deployFile);
+    expect(computeDeploymentLevels(onFly.services, onFly.runtime)).toEqual([["web", "api", "db"]]);
+    const onGcp = evaluateOnGcp(deployFile);
+    expect(computeDeploymentLevels(onGcp.services, onGcp.runtime)).toEqual([["api", "db"], ["web"]]);
 
-    // The accepted cost of that: two services that each read the other's address are a
-    // real cycle, because neither can go first. Reported as one, with the way out.
-    const mutual = () => evaluate(({ service }: ServicesFunctionContext) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API: (service("api") as any).url() } },
+    // The accepted cost on GCP: two services that each read the other's address are a
+    // real cycle there, because neither can go first. Reported as one, with the way out.
+    // On the default runtime the same file deploys in one level.
+    const mutual = ({ service }: ServicesFunctionContext) => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API: (service("api") as any).url(8080) } },
       api: { type: "serverless", ports: { 8080: { protocol: "http" } }, env: { WEB_HOST: (service("web") as any).hostname() } },
-    }));
-    expect(mutual).not.toThrow();
-    expect(() => computeDeploymentLevels(mutual().services)).toThrow(/circular connection dependency/);
+    });
+    expect(computeDeploymentLevels(evaluate(mutual).services, "fly")).toEqual([["web", "api"]]);
+    expect(() => computeDeploymentLevels(evaluateOnGcp(mutual).services, "gcp")).toThrow(/circular connection dependency/);
 
     // A public `url` was always a dependency, and still is.
     const publicUrl = evaluate(({ service }: ServicesFunctionContext) => ({
       web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API: (service("api") as any).url() } },
       api: { type: "serverless", public: true, ports: { 8080: { protocol: "http" } } },
     }));
-    expect(computeDeploymentLevels(publicUrl.services)).toEqual([["api"], ["web"]]);
+    expect(computeDeploymentLevels(publicUrl.services, publicUrl.runtime)).toEqual([["api"], ["web"]]);
   });
 
   it("leaves references to services of other deployment sources to the backend", () => {
@@ -291,21 +343,34 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
     }))).toThrow("use the `hexclave` context object instead");
   });
 
-  it("rejects a self-referential address, private one included", () => {
-    // Every service address is produced by that service's own rollout, so no self-reference
-    // to one can resolve before the deploy that creates it finishes.
-    expect(() => evaluate(({ service }: ServicesFunctionContext) => ({
+  it("rejects a self-referential address the runtime cannot answer up front", () => {
+    // A public URL is produced by the service's own rollout on either runtime, so no
+    // self-reference to it can resolve before the deploy that creates it finishes.
+    const publicSelf = ({ service }: ServicesFunctionContext) => ({
       web: { type: "serverless", public: true, ports: { 3000: { protocol: "http" } }, env: { SELF: (service("web") as any).url(3000) } },
-    }))).toThrow("cannot exist before the service is deployed");
-    // The private url used to be exempt, on the premise that it was name-derived and therefore
-    // known in advance. Nothing publishes such a record since the move off Fly, so it blocks on
-    // the real address like any other output — and reached the deploy as an unresolvable ref.
-    expect(() => evaluate(({ service }: ServicesFunctionContext) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { SELF: (service("web") as any).url(3000) } },
-    }))).toThrow("cannot exist before the service is deployed");
-    expect(() => evaluate(({ service }: ServicesFunctionContext) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { SELF: (service("web") as any).hostname() } },
-    }))).toThrow("cannot exist before the service is deployed");
+    });
+    expect(() => evaluate(publicSelf)).toThrow("cannot exist before the service is deployed");
+    expect(() => evaluateOnGcp(publicSelf)).toThrow("cannot exist before the service is deployed");
+    // A private address is name-derived on the default runtime and known in advance, so a
+    // service may name its own; on GCP nothing publishes such a record, so it blocks on the
+    // real address like any other output — and would reach the deploy as an unresolvable ref.
+    const privateSelf = ({ service }: ServicesFunctionContext) => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { SELF: (service("web") as any).url(3000), HOST: (service("web") as any).hostname() } },
+    });
+    expect(() => evaluate(privateSelf)).not.toThrow();
+    expect(() => evaluateOnGcp(privateSelf)).toThrow("cannot exist before the service is deployed");
+  });
+
+  it("reads the internal `version` export, and refuses one it does not know", () => {
+    const deployFile = () => ({ web: { type: "serverless", ports: { 3000: { protocol: "http" } } } });
+    expect(evaluate(deployFile)).toMatchObject({ runtime: "fly", version: undefined });
+    expect(evaluateOnGcp(deployFile)).toMatchObject({ runtime: "gcp", version: "gcp-beta-1" });
+    // Refused rather than ignored: a typo in our own token must not silently deploy to the
+    // default, and a stray export in someone's file must not silently mean anything.
+    const withVersion = (version: unknown) => () => evaluateWithVersion(deployFile, version);
+    expect(withVersion("gcp")).toThrow(/unknown `version` export "gcp"/);
+    expect(withVersion("1.0.0")).toThrow(/gcp-beta-1/);
+    expect(withVersion(1)).toThrow(/must be a string/);
   });
 
   it("rejects assigning the whole service() return instead of an output", () => {
@@ -824,5 +889,41 @@ describe("build and start commands", () => {
 
   it("rejects an unknown command field rather than silently dropping it", () => {
     expect(() => evaluate(web({ runCommand: "node server.js" }))).toThrow(/unknown field "runCommand"/);
+  });
+});
+
+describe("the deploy export's builder", () => {
+  const evaluateDeploy = (deployRaw: unknown) => evaluateDeploymentConfig({
+    deployFilePath: DEPLOY_FILE_PATH,
+    deploymentGroupIdExport: "test-source",
+    deployExport: () => deployRaw,
+    mode: "deploy",
+  });
+  const withServices = (extra: Record<string, unknown>) => ({
+    services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } },
+    ...extra,
+  });
+
+  it("is a sibling of services, because one machine builds them all", () => {
+    expect(evaluateDeploy(withServices({ builder: { memory: "32GB" } })).builder).toEqual({ memory: "32GB" });
+    // Its ladder starts where the service ladders stop: a builder is a transient
+    // machine sized for a build, not for an idling service.
+    expect(evaluateDeploy(withServices({ builder: { memory: "8GB" } })).builder).toEqual({ memory: "8GB" });
+    expect(() => evaluateDeploy(withServices({ builder: { memory: "512MB" } }))).toThrow(/deploy\.builder\.memory of .* must be one of "8GB", "16GB", "32GB"/);
+    expect(() => evaluateDeploy(withServices({ builder: { memory: "32gb" } }))).toThrow(/Write it as "32GB"/);
+  });
+
+  it("collapses an empty builder to no opinion at all", () => {
+    // `{}` and absent both mean "let the deployment decide"; storing one as a
+    // declaration would make them read differently downstream.
+    expect(evaluateDeploy(withServices({})).builder).toBe(undefined);
+    expect(evaluateDeploy(withServices({ builder: {} })).builder).toBe(undefined);
+  });
+
+  it("rejects fields neither half of the deploy export knows", () => {
+    expect(() => evaluateDeploy(withServices({ builder: { cpu: 4 } }))).toThrow(/unknown field "cpu"/);
+    expect(() => evaluateDeploy(withServices({ builder: "32GB" }))).toThrow(/must be an object/);
+    // The top-level check now names both supported fields rather than just one.
+    expect(() => evaluateDeploy(withServices({ builders: {} }))).toThrow(/unknown field "builders". Supported fields: services, builder/);
   });
 });

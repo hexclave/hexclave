@@ -19,6 +19,11 @@ export type CloudRunServiceSpec = {
   revision: string,
   startCommand: string | null,
   serviceKeyHash: string,
+  // Container resources, derived from the spec's memory by the caller. CPU is
+  // not independently chosen: Cloud Run accepts only certain cpu/memory PAIRS
+  // (past 4 GiB one CPU is not among them), so the pair travels together.
+  memoryMb: number,
+  cpu: number,
 };
 
 export type CloudRunObservation = {
@@ -145,7 +150,10 @@ export class CloudRunClient {
           image: spec.image,
           env: Object.entries(spec.env).filter(([name]) => name !== "PORT").map(([name, value]) => ({ name, value })),
           ports: [{ name: "http1", containerPort: spec.port }],
-          resources: { limits: { cpu: "1", memory: "512Mi" }, cpuIdle: spec.minInstances === 0 },
+          // "Mi" is the unit Cloud Run takes, and it is what our megabytes mean:
+          // the sizes are binary, spelled in the decimal shorthand everybody
+          // reads. Nothing converts, so nothing can convert wrongly.
+          resources: { limits: { cpu: String(spec.cpu), memory: `${spec.memoryMb}Mi` }, cpuIdle: spec.minInstances === 0 },
           ...(spec.startCommand === null ? {} : { command: ["/bin/sh"], args: ["-c", spec.startCommand] }),
         }],
       },

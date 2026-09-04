@@ -39,13 +39,35 @@ in production; without it the mock builder and existing-project test override bo
 Source uploads never pass through the function: `POST /v1/namespaces/:ns/uploads` returns a
 presigned bucket URL that the CLI uploads the tarball to directly.
 
-Domain claims, project-pool entries and its creation ledger, and namespace-to-project assignments are authenticated with
+Domain claims, project-pool entries and its creation ledger, and namespace records are authenticated with
 `HEXCLAVE_MARSHAL_DATA_ENCRYPTION_KEY`, with their object key bound into the MAC. Marshal fails
 closed on the older unsigned shape: before rolling this version into an environment that already
 has `domains/*.json`, `gcp-project-pool/*.json`, `gcp-project-pool-ledger.json`, or
 `tenants/*.json`, migrate or recreate those records from a trusted
-snapshot. Automatically trusting and rewriting an unsigned object would authenticate exactly the
+snapshot — `scripts/sign-control-plane-state.ts` signs a bucket's unsigned records in place
+(run it against the production bucket before the first deploy of this version: Fly-era
+`domains/*.json` are unsigned). Automatically trusting and rewriting an unsigned object would authenticate exactly the
 forgery this boundary is intended to detect.
+
+## Runtimes
+
+Marshal runs a namespace's services on one of two infrastructure providers, chosen per
+namespace and pinned in `tenants/<ns>.json` on first use (see `src/runtime.ts`):
+
+- **Fly.io** — the default. A namespace with no record runs here, which is every namespace
+  that existed before the second runtime did. One Fly app per service, machines for
+  instances, volumes for disks, Fly certificates for custom domains. Enabled by
+  `MARSHAL_FLY_API_TOKEN`; see `src/fly/`.
+- **Google Cloud** — opted into per project with the internal `version` export in the deploy
+  file (`export const version = "gcp-beta-1"`), which the backend sends as `runtime` on the
+  deploy. Enabled by `HEXCLAVE_MARSHAL_GCP_PLATFORM_PROJECT_ID`; see `src/gcp/` and the
+  sections below.
+
+The two share everything above the provider seam (`src/provider.ts`): specs, deployments,
+the build harness, the bucket, leases, redaction, and the HTTP API. A deploy that names a
+runtime other than the namespace's pin is refused with a 409 unless the namespace holds no
+services, in which case the pin moves. Both mocks (`fly-mock` on port-prefix 48, `gcp-mock`
+on 49) run side by side locally, and `MARSHAL_BUILDER=mock` covers either runtime.
 
 ## GCP tenancy and lifecycle
 

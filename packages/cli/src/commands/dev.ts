@@ -967,6 +967,7 @@ export function registerDevCommand(program: Command) {
           deploymentGroupIdExport: deployModule.deploymentGroupId,
           legacyIdExport: deployModule.legacyId,
           deployExport: deployModule.deploy,
+          versionExport: deployModule.version,
           mode: "dev",
         });
         devService = services.get(opts.serviceId);

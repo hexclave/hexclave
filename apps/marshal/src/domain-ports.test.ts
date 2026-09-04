@@ -18,6 +18,11 @@ vi.mock("./config.js", async (importOriginal) => ({
   getConfig: () => ({ envId: "test" }),
 }));
 
+// The provider is never reached: the guard under test throws first.
+vi.mock("./provider.js", () => ({
+  providerForNamespace: async () => ({ kind: "gcp" }),
+}));
+
 vi.mock("./reconciliation-lock.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./reconciliation-lock.js")>(),
   // Run the body directly: the lease is not what these tests are about, and taking a real one

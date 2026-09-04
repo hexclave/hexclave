@@ -23,11 +23,21 @@ vi.mock("./reconciliation-lock.js", () => ({
 vi.mock("./platform-domain-lock.js", () => ({
   withPlatformDomainLease: async (fn: (lease: { assertOwned: () => Promise<void> }) => Promise<unknown>) => await fn({ assertOwned: async () => {} }),
 }));
-vi.mock("./services.js", () => ({
+vi.mock("./spec-helpers.js", () => ({
   assertServiceCanHoldADomain: () => {},
+}));
+vi.mock("./env-resolution.js", () => ({
   resolveEnv: async () => ({ ok: true, env: {} }),
 }));
-vi.mock("./gcp/runtime.js", () => ({ ensureDomainGateway }));
+// The namespace is pinned to GCP, whose domain flow is what this file tests.
+vi.mock("./runtime.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./runtime.js")>(),
+  resolveNamespaceRuntime: async () => "gcp",
+}));
+vi.mock("./gcp/runtime.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./gcp/runtime.js")>(),
+  ensureDomainGateway,
+}));
 vi.mock("./gcp/context.js", () => ({
   tenantContext: async () => ({
     domains: {

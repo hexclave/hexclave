@@ -116,12 +116,17 @@ describe("MarshalClient", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
     const client = new MarshalClient({ apiKey: "test-key", baseUrl: "https://marshal.example.com" });
 
-    await client.startSourceDeployment("test-namespace", "test-source", { targets: [], order: [] });
+    await client.startSourceDeployment("test-namespace", "test-source", { targets: [], order: [], runtime: "gcp" });
+    await client.startSourceDeployment("test-namespace", "test-source", { targets: [], order: [], runtime: "fly" });
     await client.getService("test-namespace", "test-service");
 
-    const [deployStartMs, defaultMs] = timeouts;
+    const [deployStartMs, flyDeployStartMs, defaultMs] = timeouts;
     expect(deployStartMs).toBeGreaterThan(defaultMs);
+    expect(flyDeployStartMs).toBeGreaterThan(defaultMs);
+    // A first GCP deploy into a namespace may provision a tenant project synchronously when
+    // the pool is empty; a Fly deploy has nothing of the kind and keeps the shorter budget.
     expect(deployStartMs).toBe(13 * 60 * 1000);
+    expect(flyDeployStartMs).toBe(5 * 60 * 1000);
     // And under the 800s maxDuration both services declare to Vercel, so this
     // timeout fires first and the caller gets a 504 with a body rather than a
     // platform-killed invocation. Sized for the first deploy into a namespace when

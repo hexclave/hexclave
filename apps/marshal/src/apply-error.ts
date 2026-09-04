@@ -1,4 +1,5 @@
 import { MarshalError } from "./errors.js";
+import { FlyApiError } from "./fly/client.js";
 import { GcpApiError } from "./gcp/client.js";
 
 // The user-facing half of the same rule marshal-app.ts::errorResponse enforces for HTTP
@@ -8,8 +9,8 @@ import { GcpApiError } from "./gcp/client.js";
 // That string is not internal. The backend relays it verbatim, `hexclave deploy` prints it
 // under the failing service, and the dashboard renders it in the deployment panel — so
 // nothing the infrastructure provider produced may appear in it: not its wording, not its
-// status codes, and not the org/app identifiers that its endpoints (and therefore
-// GcpApiError.message) embed.
+// status codes, and not the org/app/project identifiers that its endpoints (and therefore
+// FlyApiError.message and GcpApiError.message) embed.
 //
 // The relay is therefore an allowlist, not a filter: only messages this codebase authored
 // are passed through, and every other error collapses to a fixed string. Callers log the
@@ -29,9 +30,12 @@ export function applyErrorMessage(error: unknown): string {
   // (an unresolvable ref, a volume that may not shrink), and provider-free by
   // the same rule that lets marshal-app.ts return them over HTTP.
   if (error instanceof MarshalError) return error.message;
-  // Runtime waits consistently use 408 for a service that did not become ready. Preserve
-  // the useful startup guidance without relaying the provider's endpoint or error body.
-  if (error instanceof GcpApiError && error.status === 408) {
+  // Both providers use 408 for exactly one thing: a runtime wait for a service that did not
+  // become ready (Fly: waitForMachineState "started"; GCP: the readiness waits). So a 408
+  // escaping an apply always means the service never came up, which is worth saying plainly
+  // because it is both the most common failure and the one with an obvious next step —
+  // without relaying the provider's endpoint or error body.
+  if ((error instanceof FlyApiError || error instanceof GcpApiError) && error.status === 408) {
     return "the service did not start in time. Check its logs for a crash on startup";
   }
   return GENERIC_APPLY_FAILURE;

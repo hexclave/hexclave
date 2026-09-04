@@ -39,6 +39,8 @@ describe("Cloud Run reconciliation", () => {
       revision: "rev-1",
       startCommand: null,
       serviceKeyHash: "service-key",
+      memoryMb: 512,
+      cpu: 1,
     });
 
     expect(observation.ready).toBe(true);
@@ -100,6 +102,8 @@ describe("Cloud Run reconciliation", () => {
       revision: "rev-2",
       startCommand: null,
       serviceKeyHash: "service-key",
+      memoryMb: 512,
+      cpu: 1,
     });
 
     const patchCall = request.mock.calls.find(([, options]) => options?.method === "PATCH");

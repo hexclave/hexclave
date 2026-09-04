@@ -125,13 +125,16 @@ jobs:
       - name: Wait on ClickHouse
         run: pnpm exec wait-on http://localhost:8136/ping
 
-      # The deployments e2e tests hit s3mock and fly-mock directly; marshal's /health does
-      # not touch either, so wait on them explicitly (fly-mock is a build:-from-context image).
+      # The deployments e2e tests hit s3mock, fly-mock and gcp-mock directly; marshal's /health
+      # does not touch any of them, so wait on them explicitly (both mocks are build:-from-context images).
       - name: Wait on s3mock
         run: pnpm exec wait-on http://localhost:8121/
 
       - name: Wait on fly-mock
         run: pnpm exec wait-on http://localhost:8148/health
+
+      - name: Wait on gcp-mock
+        run: pnpm exec wait-on http://localhost:8149/health
 
       - name: Initialize database
         run: pnpm run db:init
@@ -161,7 +164,7 @@ jobs:
       - name: Backfill Bulldozer from Postgres
         run: pnpm run db:backfill-bulldozer-from-prisma
 
-      # Marshal (the deployments runtime) talks to the fly-mock + s3mock
+      # Marshal (the deployments runtime) talks to the fly-mock, gcp-mock + s3mock
       # containers; the deployments e2e tests drive it through the backend.
       - name: Start marshal in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7

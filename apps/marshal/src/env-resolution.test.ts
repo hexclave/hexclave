@@ -6,6 +6,8 @@ import type { PortsConfig } from "./types.js";
 // deployed last time" — which is exactly what must NOT win for an in-flight target.
 const readSpec = vi.hoisted(() => vi.fn());
 const runtimeAddress = vi.hoisted(() => vi.fn());
+// The GCP provider, whose address is the target's rollout: a VM's internal IP, or nothing.
+const provider = vi.hoisted(() => ({ kind: "gcp" as const }));
 
 vi.mock("./config.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./config.js")>(),
@@ -17,9 +19,17 @@ vi.mock("./store.js", async (importOriginal) => ({
   readSpec,
 }));
 
-vi.mock("./gcp/runtime.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./gcp/runtime.js")>(),
-  runtimeAddress,
+vi.mock("./provider.js", () => ({
+  providerForNamespace: async () => ({
+    ...provider,
+    // GCP: no name-derived private host — a reference waits for the target's address.
+    staticPrivateHost: () => null,
+    address: async (ns: string, key: string, stored: unknown) => {
+      const address = await runtimeAddress(ns, key, stored) as { hostname: string | null, platformUrl: string | null, internalUrl: string | null };
+      // What the GCP provider does: a server's private host is its VM IP; Cloud Run has none.
+      return { ...address, privateHost: (stored as { spec: { config: { type: string } } }).spec.config.type === "server" ? address.hostname : null };
+    },
+  }),
 }));
 
 import { resolveEnv } from "./services.js";
