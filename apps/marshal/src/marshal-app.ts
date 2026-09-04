@@ -7,15 +7,17 @@
 import { node } from "@elysiajs/node";
 import { Elysia } from "elysia";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { INTERNAL_COMPLETE_PATH_PREFIX, createFlyBuilder, createMockBuilder, verifyWebhookToken, type Builder } from "./builds.js";
-import { MAX_UPLOAD_BYTES, MAX_WEBHOOK_BODY_BYTES, getConfig, resolveNamespaceOrg } from "./config.js";
+import { INTERNAL_COMPLETE_PATH_PREFIX, createGcpBuilder, createMockBuilder, verifyWebhookToken, type Builder } from "./builds.js";
+import { MAX_UPLOAD_BYTES, MAX_WEBHOOK_BODY_BYTES, getConfig } from "./config.js";
 import { attachDomain, detachDomain, normalizeHostnameOrThrow, readDomain } from "./domains.js";
 import { MarshalError } from "./errors.js";
-import { FlyApiError, flyClientForNamespaceOrg } from "./fly/client.js";
-import { fetchLogPage } from "./logs.js";
 import { MutationOutcomeUnknownError } from "./mutation-safety.js";
-import { appNameForService } from "./naming.js";
 import { ReconciliationLeaseLostError } from "./reconciliation-lock.js";
+import { recordHostIdentityAssertion } from "./gcp/auth.js";
+import { GcpApiError } from "./gcp/client.js";
+import { reapProjectPool, stepProjectPool } from "./project-pool.js";
+import { tenantContext } from "./gcp/context.js";
+import { runtimeLogs } from "./gcp/runtime.js";
 import {
   BUILD_ID_REGEX,
   advanceDeployment,
@@ -26,14 +28,14 @@ import {
   getServiceState,
   listServices,
   maybeFinalizeStaleDeployment,
-  redactBuildLogText,
+  redactBuildLogLines,
   startSourceDeployment,
   validateNamespace,
   validateServiceKey,
   validateServiceSpec,
   validateSourceId,
 } from "./services.js";
-import { createMultipartUploadSlot, createUploadSlot, multipartPartCount, readDeployment, readDeploymentLog } from "./store.js";
+import { createMultipartUploadSlot, createUploadSlot, multipartPartCount, readDeployment, readDeploymentLog, readSpec } from "./store.js";
 import type { LogLine } from "./types.js";
 
 // How long after a build goes terminal its durable log object may still be missing before
@@ -57,7 +59,7 @@ function errorResponse(error: unknown): Response {
   if (error instanceof MarshalError) {
     return jsonResponse(error.status, { error: error.code, message: error.message });
   }
-  // Fencing outcomes: another reconciliation owns this service, or a Fly write's
+  // Fencing outcomes: another reconciliation owns this service, or a provider write's
   // outcome could not be established. Both are deliberately propagated by the
   // apply paths rather than swallowed, and neither is an internal fault — the
   // caller's move is to retry, so say that instead of "internal error" (which
@@ -69,16 +71,11 @@ function errorResponse(error: unknown): Response {
   if (error instanceof MutationOutcomeUnknownError) {
     // NOT 409: the write may well have landed, so this must not read as "nothing
     // happened, safely retry" — the state has to be re-read first.
-    console.error("fly mutation outcome unknown", error);
+    console.error("runtime mutation outcome unknown", error);
     return jsonResponse(503, { error: "mutation_outcome_unknown", message: "a runtime mutation did not confirm; re-read the service state before retrying" });
   }
-  if (error instanceof FlyApiError) {
-    // Report an upstream failure without describing it: the provider's 4xxes on OUR
-    // requests are our bug or an infra failure from the caller's perspective, never
-    // theirs, so its wording, its status code, and the org/app identifiers its endpoints
-    // embed all stay in the server log — none of them belong in a response that can be
-    // relayed onward to an end user.
-    console.error("fly API error", error);
+  if (error instanceof GcpApiError) {
+    console.error("Google Cloud API error", error);
     return jsonResponse(502, { error: "upstream_api_error", message: "the runtime could not complete the request" });
   }
   console.error("unhandled marshal error", error);
@@ -93,18 +90,29 @@ async function handle(fn: () => Promise<Response | Record<string, unknown>>): Pr
   }
 }
 
-function isAuthorized(header: string | null, apiKey: string): boolean {
+// Every candidate is compared, with no short-circuit, so that which credential matched is not
+// observable in the response time.
+export function isAuthorized(header: string | null, candidates: readonly (string | null)[]): boolean {
   if (header === null) return false;
   const provided = Buffer.from(header, "utf8");
-  const wanted = Buffer.from(`Bearer ${apiKey}`, "utf8");
-  return provided.length === wanted.length && timingSafeEqual(provided, wanted);
+  let matched = false;
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === "") continue;
+    const wanted = Buffer.from(`Bearer ${candidate}`, "utf8");
+    if (provided.length === wanted.length && timingSafeEqual(provided, wanted)) matched = true;
+  }
+  return matched;
 }
 
 
 // Bounded at a safe integer AND at ~year 2255 in millis: the value is multiplied by 1e6 to
 // form a nanosecond log cursor, so an unbounded number would produce exponential-notation
-// (`1e+36`) tokens that break BigInt parsing downstream (and in the fly-mock).
+// (`1e+36`) tokens that break BigInt parsing downstream.
 const MAX_CURSOR_MILLIS = 9_000_000_000_000; // ~2255-01-01
+
+// Shared by the authentication gate and the routes themselves, so a cron path cannot come to
+// accept CRON_SECRET without the gate agreeing that it is one.
+const MAINTENANCE_PATH_PREFIX = "/v1/maintenance/";
 /**
  * The `size_bytes` an upload request declared, or undefined when it said nothing
  * usable. Advisory only — it decides whether to mint a multipart slot, never
@@ -126,10 +134,17 @@ function parseOptionalMillis(value: unknown): number | undefined {
 // `Elysia` type, and nothing downstream needs the route types.
 export function createMarshalApp() {
   const config = getConfig();
-  const builder: Builder = config.builderKind === "mock" ? createMockBuilder(completeBuild) : createFlyBuilder();
+  const builder: Builder = config.builderKind === "mock" ? createMockBuilder(completeBuild) : createGcpBuilder();
 
   const app = new Elysia({ adapter: node() })
     .onRequest(({ request }) => {
+      // Before any authentication, and on EVERY route including /health: this is the platform's
+      // OIDC assertion, which is how Marshal authenticates to Google when it holds no key (see
+      // recordHostIdentityAssertion). A Vercel Function receives it as a request header and has
+      // no environment variable carrying it, so a deployment that never reads one off a request
+      // has no Google credential at all. It is the caller's proof of the PLATFORM's identity,
+      // not of the caller's, so it grants nothing here and is safe to read this early.
+      recordHostIdentityAssertion(request);
       const url = new URL(request.url);
       // /health is the only unauthenticated surface.
       if (url.pathname === "/health") return;
@@ -174,7 +189,11 @@ export function createMarshalApp() {
         }
         return;
       }
-      if (!isAuthorized(request.headers.get("authorization"), config.apiKey)) {
+      // The maintenance crons additionally accept CRON_SECRET, so Vercel's scheduler need not
+      // be given MARSHAL_API_KEY. It is scoped to those paths alone: everywhere else, and when
+      // CRON_SECRET is unset, the API key remains the only credential.
+      const cronCredential = url.pathname.startsWith(MAINTENANCE_PATH_PREFIX) ? config.cronSecret : null;
+      if (!isAuthorized(request.headers.get("authorization"), [config.apiKey, cronCredential])) {
         return jsonResponse(401, { error: "unauthenticated", message: "missing or invalid bearer credential" });
       }
     })
@@ -207,6 +226,21 @@ export function createMarshalApp() {
         },
       });
     }))
+
+    // Maintenance crons (apps/marshal/vercel.json). Deliberately under /v1/ and NOT /internal/:
+    // that prefix carries the per-deployment webhook auth bypass above and 404s anything it
+    // does not recognize, so a route placed there would either be unauthenticated or dead.
+    // Under /v1/ they use the ordinary bearer check, which additionally accepts CRON_SECRET on
+    // this prefix (see the gate above), so Vercel's scheduler authenticates without holding
+    // MARSHAL_API_KEY. CRON_SECRET must still be SET in Vercel: with it unset the platform
+    // sends no Authorization header at all and every invocation is rejected.
+    //
+    // GET because that is what Vercel Cron issues. Both are idempotent in the sense that
+    // matters: each is a single leased pass over durable state, safe to repeat and safe to
+    // overlap (contention is reported as skipped, not as an error).
+    .get(`${MAINTENANCE_PATH_PREFIX}project-pool/step`, () => handle(async () => await stepProjectPool()))
+
+    .get(`${MAINTENANCE_PATH_PREFIX}project-pool/reap`, () => handle(async () => await reapProjectPool()))
 
     .get("/v1/namespaces/:ns", ({ params }) => handle(async () => {
       const ns = validateNamespace(params.ns);
@@ -302,16 +336,19 @@ export function createMarshalApp() {
       if (checked.builder_app === null || checked.builder_machine_id === null) {
         return { lines: [], next_since_millis: sinceMillis ?? checked.started_at_millis, complete: liveIsFinal };
       }
-      const fly = flyClientForNamespaceOrg(resolveNamespaceOrg(ns));
-      const page = await fetchLogPage(fly, checked.builder_app, {
-        sinceMillis: sinceMillis ?? checked.started_at_millis,
-        instance: checked.builder_machine_id,
-        forceNullInstance: true,
-      });
-      const redactionValues = deploymentLogRedactionValues(fly, checked);
+      const output = await (await tenantContext(ns)).compute.getSerialOutput(checked.builder_machine_id);
+      const redactionValues = deploymentLogRedactionValues(checked);
+      const allLines = redactBuildLogLines(output, redactionValues).map((text, index) => ({
+        at_millis: checked.started_at_millis + index,
+        stream: "stdout" as const,
+        instance: null,
+        text,
+      }));
+      const lines = allLines.filter((line) => sinceMillis === undefined || line.at_millis >= sinceMillis);
+      const lastAtMillis = lines.length === 0 ? null : lines[lines.length - 1].at_millis;
       return {
-        lines: page.lines.map((line) => ({ ...line, text: redactBuildLogText(line.text, redactionValues) })),
-        next_since_millis: page.nextSinceMillis,
+        lines,
+        next_since_millis: lastAtMillis === null ? sinceMillis ?? checked.started_at_millis : lastAtMillis + 1,
         complete: liveIsFinal,
       };
     }))
@@ -319,12 +356,12 @@ export function createMarshalApp() {
     .get("/v1/namespaces/:ns/services/:key/logs", ({ params, query }) => handle(async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
-      const fly = flyClientForNamespaceOrg(resolveNamespaceOrg(ns));
-      const page = await fetchLogPage(fly, appNameForService(getConfig().envId, ns, key), {
-        sinceMillis: parseOptionalMillis(query.since_millis),
-        instance: typeof query.instance === "string" && query.instance !== "" ? query.instance : undefined,
-      });
-      return { lines: page.lines, next_since_millis: page.nextSinceMillis };
+      const stored = await readSpec(ns, key);
+      if (stored === null) throw new MarshalError(404, "not_found", `service ${JSON.stringify(key)} not found`);
+      const sinceMillis = parseOptionalMillis(query.since_millis);
+      const lines = await runtimeLogs(stored, sinceMillis, typeof query.instance === "string" && query.instance !== "" ? query.instance : undefined);
+      const lastAtMillis = lines.length === 0 ? null : lines[lines.length - 1].at_millis;
+      return { lines, next_since_millis: lastAtMillis === null ? sinceMillis ?? Date.now() : lastAtMillis + 1 };
     }))
 
     // Read-only: the "re-check verification now" primitive. A PUT would repoint the hostname,

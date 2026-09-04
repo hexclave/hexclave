@@ -246,27 +246,29 @@ export function parseConnectionValue(value: string): { serviceId: string, output
 /**
  * Whether a reference actually requires its target to have DEPLOYED.
  *
- * `hostname()` never does: it is a pure function of the service identity and
- * resolves before the target exists. `url()` depends on the TARGET SERVICE:
+ * Every SERVICE output does — `url` and `hostname` alike, public or private,
+ * named port or not. Both are the target's runtime ADDRESS, and no runtime
+ * publishes an address for a service that does not exist yet: a private service
+ * is reached at its VM's internal IP (assigned when the instance is created), a
+ * public one at its platform URL, and a serverless one at the URI its revision
+ * got. None of them can be derived from the service's identity.
  *
- *  - a PUBLIC service's URL is the platform URL (or a verified custom domain),
- *    which only exists once the service has been provisioned;
- *  - a PRIVATE service's URL is built from the deterministic hostname and the
- *    port written in the reference, so it resolves just as early as hostname();
- *  - a bare `url()` has to read the target's synced definition to learn its sole
- *    HTTP port, so it waits regardless.
+ * This used to make an exception for a private `url` with a named port, on the
+ * premise that it was built from a DETERMINISTIC "<service>.internal" hostname
+ * and so resolved before its target came up. That premise died with the Fly 6PN
+ * DNS it came from: nothing publishes such a record now, the reference blocks
+ * until the target has an address, and a consumer ordered ahead of its target
+ * failed the whole deploy with "blocked on unresolved refs".
  *
- * `targetIsPublic` is null when the caller cannot answer — a reference into a
- * source this deploy file does not contain, or one naming a port the target does
- * not declare — in which case the conservative answer is that it waits. Getting
- * this wrong in the other direction would serialize independent deploys, cascade
- * false "skipped" results when the target fails, and reject mutually-wired
- * services as circular.
+ * The cost is real and accepted: mutually-wired services are now a circular
+ * dependency, reported as one, instead of silently resolving. They genuinely
+ * cannot both go first when each needs the other's address.
+ *
+ * `hexclave.*` outputs are not service outputs and never wait — they come from
+ * the managed service, which always exists.
  */
-export function connectionRequiresTargetDeployed(outputKey: string, port: number | null, targetIsPublic: boolean | null = null): boolean {
-  if (outputKey !== "url") return false;
-  if (port === null) return true;
-  return targetIsPublic !== false;
+export function connectionRequiresTargetDeployed(outputKey: string): boolean {
+  return SERVICE_OUTPUT_KEYS.includes(outputKey as ServiceOutputKey);
 }
 
 /** Formats a connection reference. The inverse of parseConnectionValue. */
@@ -294,14 +296,14 @@ export type DeploymentEnvVarDefinition = {
 };
 
 export type DeploymentServiceDefinition = {
-  // How the service is run on the Fly-backed Marshal runtime.
+  // How the service is run on the Marshal runtime.
   //
-  // - "server": exactly one instance (max_instances is always 1). With
-  //   min_instances 0 it SUSPENDS when idle rather than stopping, so it resumes
-  //   with its memory intact and without a cold start; with min_instances 1
-  //   (the default) it simply stays up. It is the only type allowed to hold a
-  //   persistent volume — a volume is local disk on one host, which only a
-  //   single instance can ever mount.
+  // - "server": exactly one instance (max_instances is always 1), backed by a
+  //   single Compute Engine VM. There is no request-triggered suspend, so
+  //   min_instances 0 keeps its availability and disk semantics but does not
+  //   guarantee scale-to-zero billing; min_instances 1 (the default) stays up.
+  //   It is the only type allowed to hold a persistent volume — a volume is
+  //   local disk on one host, which only a single instance can ever mount.
   // - "serverless": scales between min_instances and max_instances and STOPS
   //   (not suspends) on scale-down, so every start is a cold start from a clean
   //   rootfs. Persistent volumes are rejected: a fleet would give each instance
@@ -949,12 +951,12 @@ export const deploymentServiceDefinitionSchema = yupObject({
       return value === undefined || reservedStandardPortConflicts(value, (this.parent as { public?: boolean }).public === true).length === 0;
     }),
   // min is capped at the same MAX_INSTANCES_PER_SERVICE as max — an unbounded
-  // min would only ever fail downstream. On a "server" it is the SUSPEND switch
-  // rather than a fleet size:
-  // 1 (the default) keeps its single instance up, and 0 lets it suspend when idle and
-  // resume with its memory intact on the next connection.
+  // min would only ever fail downstream. On a "server" it is not a fleet size:
+  // 1 (the default) keeps its single instance up, and 0 is the Free-plan value.
+  // The runtime has no request-triggered suspend for a server, so 0 does not
+  // currently guarantee scale-to-zero billing.
   min_instances: yupNumber().integer().min(0).max(MAX_INSTANCES_PER_SERVICE).optional()
-    .test("server-is-single-instance-min", 'a "server" service holds a single instance, so min_instances must be 0 (suspend when idle) or 1 (always on) — use type "serverless" to scale out', function (value) {
+    .test("server-is-single-instance-min", 'a "server" service holds a single instance, so min_instances must be 0 or 1 — use type "serverless" to scale out', function (value) {
       return (this.parent as { type?: string }).type !== "server" || value === undefined || value === 0 || value === 1;
     }),
   max_instances: yupNumber().integer().min(1).max(MAX_INSTANCES_PER_SERVICE).optional()
@@ -1459,15 +1461,14 @@ import.meta.vitest?.test("connection references round-trip, with and without a p
   }
 });
 
-import.meta.vitest?.test("only a public or unnamed port makes a url reference wait for its target", ({ expect }) => {
-  // A private port's URL is as deterministic as the hostname it is built from.
-  expect(connectionRequiresTargetDeployed("url", 5432, false)).toBe(false);
-  expect(connectionRequiresTargetDeployed("url", 3000, true)).toBe(true);
-  // Unknown publicness (a target this deploy file cannot see) waits.
-  expect(connectionRequiresTargetDeployed("url", 3000, null)).toBe(true);
-  // A bare url() has to read the target's ports to know which one it means.
-  expect(connectionRequiresTargetDeployed("url", null, false)).toBe(true);
-  expect(connectionRequiresTargetDeployed("hostname", null, null)).toBe(false);
+import.meta.vitest?.test("every service output makes a reference wait for its target", ({ expect }) => {
+  // REGRESSION: a private url() with a named port used to be exempt, because it was
+  // built from a name derived from the service id. Nothing publishes that name any
+  // more — the address is the target's, and only the target's rollout produces it.
+  expect(connectionRequiresTargetDeployed("url")).toBe(true);
+  expect(connectionRequiresTargetDeployed("hostname")).toBe(true);
+  // The managed service is not deployed by anyone, so its outputs never wait.
+  expect(connectionRequiresTargetDeployed("projectId")).toBe(false);
 });
 
 import.meta.vitest?.test("deploymentServiceDefinitionSchema accepts a persistent volume on a server service", async ({ expect }) => {
@@ -1491,8 +1492,8 @@ import.meta.vitest?.test("deploymentServiceDefinitionSchema pins a server servic
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: { "3000": { protocol: "http" } }, max_instances: 2, env: {},
   }, { abortEarly: false })).rejects.toThrow(/max_instances must be 1/);
-  // 0 (suspend when idle) and 1 (stay up) are the only meanings a single
-  // instance can have; anything above is a fleet, which "server" is not.
+  // 0 and 1 are the only meanings a single instance can have; anything above
+  // is a fleet, which "server" is not.
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: { "3000": { protocol: "http" } }, min_instances: 1, env: {},
   }, { abortEarly: false })).resolves.toBeDefined();
@@ -1501,7 +1502,7 @@ import.meta.vitest?.test("deploymentServiceDefinitionSchema pins a server servic
   }, { abortEarly: false })).resolves.toBeDefined();
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: { "3000": { protocol: "http" } }, min_instances: 2, env: {},
-  }, { abortEarly: false })).rejects.toThrow(/min_instances must be 0 \(suspend when idle\) or 1/);
+  }, { abortEarly: false })).rejects.toThrow(/min_instances must be 0 or 1/);
   // Serverless keeps the full range.
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "serverless", ports: { "3000": { protocol: "http" } }, min_instances: 1, max_instances: 10, env: {},

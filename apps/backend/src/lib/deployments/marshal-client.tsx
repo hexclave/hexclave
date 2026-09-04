@@ -2,7 +2,7 @@ import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
 
-// Thin client for Marshal, the Fly.io-backed deployments runtime (apps/marshal).
+// Thin client for Marshal, the GCP-backed deployments runtime (apps/marshal).
 // Marshal implements the Hexclave Runtime API: stateless, namespace-scoped
 // (the namespace is the tenancy id), single bearer credential. This module is
 // the only place backend code talks to it.
@@ -24,7 +24,7 @@ export function getMarshalDeploymentsConfigOrNull(): MarshalDeploymentsConfig | 
     // The mock key is only allowed in dev/test — or on a localhost-hosted
     // instance, because the local QA setup runs *production builds* of the
     // backend on localhost (NODE_ENV=production) and still needs the local
-    // Marshal (which itself talks to the fly-mock).
+    // Marshal (which itself talks to gcp-mock).
     const isLocalhostInstance = /^(.*\.)?localhost$|^127\.0\.0\.1$/.test(new URL(getEnvVariable("NEXT_PUBLIC_STACK_API_URL", "http://invalid.example.com")).hostname);
     if (!["development", "test"].includes(getNodeEnvironment()) && !isLocalhostInstance) {
       throw new HexclaveAssertionError("Mock Marshal key used in production; please set the HEXCLAVE_MARSHAL_API_KEY environment variable to a real credential.");
@@ -81,7 +81,7 @@ export type MarshalServiceSpec = {
   config: {
     type: "server" | "serverless",
     // Whether Marshal allocates public ingress. A property of the SERVICE: the
-    // Fly proxy serves every declared port on every address the app holds, so
+    // GCP ingress fronts the service as a unit, so
     // there is no such thing as a public port with a private sibling. Marshal
     // re-validates that a public service is all-HTTP and declares a port.
     public: boolean,
@@ -211,8 +211,8 @@ export type MarshalDomainResult = {
 // Every Marshal call is bounded. `fetch` has no default timeout, so without these a Marshal
 // that accepts a connection and then stalls holds the backend invocation open forever —
 // outliving even the build-log route's own four-minute stream cap. The generous tiers exist
-// because some Marshal endpoints legitimately block on Fly: an apply rolls machines one at a
-// time with a started-wait between, and a delete tears down an app.
+// because some Marshal endpoints legitimately block on GCP: an apply waits for a Cloud Run
+// revision or Compute Engine VM, and a delete tears down its runtime resources.
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const APPLY_TIMEOUT_MS = 15 * 60 * 1000;
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -222,17 +222,22 @@ const LIST_TIMEOUT_MS = 2 * 60 * 1000;
 // the uploaded archive (reading the whole tarball out of the bucket and copying
 // it to a deployment-owned key — seconds for a small source, far longer for one
 // near the 50 MB ceiling), calls ensureApp once PER TARGET in sequence, and then
-// creates and starts the builder machine.
+// creates and starts the builder VM.
 //
-// Under the 60s default this 504'd on a 30 MB source while the runtime carried
-// on and created a real deployment — a Fly app and a builder machine included —
-// that the caller had no id for and could never poll. A deploy of many services
-// would hit the same wall on the sequential ensureApp loop alone.
+// On GCP there is one more synchronous cost, and it dominates: the FIRST
+// deployment into a namespace provisions the tenant project before anything
+// else — project creation, Cloud Billing's eventual-consistency window for the
+// brand-new project (the runtime retries its precondition failure for up to ten
+// minutes), and batch API enablement. The runtime keeps a pool of pre-provisioned
+// projects to avoid exactly this (see apps/marshal/src/project-pool.ts), but when
+// the pool is empty or disabled the request can legitimately run past five minutes.
+// A timeout is therefore not fatal: reconciliation is idempotent and deterministic,
+// so the caller can simply retry and land on the already-provisioned project.
 //
 // Deliberately BELOW the 800s Vercel maxDuration both services declare (see
 // `src/index.ts` in each): this has to fire first, so the caller gets a clean
 // 504 from here rather than a platform-killed invocation with no body at all.
-const DEPLOY_START_TIMEOUT_MS = 5 * 60 * 1000;
+const DEPLOY_START_TIMEOUT_MS = 13 * 60 * 1000;
 
 export class MarshalClient {
   constructor(private readonly config: MarshalDeploymentsConfig) {}
@@ -343,8 +348,8 @@ export class MarshalClient {
     return result.services;
   }
 
-  // Read-only. Use this for "is it verified yet?" polling: putDomain is a repoint, so calling
-  // it on a read would move the certificate off whichever service currently owns the hostname.
+  // Safe for "is it verified yet?" polling. Marshal may promote this tenancy's pending TXT
+  // proof, but unlike putDomain this cannot repoint an already claimed hostname.
   async getDomain(ns: string, hostname: string): Promise<MarshalDomainResult> {
     return await this.fetchMarshal(urlString`/v1/namespaces/${ns}/domains/${hostname}`);
   }

@@ -1,6 +1,6 @@
 // Core logic for the Deployments app: service definitions (synced from a deploy
 // file's `services` export into DeploymentService rows) + operational state
-// (Prisma) + the write-through to Marshal, the Fly.io-backed container runtime
+// (Prisma) + the write-through to Marshal, the Google Cloud-backed container runtime
 // (apps/marshal).
 //
 // The shape of the world, because it is easy to mix up:
@@ -261,11 +261,22 @@ export async function getServiceVolume(prisma: PrismaClientTransaction, tenancy:
 }
 
 /**
- * Always-on instances are a paid capability: they hold a machine up around the
- * clock instead of scaling to zero between requests. That is one rule for both
- * service types — a "server" with `minInstances: 1` (its default!) is as
- * always-on as a "serverless" with `minInstances: 1`, so a Free project must
- * write `minInstances: 0` and let its services suspend or stop when idle.
+ * The Free plan's deployment entitlements. Two rules, one plan read.
+ *
+ * A `server` is paid-only, whatever its `minInstances`. A server is a VM that
+ * runs from the moment it is applied until the service is torn down: GCP offers
+ * no idle-suspend and no wake-on-request (Compute Engine's suspend is a manual
+ * API call, unavailable on the E2 machine types and COS images these VMs use),
+ * so `minInstances: 0` on a server does not scale it to zero. It is accepted
+ * and ignored — `applyRuntimeService` never passes it to Compute Engine.
+ * Gating on `minInstances` alone therefore let a Free project hold a machine up
+ * around the clock by writing the one value that reads like opting out of
+ * exactly that, which is why the type is now gated on its own.
+ *
+ * A `serverless` may still choose its floor, and `minInstances` above 0 is
+ * paid: it keeps a Cloud Run instance warm between requests. Cloud Run really
+ * does scale to zero, so there `minInstances: 0` means what it says and stays
+ * free.
  *
  * Called from BOTH doors, and it has to be:
  *
@@ -279,7 +290,8 @@ export async function getServiceVolume(prisma: PrismaClientTransaction, tenancy:
  *     machines with the old sync id.
  *
  * `persistentVolumes` is deliberately NOT gated: disks are available on every
- * plan for now. That is a pricing decision, not an oversight.
+ * plan for now. That is a pricing decision, not an oversight. In practice only
+ * a `server` may hold one, so the type gate above already reserves them.
  *
  * FUTURE: this gates new DEPLOYS, not machines already running. A team can
  * subscribe, deploy always-on services, cancel, and keep those machines
@@ -287,32 +299,64 @@ export async function getServiceVolume(prisma: PrismaClientTransaction, tenancy:
  * downgrade-time sweep that rescales running services, which belongs with the
  * billing lifecycle rather than here.
  */
-export async function assertMinInstancesAllowedByPlan(tenancy: Tenancy, services: Record<string, DeploymentServiceDefinition>): Promise<void> {
-  const offending = Object.entries(services)
-    .filter(([, definition]) => effectiveMinInstances(definition) > 0)
+export async function assertServicesAllowedByPlan(tenancy: Tenancy, services: Record<string, DeploymentServiceDefinition>): Promise<void> {
+  const entries = Object.entries(services);
+  // A server is refused on its type alone, so it is deliberately excluded from
+  // the always-on list below: the two problems have different remedies, and a
+  // service named under both would be told to fix it twice.
+  const serverServices = entries
+    .filter(([, definition]) => definition.type === "server")
     .map(([serviceId]) => serviceId)
     .sort(stringCompare);
-  if (offending.length === 0) return;
+  const alwaysOnServices = entries
+    .filter(([, definition]) => definition.type !== "server" && effectiveMinInstances(definition) > 0)
+    .map(([serviceId]) => serviceId)
+    .sort(stringCompare);
+  if (serverServices.length === 0 && alwaysOnServices.length === 0) return;
 
   // Null = this project isn't plan-gated at all (self-hosted, or plan limits
   // disabled) or the plan couldn't be read. All of those must fail open —
   // deploying can't depend on the billing store being reachable.
   if (await getPlanIdForProjectOrNull(tenancy.project) !== "free") return;
 
-  // The CLI truncates the surfaced message at 1000 chars, and the remedy comes
-  // last — so cap the list rather than let a config with many long service ids
-  // push the actionable half off the end.
-  const shown = offending.slice(0, 5).map((serviceId) => `\`${serviceId}\``);
-  const list = offending.length > shown.length
-    ? `${shown.join(", ")}, and ${offending.length - shown.length} more`
+  // Both sections can fire at once, and the CLI truncates the whole message at
+  // 1000 chars — so name fewer services when there are two remedies to fit.
+  const cap = serverServices.length > 0 && alwaysOnServices.length > 0 ? 3 : 5;
+  const lines: string[] = [];
+  if (serverServices.length > 0) {
+    lines.push(
+      `\`server\` services are not available on the Free plan, but ${serverServices.length === 1 ? `service ${planGateServiceList(serverServices, cap)} is` : `services ${planGateServiceList(serverServices, cap)} are`} declared as one.`,
+      "",
+      "A `server` holds a machine and its disk from deploy until you tear it down — `minInstances: 0` does not make it scale to zero. Either:",
+      "  - use `type: \"serverless\"`, which scales to zero and cold-starts on the next request (it can have no persistent volume); or",
+      "  - upgrade your plan at https://app.hexclave.com to run persistent servers.",
+    );
+  }
+  if (alwaysOnServices.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(
+      `Always-on instances are not available on the Free plan, but ${alwaysOnServices.length === 1 ? `service ${planGateServiceList(alwaysOnServices, cap)} keeps` : `services ${planGateServiceList(alwaysOnServices, cap)} keep`} an instance running (\`minInstances\` above 0).`,
+      "",
+      "Either:",
+      `  - set \`minInstances: 0\` on ${alwaysOnServices.length === 1 ? "that service" : "those services"}, which scales to zero and cold-starts on the next request; or`,
+      "  - upgrade your plan at https://app.hexclave.com to keep instances always on.",
+    );
+  }
+  throw new StatusError(400, lines.join("\n"));
+}
+
+/**
+ * Names the offending services for a plan-gate message.
+ *
+ * The CLI truncates the surfaced message at 1000 chars and the remedy comes
+ * last, so cap the list rather than let a config with many long service ids
+ * push the actionable half off the end.
+ */
+function planGateServiceList(serviceIds: string[], cap: number): string {
+  const shown = serviceIds.slice(0, cap).map((serviceId) => `\`${serviceId}\``);
+  return serviceIds.length > shown.length
+    ? `${shown.join(", ")}, and ${serviceIds.length - shown.length} more`
     : shown.join(", ");
-  throw new StatusError(400, [
-    `Always-on instances are not available on the Free plan, but ${offending.length === 1 ? `service ${list} keeps` : `services ${list} keep`} an instance running (\`minInstances\` above 0).`,
-    "",
-    "Either:",
-    `  - set \`minInstances: 0\` on ${offending.length === 1 ? "that service" : "those services"} — a \`server\` then suspends when idle and resumes with its memory intact, and a \`serverless\` scales to zero and cold-starts on the next request. Note that a \`server\` defaults to \`minInstances: 1\`, so this has to be written out; or`,
-    "  - upgrade your plan at https://app.hexclave.com to keep instances always on.",
-  ].join("\n"));
 }
 
 /**

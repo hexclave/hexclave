@@ -1,31 +1,41 @@
 // All Marshal configuration comes from env vars — Marshal is stateless and holds no DB.
-// The mock sentinel token points all Fly API URLs at the fly-mock docker service and is
-// refused unless the process explicitly opts in. This must not depend on NODE_ENV: an
-// omitted production NODE_ENV must fail closed.
+// Mock mode is refused unless the process explicitly opts in. This must not depend on
+// NODE_ENV: an omitted production NODE_ENV must fail closed.
 
 import { assertDataEncryptionKeyIsSafe, parseDataEncryptionRootKey } from "./spec-crypto.js";
-
-export const MOCK_FLY_TOKEN = "mock_hexclave_fly_key";
 
 export type MarshalConfig = {
   port: number,
   apiKey: string,
+  // Vercel sets `Authorization: Bearer $CRON_SECRET` on its cron invocations. Accepted ONLY on
+  // the maintenance routes, so the platform's scheduler does not have to be handed the
+  // credential the backend uses for everything else. Null when unset, which is not a fallback
+  // to anything: unset means Vercel sends no Authorization header and the crons cannot run.
+  cronSecret: string | null,
   webhookSecret: string,
   dataEncryptionRootKey: Buffer,
-  // Base URL builder machines use to reach the completion webhook. Only needed for real
-  // Fly builds (the mock builder completes in-process).
+  // Base URL builder VMs use to reach the completion webhook. Only needed for real builds
+  // (the mock builder completes in-process).
   publicUrl: string | null,
   envId: string,
-  fly: {
-    token: string,
-    orgSlug: string,
-    machinesApiUrl: string,
-    graphqlApiUrl: string,
-    logsApiUrl: string,
-    registryHost: string,
+  gcp: {
+    billingAccount: string,
+    projectParent: string | null,
+    projectPrefix: string,
+    // How many fully provisioned tenant projects to keep ready for immediate assignment
+    // (Google's multi-tenant recommendation). 0 disables the pool and every first deploy
+    // into a namespace provisions its project synchronously.
+    projectPoolSize: number,
+    platformProjectId: string,
+    existingProjectIdForTests: string | null,
     region: string,
+    zone: string,
+    network: string,
+    subnetwork: string,
+    mockUrl: string | null,
+    mockToken: string | null,
   },
-  builderKind: "fly" | "mock",
+  builderKind: "gcp" | "mock",
   s3: {
     endpoint: string,
     region: string,
@@ -53,20 +63,19 @@ export function assertMocksExplicitlyAllowed(description: string, environment: N
   }
 }
 
+export function resolveGcpMockUrl(value: string | undefined, prefix: string): string | null {
+  const configured = (value || "").replace(/\/$/, "");
+  return configured === "local" ? `http://localhost:${prefix}48` : configured || null;
+}
+
 let cached: MarshalConfig | null = null;
 
 export function getConfig(): MarshalConfig {
   if (cached) return cached;
 
-  const flyToken = env("MARSHAL_FLY_API_TOKEN");
-  const isMockFly = flyToken === MOCK_FLY_TOKEN;
-  if (isMockFly) assertMocksExplicitlyAllowed("the mock Fly token");
-  // The fly-mock docker service serves all three API surfaces on one port.
-  const flyMockUrl = `http://localhost:${portPrefix()}48`;
-
-  const builderKind = env("MARSHAL_BUILDER", "fly");
-  if (builderKind !== "fly" && builderKind !== "mock") {
-    throw new Error(`marshal refuses to start: MARSHAL_BUILDER must be "fly" or "mock" (got ${JSON.stringify(builderKind)})`);
+  const builderKind = env("MARSHAL_BUILDER", "gcp");
+  if (builderKind !== "gcp" && builderKind !== "mock") {
+    throw new Error(`marshal refuses to start: MARSHAL_BUILDER must be "gcp" or "mock" (got ${JSON.stringify(builderKind)})`);
   }
   if (builderKind === "mock") assertMocksExplicitlyAllowed("the mock builder");
 
@@ -75,12 +84,40 @@ export function getConfig(): MarshalConfig {
     throw new Error(`marshal refuses to start: MARSHAL_PORT must be a valid port number (got ${JSON.stringify(process.env.MARSHAL_PORT)})`);
   }
 
-  const publicUrl = (process.env.MARSHAL_PUBLIC_URL || "").replace(/\/$/, "") || null;
+  const publicUrlRaw = (process.env.MARSHAL_PUBLIC_URL || "").replace(/\/$/, "") || null;
+  let publicUrl: string | null = null;
+  if (publicUrlRaw !== null) {
+    let parsed: URL;
+    try {
+      parsed = new URL(publicUrlRaw);
+    } catch (error) {
+      throw new Error(`marshal refuses to start: MARSHAL_PUBLIC_URL must be an absolute URL (got ${JSON.stringify(publicUrlRaw)})`, { cause: error });
+    }
+    if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" || parsed.pathname !== "/") {
+      throw new Error("marshal refuses to start: MARSHAL_PUBLIC_URL must contain only an origin, without credentials, a path, query params, or a fragment");
+    }
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && process.env.MARSHAL_ALLOW_MOCKS === "1")) {
+      throw new Error("marshal refuses to start: MARSHAL_PUBLIC_URL must use HTTPS (HTTP is allowed only with MARSHAL_ALLOW_MOCKS=1)");
+    }
+    publicUrl = parsed.origin;
+  }
   // The real builder machine calls the completion webhook on MARSHAL_PUBLIC_URL — refuse to
   // start without it rather than failing every upload-sourced build at runtime.
-  if (builderKind === "fly" && publicUrl === null) {
-    throw new Error("marshal refuses to start: MARSHAL_PUBLIC_URL is required when MARSHAL_BUILDER=fly (the builder machine calls the completion webhook on it).");
+  if (builderKind === "gcp" && publicUrl === null) {
+    throw new Error("marshal refuses to start: MARSHAL_PUBLIC_URL is required when MARSHAL_BUILDER=gcp (the builder VM calls the completion webhook on it).");
   }
+
+  const existingProjectIdForTests = (process.env.HEXCLAVE_MARSHAL_GCP_EXISTING_PROJECT_ID_FOR_TESTS || "").trim() || null;
+  if (existingProjectIdForTests !== null) assertMocksExplicitlyAllowed("HEXCLAVE_MARSHAL_GCP_EXISTING_PROJECT_ID_FOR_TESTS");
+  const gcpMockUrl = resolveGcpMockUrl(process.env.HEXCLAVE_MARSHAL_GCP_MOCK_URL, portPrefix());
+  if (gcpMockUrl !== null) assertMocksExplicitlyAllowed("HEXCLAVE_MARSHAL_GCP_MOCK_URL");
+  const projectPoolSizeRaw = process.env.HEXCLAVE_MARSHAL_GCP_PROJECT_POOL_SIZE || "0";
+  const projectPoolSize = Number(projectPoolSizeRaw);
+  if (!Number.isInteger(projectPoolSize) || projectPoolSize < 0 || projectPoolSize > 100) {
+    throw new Error(`marshal refuses to start: HEXCLAVE_MARSHAL_GCP_PROJECT_POOL_SIZE must be an integer between 0 and 100 (got ${JSON.stringify(projectPoolSizeRaw)})`);
+  }
+  const region = env("HEXCLAVE_MARSHAL_GCP_REGION", "us-central1");
+  const zone = env("HEXCLAVE_MARSHAL_GCP_ZONE", `${region}-a`);
 
   const apiKey = env("MARSHAL_API_KEY");
   const dataEncryptionKey = env("HEXCLAVE_MARSHAL_DATA_ENCRYPTION_KEY");
@@ -88,25 +125,31 @@ export function getConfig(): MarshalConfig {
   cached = {
     port,
     apiKey,
+    cronSecret: process.env.CRON_SECRET || null,
     webhookSecret: env("MARSHAL_WEBHOOK_SECRET", apiKey),
     dataEncryptionRootKey: parseDataEncryptionRootKey(dataEncryptionKey),
     publicUrl,
     envId: env("MARSHAL_ENV_ID"),
-    fly: {
-      token: flyToken,
-      orgSlug: env("MARSHAL_FLY_ORG_SLUG"),
-      machinesApiUrl: env("MARSHAL_FLY_MACHINES_API_URL", isMockFly ? flyMockUrl : "https://api.machines.dev").replace(/\/$/, ""),
-      graphqlApiUrl: env("MARSHAL_FLY_GRAPHQL_API_URL", isMockFly ? `${flyMockUrl}/graphql` : "https://api.fly.io/graphql"),
-      logsApiUrl: env("MARSHAL_FLY_LOGS_API_URL", isMockFly ? `${flyMockUrl}/api/v1` : "https://api.fly.io/api/v1").replace(/\/$/, ""),
-      registryHost: env("MARSHAL_FLY_REGISTRY_HOST", "registry.fly.io"),
-      region: env("MARSHAL_FLY_REGION", "iad"),
+    gcp: {
+      billingAccount: env("HEXCLAVE_MARSHAL_GCP_BILLING_ACCOUNT", existingProjectIdForTests === null ? undefined : "test-only"),
+      projectParent: (process.env.HEXCLAVE_MARSHAL_GCP_PROJECT_PARENT || "").replace(/^\/+|\/+$/g, "") || null,
+      projectPrefix: env("HEXCLAVE_MARSHAL_GCP_PROJECT_PREFIX", "hxc-tenant"),
+      projectPoolSize,
+      platformProjectId: env("HEXCLAVE_MARSHAL_GCP_PLATFORM_PROJECT_ID"),
+      existingProjectIdForTests,
+      region,
+      zone,
+      network: env("HEXCLAVE_MARSHAL_GCP_NETWORK", "hexclave-runtime"),
+      subnetwork: env("HEXCLAVE_MARSHAL_GCP_SUBNETWORK", "hexclave-runtime"),
+      mockUrl: gcpMockUrl,
+      mockToken: gcpMockUrl === null ? null : env("HEXCLAVE_MARSHAL_GCP_MOCK_TOKEN", "mock_hexclave_gcp_key"),
     },
     builderKind,
     s3: {
       // The localhost default is the dev s3mock and is only offered in mock mode: silently
       // pointing a real deployment at localhost would fail every spec, upload and build with
       // a connection error instead of saying which env var is missing.
-      endpoint: env("MARSHAL_S3_ENDPOINT", isMockFly ? `http://localhost:${portPrefix()}21` : undefined),
+      endpoint: env("MARSHAL_S3_ENDPOINT", builderKind === "mock" ? `http://localhost:${portPrefix()}21` : undefined),
       region: env("MARSHAL_S3_REGION", "auto"),
       accessKeyId: env("MARSHAL_S3_ACCESS_KEY_ID"),
       secretAccessKey: env("MARSHAL_S3_SECRET_ACCESS_KEY"),
@@ -117,66 +160,50 @@ export function getConfig(): MarshalConfig {
   return cached;
 }
 
-// namespace → Fly org resolution. One org per environment today; sharding namespaces
-// across orgs later is a change to this function only (per the plan's decision #3).
-export function resolveNamespaceOrg(_ns: string): { orgSlug: string, token: string } {
-  const config = getConfig();
-  return { orgSlug: config.fly.orgSlug, token: config.fly.token };
-}
-
 // Runtime policy (deliberately NOT part of the service spec or the revision hash).
 export const MAX_INSTANCES_CAP = 5;
-// Each declared port becomes its own Fly services entry. A bound on the spec
-// rather than a platform limit: a container listening on more than this is far
+// A bound on the spec rather than a platform limit: a container listening on more than this is far
 // likelier to be a config mistake than a real fleet.
 export const MAX_PORTS_PER_SERVICE = 10;
-// Fly volume bounds: 1 GB is the platform default/minimum, 500 GB the maximum.
+// Persistent Disk bounds. Disks are grow-only and survive server deletion.
 export const MIN_VOLUME_SIZE_GB = 1;
 export const MAX_VOLUME_SIZE_GB = 500;
-// A Fly machine mounts at most one volume ("Currently, you may only mount one volume per
-// Machine" — Machines API reference), so a second entry could not be honoured.
+// A server deliberately supports one persistent disk to preserve the v1 service contract.
 export const MAX_PERSISTENT_VOLUMES_PER_SERVICE = 1;
-// Volume ids must survive flyVolumeName() unchanged; see VOLUME_NAME_PREFIX below.
+// Volume ids must survive gcpDiskName() unchanged; see VOLUME_NAME_PREFIX below.
 export const VOLUME_ID_REGEX = /^[a-z][a-z0-9_]*$/;
 export const MAX_VOLUME_ID_LENGTH = 26;
-// One volume per service (Fly allows at most one mount per machine, and a service with a
-// volume is a single-instance "server"). Fly volume names are alnum + underscore, <= 30
-// chars, so the caller-chosen volume id (lowercase alnum + underscore, <= 26 — validated
-// upstream) fits behind this 4-character prefix.
-//
-// The name is derived from the volume ID rather than being constant so a service can hold
-// several distinct disks over its life and name which one it wants. The identity is NOT
-// global: a Fly volume lives inside one app and the app is per-service (see naming.ts), so
-// the same id under a different service is a DIFFERENT disk — ensureVolume finds no volume
-// by that name in the new app and creates an empty one. Callers must not present moving an
-// id between services as moving the data.
+// The name is derived from service identity and volume id in naming.ts. Underscores are
+// normalized because Compute Engine resource names only allow lowercase letters, digits,
+// and hyphens.
 export const VOLUME_NAME_PREFIX = "hxv_";
-export function flyVolumeName(volumeId: string): string {
-  return `${VOLUME_NAME_PREFIX}${volumeId}`;
+export function gcpDiskName(volumeId: string): string {
+  return `${VOLUME_NAME_PREFIX}${volumeId}`.replace(/_/g, "-");
 }
+
 export const MACHINE_GUEST = { cpu_kind: "shared", cpus: 1, memory_mb: 512 };
 export const BUILDER_GUEST = { cpu_kind: "shared", cpus: 2, memory_mb: 2048 };
 // Railpack builds get a bigger machine: every builder is ephemeral (no image cache) and the
-// railpack-builder base image is large — real-Fly QA measured the default guest timing out at
+// railpack-builder base image is large, and the default guest can time out during
 // 15 minutes on base-image extraction alone. The CPUs are what buy that back.
 //
 // The RAM has to cover TWO things at once, which is what the first sizing of it got wrong:
 // the tmpfs holding buildkit's snapshot store (below) AND the build process itself. At 8g
 // with a 6g tmpfs there were ~2g left, and a Next 16 app with ~1.1g of node_modules either
 // filled the store (ENOSPC) or was OOM-killed at ~1.3g RSS. 16g is the ceiling for two
-// performance CPUs (Fly allows 8g per CPU), and splits ~10/6 between the two.
+// compilation. The larger shape splits memory roughly 10/6 between snapshots and the build.
 export const RAILPACK_BUILDER_GUEST = { cpu_kind: "performance", cpus: 2, memory_mb: 16384 };
 // A cap, not a reservation — unused tmpfs pages cost nothing. Sized so the store cannot fill
 // before the guest's remaining ~6g is what limits the build, since ENOSPC from inside a
 // buildkit step is a far more confusing failure than running out of memory.
 export const RAILPACK_BUILDKIT_TMPFS_SIZE = "10g";
-export const BUILDER_IMAGE = "moby/buildkit:v0.23.2";
+export const BUILDER_IMAGE = "docker.io/moby/buildkit:v0.23.2@sha256:ddd1ca44b21eda906e81ab14a3d467fa6c39cd73b9a39df1196210edcb8db59e";
 // Railpack (https://railpack.com) builds services that don't declare a Dockerfile: the CLI
 // analyzes the source and emits a build plan that its BuildKit frontend executes. CLI and
 // frontend are pinned to the same release by checksum/digest (not just tags), so neither a
 // re-pushed tag nor a tampered release asset can change what runs on the builder.
 // FUTURE: mirror the CLI tarball and frontend image into Marshal-owned storage (the S3
-// bucket / a Fly registry) so github.com/ghcr.io outages can't fail every Railpack build,
+// bucket / Artifact Registry) so github.com/ghcr.io outages can't fail every Railpack build,
 // and so each build stops re-downloading them.
 export const RAILPACK_VERSION = "0.35.0";
 // The builder image is Alpine-based, hence the musl build.
@@ -230,7 +257,7 @@ export const MAX_WEBHOOK_BODY_BYTES = 64 * 1024;
 export const SOFT_CONCURRENCY_LIMIT = 25;
 
 // Build-time env (see buildTimeEnv). The values ride to the builder machine inside its
-// machine CONFIG, via the files API — so they are bounded by what the Fly machine-create
+// VM metadata through the file bundle, so they are bounded by what the instance-create
 // API will accept as one document, not by anything about env vars. The cap is enforced at
 // spec validation so an oversized env fails the PUT with a precise message instead of
 // surfacing as an opaque machine-create rejection fifteen seconds into a deploy.
@@ -238,6 +265,11 @@ export const MAX_BUILD_ENV_BYTES = 32 * 1024;
 // Where the harness finds those files: one file per var, filename = var name, contents =
 // the exact value.
 export const BUILD_ENV_DIR = "/marshal-build-env";
+// Tenant env reaches the builder, so its values are scrubbed from build logs alongside
+// Marshal's own credentials. Short values are skipped: "1", "true", "5432" and friends are
+// everywhere in a build log, and redacting them would leave a page of <redacted> with no
+// secret actually protected (nothing that short is a credential worth hiding).
+export const MIN_REDACTED_ENV_VALUE_LENGTH = 8;
 // Where Marshal-generated Dockerfiles (and Dockerfile suffixes) are injected on
 // the builder machine, one directory per target. Kept out of the build CONTEXT
 // (/ctx, the extracted upload) on purpose: a file placed there would be part of
@@ -248,8 +280,3 @@ export const BUILD_DOCKERFILE_DIR = "/marshal-dockerfiles";
 // it. Both must agree: a command the runtime would refuse has to fail at sync
 // time, before an upload has been consumed.
 export const MAX_COMMAND_LENGTH = 2048;
-// Tenant env now reaches the builder, so its values are scrubbed from build logs alongside
-// Marshal's own credentials. Short values are skipped: "1", "true", "5432" and friends are
-// everywhere in a build log, and redacting them would leave a page of <redacted> with no
-// secret actually protected (nothing that short is a credential worth hiding).
-export const MIN_REDACTED_ENV_VALUE_LENGTH = 8;

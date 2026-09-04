@@ -15,27 +15,20 @@ export type EnvValue =
   // "<service_key>.<output_key>", with an optional ":<port>" on `url`.
   | { ref: string };
 
-// A persistent disk mounted into the container. Fly volumes are a slice of local NVMe on
-// ONE host: a volume attaches to at most one machine and a machine mounts at most one
-// volume, so only a "server" (single-instance by construction) can hold one — enforced in
-// validateServiceSpec. size_gb is grow-only; Fly rejects a shrink.
+// A zonal persistent disk mounted into the container. A disk attaches to one server VM, so
+// only a "server" (single-instance by construction) can hold one. size_gb is grow-only.
 export type VolumeConfig = {
   path: string, // absolute, normalized mount point inside the container
   size_gb: number,
 };
 
-// "server"     → one instance, autostop "suspend": it resumes with memory intact and is
-//                the only type that may mount a volume.
+// "server"     → one Compute Engine instance, the only type that may mount a volume. There
+//                is no request-triggered suspend, so min_instances 0 does not scale it to zero.
 // "serverless" → scales between bounds, autostop "stop": every start is cold, no volume.
 export type ServiceKind = "server" | "serverless";
 
-// How one port the container listens on is exposed. Each becomes its own entry
-// in the machine's Fly `services` array.
-//
-// There is deliberately no per-port `public`: Fly's listener set is per-APP, not
-// per-address, so every declared port answers on every address the app holds.
-// Visibility is therefore a property of the whole container (see
-// ContainerConfig.public) and a per-port flag could only ever lie about it.
+// How one port the container listens on is exposed. Visibility is deliberately a property
+// of the whole container (see ContainerConfig.public), not an individual port.
 //
 // A "tcp" port is raw, and only a PRIVATE service may declare one: a shared
 // public IPv4 tells apps apart by SNI or Host, and raw TCP carries neither.
@@ -70,9 +63,7 @@ export type ContainerConfig = {
   type: ServiceKind,
   min_instances: number,
   max_instances: number, // >= min_instances; v1 cap: 10. Always 0/1 for "server".
-  // Whether the service takes public ingress. The whole container, not one port:
-  // the Fly proxy serves every declared port on every address the app holds, so
-  // there is no such thing as a public port with a private sibling.
+  // Whether the service takes public ingress. The whole container, not one port.
   //
   // A public service must be all-HTTP and must declare at least one port; both
   // are enforced in validateServiceSpec.
@@ -81,19 +72,13 @@ export type ContainerConfig = {
   // Readiness = a declared port accepts connections.
   ports: PortsConfig,
   // Absent = the container filesystem is entirely ephemeral. Keyed by VOLUME ID, which
-  // names the Fly volume (see flyVolumeName): the id, not the service, identifies the
-  // disk, so the same id under a different service moves the mount there. At most one
-  // entry — a Fly machine mounts at most one volume.
+  // contributes to the stable persistent-disk identity. At most one entry.
   persistent_volumes?: Record<string, VolumeConfig>,
   // A single command line to start the container with, INSTEAD of whatever the
   // image would have started. Absent = the image decides.
   //
-  // It becomes the machine's `init.exec`, which replaces the image's entrypoint
-  // AND its command (verified against real Fly: with `exec` set, an nginx image's
-  // /docker-entrypoint.sh never runs; `init.cmd` alone would instead be passed
-  // to that entrypoint as arguments, which is a different and much more
-  // surprising thing). So it is container config, not image content: it takes
-  // effect on a machine roll and never causes a build.
+  // It replaces the image's entrypoint and command, so it is container config rather than
+  // image content: it takes effect on a runtime roll and never causes a build.
   //
   // Run through `/bin/sh -c`, so an image without a shell cannot use one.
   start_command?: string,
@@ -128,7 +113,7 @@ export type DeploymentTarget = {
   // ALONE, it is the image to run: the target takes no part in the deployment's
   // build, and starts "pending" rather than "building" because there is nothing
   // to wait for. Stored as the author wrote it, normalized but NOT resolved — a
-  // tag reaches the machine config as a tag and Fly resolves it when it pulls.
+  // tag reaches the runtime config as a tag and the platform resolves it when it pulls.
   //
   // With a `build_command` it is instead the BASE of a generated Dockerfile, and
   // the target is built like any other. `targetIsBuilt` is the one place that
@@ -273,9 +258,9 @@ export type StoredDeployment = Omit<Deployment, "services"> & {
   // webhook, which MERGES into this rather than replacing it.
   //
   // What a target will RUN, which for a tag is not the same as which bytes it
-  // ran — that is reported per service in `services`, from what Fly resolved.
+  // ran — that is reported per service in `services`.
   images: Record<string, string>,
-  // Set for real Fly builds so live logs can be proxied from the builder machine and the
+  // Set for real GCP builds so live logs can be proxied from the builder VM and the
   // lazy backstop can detect a dead builder. Null for mock builds.
   builder_app: string | null,
   builder_machine_id: string | null,
@@ -291,11 +276,78 @@ export type ReconciliationLease = {
   expires_at_millis: number,
 };
 
-// Global hostname-uniqueness registry entry (smoke test showed Fly does NOT enforce
+// Namespace → tenant GCP project assignment (created once, conditionally). Google's
+// multi-tenant guidance recommends assigning pre-created projects to tenants on demand
+// (https://docs.cloud.google.com/run/docs/securing/multi-tenant), so the id is NOT derived
+// from the namespace: this mapping is the idempotency anchor that keeps reconciliation
+// deterministic across restarts and Marshal replicas.
+export type TenantProjectAssignment = {
+  project_id: string,
+};
+
+// One entry of the pre-provisioned tenant project pool. A project enters the pool only
+// after it is fully provisioned (created, billed, APIs enabled, runtime IAM granted), so
+// claiming one is a pure bucket operation — no GCP latency in the deploy-start path.
+//
+// The states before `ready` are RESUME POINTS, not scheduled stages: provisioning runs on
+// a cron-driven advancer whose process can be frozen at any instruction (Vercel freezes the
+// sandbox the moment a response is written), so every step has to be re-enterable from
+// whatever the bucket last recorded. `creating` in particular is written BEFORE the Resource
+// Manager POST — a freeze between the POST and the record would otherwise leave a billable
+// GCP project that nothing in the bucket knows about, and therefore nothing can ever reap.
+//
+//   creating        — the record exists; the project may or may not exist yet in GCP
+//   billing_pending — the project is ACTIVE; Cloud Billing has not accepted it yet
+//   apis_pending    — billing attached; `operation_name` is the batchEnable to poll
+//   iam_pending     — APIs enabled; service identity and runtime bindings still to grant
+//   ready           — fully provisioned and claimable
+//   claimed         — assigned to `ns`
+//   condemned       — given up on; the reaper deletes the GCP project and the entry
+export const POOL_PROJECT_STATES = ["creating", "billing_pending", "apis_pending", "iam_pending", "ready", "claimed", "condemned"] as const;
+
+export type PoolProjectState = (typeof POOL_PROJECT_STATES)[number];
+
+// Deliberately a flat record rather than a discriminated union: every state transition is a
+// read-modify-CAS-write of the whole entry, and a union would make each one restate fields
+// that are simply carried forward. `ns` is meaningful only in `claimed`.
+export type PoolProjectEntry = {
+  state: PoolProjectState,
+  // When the entry was first written — which, because the record precedes the create call,
+  // is also the earliest moment a billable project could exist. The reaper's stall check
+  // measures from here.
+  created_at_millis: number,
+  // When the state last changed. The reaper's claim grace measures from HERE, not from
+  // created_at_millis: a project claimed weeks after it was provisioned must not be treated
+  // as instantly past its grace.
+  state_since_millis: number,
+  attempts: number,
+  last_error: string | null,
+  // The in-flight Service Usage batchEnable operation. Stored so a tick resuming after a
+  // freeze polls the enablement already running instead of starting a second one.
+  operation_name: string | null,
+  project_number: string | null,
+  ns: string | null,
+};
+
+// Global hostname-uniqueness registry entry (the infrastructure provider does not enforce
 // cross-app hostname uniqueness, so Marshal owns it). Claimed with a conditional PUT.
 export type DomainClaim = {
   hostname: string,
   ns: string,
   service_key: string,
   claimed_at_millis: number,
+  // Present while provider cleanup is in progress. The global reservation remains until
+  // cleanup succeeds, so a failed delete can be retried without a new owner racing it.
+  deleting_at_millis?: number,
+};
+
+// A request to attach a hostname is tenant-local until DNS proves control. Keeping pending
+// requests out of the global claim key prevents an unverified tenant from squatting a name.
+export type PendingDomainClaim = {
+  hostname: string,
+  ns: string,
+  service_key: string,
+  verification_token: string,
+  created_at_millis: number,
+  expires_at_millis: number,
 };

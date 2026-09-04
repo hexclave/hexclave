@@ -82,7 +82,7 @@ describe("service reconciliation lease", () => {
     expect(performance.now() - startedAt).toBeGreaterThanOrEqual(takeoverGraceMs - 5);
   });
 
-  it("keeps the lease until expiry when a Fly mutation outcome is unknown", async () => {
+  it("keeps the lease until expiry when a provider mutation outcome is unknown", async () => {
     const error = new MutationOutcomeUnknownError("unknown", { cause: new Error("socket closed") });
     await expect(withReconciliationLease("ns", "web", async () => {
       throw error;

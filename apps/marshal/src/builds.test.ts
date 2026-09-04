@@ -4,38 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { BASE_IMAGE, MAX_BUILD_ENV_BYTES } from "./config.js";
-import { INTERNAL_COMPLETE_PATH_PREFIX, buildEnvByteLength, buildHarnessScript, buildTimeEnv, createFlyBuilder, createMockBuilder, generatedDockerfile, type BuildTarget } from "./builds.js";
+import { buildEnvByteLength, buildHarnessScript, buildTimeEnv, createMockBuilder, generatedDockerfile, type BuildTarget } from "./builds.js";
 import { validateDeploymentRequest, validateServiceSpec } from "./services.js";
 import { targetIsBuilt, targetUsesGeneratedDockerfile } from "./types.js";
 
-// startBuild reaches for Marshal's Fly client, config, and object store through module
-// singletons, so the machine-config assertions below need all three stubbed. Only getConfig
-// and resolveNamespaceOrg are overridden in config — the module's pinned constants
-// (BUILDER_IMAGE, the railpack pins) are the real ones, which is the point of the test.
-const createMachine = vi.fn(async () => ({ id: "machine-1" }));
+// The mock builder needs only the webhook secret. The real GCP builder is covered by the
+// Compute Engine startup-script and client tests, without provisioning a VM in unit tests.
 vi.mock("./config.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./config.js")>(),
-  getConfig: () => ({
-    envId: "test",
-    publicUrl: "https://marshal.example.com",
-    webhookSecret: "webhook-secret",
-    fly: { region: "iad", registryHost: "registry.fly.io", token: "FlyV1 org-token" },
-  }),
-  resolveNamespaceOrg: () => ({ orgSlug: "org", token: "FlyV1 org-token" }),
-}));
-vi.mock("./fly/client.js", () => ({
-  flyClientForNamespaceOrg: () => ({
-    ensureApp: async () => {},
-    createMachine,
-    registryAuthBase64: () => "registry-auth-blob",
-  }),
+  getConfig: () => ({ webhookSecret: "webhook-secret" }),
 }));
 vi.mock("./store.js", () => ({
-  presignValidatedUploadGet: async () => "https://bucket.example.com/src.tar.gz?X-Amz-Signature=deadbeef",
   readSpec: async () => null,
 }));
 
-// The harness script itself only runs on a real Fly builder machine, so these tests pin its
+// The harness script itself only runs on a real GCP builder VM, so these tests pin its
 // shape (both build modes, credential stripping, checksum verification) rather than its
 // behavior — a regression here means the real builder changed in a way QA must re-verify.
 describe("buildHarnessScript", () => {
@@ -89,9 +72,9 @@ describe("buildHarnessScript", () => {
     fs.writeFileSync(manifestPath, [
       // Both optional fields set, then BOTH empty (Railpack from the upload root), then only
       // root_directory set — the case that shifted fields.
-      "web\tregistry.fly.io/web:tag\tweb/Dockerfile\tapps/web",
-      "api\tregistry.fly.io/api:tag\t\t",
-      "db\tregistry.fly.io/db:tag\t\tservices/db",
+      "web\tus-central1-docker.pkg.dev/project/marshal/web:tag\tweb/Dockerfile\tapps/web",
+      "api\tus-central1-docker.pkg.dev/project/marshal/api:tag\t\t",
+      "db\tus-central1-docker.pkg.dev/project/marshal/db:tag\t\tservices/db",
       "",
     ].join("\n"));
 
@@ -100,9 +83,9 @@ describe("buildHarnessScript", () => {
 done < ${JSON.stringify(manifestPath)}`], { encoding: "utf8" });
 
     expect(output.trim().split("\n")).toEqual([
-      "[web][registry.fly.io/web:tag][web/Dockerfile][apps/web]",
-      "[api][registry.fly.io/api:tag][][]",
-      "[db][registry.fly.io/db:tag][][services/db]",
+      "[web][us-central1-docker.pkg.dev/project/marshal/web:tag][web/Dockerfile][apps/web]",
+      "[api][us-central1-docker.pkg.dev/project/marshal/api:tag][][]",
+      "[db][us-central1-docker.pkg.dev/project/marshal/db:tag][][services/db]",
     ]);
   });
 
@@ -123,7 +106,7 @@ done < ${JSON.stringify(manifestPath)}`], { encoding: "utf8" });
 
   it("mounts a tmpfs for the buildkit snapshotter when sized", () => {
     // Without this, the overlayfs rootfs forces buildkit's native (full-copy) snapshotter
-    // and large base-image extraction alone exceeds the build timeout (real-Fly QA).
+    // and large base-image extraction alone exceeds the build timeout (real-provider QA).
     expect(script).toContain("mount -t tmpfs");
     expect(script).toContain("/var/lib/buildkit");
   });
@@ -169,105 +152,6 @@ describe("buildHarnessScript build-time env", () => {
   });
 });
 
-describe("createFlyBuilder machine configuration", () => {
-  const startOptions = {
-    ns: "ns",
-    deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-    uploadId: "00000000-0000-4000-8000-000000000001",
-    targets: [{
-      serviceKey: "web",
-      pushTarget: "registry.fly.io/hx-test-ns-web:01hzzzzzzzzzzzzzzzzzzzzzzz",
-      dockerfilePath: null,
-      rootDirectory: null,
-      baseImage: null,
-      buildCommand: null,
-      buildEnv: { NEXT_PUBLIC_API_URL: "https://api.example.com", OPENAI_API_KEY: "sk-secret" },
-    }],
-  };
-  const lease = { assertOwned: async () => {} } as any;
-
-  it("delivers tenant values as files and never in the machine env block", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild(startOptions, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-
-    const files = Object.fromEntries(config.files.map((file: any) => [file.guest_path, Buffer.from(file.raw_value, "base64").toString("utf8")]));
-    // Per TARGET, because one machine builds every service of the deployment: a
-    // value belonging to one service must not be offered to another's build.
-    expect(files["/marshal-build-env/web/NEXT_PUBLIC_API_URL"]).toBe("https://api.example.com");
-    expect(files["/marshal-build-env/web/OPENAI_API_KEY"]).toBe("sk-secret");
-    expect(files["/marshal-build.sh"]).toContain("MARSHAL_BUILD_START");
-    // The manifest the harness loops over, one tab-separated line per target.
-    expect(files["/marshal-targets.tsv"]).toBe("web\tregistry.fly.io/hx-test-ns-web:01hzzzzzzzzzzzzzzzzzzzzzzz\t\t\n");
-
-    // The env block is Marshal's own credentials plus pointers. A tenant value landing
-    // here would sit next to the org token and reach `railpack prepare`, which runs
-    // unsandboxed in the harness — so assert the absence, not just the files' presence.
-    expect(config.env.BUILD_ENV_DIR).toBe("/marshal-build-env");
-    expect(Object.values(config.env)).not.toContain("sk-secret");
-    expect(Object.values(config.env)).not.toContain("https://api.example.com");
-    expect(Object.keys(config.env)).not.toContain("OPENAI_API_KEY");
-  });
-
-  it("skips an empty value rather than sending an ambiguous empty file", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ...startOptions,
-      targets: [{ ...startOptions.targets[0], buildEnv: { SET: "x", UNSET: "" } }],
-    }, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-    const paths = config.files.map((file: any) => file.guest_path);
-    expect(paths).toContain("/marshal-build-env/web/SET");
-    expect(paths).not.toContain("/marshal-build-env/web/UNSET");
-  });
-});
-
-describe("a deployment with several targets", () => {
-  const lease = { assertOwned: async () => {} } as any;
-
-  it("gives every target its own env directory and one manifest line", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ns: "ns",
-      deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-      uploadId: "00000000-0000-4000-8000-000000000001",
-      targets: [
-        { serviceKey: "web", pushTarget: "registry.fly.io/web:rev", dockerfilePath: "apps/web/Dockerfile", rootDirectory: "apps/web", baseImage: null, buildCommand: null, buildEnv: { WEB_ONLY: "w" } },
-        { serviceKey: "api", pushTarget: "registry.fly.io/api:rev", dockerfilePath: null, rootDirectory: "apps/api", baseImage: null, buildCommand: null, buildEnv: { API_ONLY: "a" } },
-      ],
-    }, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-    const files = Object.fromEntries(config.files.map((file: any) => [file.guest_path, Buffer.from(file.raw_value, "base64").toString("utf8")]));
-    expect(files["/marshal-targets.tsv"]).toBe([
-      "web\tregistry.fly.io/web:rev\tapps/web/Dockerfile\tapps/web",
-      "api\tregistry.fly.io/api:rev\t\tapps/api",
-      "",
-    ].join("\n"));
-    // Neither target can see the other's values.
-    expect(files["/marshal-build-env/web/WEB_ONLY"]).toBe("w");
-    expect(files["/marshal-build-env/api/API_ONLY"]).toBe("a");
-    expect(files["/marshal-build-env/web/API_ONLY"]).toBeUndefined();
-    expect(files["/marshal-build-env/api/WEB_ONLY"]).toBeUndefined();
-  });
-
-  it("sizes the machine for Railpack when ANY target auto-detects", async () => {
-    // One machine builds them all, so the largest requirement wins: a
-    // Dockerfile-only guest would time out the railpack target's build.
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ns: "ns",
-      deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-      uploadId: "00000000-0000-4000-8000-000000000001",
-      targets: [
-        { serviceKey: "web", pushTarget: "registry.fly.io/web:rev", dockerfilePath: "Dockerfile", rootDirectory: null, baseImage: null, buildCommand: null, buildEnv: {} },
-        { serviceKey: "api", pushTarget: "registry.fly.io/api:rev", dockerfilePath: null, rootDirectory: null, baseImage: null, buildCommand: null, buildEnv: {} },
-      ],
-    }, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-    expect(config.env.BUILDKIT_TMPFS_SIZE).toBeDefined();
-  });
-});
-
 describe("buildTimeEnv", () => {
   it("takes plain values and drops refs", () => {
     // One channel: every declared var goes to the build AND the runtime, secrets included.
@@ -284,33 +168,6 @@ describe("buildTimeEnv", () => {
   });
 });
 
-describe("the build completion webhook", () => {
-  // The gate in marshal-app.ts authenticates /internal/* BEFORE any handler runs and 404s a path it
-  // does not recognize, so a webhook URL the gate cannot match means no real Fly build can
-  // ever complete — and nothing in e2e notices, because the mock builder completes in
-  // process without crossing HTTP. Both sides derive from buildCompletionPath; this pins
-  // that they still agree.
-  const INTERNAL_COMPLETE_PATH_REGEX = new RegExp(`^${INTERNAL_COMPLETE_PATH_PREFIX}([^/]+)/complete$`);
-
-  it("posts to a path the app's pre-handler auth gate accepts", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ns: "ns",
-      deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-      uploadId: "00000000-0000-4000-8000-000000000001",
-      targets: [{ serviceKey: "web", pushTarget: "registry.fly.io/hx-test-ns-web:tag", dockerfilePath: null, rootDirectory: null, baseImage: null, buildCommand: null, buildEnv: {} }],
-    }, { assertOwned: async () => {} } as any);
-    const webhookUrl = new URL((createMachine.mock.calls[0] as any)[1].config.env.WEBHOOK_URL);
-
-    const match = INTERNAL_COMPLETE_PATH_REGEX.exec(webhookUrl.pathname);
-    expect(match).not.toBeNull();
-    // The gate verifies the token against the id it reads out of the path, so the captured
-    // group has to BE the deployment id, not merely match something.
-    expect(match?.[1]).toBe("01HZZZZZZZZZZZZZZZZZZZZZZZ");
-    expect(webhookUrl.searchParams.get("ns")).toBe("ns");
-  });
-});
-
 describe("createMockBuilder", () => {
   it("reports a hexadecimal digest per target, whatever the service is called", async () => {
     // parseBuildImages requires /^sha256:[a-f0-9]{64}$/, and a service key is free to
@@ -323,7 +180,7 @@ describe("createMockBuilder", () => {
       deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
       uploadId: "00000000-0000-4000-8000-000000000001",
       targets: ["web", "api", "worker-queue"].map((serviceKey) => ({
-        serviceKey, pushTarget: `registry.fly.io/hx-test-ns-${serviceKey}:tag`, dockerfilePath: null, rootDirectory: null, baseImage: null, buildCommand: null, buildEnv: {},
+        serviceKey, pushTarget: `us-central1-docker.pkg.dev/project/marshal/hx-test-ns-${serviceKey}:tag`, dockerfilePath: null, rootDirectory: null, baseImage: null, buildCommand: null, buildEnv: {},
       })),
     }, { assertOwned: async () => {} } as any);
     await vi.waitFor(() => expect(completions.length).toBe(1));
@@ -535,7 +392,7 @@ describe("build and start commands", () => {
 describe("generatedDockerfile", () => {
   const target = (extra: Partial<BuildTarget> = {}): BuildTarget => ({
     serviceKey: "web",
-    pushTarget: "registry.fly.io/web:tag",
+    pushTarget: "us-central1-docker.pkg.dev/project/marshal/web:tag",
     dockerfilePath: null,
     rootDirectory: null,
     baseImage: null,

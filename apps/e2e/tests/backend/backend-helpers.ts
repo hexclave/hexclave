@@ -1441,6 +1441,47 @@ async function waitForBillingTeamPlanEntitlement(ownerTeamId: string): Promise<v
   }
 }
 
+/**
+ * Waits until a billing team's granted plan is visible to the backend.
+ *
+ * Subscriptions are read through bulldozer, which materializes a grant
+ * asynchronously, so a test that deployed immediately after granting would race
+ * the gate and see the Free-plan refusal. Unlike the Free-plan wait above this
+ * one THROWS on timeout: a silent fallthrough here means the test quietly
+ * exercises the Free path and fails later with an unrelated-looking 400.
+ *
+ * The team's own products are read in the internal project, which is where the
+ * subscription lives — `plan-usage` would report the same thing, but only for a
+ * project, and the caller may not have switched to one yet.
+ */
+async function waitForBillingTeamPlanId(ownerTeamId: string, planId: string): Promise<void> {
+  const pollIntervalMs = 200;
+  const timeoutMs = 15_000;
+  const deadline = performance.now() + timeoutMs;
+  let lastSeen: unknown = undefined;
+
+  while (performance.now() < deadline) {
+    const products = await withInternalProject(async () => {
+      const response = await niceBackendFetch(
+        `/api/v1/payments/products/team/${encodeURIComponent(ownerTeamId)}`,
+        { accessType: "server" },
+      );
+      if (response.status !== 200) {
+        throw new HexclaveAssertionError("Failed to read billing-team products while waiting for a granted plan", { ownerTeamId, response });
+      }
+      return (response.body as any)?.items ?? [];
+    });
+    lastSeen = products;
+    if (Array.isArray(products) && products.some((item: any) => item?.id === planId)) return;
+    await wait(pollIntervalMs);
+  }
+
+  throw new HexclaveAssertionError(
+    `Timed out waiting ${timeoutMs} ms for billing team ${ownerTeamId} to show plan ${planId}`,
+    { ownerTeamId, planId, lastSeen },
+  );
+}
+
 export namespace Project {
   export async function create(body?: any) {
     const ownerTeamId = body?.owner_team_id ?? (await User.getCurrent()).selected_team_id;
@@ -1535,6 +1576,46 @@ export namespace Project {
       projectKeys,
       userAuth: null
     });
+    return createResult;
+  }
+
+  /**
+   * Puts a project's billing team on a paid base plan, and waits until the
+   * backend can see it.
+   *
+   * `Project.create` always records an owner team and waits for its Free-plan
+   * entitlement, so every project a test creates is plan-gated as Free. Tests
+   * that exercise a paid-only capability — today, any `server` service or any
+   * `minInstances` above 0 (see `assertServicesAllowedByPlan`) — have to buy in
+   * explicitly with this.
+   *
+   * The grant is written in the INTERNAL project, whose team subscriptions are
+   * what `getPlanIdForProjectOrNull` reads for every other project.
+   */
+  export async function grantBillingTeamPlan(ownerTeamId: string, planId: "team" | "growth" = "team"): Promise<void> {
+    const response = await withInternalProject(async () => await niceBackendFetch(
+      `/api/v1/payments/products/team/${encodeURIComponent(ownerTeamId)}`,
+      { accessType: "server", method: "POST", body: { product_id: planId } },
+    ));
+    if (response.status !== 200) {
+      throw new HexclaveAssertionError("Failed to grant a paid plan to a billing team", { ownerTeamId, planId, response });
+    }
+    await waitForBillingTeamPlanId(ownerTeamId, planId);
+  }
+
+  /**
+   * Creates a project whose billing team is on a paid plan, and switches to it.
+   *
+   * The plain `createAndSwitch` deliberately stays on Free: that is what a real
+   * new project is, and the Free-plan gate's own tests need it.
+   */
+  export async function createAndSwitchOnPaidPlan(body?: Partial<AdminUserProjectsCrud["Admin"]["Create"]>, useExistingUser?: boolean) {
+    const createResult = await Project.createAndSwitch(body, useExistingUser);
+    const ownerTeamId = createResult.createProjectResponse.body.owner_team_id;
+    if (typeof ownerTeamId !== "string") {
+      throw new HexclaveAssertionError("Cannot put a project on a paid plan: it has no owner team", { projectId: createResult.projectId });
+    }
+    await Project.grantBillingTeamPlan(ownerTeamId);
     return createResult;
   }
 

@@ -8,5 +8,8 @@ import { getConfig } from "./config.js";
 const config = getConfig();
 const { app } = createMarshalApp();
 app.listen(config.port);
+// The tenant project pool is NOT topped up from here. It is advanced by the maintenance crons
+// (apps/marshal/vercel.json in production, apps/backend/scripts/run-cron-jobs.ts locally), so
+// that provisioning survives a hosting platform that freezes the process at response time.
 
-console.log(`Marshal listening on http://localhost:${config.port} (env=${config.envId}, builder=${config.builderKind}, fly org=${config.fly.orgSlug})`);
+console.log(`Marshal listening on http://localhost:${config.port} (env=${config.envId}, builder=${config.builderKind}, gcp region=${config.gcp.region})`);

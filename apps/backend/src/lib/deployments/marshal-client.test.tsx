@@ -121,10 +121,12 @@ describe("MarshalClient", () => {
 
     const [deployStartMs, defaultMs] = timeouts;
     expect(deployStartMs).toBeGreaterThan(defaultMs);
-    expect(deployStartMs).toBe(5 * 60 * 1000);
+    expect(deployStartMs).toBe(13 * 60 * 1000);
     // And under the 800s maxDuration both services declare to Vercel, so this
     // timeout fires first and the caller gets a 504 with a body rather than a
-    // platform-killed invocation.
+    // platform-killed invocation. Sized for the first deploy into a namespace when
+    // Marshal's project pool is empty: project creation + billing propagation + API
+    // enablement can exceed five minutes before the runtime even sees the archive.
     expect(deployStartMs).toBeLessThan(800 * 1000);
   });
 });

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 const IV_BYTES = 12;
 export const DEVELOPMENT_DATA_ENCRYPTION_KEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -23,10 +23,24 @@ export function parseDataEncryptionRootKey(value: string): Buffer {
   return Buffer.from(value, "hex");
 }
 
-function deriveKey(rootKey: Buffer, purpose: "stored-spec-env" | "service-revision"): Buffer {
+function deriveKey(rootKey: Buffer, purpose: "stored-spec-env" | "service-revision" | "control-plane-state"): Buffer {
   return createHmac("sha256", rootKey)
     .update(`hexclave-marshal/${purpose}/v1`, "utf8")
     .digest();
+}
+
+export function authenticateControlPlaneState(serializedValue: string, authenticatedContext: string, rootKey: Buffer): string {
+  return createHmac("sha256", deriveKey(rootKey, "control-plane-state"))
+    .update(authenticatedContext, "utf8")
+    .update("\0", "utf8")
+    .update(serializedValue, "utf8")
+    .digest("base64");
+}
+
+export function verifyControlPlaneStateAuthentication(serializedValue: string, authenticatedContext: string, macBase64: string, rootKey: Buffer): boolean {
+  const expected = Buffer.from(authenticateControlPlaneState(serializedValue, authenticatedContext, rootKey), "base64");
+  const provided = Buffer.from(macBase64, "base64");
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
 export function serviceRevisionKey(rootKey: Buffer): Buffer {

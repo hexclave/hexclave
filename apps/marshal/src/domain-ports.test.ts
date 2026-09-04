@@ -5,16 +5,17 @@ import { describe, expect, it, vi } from "vitest";
 // execution reach that line, not to model the rest of the apply.
 
 const domainClaims = vi.hoisted(() => vi.fn(async (_ns: string, _key: string): Promise<string[]> => []));
+const domainClaim = vi.hoisted(() => vi.fn(async (hostname: string): Promise<{
+  value: { hostname: string, ns: string, service_key: string, claimed_at_millis: number },
+  etag: string,
+} | null> => ({
+  value: { hostname, ns: "namespace", service_key: "web", claimed_at_millis: 1 },
+  etag: "claim-etag",
+})));
 
 vi.mock("./config.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./config.js")>(),
-  getConfig: () => ({ envId: "test", fly: { orgSlug: "org", token: "token" } }),
-  resolveNamespaceOrg: () => ({ orgSlug: "org", token: "token" }),
-}));
-
-vi.mock("./fly/client.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./fly/client.js")>(),
-  flyClientForNamespaceOrg: () => ({}),
+  getConfig: () => ({ envId: "test" }),
 }));
 
 vi.mock("./reconciliation-lock.js", async (importOriginal) => ({
@@ -29,6 +30,7 @@ vi.mock("./reconciliation-lock.js", async (importOriginal) => ({
 vi.mock("./store.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./store.js")>(),
   listDomainClaimsForService: domainClaims,
+  readDomainClaimVersioned: domainClaim,
 }));
 
 import { applyServiceSpec, assertServiceCanHoldADomain, validateServiceSpec } from "./services.js";
@@ -37,7 +39,7 @@ import { applyServiceSpec, assertServiceCanHoldADomain, validateServiceSpec } fr
 function spec(ports: unknown) {
   return validateServiceSpec({
     config: { type: "serverless", min_instances: 0, max_instances: 1, ports },
-    source: { image: "registry.fly.io/example@sha256:abc" },
+    source: { image: "us-central1-docker.pkg.dev/example/runtime/example@sha256:abc" },
     env: {},
   });
 }
@@ -80,7 +82,7 @@ describe("a spec write against a service that holds a domain", () => {
   //   2. attach a custom domain                       — allowed: one port, HTTP. Public IPs now exist.
   //   3. PUT `web` with a private `tcp` 5432 sibling  — spec validation passes (still no
   //                                                     `public: true` port), old guard passes
-  //   4. Fly's proxy answers 5432 on the domain's public IPs — the database is on the internet.
+  //   4. the domain gateway answers 5432 on its public IP — the database is on the internet.
   //
   // Step 3 is an ordinary config edit. The whole rule has to be re-checked on every write.
   it("refuses to add a private sibling port after a domain was attached", async () => {
@@ -111,5 +113,14 @@ describe("a spec write against a service that holds a domain", () => {
     const error = await apply({ "3000": { protocol: "http" }, "5432": { protocol: "tcp" } }).then(() => null, (caught: unknown) => caught);
     expect(error).not.toBeNull();
     expect(String(error)).not.toMatch(/may not declare a private port alongside others|need an HTTP port/);
+  });
+
+  it("does not treat an orphaned domain index as current ownership", async () => {
+    domainClaims.mockResolvedValue(["orphan.example.com"]);
+    domainClaim.mockResolvedValueOnce(null);
+
+    const error = await apply({ "3000": { protocol: "http" }, "5432": { protocol: "tcp" } }).then(() => null, (caught: unknown) => caught);
+    expect(error).not.toBeNull();
+    expect(String(error)).not.toMatch(/may not declare more than one port|need an HTTP port/);
   });
 });

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { deploymentStateForApply, reportedDigest } from "./services.js";
+import { builderOutputIsTerminal, builderStartupScriptFailed, deploymentStateForApply } from "./services.js";
 import type { ServiceState } from "./types.js";
 
 // The image the spec named. Every outcome reports one — including a failure,
 // where "which image" is most of the question.
-const IMAGE = "registry.fly.io/app@sha256:" + "a".repeat(64);
+const IMAGE = "us-central1-docker.pkg.dev/project/marshal/app@sha256:" + "a".repeat(64);
 
 function state(overrides: Partial<ServiceState> = {}): ServiceState {
   return {
@@ -14,7 +14,7 @@ function state(overrides: Partial<ServiceState> = {}): ServiceState {
     instances: 1,
     revision: "revision",
     target_revision: null,
-    outputs: { hostname: "web.flycast", internal_url: "http://web.flycast:3000", url: "https://web.fly.dev" },
+    outputs: { hostname: "web.internal", internal_url: "http://web.internal:3000", url: "https://web-example.run.app" },
     domains: [],
     error: null,
     observed_at_millis: 0,
@@ -28,7 +28,7 @@ describe("the deployment outcome of one service's apply", () => {
       service_key: "web",
       status: "deployed",
       revision: "r1",
-      url: "https://web.fly.dev",
+      url: "https://web-example.run.app",
       image: IMAGE,
       error: null,
     });
@@ -36,7 +36,7 @@ describe("the deployment outcome of one service's apply", () => {
     expect(deploymentStateForApply("web", IMAGE, {
       revision: "r1",
       imageRef: null,
-      state: state({ outputs: { hostname: "web.flycast", internal_url: null, url: null } }),
+      state: state({ outputs: { hostname: "web.internal", internal_url: null, url: null } }),
     })).toMatchObject({ status: "deployed", url: null });
   });
 
@@ -68,12 +68,12 @@ describe("the deployment outcome of one service's apply", () => {
     // which carries no error. Failing on the status alone would fail deploys for
     // a transient state that resolves itself.
     expect(deploymentStateForApply("web", IMAGE, { revision: "r1", imageRef: null, state: state({ status: "degraded" }) }))
-      .toMatchObject({ status: "deployed", url: "https://web.fly.dev" });
+      .toMatchObject({ status: "deployed", url: "https://web-example.run.app" });
   });
 
-  it("reports the image FLY resolved, not the tag the spec named", () => {
+  it("reports the image runtime resolved, not the tag the spec named", () => {
     // Marshal does not resolve images, so a tag stays a tag in the spec and the
-    // digest only exists in what Fly reported back for the machine. Recording
+    // digest only exists in what the runtime reported back for the machine. Recording
     // the tag here would make the deployment history say nothing at all about
     // which bytes ran.
     const ran = "docker.io/library/postgres@sha256:" + "b".repeat(64);
@@ -106,30 +106,30 @@ describe("the deployment outcome of one service's apply", () => {
   });
 });
 
-describe("the digest Fly reports for a machine", () => {
-  const machine = (imageRef: unknown) => ({ image_ref: imageRef } as Parameters<typeof reportedDigest>[0]);
-  const digest = `sha256:${"c".repeat(64)}`;
-
-  it("is the digest when Fly reports one", () => {
-    expect(reportedDigest(machine({ digest }))).toBe(digest);
+describe("builder terminal output", () => {
+  it("recognizes every harness terminal outcome without treating startup as terminal", () => {
+    expect(builderOutputIsTerminal("MARSHAL_BUILD_START\nMARSHAL_TARGET_START web")).toBe(false);
+    expect(builderOutputIsTerminal("MARSHAL_BUILD_DONE")).toBe(true);
+    expect(builderOutputIsTerminal("MARSHAL_BUILD_FAILED: compilation failed")).toBe(true);
+    expect(builderOutputIsTerminal("MARSHAL_BUILD_TIMEOUT")).toBe(true);
   });
 
-  it("is null when Fly reports no image_ref, or no digest in it", () => {
-    expect(reportedDigest(machine(undefined))).toBeNull();
-    expect(reportedDigest(machine({ registry: "docker-hub-mirror.fly.io" }))).toBeNull();
+  it("treats a builder whose startup script died as terminal", () => {
+    // Real serial output: the metadata script runner prefixes every line and kernel messages
+    // splice into them, so the marker is never at the start of a line.
+    const serial = [
+      "[   19.153897] google_metadata_script_runner_adapt[783]: Found startup-script in metadata.",
+      "[   22.114974] google_metadata_script_runner_adapt[783]: startup-script: Error response from daemon",
+      `[   22.117450] google_metadata_script_runner_adapt[783]: Script "startup-script" failed with error: exit status 1`,
+    ].join("\n");
+
+    expect(builderStartupScriptFailed(serial)).toBe(true);
+    // No harness marker is ever printed, which is exactly why this needs its own signal.
+    expect(builderOutputIsTerminal(serial)).toBe(false);
   });
 
-  it("is null for an EMPTY digest, which a null check alone would let through", () => {
-    // REGRESSION: `image_ref.digest` is optional and typed as a plain string, so
-    // "" is inside its declared type — and `?? null` is nullish-only. It reached
-    // pinToDigest and was recorded as `docker.io/library/redis@`: an image
-    // reference, stored as what ran, naming nothing.
-    expect(reportedDigest(machine({ digest: "" }))).toBeNull();
-  });
-
-  it("is null for anything that is not a sha256 digest", () => {
-    expect(reportedDigest(machine({ digest: "latest" }))).toBeNull();
-    expect(reportedDigest(machine({ digest: "sha256:nothex" }))).toBeNull();
-    expect(reportedDigest(machine({ digest: `sha512:${"c".repeat(128)}` }))).toBeNull();
+  it("does not call a healthy builder's startup script failed", () => {
+    expect(builderStartupScriptFailed("MARSHAL_BUILD_START\nMARSHAL_TARGET_START web")).toBe(false);
+    expect(builderStartupScriptFailed("")).toBe(false);
   });
 });

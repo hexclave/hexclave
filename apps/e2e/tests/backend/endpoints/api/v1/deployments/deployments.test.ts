@@ -1,23 +1,23 @@
 import { createTar } from "@hexclave/shared/dist/utils/tar";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { describe } from "vitest";
 import { it } from "../../../../../helpers";
 import { InternalApiKey, Project, backendContext, niceBackendFetch } from "../../../../backend-helpers";
 
 // These tests run against the local Marshal dev server (apps/marshal), which
-// itself talks to the fly-mock docker service (docker/dependencies/fly-mock)
+// itself talks to the gcp-mock docker service (docker/dependencies/gcp-mock)
 // and the s3mock bucket — the backend's .env.development points at Marshal via
 // the mock HEXCLAVE_MARSHAL_API_KEY, and Marshal's .env.development enables
-// the mock builder (instant fake digests). CI never talks to real Fly.
+// the mock builder (instant fake digests). CI never talks to real GCP.
 // Secret values are KMS-encrypted server-side via the localstack container.
-const FLY_MOCK_URL = `http://localhost:${process.env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX || "81"}48`;
-// Same well-known dev token Marshal uses (MOCK_FLY_TOKEN in apps/marshal/src/config.ts).
+const GCP_MOCK_URL = `http://localhost:${process.env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX || "81"}48`;
+// Same well-known dev token Marshal uses in apps/marshal/.env.development.
 // The mock's /__mock namespace requires it because its listing exposes resolved secrets.
-const FLY_MOCK_TOKEN = "mock_hexclave_fly_key";
+const GCP_MOCK_TOKEN = "mock_hexclave_gcp_key";
 
-// Service ids are randomized per test because the fly-mock accumulates apps
-// for its whole container lifetime: metadata-based lookups (see findMockApp)
+// Service ids are randomized per test because the gcp-mock accumulates projects
+// for its whole container lifetime: label-based lookups below
 // must not collide with earlier runs or concurrently-running tests.
 function uniqueServiceId(prefix: string): string {
   return `${prefix}-${randomUUID().slice(0, 8)}`;
@@ -166,39 +166,81 @@ function serviceOutcome(deployment: Record<string, any>, serviceId: string): Rec
   return outcome;
 }
 
-type MockApp = {
+type MockCloudRunService = {
   name: string,
-  sharedIpv4: string | null,
-  dedicatedIps: { id: string, address: string, type: string }[],
-  machines: { id: string, image: string, metadata: Record<string, string>, env: Record<string, string>, mounts: { volume: string, path: string }[], init: { exec?: string[] } | null }[],
-  volumes: { id: string, name: string, size_gb: number, attached_machine_id: string | null }[],
-  certificates: { hostname: string, clientStatus: string }[],
+  labels: Record<string, string>,
+  ingress: string,
+  invokerIamDisabled: boolean,
+  uri: string,
+  scaling: { minInstanceCount: number, maxInstanceCount: number },
+  template: { containers: { image: string, env: { name: string, value: string }[], command?: string[], args?: string[], ports?: { containerPort: number }[] }[] },
 };
 
-// Finds the fly-mock app backing a service by the hexclave_key metadata its machines carry
-// (the test doesn't need Marshal's app-naming scheme), and waits for the expected machine
-// count as an independent assertion on the runtime fleet. Matches on ns too so a fixed-id
-// service in a parallel worker can't shadow it.
-async function findMockApp(serviceId: string, expectedMachines = 1, ns?: string): Promise<MockApp> {
-  let seen: MockApp | undefined;
+type MockInstance = {
+  id: string,
+  name: string,
+  status: string,
+  labels: Record<string, string>,
+  metadata: { items: { key: string, value: string }[] },
+  disks: { boot: boolean, source: string, deviceName: string, autoDelete: boolean }[],
+  networkInterfaces: { networkIP: string }[],
+};
+
+type MockDisk = { id: string, name: string, sizeGb: string };
+type MockProject = {
+  projectId: string,
+  cloudRunServices: MockCloudRunService[],
+  instances: MockInstance[],
+  disks: MockDisk[],
+  computeResources: { path: string, resource: Record<string, unknown> }[],
+};
+
+function serviceKeyHash(serviceId: string): string {
+  return createHash("sha256").update(serviceId).digest("hex").slice(0, 24);
+}
+
+async function mockProjects(): Promise<MockProject[]> {
+  const response = await fetch(`${GCP_MOCK_URL}/__mock/projects`, {
+    headers: { authorization: `Bearer ${GCP_MOCK_TOKEN}` },
+  });
+  if (!response.ok) throw new Error(`gcp-mock project listing failed: ${response.status} ${await response.text()}`);
+  return (await response.json() as { projects: MockProject[] }).projects;
+}
+
+async function findMockCloudRun(serviceId: string): Promise<{ project: MockProject, service: MockCloudRunService }> {
+  const hash = serviceKeyHash(serviceId);
   for (let attempt = 0; attempt < 60; attempt++) {
-    // The /__mock namespace is authenticated: its listing includes each machine's
+    // The /__mock namespace is authenticated: its listing includes each container's
     // resolved env, which holds decrypted project secrets.
-    const response = await fetch(`${FLY_MOCK_URL}/__mock/apps`, {
-      headers: { authorization: `Bearer ${FLY_MOCK_TOKEN}` },
-    });
-    if (response.ok) {
-      const { apps } = await response.json() as { apps: MockApp[] };
-      const matches = apps.filter((candidate) => candidate.machines.some((machine) =>
-        machine.metadata.hexclave_key === serviceId && (ns === undefined || machine.metadata.hexclave_ns === ns)));
-      if (matches.length > 0) {
-        seen = matches[0];
-        if (seen.machines.length >= expectedMachines) return seen;
-      }
+    for (const project of await mockProjects()) {
+      const service = project.cloudRunServices.find((candidate) => candidate.labels["hexclave-service-key"] === hash);
+      if (service !== undefined) return { project, service };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`fly-mock app for ${serviceId} never converged to ${expectedMachines} machine(s) (last saw ${seen?.machines.length ?? 0})`);
+  throw new Error(`gcp-mock Cloud Run service for ${serviceId} never appeared`);
+}
+
+async function findMockInstance(serviceId: string): Promise<{ project: MockProject, instance: MockInstance }> {
+  const hash = serviceKeyHash(serviceId);
+  for (let attempt = 0; attempt < 60; attempt++) {
+    for (const project of await mockProjects()) {
+      const instance = project.instances.find((candidate) => candidate.labels["hexclave-service-key"] === hash);
+      if (instance !== undefined) return { project, instance };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`gcp-mock Compute Engine instance for ${serviceId} never appeared`);
+}
+
+function cloudRunEnv(service: MockCloudRunService): Record<string, string> {
+  return Object.fromEntries(service.template.containers[0].env.map(({ name, value }) => [name, value]));
+}
+
+function startupScript(instance: MockInstance): string {
+  const script = instance.metadata.items.find((item) => item.key === "startup-script")?.value;
+  if (script === undefined) throw new Error(`Mock instance ${instance.name} has no startup script`);
+  return script;
 }
 
 describe("access control", () => {
@@ -308,13 +350,12 @@ describe("definition sync", () => {
   });
 
   it("stores a mixed port list and rejects the ones it could not serve", async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
 
     await syncServices({
       database: { type: "serverless", ports: { 5432: { protocol: "tcp" } }, env: {} },
-      // Several PRIVATE ports of mixed protocols. min_instances is written out because this
-      // project is on the Free plan, where an always-on instance — a `server`'s default — is
-      // refused before any of the port handling under test runs.
+      // Several PRIVATE ports of mixed protocols, on the only type that may declare
+      // TCP ports at all.
       gateway: {
         type: "server",
         min_instances: 0,
@@ -390,8 +431,9 @@ describe("definition sync", () => {
   it("rejects always-on instances on the Free plan, naming the offending services", async ({ expect }) => {
     // A project created through the internal projects API is owned by a billing
     // team that starts on the Free plan (Project.create waits for that
-    // entitlement), so this exercises the gate's POSITIVE path — unlike the
-    // other tests here, whose projects have no owner team and are never gated.
+    // entitlement), so this exercises the gate's POSITIVE path. Every other
+    // project in this file is gated as Free too; the tests that need a paid
+    // capability opt in with Project.createAndSwitchOnPaidPlan().
     const { createProjectResponse } = await Project.createAndSwitch();
     expect(createProjectResponse.body.owner_team_id).toEqual(expect.any(String));
 
@@ -449,8 +491,69 @@ describe("definition sync", () => {
     expect(accepted.status).toBe(200);
   });
 
+  it("rejects `server` services on the Free plan, whatever their minInstances", async ({ expect }) => {
+    // A `server` is a VM that runs until the service is torn down — GCP has no
+    // idle-suspend and no wake-on-request, so `minInstances: 0` is accepted and
+    // ignored rather than scaling it to zero. The gate therefore refuses the
+    // TYPE, not the instance floor: gating on minInstances alone let a Free
+    // project hold a machine up around the clock by writing the one value that
+    // reads like opting out of exactly that.
+    const { createProjectResponse } = await Project.createAndSwitch();
+    expect(createProjectResponse.body.owner_team_id).toEqual(expect.any(String));
+
+    const planUsage = await niceBackendFetch("/api/v1/internal/plan-usage", { accessType: "admin" });
+    const enforced = (planUsage.body as any)?.are_plan_limits_enforced !== false;
+
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: "server-plan-src",
+        services: {
+          // The value that used to buy its way past the gate.
+          db: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, env: {} },
+          web: { type: "serverless", ports: { 3000: { protocol: "http" } }, min_instances: 0, env: {} },
+        },
+      },
+    });
+
+    if (!enforced) {
+      // Plan limits off: the gate must fail OPEN, not half-apply.
+      expect(response.status).toBe(200);
+      return;
+    }
+
+    expect(response.status).toBe(400);
+    const message = JSON.stringify(response.body);
+    expect(message).toContain("Free plan");
+    expect(message).toContain("`db`");
+    // The scale-to-zero serverless alongside it is untouched, and the message
+    // must not tell the author to set a minInstances they already set.
+    expect(message).not.toContain("`web`");
+
+    // Nothing was written: the gate runs before the upsert.
+    const listResponse = await niceBackendFetch("/api/v1/deployments/services", { accessType: "admin" });
+    expect((listResponse.body as any).items).toEqual([]);
+
+    // The same config syncs once the billing team is on a paid plan — proving
+    // the refusal is the entitlement, not the definition.
+    await Project.grantBillingTeamPlan(createProjectResponse.body.owner_team_id);
+    const accepted = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: "server-plan-src",
+        services: {
+          db: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, env: {} },
+          web: { type: "serverless", ports: { 3000: { protocol: "http" } }, min_instances: 0, env: {} },
+        },
+      },
+    });
+    expect(accepted.status).toBe(200);
+  });
+
   it("stores a volume and surfaces it on the service", async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const serviceId = uniqueServiceId("vol");
     const { sourceId } = await syncServices({
       [serviceId]: { type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1, persistent_volumes: { data: { path: "/data", size_gb: 10 } }, env: {} },
@@ -470,10 +573,9 @@ describe("definition sync", () => {
   });
 
   it("rejects shrinking a volume at sync time, before anything is uploaded", async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const serviceId = uniqueServiceId("shrink");
-    // min_instances is written out because this project is on the Free plan, which does not
-    // allow an always-on instance — and a `server` defaults to one.
+    // A `server`, because only a single-instance service may hold a disk.
     const definition = (sizeGb: number) => ({
       [serviceId]: { type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1, persistent_volumes: { data: { path: "/data", size_gb: sizeGb } }, env: {} },
     });
@@ -501,8 +603,8 @@ describe("definition sync", () => {
   });
 
   it("rejects a volume on a service that could run more than one instance", async ({ expect }) => {
-    await Project.createAndSwitch();
-    // A Fly volume attaches to one machine, so a fleet would silently give each
+    await Project.createAndSwitchOnPaidPlan();
+    // A persistent disk attaches to one VM, so a fleet would silently give each
     // instance its own separate disk. Only a "server" is single-instance by
     // construction, so that is where the rule lives now.
     const response = await niceBackendFetch("/api/v1/deployments/services", {
@@ -521,7 +623,7 @@ describe("definition sync", () => {
     });
     expect(badBounds.status).toBe(400);
 
-    // More than one disk on one machine is beyond what Fly can mount.
+    // The current persistent-server abstraction intentionally supports one data disk.
     const twoVolumes = await niceBackendFetch("/api/v1/deployments/services", {
       method: "PUT",
       accessType: "admin",
@@ -533,7 +635,7 @@ describe("definition sync", () => {
   });
 
   it("rejects a volume mount path that is not a normalized absolute path", async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     for (const path of ["data", "/", "/data/../etc"]) {
       const response = await niceBackendFetch("/api/v1/deployments/services", {
         method: "PUT",
@@ -564,12 +666,11 @@ describe("definition sync", () => {
   });
 
   it("stores a prebuilt image, normalized, and refuses one that also builds", async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const ok = await niceBackendFetch("/api/v1/deployments/services", {
       method: "PUT",
       accessType: "admin",
-      // min_instances written out: a `server` defaults to 1, and this project's
-      // billing team is on the Free plan, which refuses always-on instances.
+      // A `server`, because this one holds a TCP port.
       body: { source_id: "img-src", services: { db: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, image: "postgres:16", env: {} } } },
     });
     expect(ok.status).toBe(200);
@@ -601,7 +702,7 @@ describe("definition sync", () => {
   });
 
   it("stores build and start commands, and turns an image into a base", async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const ok = await niceBackendFetch("/api/v1/deployments/services", {
       method: "PUT",
       accessType: "admin",
@@ -785,7 +886,7 @@ describe("secrets", () => {
 });
 
 describe("deploys against the Marshal runtime", () => {
-  it("deploys a service end to end: sync, upload, build, machines, env resolution", { timeout: 120_000 }, async ({ expect }) => {
+  it("deploys a service end to end: sync, upload, build, runtime, env resolution", { timeout: 120_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
     await InternalApiKey.createAndSetProjectKeys();
     const serviceId = uniqueServiceId("web");
@@ -833,38 +934,35 @@ describe("deploys against the Marshal runtime", () => {
     expect(service.provisioned).toBe(true);
     expect(service.has_successful_deploy).toBe(true);
 
-    // The fly-mock shows the machines Marshal created: max_instances of them,
-    // with the resolved env (secrets and hexclave connections resolved
-    // server-side; nothing unresolved leaks through).
-    const app = await findMockApp(serviceId, 2);
-    expect(app.machines).toHaveLength(2);
+    // Cloud Run represents the fleet as one autoscaled service. max_instances
+    // is a scaling bound, not a count of eagerly-created machines.
+    const { service: cloudRun } = await findMockCloudRun(serviceId);
+    expect(cloudRun.scaling).toEqual({ minInstanceCount: 0, maxInstanceCount: 2 });
     const projectKeys = backendContext.value.projectKeys;
     if (projectKeys === "no-project") throw new Error("No project in context");
-    for (const machine of app.machines) {
-      expect(machine.env).toEqual({
-        PLAIN_VAR: "plain-value",
-        OPENAI_KEY: "sk-secret-value-123",
-        PROJECT_ID: projectKeys.projectId,
-        ["__proto__"]: "special-key-value",
-        // Every deployed service is handed its project's Hexclave credentials, plus
-        // NEXT_PUBLIC_/VITE_ copies of the PUBLIC three — a framework that inlines values at
-        // build time only reads its own prefix, so an unprefixed name is invisible to the
-        // client bundle. Asserted with toEqual (not toMatchObject) so an accidental fourth
-        // prefixed copy — of the secret server key above all — fails this test.
-        HEXCLAVE_PROJECT_ID: projectKeys.projectId,
-        HEXCLAVE_API_URL: expect.any(String),
-        HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
-        HEXCLAVE_SECRET_SERVER_KEY: expect.any(String),
-        NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: projectKeys.projectId,
-        NEXT_PUBLIC_HEXCLAVE_API_URL: expect.any(String),
-        NEXT_PUBLIC_HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
-        VITE_HEXCLAVE_PROJECT_ID: projectKeys.projectId,
-        VITE_HEXCLAVE_API_URL: expect.any(String),
-        VITE_HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
-      });
-      expect(machine.image).toMatch(/^registry\.fly\.io\/.*@sha256:[0-9a-f]{64}$/);
-      expect(machine.metadata.hexclave_key).toBe(serviceId);
-    }
+    expect(cloudRunEnv(cloudRun)).toEqual({
+      PLAIN_VAR: "plain-value",
+      OPENAI_KEY: "sk-secret-value-123",
+      PROJECT_ID: projectKeys.projectId,
+      ["__proto__"]: "special-key-value",
+      // Every deployed service is handed its project's Hexclave credentials, plus
+      // NEXT_PUBLIC_/VITE_ copies of the PUBLIC three — a framework that inlines values at
+      // build time only reads its own prefix, so an unprefixed name is invisible to the
+      // client bundle. Asserted with toEqual (not toMatchObject) so an accidental fourth
+      // prefixed copy — of the secret server key above all — fails this test.
+      HEXCLAVE_PROJECT_ID: projectKeys.projectId,
+      HEXCLAVE_API_URL: expect.any(String),
+      HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
+      HEXCLAVE_SECRET_SERVER_KEY: expect.any(String),
+      NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: projectKeys.projectId,
+      NEXT_PUBLIC_HEXCLAVE_API_URL: expect.any(String),
+      NEXT_PUBLIC_HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
+      VITE_HEXCLAVE_PROJECT_ID: projectKeys.projectId,
+      VITE_HEXCLAVE_API_URL: expect.any(String),
+      VITE_HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
+    });
+    expect(cloudRun.template.containers[0].image).toMatch(/^us-central1-docker\.pkg\.dev\/.*@sha256:[0-9a-f]{64}$/);
+    expect(cloudRun.labels["hexclave-service-key"]).toBe(serviceKeyHash(serviceId));
 
     // Build logs stream with every env VALUE redacted. The mock builder echoes the resolved
     // env into the log (MARSHAL_MOCK_ENV), standing in for a build step that echoes its own
@@ -883,8 +981,7 @@ describe("deploys against the Marshal runtime", () => {
     expect(logsText).not.toContain("plain-value");
 
     // Runtime logs: what the SERVICE printed, as opposed to what its build did.
-    // The fly-mock writes a line per machine lifecycle event, so a deployed
-    // service always has some.
+    // gcp-mock writes the same Cloud Logging resource shape as a ready revision.
     const runtime = await readRuntimeLogs(serviceId);
     expect(runtime.status).toBe(200);
     expect(runtime.contentType).toContain("application/x-ndjson");
@@ -895,22 +992,9 @@ describe("deploys against the Marshal runtime", () => {
       expect(["stdout", "stderr", "system"]).toContain(line.stream);
     }
 
-    // The stream classification is the one piece of real logic in the mapping:
-    // a line from a non-"app" provider is the RUNTIME talking about the service
-    // (machine started), not the service talking. Getting this backwards would
-    // present platform chatter as the app's own output.
-    const machineStarted = runtime.lines.find((line) => line.text.includes("Machine started"));
-    expect(machineStarted?.stream).toBe("system");
-    const appOutput = runtime.lines.find((line) => line.text.includes("mock app listening"));
-    expect(appOutput?.stream).toBe("stdout");
-
-    // Instances are named, which is what lets a reader filter a multi-instance
-    // service down to one machine. (The build-log path deliberately nulls this;
-    // the runtime path must not.)
-    const machineIds = new Set(app.machines.map((machine: any) => machine.id));
-    const runtimeInstances = new Set(runtime.lines.map((line) => line.instance).filter((instance) => instance != null));
-    expect(runtimeInstances.size).toBeGreaterThan(0);
-    for (const instance of runtimeInstances) expect(machineIds).toContain(instance);
+    const revisionReady = runtime.lines.find((line) => line.text.includes("Cloud Run revision"));
+    expect(revisionReady?.stream).toBe("stdout");
+    expect(runtime.lines.every((line) => line.instance === null)).toBe(true);
 
     // Resuming from the newest timestamp returns nothing: the cursor is what
     // makes a reconnect neither repeat nor skip, and it is the whole reason this
@@ -934,7 +1018,7 @@ describe("deploys against the Marshal runtime", () => {
     await InternalApiKey.createAndSetProjectKeys();
     const serviceId = uniqueServiceId("never-deployed");
     // Synced but never deployed: the definition exists, the runtime has no app
-    // for it, and Fly answers a missing app with an empty page — which would
+    // for it, and GCP answers a missing runtime with an empty page — which would
     // render as a silently empty stream if this were not refused up front.
     await syncServices({
       [serviceId]: {
@@ -953,15 +1037,15 @@ describe("deploys against the Marshal runtime", () => {
   });
 
   it("deploys a prebuilt image with no upload and no build at all", { timeout: 120_000 }, async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     await InternalApiKey.createAndSetProjectKeys();
     const serviceId = uniqueServiceId("db");
     const { syncId: definitionSyncId, sourceId } = await syncServices({
       [serviceId]: {
         type: "server",
         ports: { 5432: { protocol: "tcp" } },
-        // min_instances stays 0 (suspend when idle): this project's billing team
-        // is on the Free plan, which refuses always-on instances.
+        // Accepted on a `server`, but inert: the VM runs from apply until the
+        // service is torn down, so this pins storage, not runtime behaviour.
         min_instances: 0,
         max_instances: 1,
         image: "postgres:16",
@@ -982,13 +1066,13 @@ describe("deploys against the Marshal runtime", () => {
     // so this digest is what the platform reported back for it.
     expect(outcome.image).toMatch(/^docker\.io\/library\/postgres@sha256:[0-9a-f]{64}$/);
 
-    const app = await findMockApp(serviceId, 1);
-    expect(app.machines).toHaveLength(1);
-    // The machine is given the reference AS WRITTEN — the author's image from its
-    // own registry, not a Fly-registry image (which is what a built service gets),
+    const { instance } = await findMockInstance(serviceId);
+    expect(instance.status).toBe("RUNNING");
+    // The VM is given the reference AS WRITTEN — the author's image from its
+    // own registry, not an Artifact Registry image (which is what a built service gets),
     // and a tag rather than the digest the outcome reports.
-    expect(app.machines[0].image).toBe("docker.io/library/postgres:16");
-    expect(app.machines[0].env).toMatchObject({ POSTGRES_PASSWORD: "hunter2" });
+    expect(startupScript(instance)).toContain("readonly IMAGE='docker.io/library/postgres:16'");
+    expect(startupScript(instance)).toContain("'POSTGRES_PASSWORD=hunter2'");
 
     // The definition still reports the reference the author wrote.
     const service = (await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" })).body as any;
@@ -1000,7 +1084,7 @@ describe("deploys against the Marshal runtime", () => {
     // The two halves of the feature in one deploy: a start command that costs no
     // build (the image service still has none), and a build command that turns a
     // service with no Dockerfile into a base-image build.
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     await InternalApiKey.createAndSetProjectKeys();
     const cacheServiceId = uniqueServiceId("cache");
     const webServiceId = uniqueServiceId("web");
@@ -1026,16 +1110,16 @@ describe("deploys against the Marshal runtime", () => {
     // so it still runs the reference the author wrote.
     expect(serviceOutcome(deployment, cacheServiceId).image).toMatch(/^docker\.io\/library\/redis@sha256:[0-9a-f]{64}$/);
     // ...while the base-image build pushed an image of its own.
-    expect(serviceOutcome(deployment, webServiceId).image).toMatch(/^registry\.fly\.io\/.*@sha256:[0-9a-f]{64}$/);
+    expect(serviceOutcome(deployment, webServiceId).image).toMatch(/^us-central1-docker\.pkg\.dev\/.*@sha256:[0-9a-f]{64}$/);
 
-    // What the machines are actually started with. `exec` (not `cmd`) is what
-    // replaces the image's entrypoint as well as its command — verified against
-    // real Fly, where `cmd` alone is passed TO the entrypoint as arguments.
-    const cacheApp = await findMockApp(cacheServiceId, 1);
-    expect(cacheApp.machines[0].image).toBe("docker.io/library/redis:7-alpine");
-    expect(cacheApp.machines[0].init).toEqual({ exec: ["/bin/sh", "-c", "redis-server --appendonly yes"] });
-    const webApp = await findMockApp(webServiceId, 1);
-    expect(webApp.machines[0].init).toEqual({ exec: ["/bin/sh", "-c", "node server.js"] });
+    // Both runtimes replace the image entrypoint with a shell for start_command.
+    const { instance: cacheInstance } = await findMockInstance(cacheServiceId);
+    expect(startupScript(cacheInstance)).toContain("readonly IMAGE='docker.io/library/redis:7-alpine'");
+    expect(startupScript(cacheInstance)).toContain("'--entrypoint' '/bin/sh'");
+    expect(startupScript(cacheInstance)).toContain("'-c' 'redis-server --appendonly yes'");
+    const { service: webCloudRun } = await findMockCloudRun(webServiceId);
+    expect(webCloudRun.template.containers[0].command).toEqual(["/bin/sh"]);
+    expect(webCloudRun.template.containers[0].args).toEqual(["-c", "node server.js"]);
 
     // Both commands survive the round trip into the service board.
     const service = (await niceBackendFetch(`/api/v1/deployments/services/${webServiceId}`, { accessType: "admin" })).body as any;
@@ -1047,7 +1131,7 @@ describe("deploys against the Marshal runtime", () => {
     // The common shape: an app built from the repo, wired to a stock database
     // image. One deployment, one build covering only the built service, and both
     // applied in dependency order.
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     await InternalApiKey.createAndSetProjectKeys();
     const dbServiceId = uniqueServiceId("db");
     const webServiceId = uniqueServiceId("web");
@@ -1067,19 +1151,24 @@ describe("deploys against the Marshal runtime", () => {
     expect(deployment.has_build_logs).toBe(true);
 
     // The prebuilt service runs its own registry's image; the built one runs what
-    // the build pushed to Fly's. Both outcomes name a digest — the prebuilt one
+    // the build pushed to Artifact Registry. Both outcomes name a digest — the prebuilt one
     // because the platform reported what its tag resolved to.
     expect(serviceOutcome(deployment, dbServiceId).image).toMatch(/^docker\.io\/library\/postgres@sha256:[0-9a-f]{64}$/);
-    expect(serviceOutcome(deployment, webServiceId).image).toMatch(/^registry\.fly\.io\/.*@sha256:[0-9a-f]{64}$/);
+    expect(serviceOutcome(deployment, webServiceId).image).toMatch(/^us-central1-docker\.pkg\.dev\/.*@sha256:[0-9a-f]{64}$/);
     expect(serviceOutcome(deployment, dbServiceId).status).toBe("deployed");
     expect(serviceOutcome(deployment, webServiceId).status).toBe("deployed");
 
     // The connection resolved across the two kinds of service, which is the whole
-    // point of deploying them together. The hostname is derived (and hashed), so
-    // this asserts that it resolved to a private address at all rather than
-    // matching the service id inside it.
-    const webApp = await findMockApp(webServiceId, 1);
-    expect(webApp.machines[0].env.DATABASE_HOST).toMatch(/\.flycast$/);
+    // point of deploying them together. `hostname()` returns the VM's internal IP:
+    // there is no name to return, because nothing on GCP publishes a record for a
+    // service (its own internal DNS names the INSTANCE, "-vm" suffix and all). A
+    // name-derived hostname is what the Fly runtime answered, and handing one out
+    // here produced an env var whose consumer got ENOTFOUND on a green deploy.
+    const { service: webCloudRun } = await findMockCloudRun(webServiceId);
+    const { instance: dbInstance } = await findMockInstance(dbServiceId);
+    const expectedDatabaseHostname = dbInstance.networkInterfaces[0]?.networkIP;
+    expect(expectedDatabaseHostname).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+    expect(cloudRunEnv(webCloudRun).DATABASE_HOST).toBe(expectedDatabaseHostname);
   });
 
   it("records what the deploy packaged, and reports it back with the deployment", { timeout: 120_000 }, async ({ expect }) => {
@@ -1138,7 +1227,7 @@ describe("deploys against the Marshal runtime", () => {
     // outright, so the outcome stayed "pending" whatever the runtime reported.
     // The storage layer cannot represent it, so the honest fix is to say so on
     // the request that introduces it rather than mid-deploy.
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     await InternalApiKey.createAndSetProjectKeys();
     const response = await niceBackendFetch("/api/v1/deployments/services", {
       method: "PUT",
@@ -1153,7 +1242,7 @@ describe("deploys against the Marshal runtime", () => {
   });
 
   it("refuses an upload for a deployment that builds nothing", async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     await InternalApiKey.createAndSetProjectKeys();
     const serviceId = uniqueServiceId("db");
     const { syncId: definitionSyncId, sourceId } = await syncServices({
@@ -1225,17 +1314,15 @@ describe("deploys against the Marshal runtime", () => {
     // still resolves for the RUNNING container — build-time absence is not runtime absence.
     expect(logsText).not.toContain("sk-build-secret-value");
     expect(logsText).toContain("PORT=3000");
-    const webApp = await findMockApp(webServiceId);
-    expect(webApp.machines[0].env.API_INTERNAL_URL).toMatch(/^http:\/\/.*:8080$/);
-    expect(webApp.machines[0].env.BUILD_SECRET).toBe("sk-build-secret-value");
+    const { service: webCloudRun } = await findMockCloudRun(webServiceId);
+    expect(cloudRunEnv(webCloudRun).API_INTERNAL_URL).toMatch(/^https:\/\/.*\.run\.app$/);
+    expect(cloudRunEnv(webCloudRun).BUILD_SECRET).toBe("sk-build-secret-value");
   });
 
   it("provisions a volume and mounts it on the machine", { timeout: 120_000 }, async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const serviceId = uniqueServiceId("vol");
-    // `server`, because only a single-instance service may hold a disk. Its
-    // min_instances 0 is scale-to-zero by SUSPENDING, so the disk comes back
-    // with the machine (and Free-plan projects can't pin instances anyway).
+    // `server`, because only a single-instance service may hold a disk.
     const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId, {
       type: "server",
       min_instances: 0,
@@ -1244,12 +1331,14 @@ describe("deploys against the Marshal runtime", () => {
     });
     await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
 
-    const app = await findMockApp(serviceId, 1);
-    expect(app.volumes).toHaveLength(1);
-    expect(app.volumes[0]).toMatchObject({ name: "hxv_data", size_gb: 3 });
-    // The machine mounts that exact volume at the configured path.
-    expect(app.machines[0].mounts).toEqual([{ volume: app.volumes[0].id, path: "/data" }]);
-    expect(app.volumes[0].attached_machine_id).toBe(app.machines[0].id);
+    const { project, instance } = await findMockInstance(serviceId);
+    expect(project.disks).toHaveLength(1);
+    expect(project.disks[0].name).toMatch(/^hxv-/);
+    expect(project.disks[0].sizeGb).toBe("3");
+    // The VM attaches that exact persistent disk without auto-deleting it.
+    const dataDisk = instance.disks.find((disk) => disk.boot !== true);
+    expect(dataDisk).toMatchObject({ deviceName: project.disks[0].name, autoDelete: false });
+    expect(dataDisk?.source).toContain(`/disks/${project.disks[0].name}`);
 
     // Growing the volume reuses the SAME volume rather than creating a second
     // one — the disk (and its data) must survive the redeploy.
@@ -1261,14 +1350,14 @@ describe("deploys against the Marshal runtime", () => {
     const { uploadId: grownUploadId } = await createUpload();
     await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: grownUploadId, definitionSyncId: grownSyncId, levels: [[serviceId]] }), "deployed");
 
-    const grownApp = await findMockApp(serviceId, 1);
-    expect(grownApp.volumes).toHaveLength(1);
-    expect(grownApp.volumes[0].id).toBe(app.volumes[0].id);
-    expect(grownApp.volumes[0].size_gb).toBe(5);
+    const grown = await findMockInstance(serviceId);
+    expect(grown.project.disks).toHaveLength(1);
+    expect(grown.project.disks[0].id).toBe(project.disks[0].id);
+    expect(grown.project.disks[0].sizeGb).toBe("5");
   });
 
   it("adds a volume to an already-deployed service by recreating the machine", { timeout: 180_000 }, async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const serviceId = uniqueServiceId("voladd");
 
     // Deploy WITHOUT a volume first. `server` from the start, so that the only
@@ -1276,16 +1365,14 @@ describe("deploys against the Marshal runtime", () => {
     // would force a recreate on its own and hide what this test is pinning.
     const first = await syncServiceAndUpload(serviceId, { type: "server", min_instances: 0, max_instances: 1 });
     await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
-    const before = await findMockApp(serviceId, 1);
-    expect(before.volumes).toHaveLength(0);
-    expect(before.machines[0].mounts).toEqual([]);
-    const originalMachineId = before.machines[0].id;
+    const before = await findMockInstance(serviceId);
+    expect(before.project.disks).toHaveLength(0);
+    expect(before.instance.disks.filter((disk) => disk.boot !== true)).toEqual([]);
+    const originalInstanceId = before.instance.id;
 
-    // Now add a volume. A machine's mounts cannot change in place — Fly places a
-    // machine on its volume's host, and rejects an update that introduces a mount
-    // on an already-placed machine (the mock reproduces that 400). So this must
-    // provision the volume and RECREATE the machine, not update it. Before the
-    // recreate path existed this deploy failed and every retry failed identically.
+    // Now add a volume. Compute Engine cannot mutate the attached-disk graph in
+    // this declarative instance create request, so Marshal provisions the disk and
+    // replaces the VM while retaining that separately-managed disk.
     const second = await syncServiceAndUpload(serviceId, {
       type: "server",
       min_instances: 0,
@@ -1294,13 +1381,14 @@ describe("deploys against the Marshal runtime", () => {
     }, undefined, first.sourceId);
     await pollDeploymentToStatus(await startDeploy({ sourceId: second.sourceId, uploadId: second.uploadId, definitionSyncId: second.definitionSyncId, levels: [[serviceId]] }), "deployed");
 
-    const after = await findMockApp(serviceId, 1);
-    expect(after.volumes).toHaveLength(1);
-    expect(after.volumes[0]).toMatchObject({ name: "hxv_data", size_gb: 2 });
-    expect(after.machines[0].mounts).toEqual([{ volume: after.volumes[0].id, path: "/data" }]);
-    // A NEW machine, on the volume's host — not the original one updated in place.
-    expect(after.machines[0].id).not.toBe(originalMachineId);
-    expect(after.machines).toHaveLength(1);
+    const after = await findMockInstance(serviceId);
+    expect(after.project.disks).toHaveLength(1);
+    expect(after.project.disks[0]).toMatchObject({ sizeGb: "2" });
+    expect(after.instance.disks.find((disk) => disk.boot !== true)).toMatchObject({
+      deviceName: after.project.disks[0].name,
+      autoDelete: false,
+    });
+    expect(after.instance.id).not.toBe(originalInstanceId);
   });
 
   it("marks the run failed and reports blocked when a `url` connection has no verified domain", { timeout: 120_000 }, async ({ expect }) => {
@@ -1321,20 +1409,20 @@ describe("deploys against the Marshal runtime", () => {
     expect((service.body as any).url).toBeNull();
   });
 
-  it("gives public services a fly.dev endpoint and removes ingress when they become private", { timeout: 180_000 }, async ({ expect }) => {
+  it("gives public services a run.app endpoint and restricts ingress when they become private", { timeout: 180_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
     const serviceId = uniqueServiceId("public");
 
     const first = await syncServiceAndUpload(serviceId, { public: true, ports: { 3000: { protocol: "http" } } });
     const publicRun = await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
-    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/hxc-.+\.fly\.dev$/);
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/hxc-.+\.run\.app$/);
     const publicService = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
     expect((publicService.body as any).public).toBe(true);
     expect((publicService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
     expect((publicService.body as any).url).toBe(serviceOutcome(publicRun, serviceId).url);
-    const publicApp = await findMockApp(serviceId);
-    expect(publicApp.sharedIpv4).not.toBeNull();
-    expect(publicApp.dedicatedIps.some((ip) => ip.type === "v6")).toBe(true);
+    const { service: publicCloudRun } = await findMockCloudRun(serviceId);
+    expect(publicCloudRun.ingress).toBe("INGRESS_TRAFFIC_ALL");
+    expect(publicCloudRun.invokerIamDisabled).toBe(true);
 
     const second = await syncServiceAndUpload(serviceId, { public: false, ports: { 3000: { protocol: "http" } } }, undefined, first.sourceId);
     const privateRun = await pollDeploymentToStatus(await startDeploy({ sourceId: second.sourceId, uploadId: second.uploadId, definitionSyncId: second.definitionSyncId, levels: [[serviceId]] }), "deployed");
@@ -1343,9 +1431,9 @@ describe("deploys against the Marshal runtime", () => {
     expect((privateService.body as any).public).toBe(false);
     expect((privateService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
     expect((privateService.body as any).url).toBeNull();
-    const privateApp = await findMockApp(serviceId);
-    expect(privateApp.sharedIpv4).toBeNull();
-    expect(privateApp.dedicatedIps.filter((ip) => ip.type === "v6")).toEqual([]);
+    const { service: privateCloudRun } = await findMockCloudRun(serviceId);
+    expect(privateCloudRun.ingress).toBe("INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER");
+    expect(privateCloudRun.invokerIamDisabled).toBe(true);
   });
 
   it("rejects a connection to a service that doesn't exist", async ({ expect }) => {
@@ -1365,7 +1453,7 @@ describe("deploys against the Marshal runtime", () => {
   });
 
   it("resolves url connections between services deterministically, named or not", { timeout: 120_000 }, async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const apiServiceId = uniqueServiceId("api");
     const webServiceId = uniqueServiceId("web");
 
@@ -1377,24 +1465,20 @@ describe("deploys against the Marshal runtime", () => {
     const upload1 = await createUpload();
     await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: upload1.uploadId, definitionSyncId: sync1, levels: [[apiServiceId]] }), "deployed");
 
-    // ...and the web service's env gets the API's flycast address, which is
-    // deterministic (it doesn't even require the API to be deployed).
+    // ...and the web service's env gets the API's private Cloud Run URI.
     const upload2 = await createUpload();
     await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: upload2.uploadId, definitionSyncId: sync1, levels: [[webServiceId]] }), "deployed");
 
-    const webApp = await findMockApp(webServiceId);
-    const apiApp = await findMockApp(apiServiceId);
-    // The URL carries the PORT. Every port answers on its own number on the
-    // private network — which is what lets a service expose more than one — so
-    // there is no single well-known port to leave implicit.
-    expect(webApp.machines[0].env.API_URL).toBe(`http://${apiApp.name}.flycast:8080`);
+    const { service: webCloudRun } = await findMockCloudRun(webServiceId);
+    const { service: apiCloudRun } = await findMockCloudRun(apiServiceId);
+    expect(cloudRunEnv(webCloudRun).API_URL).toBe(apiCloudRun.uri);
 
     // A multi-port target has to be named explicitly: a bare url() is ambiguous
     // and rejected, while `:9090` resolves to that port.
     const multiServiceId = uniqueServiceId("multi");
     const consumerId = uniqueServiceId("consumer");
     const ambiguous = await syncServices({
-      [multiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, env: {} },
+      [multiServiceId]: { type: "server", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, min_instances: 0, max_instances: 1, env: {} },
       [consumerId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API: { type: "connection", value: `${multiServiceId}.url` } } },
     });
     const consumerUpload = await createUpload();
@@ -1412,20 +1496,24 @@ describe("deploys against the Marshal runtime", () => {
     expect(JSON.stringify(ambiguousDeploy.body)).toContain("exactly one HTTP port");
 
     const named = await syncServices({
-      [multiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, env: {} },
+      [multiServiceId]: { type: "server", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, min_instances: 0, max_instances: 1, env: {} },
       [consumerId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API: { type: "connection", value: `${multiServiceId}.url:9090` } } },
     }, ambiguous.sourceId);
     const namedUpload = await createUpload();
-    // The consumer is applied FIRST, before the target it references: naming a PRIVATE port
-    // makes the URL fully determined from the deployment's own targets, so it resolves
-    // without waiting for the target to come up — which is the whole difference from a
-    // public `url`, and what keeps mutually-wired services from being circular.
+    // The target is applied FIRST. Naming a private port settles WHICH port the URL means,
+    // but not the address it is built from: that is the target VM's internal IP, which only
+    // exists once the target has rolled out. `connectionRequiresTargetDeployed` makes every
+    // service reference a deploy-ordering edge for exactly this reason — a consumer put
+    // ahead of its target fails the deploy on "blocked on unresolved refs".
     await pollDeploymentToStatus(
-      await startDeploy({ sourceId: named.sourceId, uploadId: namedUpload.uploadId, definitionSyncId: named.syncId, levels: [[consumerId], [multiServiceId]] }),
+      await startDeploy({ sourceId: named.sourceId, uploadId: namedUpload.uploadId, definitionSyncId: named.syncId, levels: [[multiServiceId], [consumerId]] }),
       "deployed",
     );
-    const consumerApp = await findMockApp(consumerId);
-    expect(consumerApp.machines[0].env.API).toMatch(/^http:\/\/hxc-.+\.flycast:9090$/);
+    const { service: consumerCloudRun } = await findMockCloudRun(consumerId);
+    const { instance: multiInstance } = await findMockInstance(multiServiceId);
+    // The named port, on the target's own address — not on the sole-HTTP-port internal URL,
+    // which is null for a multi-port service and is what a wrong resolution would produce.
+    expect(cloudRunEnv(consumerCloudRun).API).toBe(`http://${multiInstance.networkInterfaces[0]?.networkIP}:9090`);
     // The API must report the reference it actually stored, port and all —
     // reporting a bare `url` would name a DIFFERENT (and, on this multi-port
     // target, invalid) config.
@@ -1436,7 +1524,7 @@ describe("deploys against the Marshal runtime", () => {
     // A port suffix is meaningful only on `url`: a hostname is the service's private DNS
     // name, which no port belongs to.
     const strayPort = await syncServices({
-      [multiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, env: {} },
+      [multiServiceId]: { type: "server", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, min_instances: 0, max_instances: 1, env: {} },
       [consumerId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { H: { type: "connection", value: `${multiServiceId}.hostname:9090` } } },
     }, named.sourceId);
     const strayUpload = await createUpload();
@@ -1568,7 +1656,7 @@ describe("deploys against the Marshal runtime", () => {
     // toMatchObject, not toEqual: every service also receives its project's Hexclave
     // credentials, which the end-to-end test above pins exactly. What matters here is the
     // declared pair, and below, that DROP is really gone.
-    expect((await findMockApp(serviceId)).machines[0].env).toMatchObject({ KEEP: "yes", DROP: "bye" });
+    expect(cloudRunEnv((await findMockCloudRun(serviceId)).service)).toMatchObject({ KEEP: "yes", DROP: "bye" });
 
     // The SAME deployment source re-syncing: a different one claiming this
     // service id would be refused, which is the point of the ownership rule.
@@ -1577,9 +1665,9 @@ describe("deploys against the Marshal runtime", () => {
     }, sourceId);
     const upload2 = await createUpload();
     await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: upload2.uploadId, definitionSyncId: sync2, levels: [[serviceId]] }), "deployed");
-    // The machines were fully replaced with the new spec's env — the dropped
+    // The Cloud Run revision was replaced with the new spec's env — the dropped
     // var is actually gone, not merely unlisted.
-    const redeployedEnv = (await findMockApp(serviceId)).machines[0].env;
+    const redeployedEnv = cloudRunEnv((await findMockCloudRun(serviceId)).service);
     expect(redeployedEnv).toMatchObject({ KEEP: "yes" });
     expect(Object.hasOwn(redeployedEnv, "DROP")).toBe(false);
   });
@@ -1614,7 +1702,7 @@ describe("deploys against the Marshal runtime", () => {
 
   // NOTE: there is deliberately no backend DELETE-service route (removal is config-driven;
   // auto-cleanup of services dropped from the config is a tracked gap), so Marshal's
-  // deleteService — which releases the hostname claim and tears down the Fly app — has no
+  // deleteService — which releases the hostname claim and tears down the GCP runtime — has no
   // backend-e2e path to exercise. Worth a direct Marshal-level test when one is added.
 });
 
@@ -1625,7 +1713,7 @@ describe("domains", () => {
     const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
     await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
 
-    // The magic ".verified.test" suffix makes the fly-mock verify instantly.
+    // The magic ".verified.test" suffix makes gcp-mock mark the managed certificate ACTIVE.
     const hostname = `${serviceId}.verified.test`;
     const addResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
       method: "POST",
@@ -1656,7 +1744,14 @@ describe("domains", () => {
     const getPending = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${pendingHostname}`, { accessType: "admin" });
     const records = (getPending.body as any).dns_records;
     expect(Array.isArray(records)).toBe(true);
-    expect(records.length).toBeGreaterThan(0);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "TXT",
+        name: `_hexclave-verification.${pendingHostname}`,
+        value: expect.stringMatching(/^hexclave-domain-verification=[A-Za-z0-9_-]{43}$/),
+      }),
+      expect.objectContaining({ type: "A", name: pendingHostname }),
+    ]));
 
     const deleteResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, {
       method: "DELETE",
@@ -1668,7 +1763,7 @@ describe("domains", () => {
   });
 
   it("rejects a hostname already attached to another project's service", { timeout: 120_000 }, async ({ expect }) => {
-    // The hostname registry is global across namespaces (Fly itself does NOT
+    // The hostname registry is global across namespaces (GCP itself does NOT
     // enforce cross-app hostname uniqueness — Marshal's bucket registry does).
     const hostname = `contested-${randomUUID().slice(0, 8)}.verified.test`;
 
@@ -1707,7 +1802,7 @@ describe("domains", () => {
       [ownerServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
       [otherServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
     });
-    // Both services in ONE deployment: a deploy ships its whole source, and Fly mutations of
+    // Both services in ONE deployment: a deploy ships its whole source, and GCP mutations of
     // a source are serialized behind its lease — so two back-to-back deploys of the same
     // source are contention this test has no reason to create.
     const upload = await createUpload();
@@ -1751,7 +1846,7 @@ describe("domains", () => {
       [firstServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
       [secondServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
     });
-    // One deployment ships both services: Fly mutations of a source are serialized behind
+    // One deployment ships both services: GCP mutations of a source are serialized behind
     // its lease, so racing two deploys of the SAME source would only test that lease. The
     // race under test is the one below, between two domain adds.
     const upload = await createUpload();
@@ -1872,10 +1967,10 @@ describe("deployments of a whole deployment source", () => {
     expect(deployment.services.map((service: any) => service.service_id)).toEqual([apiServiceId, webServiceId]);
     expect(deployment.services.every((service: any) => service.status === "deployed")).toBe(true);
 
-    // Both are actually running, and web got the API's flycast address.
-    const apiApp = await findMockApp(apiServiceId);
-    const webApp = await findMockApp(webServiceId);
-    expect(webApp.machines[0].env.API_URL).toBe(`http://${apiApp.name}.flycast:8080`);
+    // Both are actually running, and web got the API's private Cloud Run URI.
+    const apiCloudRun = (await findMockCloudRun(apiServiceId)).service;
+    const webCloudRun = (await findMockCloudRun(webServiceId)).service;
+    expect(cloudRunEnv(webCloudRun).API_URL).toBe(apiCloudRun.uri);
 
     // ONE build log covering both services: they shared a builder machine.
     const logs = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}/logs`, { accessType: "admin" });
@@ -1923,7 +2018,7 @@ describe("deployments of a whole deployment source", () => {
   });
 
   it("removes a service the deploy file no longer declares, keeping its disk", { timeout: 120_000 }, async ({ expect }) => {
-    await Project.createAndSwitch();
+    await Project.createAndSwitchOnPaidPlan();
     const keptServiceId = uniqueServiceId("kept");
     const droppedServiceId = uniqueServiceId("dropped");
     const { syncId, sourceId } = await syncServices({

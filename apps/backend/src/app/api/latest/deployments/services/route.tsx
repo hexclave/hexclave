@@ -1,4 +1,4 @@
-import { HEXCLAVE_SERVICE_ID, assertMinInstancesAllowedByPlan, getOrCreateDeploymentSource, listServiceRows, serviceToApiShape, syncSourceServices, tearDownServices } from "@/lib/deployments";
+import { HEXCLAVE_SERVICE_ID, assertServicesAllowedByPlan, getOrCreateDeploymentSource, listServiceRows, serviceToApiShape, syncSourceServices, tearDownServices } from "@/lib/deployments";
 import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { DEPLOYMENT_SOURCE_ID_REGEX, MAX_DEPLOYMENT_SOURCE_ID_LENGTH, deploymentServiceDefinitionSchema } from "@hexclave/shared/dist/deployments";
@@ -78,7 +78,7 @@ export const PUT = createSmartRouteHandler({
       // the latter is what an empty `services` export actually means.
       throw new StatusError(400, "The services record must contain at least one service. (Nothing to sync — the deploy file's `services` are empty.)");
     }
-    await assertMinInstancesAllowedByPlan(auth.tenancy, body.services);
+    await assertServicesAllowedByPlan(auth.tenancy, body.services);
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const syncId = randomUUID();
     // One transaction: the sync detaches volumes before re-attaching them, so a

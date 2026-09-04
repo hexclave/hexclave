@@ -1,21 +1,23 @@
 import { createHash } from "node:crypto";
 import { buildEnvByteLength, buildTimeEnv, computeWebhookToken, type Builder } from "./builds.js";
-import { BASE_IMAGE, BUILD_TIMEOUT_SECONDS, MACHINE_GUEST, MAX_BUILD_ENV_BYTES, MAX_COMMAND_LENGTH, MAX_INSTANCES_CAP, MAX_PERSISTENT_VOLUMES_PER_SERVICE, MAX_PORTS_PER_SERVICE, MAX_UPLOAD_BYTES, MAX_VOLUME_ID_LENGTH, MAX_VOLUME_SIZE_GB, MIN_REDACTED_ENV_VALUE_LENGTH, MIN_VOLUME_SIZE_GB, SOFT_CONCURRENCY_LIMIT, VOLUME_ID_REGEX, flyVolumeName, getConfig, resolveNamespaceOrg } from "./config.js";
+import { BASE_IMAGE, BUILD_TIMEOUT_SECONDS, MAX_BUILD_ENV_BYTES, MAX_COMMAND_LENGTH, MAX_INSTANCES_CAP, MAX_PERSISTENT_VOLUMES_PER_SERVICE, MAX_PORTS_PER_SERVICE, MAX_UPLOAD_BYTES, MAX_VOLUME_ID_LENGTH, MAX_VOLUME_SIZE_GB, MIN_REDACTED_ENV_VALUE_LENGTH, MIN_VOLUME_SIZE_GB, VOLUME_ID_REGEX, getConfig } from "./config.js";
 import { applyErrorMessage } from "./apply-error.js";
+import { domainVerificationRecord } from "./domain-verification.js";
 import { MarshalError, badRequest, conflict, notFound } from "./errors.js";
-import { FlyClient, flyClientForNamespaceOrg, type FlyCertificate, type FlyMachine, type FlyVolume } from "./fly/client.js";
-import { fetchAllLogs } from "./logs.js";
-import { appNameForService, hostnameForService, networkForNamespace } from "./naming.js";
+import { privateHostnameForService, serviceName } from "./naming.js";
 import { MutationOutcomeUnknownError, RECONCILIATION_TAKEOVER_GRACE_MS } from "./mutation-safety.js";
 import { redactSecrets } from "./redact.js";
 import { ReconciliationLeaseLostError, withReconciliationLease, type ReconciliationLeaseGuard } from "./reconciliation-lock.js";
 import { computeRevision } from "./revision.js";
-import { reconcilePublicIps } from "./public-networking.js";
-import { createDeployment, deleteSpecConditionally, deleteUpload, deleteValidatedUpload, listDomainClaimsForService, listSpecKeys, readDeployment, readDeploymentVersioned, readDomainClaimVersioned, readSpec, readSpecVersioned, readUpload, releaseDomainClaim, replaceDeployment, statUpload, writeDeploymentLog, writeSpec, writeValidatedUpload } from "./store.js";
-import { validateSourceArchive } from "./source-archive.js";
-import { isImageDigest, pinToDigest, validateImageRef } from "./image-ref.js";
-import { portEntries, targetIsBuilt, targetUsesGeneratedDockerfile, type Deployment, type DeploymentServiceState, type DeploymentTarget, type DnsRecord, type EnvValue, type PortEntry, type PortsConfig, type ServiceDomainState, type ServiceSpec, type ServiceState, type StoredDeployment, type StoredSpec, type VolumeConfig } from "./types.js";
+import { beginDomainClaimDeletion, createDeployment, deletePendingDomainClaim, deleteSpecConditionally, deleteUpload, deleteValidatedUpload, listDomainClaimsForService, listPendingDomainClaimsForService, listSpecKeys, readDeployment, readDeploymentVersioned, readDomainClaimVersioned, readPendingDomainClaimVersioned, readSpec, readSpecVersioned, readUpload, releaseDomainClaim, replaceDeployment, statUpload, writeDeploymentLog, writeSpec, writeValidatedUpload } from "./store.js";
+import { loadAndValidateSourceArchive } from "./source-archive.js";
+import { validateImageRef } from "./image-ref.js";
+import { portEntries, targetIsBuilt, targetUsesGeneratedDockerfile, type Deployment, type DeploymentServiceState, type DeploymentTarget, type EnvValue, type PortsConfig, type ServiceKind, type ServiceSpec, type ServiceState, type StoredDeployment, type StoredSpec, type VolumeConfig } from "./types.js";
 import { ulid } from "./ulid.js";
+import { applyRuntimeService, deleteRuntimeService, observeRuntimeService, runtimeAddress } from "./gcp/runtime.js";
+import { tenantContext } from "./gcp/context.js";
+import { projectIdForNamespace } from "./gcp/projects.js";
+import { withPlatformDomainLease } from "./platform-domain-lock.js";
 
 const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // The optional `:<port>` suffix belongs to `url`, which names the port it means
@@ -105,11 +107,8 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
   if (maxInstances > MAX_INSTANCES_CAP) throw badRequest(`config.max_instances must be <= ${MAX_INSTANCES_CAP}`);
 
   // Ports. Re-validated here rather than trusted from the backend: this is the
-  // boundary that turns a spec into Fly machine config, and a bad port list
-  // would otherwise reach the Fly API.
-  // An EMPTY array is legal: a worker with nothing listening, which gets an empty
-  // Fly `services` array. It only ever runs while pinned, since autostart lives on
-  // a `services` entry — that is the caller's call to make, not ours to refuse.
+  // boundary that turns a spec into provider config, and a bad port list would otherwise
+  // reach a provider API. An empty object remains legal for a private server worker.
   // Keyed by port number, exactly as the deploy file writes it — so a duplicate
   // port is impossible by construction and the key is what has to be validated.
   // Arrays are excluded explicitly: asRecord accepts them (an array IS an
@@ -139,17 +138,11 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
   const portList = portEntries(ports);
 
   // Visibility belongs to the CONTAINER, not to a port — see PortConfig in
-  // types.ts. Fly's `services` array is the proxy's listener set for the whole
-  // APP with no per-address scoping, so every declared port answers on every IP
-  // the app holds: "public 3000, private 5432" is not a thing the runtime can do,
-  // and a per-port flag could only ever misdescribe it.
+  // types.ts. A per-port public flag would misdescribe the service-level ingress contract.
   const isPublic = config.public ?? false;
   if (typeof isPublic !== "boolean") throw badRequest("config.public must be a boolean");
   // A public service is all-HTTP. Raw TCP cannot take public ingress: a shared
-  // public IPv4 tells apps apart by SNI (TLS) or Host (HTTP), and a raw stream
-  // carries neither, so the edge accepts the connection and then drops it —
-  // VERIFIED against real Fly. It would need a dedicated IPv4 per service, which
-  // is a billing decision rather than a code change.
+  // public gateway is HTTP-layer and cannot route an arbitrary raw stream.
   const tcpPorts = portList.filter((entry) => entry.protocol === "tcp");
   if (isPublic && tcpPorts.length > 0) {
     throw badRequest(`a public service may not declare a "tcp" port (it declares ${tcpPorts.map((entry) => entry.port).join(", ")}): raw TCP carries no SNI or Host header, so a shared public address cannot tell which service a connection is for`);
@@ -164,7 +157,7 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
   // whole app. So a different port that is itself numbered 80 or 443 asks for an
   // external listener the holder has already taken — `{80: public, 443: public}`
   // makes 80 the holder, which claims 80 and 443, and the declared 443 claims
-  // 443 a second time. Fly cannot serve one external port from two entries.
+  // 443 a second time. The gateway cannot serve one external port from two entries.
   //
   // Refused rather than resolved by precedence: dropping the holder's standard
   // binding costs the platform URL and the certificate, and dropping the
@@ -187,9 +180,8 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
     throw badRequest('config.min_instances must be 0 or 1 and config.max_instances must be 1 when config.type is "server"');
   }
 
-  // A Fly volume attaches to at most one machine, and a machine mounts at most one volume,
-  // so only a single-instance "server" can hold one. min_instances 0 is still fine — a
-  // suspended machine keeps its volume and resumes with it (smoke-verified).
+  // A persistent disk attaches to the single Compute Engine VM, so only a "server" can
+  // hold one. The disk survives runtime deletion and a later deployment adopts it.
   let persistentVolumes: Record<string, VolumeConfig> | undefined;
   if (config.persistent_volumes !== undefined && config.persistent_volumes !== null) {
     const volumesRecord = asRecord(config.persistent_volumes);
@@ -203,9 +195,8 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
     }
     const validatedVolumes = new Map<string, VolumeConfig>();
     for (const [volumeId, volumeValue] of Object.entries(volumesRecord)) {
-      // The id becomes the Fly volume name (see flyVolumeName), so it has to survive that
-      // mapping unchanged — no case folding, no character substitution, nothing that could
-      // make two distinct ids name one disk.
+      // The id contributes to the disk identity, so its spelling is constrained before the
+      // naming function normalizes it.
       if (!VOLUME_ID_REGEX.test(volumeId) || volumeId.length > MAX_VOLUME_ID_LENGTH) {
         throw badRequest(`invalid persistent volume id ${JSON.stringify(volumeId)} (lowercase letters, digits, and underscores, starting with a letter, at most ${MAX_VOLUME_ID_LENGTH} characters)`);
       }
@@ -268,10 +259,8 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
     if (hasRef && !REF_REGEX.test(envValue.ref as string)) throw badRequest(`env.${key}.ref must look like "<service_key>.<output_key>"`);
     validatedEnv.set(key, hasValue ? { value: envValue.value as string } : { ref: envValue.ref as string });
   }
-  // Plain values ride to the builder machine inside its machine config (see
-  // createFlyBuilder), so their total size is bounded by what one machine-create call will
-  // accept. Enforced here rather than at build start so an oversized env is a 400 naming
-  // the problem, not an opaque Fly rejection partway into a deploy. Refs don't count: they
+  // Plain values ride to the builder VM inside its metadata, so their total size is bounded.
+  // Enforced here so an oversized env is a 400 rather than an opaque provider rejection. Refs don't count: they
   // resolve to machine env only.
   const buildEnvBytes = buildEnvByteLength(buildTimeEnv(Object.fromEntries(validatedEnv)));
   if (buildEnvBytes > MAX_BUILD_ENV_BYTES) {
@@ -295,7 +284,7 @@ export function validateServiceSpec(body: unknown): ServiceSpec {
 // What a `url` reference needs to know about its target: which ports it declares
 // and whether the SERVICE is public. Kept as one value so the two can never be
 // sourced from different places — see targetOf.
-export type KnownTarget = { ports: PortsConfig, public: boolean };
+export type KnownTarget = { type: ServiceKind, ports: PortsConfig, public: boolean };
 
 type ResolvedEnv =
   | { ok: true, env: Record<string, string> }
@@ -306,11 +295,11 @@ type ResolvedEnv =
 // deployment's own targets when the target is part of this deploy (which is what
 // keeps a private url() from depending on deploy ORDER), and otherwise from the
 // target's stored spec.
-export async function resolveEnv(fly: FlyClient, ns: string, env: Record<string, EnvValue>, knownTargets?: Map<string, KnownTarget>): Promise<ResolvedEnv> {
+export async function resolveEnv(ns: string, env: Record<string, EnvValue>, knownTargets?: Map<string, KnownTarget>): Promise<ResolvedEnv> {
   const { envId } = getConfig();
   const resolved = new Map<string, string>();
   const blockedRefs: string[] = [];
-  const urlCache = new Map<string, string | null>();
+  const addressCache = new Map<string, Awaited<ReturnType<typeof runtimeAddress>> | null>();
   const targetCache = new Map<string, KnownTarget | null>();
   // Ports AND visibility together: they are two halves of one decision (which
   // address a `url` resolves to), so reading them from different places lets a
@@ -321,7 +310,7 @@ export async function resolveEnv(fly: FlyClient, ns: string, env: Record<string,
     if (known !== undefined) return known;
     if (!targetCache.has(targetKey)) {
       const spec = await readSpec(ns, targetKey);
-      targetCache.set(targetKey, spec === null ? null : { ports: spec.spec.config.ports, public: spec.spec.config.public });
+      targetCache.set(targetKey, spec === null ? null : { type: spec.spec.config.type, ports: spec.spec.config.ports, public: spec.spec.config.public });
     }
     return targetCache.get(targetKey) ?? null;
   };
@@ -342,17 +331,27 @@ export async function resolveEnv(fly: FlyClient, ns: string, env: Record<string,
     const namedPort = namedPortText ? Number(namedPortText) : null;
     switch (outputKey) {
       case "hostname": {
-        resolved.set(key, hostnameForService(envId, ns, targetKey));
+        const target = await targetOf(targetKey);
+        if (target === null) {
+          blockedRefs.push(value.ref);
+          break;
+        }
+        if (!addressCache.has(targetKey)) addressCache.set(targetKey, await computeServiceAddress(ns, targetKey));
+        const hostname = addressCache.get(targetKey)?.hostname ?? null;
+        if (hostname === null) blockedRefs.push(value.ref);
+        else resolved.set(key, hostname);
         break;
       }
       case "url": {
         // Which port the URL means, and what it looks like. The port picks the
         // number; the TARGET SERVICE's visibility picks the address:
         //  - a PUBLIC service resolves to its public URL (the platform URL, or a
-        //    verified custom domain), which exists only once the service is up —
-        //    so it blocks until then;
+        //    verified custom domain), which exists only once the service is up;
         //  - a PRIVATE service resolves to its internal address, built from the
-        //    deterministic hostname and the port itself.
+        //    target's runtime hostname (a VM's internal IP) and the port itself.
+        // Either way the address comes from the target's ROLLOUT, so both block
+        // until the target has one — which is why every service reference is a
+        // deploy-ordering edge (see connectionRequiresTargetDeployed).
         const target = await targetOf(targetKey);
         if (target === null) {
           // Nothing known about the target: it may not have been deployed yet.
@@ -379,18 +378,35 @@ export async function resolveEnv(fly: FlyClient, ns: string, env: Record<string,
         // Read from `target`, which prefers this deployment's own specs — see
         // targetOf. Reading it from the STORED spec instead reintroduced exactly
         // the deploy-order dependence knownTargets exists to remove.
+        if (!addressCache.has(targetKey)) addressCache.set(targetKey, await computeServiceAddress(ns, targetKey));
+        const address = addressCache.get(targetKey) ?? null;
+        // A private server is addressed by the VM's internal IP and the requested port —
+        // NOT by internalUrl, which only answers for a sole HTTP port and is null for the
+        // tcp-only services (a database, say) that private url() refs exist to reach.
         if (!target.public) {
-          resolved.set(key, `http://${hostnameForService(envId, ns, targetKey)}:${port.port}`);
+          // A PRIVATE address already carries the port it is reached on, so it is
+          // finished here — it must NOT fall through to the standard-ports suffix
+          // below, which exists only for a public URL that carries no port at all.
+          // Letting it through appended the number a second time and handed the
+          // consumer "http://10.128.0.21:9090:9090".
+          //
+          // A private server is addressed by the VM's internal IP and the requested port —
+          // NOT by internalUrl, which only answers for a sole HTTP port and is null for the
+          // tcp-only services (a database, say) that private url() refs exist to reach. A
+          // private SERVERLESS service is the opposite: its address is the Cloud Run URI,
+          // one port-agnostic HTTPS endpoint that no port number belongs on.
+          const privateUrl = target.type === "server"
+            ? (address?.hostname == null ? null : `http://${address.hostname}:${port.port}`)
+            : address?.internalUrl ?? null;
+          if (privateUrl === null) blockedRefs.push(value.ref);
+          else resolved.set(key, privateUrl);
           break;
         }
-        if (!urlCache.has(targetKey)) {
-          urlCache.set(targetKey, await computeServiceUrl(fly, ns, targetKey));
-        }
-        const url = urlCache.get(targetKey) ?? null;
+        const url = address?.platformUrl ?? null;
         if (url === null) {
           blockedRefs.push(value.ref);
         } else {
-          // computeServiceUrl answers for the port that owns 80/443. Any OTHER
+          // The platform URL answers for the port that owns 80/443. Any OTHER
           // public port of a multi-port service is reachable on its own number
           // and nowhere else, so the ref has to carry it — otherwise every
           // public port of one service would resolve to the same URL and quietly
@@ -411,143 +427,14 @@ export async function resolveEnv(fly: FlyClient, ns: string, env: Record<string,
   return { ok: true, env: Object.fromEntries(resolved) };
 }
 
-function certificateIsVerified(certificate: FlyCertificate): boolean {
-  return certificate.clientStatus === "Ready";
-}
-
-async function computeServiceUrl(fly: FlyClient, ns: string, key: string): Promise<string | null> {
-  const { envId } = getConfig();
+async function computeServiceAddress(ns: string, key: string): Promise<Awaited<ReturnType<typeof runtimeAddress>> | null> {
   const stored = await readSpec(ns, key);
-  if (stored !== null && specIsPublic(stored.spec)) {
-    return `https://${appNameForService(envId, ns, key)}.fly.dev`;
-  }
-  const certificates = await fly.listCertificates(appNameForService(envId, ns, key));
-  const verified = certificates.filter(certificateIsVerified).map((certificate) => certificate.hostname).sort();
-  return verified.length > 0 ? `https://${verified[0]}` : null;
+  if (stored === null) return null;
+  return await runtimeAddress(ns, key, stored);
 }
 
 // ---------------------------------------------------------------------------
-// Machine reconciliation
-
-function isServerful(spec: ServiceSpec): boolean {
-  return spec.config.min_instances === 1 && spec.config.max_instances === 1;
-}
-
-function desiredMachineCount(spec: ServiceSpec): number {
-  return isServerful(spec) ? 1 : spec.config.max_instances;
-}
-
-function pinnedMachineCount(spec: ServiceSpec): number {
-  return isServerful(spec) ? 1 : spec.config.min_instances;
-}
-
-// The parts of a Fly machine config this module actually produces. Named rather
-// than left as `Record<string, unknown>` so callers — the tests especially — can
-// read `.services[].ports[].handlers` without a cast to get at it. Fly accepts
-// far more than this; only what we send is described.
-export type MachineConfig = {
-  image: string,
-  env: Record<string, string>,
-  // Present only when the spec names a start command. `exec` replaces the
-  // image's ENTRYPOINT and CMD both — see ContainerConfig.start_command.
-  init?: { exec: string[] },
-  mounts?: { volume: string, path: string }[],
-  metadata: Record<string, string>,
-  services: {
-    protocol: string,
-    internal_port: number,
-    autostop: string,
-    autostart: boolean,
-    ports: { port: number, handlers?: string[] }[],
-    concurrency: { type: string, soft_limit: number },
-  }[],
-  [key: string]: unknown,
-};
-
-export function machineConfigForSlot(options: {
-  imageRef: string,
-  spec: ServiceSpec,
-  revision: string,
-  ns: string,
-  key: string,
-  slot: number,
-  env: Record<string, string>,
-  volumeId: string | null,
-}): MachineConfig {
-  const pinned = options.slot < pinnedMachineCount(options.spec);
-  const volume = specVolume(options.spec)?.volume;
-  const standardPortsHolder = standardPortsHolderFor(options.spec.config.ports, options.spec.config.public);
-  const config = {
-    image: options.imageRef,
-    guest: MACHINE_GUEST,
-    env: options.env,
-    // A start command replaces what the image starts, entrypoint included: `exec`
-    // is the only one of Fly's three init fields that does. (`cmd` alone is
-    // passed TO the image's entrypoint as arguments — verified against real Fly
-    // with nginx, whose docker-entrypoint.sh then ran the command as if it were
-    // its own arguments.) Absent when there is none, so a spec without one hashes
-    // and behaves exactly as before this existed.
-    ...(options.spec.config.start_command !== undefined
-      ? { init: { exec: ["/bin/sh", "-c", options.spec.config.start_command] } }
-      : {}),
-    // Only slot 0 can carry the volume, and a volume-backed spec is single-slot anyway
-    // (type "server", enforced in validateServiceSpec). The volume id is part of the
-    // hashed config on purpose: if the volume were ever replaced, the machine must roll onto
-    // the new one rather than silently keep the old mount.
-    ...(volume !== undefined && options.volumeId !== null && options.slot === 0
-      ? { mounts: [{ volume: options.volumeId, path: volume.path }] }
-      : {}),
-    metadata: {
-      hexclave_ns: options.ns,
-      hexclave_key: options.key,
-      hexclave_revision: options.revision,
-      hexclave_slot: String(options.slot),
-    },
-    restart: { policy: "on-failure", max_retries: 2 },
-    // One Fly services entry per declared port. Every port is reachable at its
-    // OWN number (that is what makes several ports addressable at all), and the
-    // service's single HTTP port additionally answers on 80/443 so its fly.dev
-    // URL and any custom domain certificate work on the standard ports.
-    services: portEntries(options.spec.config.ports).map((entry) => ({
-      protocol: "tcp",
-      internal_port: entry.port,
-      // Pinned machines never autostop; the rest scale to zero and Fly Proxy autostarts
-      // them on demand (only *existing* machines get autostarted, which is why the full
-      // max_instances fleet is pre-created).
-      //
-      // A "server" SUSPENDS instead of stopping: it resumes with its memory intact and
-      // without a cold start, and Fly leaves an attached volume and its data untouched
-      // across suspend/resume. Suspend is only advisable at <= 2 GB of memory, which
-      // MACHINE_GUEST (512 MB) satisfies. A "serverless" stops, so each start is cold from a
-      // clean rootfs.
-      autostop: pinned ? "off" : options.spec.config.type === "server" ? "suspend" : "stop",
-      autostart: true,
-      ports: externalPortsFor(entry, standardPortsHolder, options.spec.config.public),
-      concurrency: {
-        type: entry.protocol === "http" ? "requests" : "connections",
-        soft_limit: SOFT_CONCURRENCY_LIMIT,
-      },
-    })),
-  };
-  // The config hash makes re-applies cheap no-ops and catches resolved-ref drift that the
-  // revision (hashed over UNresolved env) deliberately ignores.
-  const hash = createHash("sha256").update(JSON.stringify(config)).digest("hex").slice(0, 12);
-  return { ...config, metadata: { ...config.metadata, hexclave_config_hash: hash } };
-}
-
-// The spec's single persistent volume, or null. `persistent_volumes` is a record so the
-// volume ID is a first-class key, but validateServiceSpec caps it at one entry, so every
-// consumer wants exactly this.
-/**
- * Whether the spec asks for public ingress. A property of the container, not of
- * any port.
- *
- * Compared against `true` rather than returned directly, despite the type: specs
- * live in the bucket, which no reset clears, and one written before `public`
- * existed has no such field. Such a spec reads as PRIVATE — the safe direction,
- * and it self-corrects on the next apply, which rewrites the spec from the
- * backend's definition.
- */
+// Service transport helpers
 export function specIsPublic(spec: ServiceSpec): boolean {
   return spec.config.public === true;
 }
@@ -591,15 +478,13 @@ export function standardPortsHolderFor(ports: PortsConfig, isPublic: boolean): n
 /**
  * The port rule for a service that holds (or is about to hold) a custom domain.
  *
- * A custom domain allocates public IPs on the service's app (see ensurePublicIps), so it
- * makes the service reachable exactly the way `public: true` does — so a service holding one
+ * A custom domain allocates a public load-balancer IP, so it makes the service reachable
+ * exactly the way `public: true` does — so a service holding one
  * has to satisfy the same rules a public service does, whether or not it declares itself
  * public.
  *
- * Fly `services` are the proxy's listener set for the whole app with no per-address scoping,
- * so every declared port answers on every IP the app holds. A PRIVATE service with an HTTP
- * port next to a 5432 looks legal at sync time — nothing is public — but a domain on it puts
- * that 5432 on the internet.
+ * A PRIVATE service with an HTTP port next to a 5432 looks legal at sync time, but attaching
+ * a domain must never make an ambiguous sibling port public.
  *
  * STRICTER THAN validateServiceSpec, and deliberately: that rule passes a wholly private
  * multi-port service, because a service nobody can reach leaks nothing. A domain is exactly
@@ -629,277 +514,10 @@ export function assertServiceCanHoldADomain(serviceKey: string, ports: PortsConf
   }
 }
 
-/**
- * A port's external bindings, deduplicated.
- *
- * The dedupe is load-bearing: a container that listens on 80 or 443 (the default
- * for most web images) would otherwise get that number twice in one entry, and
- * for 443 with CONFLICTING handlers — plain `http` from its own binding and
- * `tls,http` from the standard one — leaving which wins up to Fly.
- */
-export function externalPortsFor(entry: PortEntry, standardPortsHolder: number | null, isPublic: boolean): { port: number, handlers?: string[] }[] {
-  if (entry.protocol !== "http") return [{ port: entry.port }];
-  const bindings = new Map<number, { port: number, handlers?: string[] }>();
-  // Its own number first, so a second HTTP port stays addressable...
-  //
-  // A PUBLIC SERVICE terminates TLS on that number, a private one does not. The
-  // distinction is not cosmetic: on a public service a non-holder port's own
-  // number is the ONLY way to reach it (the standard 80/443 belong to the
-  // holder), so leaving it plain would put a port the author asked to publish on
-  // the internet in cleartext — and the URL we hand back for it says https. A
-  // private service is reached over Flycast as `http://<host>:<port>`, and
-  // adding TLS there would break every private url() instead.
-  bindings.set(entry.port, { port: entry.port, handlers: isPublic ? ["tls", "http"] : ["http"] });
-  if (entry.port === standardPortsHolder) {
-    // ...but the standard ports win the collision: 443 must terminate TLS, and
-    // 80 stays plain HTTP (no force_https) because a private url() is http.
-    bindings.set(80, { port: 80, handlers: ["http"] });
-    bindings.set(443, { port: 443, handlers: ["tls", "http"] });
-  }
-  return [...bindings.values()];
-}
-
 export function specVolume(spec: ServiceSpec): { volumeId: string, volume: VolumeConfig } | null {
   const entries = Object.entries(spec.config.persistent_volumes ?? {});
   if (entries.length === 0) return null;
   return { volumeId: entries[0][0], volume: entries[0][1] };
-}
-
-// Fly does NOT enforce unique volume names within an app. The reconciliation lease prevents
-// Marshal replicas from creating concurrently, but a process can still die after Fly accepts
-// a create and before the bucket records the outcome. These helpers make recovery
-// DETERMINISTIC — the currently-attached volume first, then the oldest id — so every later
-// apply converges on the same disk. Choosing arbitrarily is the dangerous case: it would roll
-// the machine onto another volume and the service would come up with an empty disk, which
-// reads to the tenant as total data loss. Volumes being destroyed are never candidates.
-export function candidateVolumes(volumes: FlyVolume[], volumeId: string): FlyVolume[] {
-  const name = flyVolumeName(volumeId);
-  return volumes
-    .filter((candidate) => candidate.name === name && candidate.state !== "destroying" && candidate.state !== "pending_destruction")
-    .sort((a, b) => {
-      if ((a.attached_machine_id !== null) !== (b.attached_machine_id !== null)) return a.attached_machine_id !== null ? -1 : 1;
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-    });
-}
-
-export function selectCanonicalVolume(volumes: FlyVolume[], volumeId: string): FlyVolume | null {
-  const candidates = candidateVolumes(volumes, volumeId);
-  return candidates.length === 0 ? null : candidates[0];
-}
-
-// Idempotently brings the service's single volume to the configured size, returning its id.
-// Created BEFORE any machine: Fly places a machine on its volume's host, and creating the
-// machine first would usually land it on a different host (then the mount fails).
-async function ensureVolume(fly: FlyClient, appName: string, volumeId: string, volume: VolumeConfig, lease: ReconciliationLeaseGuard): Promise<string> {
-  const config = getConfig();
-  const candidates = candidateVolumes(await fly.listVolumes(appName), volumeId);
-  if (candidates.length === 0) {
-    await lease.assertOwned();
-    const created = await fly.createVolume(appName, { name: flyVolumeName(volumeId), region: config.fly.region, size_gb: volume.size_gb });
-    await fly.waitForVolumeListed(appName, created.id);
-    // Re-list and re-select rather than trusting our own create. Two concurrent
-    // applies can both see an empty list and both create a volume (Fly does not
-    // enforce unique names), and if each then mounted the disk it made, the service
-    // would come up as two machines backed by DIVERGENT data — writes split across
-    // two disks, unmergeable. Re-selecting with the same deterministic rule makes
-    // both applies converge on one canonical volume; the loser's create is orphaned
-    // (logged below), and whichever apply gets there second is refused by Fly's
-    // "volume already claimed" 412 instead of silently diverging.
-    const canonical = selectCanonicalVolume(await fly.listVolumes(appName), volumeId);
-    if (canonical === null) return created.id; // list raced the create; ours is all we know of
-    if (canonical.id !== created.id) {
-      console.error(`volume create race on ${appName}: adopted ${canonical.id}, orphaning ${created.id} (needs manual cleanup)`);
-      // The orphan may be smaller than requested; the adopted one still has to grow.
-      if (volume.size_gb > canonical.size_gb) {
-        await lease.assertOwned();
-        await fly.extendVolume(appName, canonical.id, volume.size_gb);
-      }
-    }
-    return canonical.id;
-  }
-  const existing = candidates[0];
-  if (volume.size_gb > existing.size_gb) {
-    await lease.assertOwned();
-    await fly.extendVolume(appName, existing.id, volume.size_gb);
-  } else if (volume.size_gb < existing.size_gb) {
-    // Fly volumes are grow-only, and shrinking would mean destroying tenant data. Fail the
-    // deploy rather than silently ignoring the requested size: a no-op here would leave the
-    // config claiming a size the service does not have and the tenant billed for the larger
-    // disk, with nothing anywhere reporting the divergence.
-    throw badRequest(
-      `the volume is already ${existing.size_gb}GB and cannot be shrunk to ${volume.size_gb}GB (disks can only grow). `
-      + `Set the volume size back to at least ${existing.size_gb}GB, or remove the volume from this service and redeploy to detach it — the existing disk is kept either way.`,
-    );
-  }
-  return existing.id;
-}
-
-// Mount sets are compared by (volume id, path), order-insensitively. Any difference means
-// the machine has to be recreated rather than updated — see the call site.
-function mountsDiffer(a: { volume: string, path: string }[], b: { volume: string, path: string }[]): boolean {
-  if (a.length !== b.length) return true;
-  const key = (mount: { volume: string, path: string }) => `${mount.volume}\u0000${mount.path}`;
-  const inA = new Set(a.map(key));
-  return b.some((mount) => !inA.has(key(mount)));
-}
-
-/**
- * The digest Fly reports for a machine, or null when it reports nothing usable.
- *
- * VALIDATED, not merely null-checked. `image_ref.digest` is optional and typed
- * as a plain string, so an empty or malformed one is inside its declared type —
- * and `??` is nullish-only, so `""` would sail past a null check and compose
- * into `docker.io/library/redis@`: a reference recorded as "what ran" that names
- * nothing. The null the callers already handle is the right answer for anything
- * that is not a digest.
- */
-export function reportedDigest(machine: FlyMachine): string | null {
-  const digest = machine.image_ref?.digest;
-  return digest !== undefined && isImageDigest(digest) ? digest : null;
-}
-
-/**
- * Rolls the service's machines onto `imageRef`, and reports the image Fly says
- * slot 0 is actually running.
- *
- * The two differ whenever `imageRef` names a tag: Marshal does not resolve
- * images, so the digest Fly reports back is the only record of which bytes the
- * tag pointed at. Slot 0 because it is the one machine every service has, and
- * because a mid-roll tag move would make the later slots disagree — which is a
- * property of tags, not something a second read here could fix.
- *
- * Null when Fly reports no digest (the mock Fly before it grew `image_ref`, or
- * a machine the roll left untouched and unread); callers fall back to the
- * reference as written.
- */
-async function applyMachines(fly: FlyClient, stored: StoredSpec, imageRef: string, env: Record<string, string>, lease: ReconciliationLeaseGuard): Promise<string | null> {
-  const config = getConfig();
-  const appName = appNameForService(config.envId, stored.ns, stored.key);
-  const network = networkForNamespace(config.envId, stored.ns);
-  await lease.assertOwned();
-  await fly.ensureApp(appName, network);
-  await lease.assertOwned();
-  await fly.ensureFlycastIp(appName, network);
-  await lease.assertOwned();
-  await reconcilePublicIps(fly, appName, specIsPublic(stored.spec) ? "public" : "private");
-
-  const specVolumeEntry = specVolume(stored.spec);
-  const volumeId = specVolumeEntry === null
-    ? null
-    : await ensureVolume(fly, appName, specVolumeEntry.volumeId, specVolumeEntry.volume, lease);
-
-  const machines = await fly.listMachines(appName);
-  const bySlot = new Map<number, FlyMachine>();
-  let extras: FlyMachine[] = [];
-  for (const machine of machines) {
-    const slot = Number(machine.config.metadata?.hexclave_slot);
-    if (Number.isInteger(slot) && slot >= 0 && !bySlot.has(slot)) {
-      bySlot.set(slot, machine);
-    } else {
-      extras.push(machine);
-    }
-  }
-
-  // A volume can only be claimed by one machine, so any leftover machine still holding it
-  // must go BEFORE the slot loop tries to mount it — otherwise slot 0's create/update gets
-  // Fly's 412 "volume already claimed", applyMachines throws before reaching the destroy
-  // loop below, and every retry reproduces it identically (a permanently wedged service).
-  // Scoped to claim-holders only: reordering the whole destroy loop would break the rolling
-  // guarantee documented below.
-  if (volumeId !== null) {
-    const holdsVolume = (machine: FlyMachine) => (machine.config.mounts ?? []).some((mount) => mount.volume === volumeId);
-    const claimHolders = extras.filter(holdsVolume);
-    for (const machine of claimHolders) {
-      await lease.assertOwned();
-      await fly.destroyMachine(appName, machine.id);
-    }
-    extras = extras.filter((machine) => !holdsVolume(machine));
-  }
-
-  const count = desiredMachineCount(stored.spec);
-  // Fly's resolution of `imageRef` for slot 0 — see this function's doc comment.
-  // Assigned directly in each branch rather than through a helper: a closure
-  // hides the assignment from TypeScript's control flow, which then reads the
-  // return below as dead code.
-  let runningDigest: string | null = null;
-  // Rolling, one machine at a time with a started-wait between (deploy decision #6): a bad
-  // image fails on slot 0 and leaves the rest serving the old revision.
-  for (let slot = 0; slot < count; slot++) {
-    const desired = machineConfigForSlot({ imageRef, spec: stored.spec, revision: stored.revision, ns: stored.ns, key: stored.key, slot, env, volumeId });
-    const desiredHash = (desired.metadata as Record<string, string>).hexclave_config_hash;
-    let existing = bySlot.get(slot);
-    bySlot.delete(slot);
-
-    // A machine's MOUNTS cannot be changed in place. Fly places a machine on its volume's
-    // host, so an already-placed machine can't adopt a volume that was created afterwards:
-    // real Fly rejects the update with `400 invalid_argument: volume does not exist`, even
-    // once the volume is listed and `created` (verified against real Fly). Left to
-    // the update path, adding a volume to a deployed service would fail identically on every
-    // retry and wedge it forever. Destroy first so the branch below recreates it on the
-    // volume's host. Detaching is recreated too: the reverse transition is equally unproven,
-    // and the volume itself always survives (smoke Q3a).
-    if (existing !== undefined && mountsDiffer(existing.config.mounts ?? [], desired.mounts as { volume: string, path: string }[] | undefined ?? [])) {
-      await lease.assertOwned();
-      await fly.destroyMachine(appName, existing.id);
-      existing = undefined;
-    }
-
-    const existingStarted = existing !== undefined && (existing.state === "started" || existing.state === "starting");
-    // Config-hash match short-circuits — but only when the machine is actually up. A pinned
-    // (autostop:"off") slot that crash-looped to `stopped` will never be restarted by Fly
-    // Proxy, so a same-spec reconcile must still boot it; otherwise an always-on service
-    // stays down forever. Autostoppable slots are meant to be stopped, so leave those.
-    const pinned = slot < pinnedMachineCount(stored.spec);
-    if (existing !== undefined && existing.config.metadata?.hexclave_config_hash === desiredHash && (existingStarted || !pinned)) {
-      if (slot === 0) runningDigest = reportedDigest(existing);
-      continue;
-    }
-    if (existing !== undefined && existing.config.metadata?.hexclave_config_hash === desiredHash) {
-      // Hash matches but a pinned machine is stopped: just start it, no config churn.
-      try {
-        await lease.assertOwned();
-        await fly.startMachine(appName, existing.id);
-      } catch (error) {
-        if (isReconciliationFencingError(error)) throw error;
-        // Already booting / raced — the wait below arbitrates.
-      }
-      await fly.waitForMachineState(appName, existing.id, "started", { instanceId: existing.instance_id, totalTimeoutSeconds: 120 });
-      if (slot === 0) runningDigest = reportedDigest(existing);
-      continue;
-    }
-    if (existing !== undefined) {
-      const wasStopped = existing.state !== "started" && existing.state !== "starting";
-      await lease.assertOwned();
-      const updated = await fly.updateMachine(appName, existing.id, desired);
-      if (wasStopped) {
-        // Updating a stopped machine doesn't reliably boot it; start explicitly so the
-        // started-wait below actually gates the roll (autostop re-stops it when idle).
-        try {
-          await lease.assertOwned();
-          await fly.startMachine(appName, updated.id);
-        } catch (error) {
-          if (isReconciliationFencingError(error)) throw error;
-          // Racing the update-triggered boot is fine — the wait below is the arbiter.
-        }
-      }
-      await fly.waitForMachineState(appName, updated.id, "started", { instanceId: updated.instance_id, totalTimeoutSeconds: 120 });
-      if (slot === 0) runningDigest = reportedDigest(updated);
-    } else {
-      await lease.assertOwned();
-      const created = await fly.createMachine(appName, {
-        name: `${stored.key.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 20)}-${slot}`,
-        region: config.fly.region,
-        config: desired,
-      });
-      await fly.waitForMachineState(appName, created.id, "started", { instanceId: created.instance_id, totalTimeoutSeconds: 120 });
-      if (slot === 0) runningDigest = reportedDigest(created);
-    }
-  }
-  for (const machine of [...bySlot.values(), ...extras]) {
-    await lease.assertOwned();
-    await fly.destroyMachine(appName, machine.id);
-  }
-  return runningDigest === null ? null : pinToDigest(imageRef, runningDigest);
 }
 
 // ---------------------------------------------------------------------------
@@ -909,10 +527,8 @@ export type ApplyResult = {
   revision: string,
   changed: boolean,
   state: ServiceState,
-  // The image Fly reports the service is running, digest-pinned — see
-  // applyMachines. Null when no machine was rolled or read (an apply that ended
-  // blocked, lost the spec, or threw), in which case there is nothing to say
-  // beyond the reference the spec named.
+  // The image reference the provider accepted. Null when no runtime resource was rolled
+  // (an apply that ended blocked, lost the spec, or threw).
   imageRef: string | null,
 };
 
@@ -951,6 +567,18 @@ async function specIsStillOwned(ns: string, key: string, etag: string): Promise<
   return (await readSpecVersioned(ns, key))?.etag === etag;
 }
 
+async function currentDomainClaimsForService(ns: string, key: string): Promise<string[]> {
+  const indexed = await listDomainClaimsForService(ns, key);
+  const claims = await Promise.all(indexed.map(async (hostname) => ({ hostname, claim: await readDomainClaimVersioned(hostname) })));
+  // Index entries are intentionally written before the global claim CAS so a crash cannot
+  // create an undiscoverable claim. The tradeoff is harmless orphan indexes; every reader
+  // must revalidate them against the authenticated global authority before treating them as
+  // service state.
+  return claims
+    .filter(({ claim }) => claim !== null && claim.value.ns === ns && claim.value.service_key === key)
+    .map(({ hostname }) => hostname);
+}
+
 export async function applyServiceSpec(ns: string, key: string, spec: ServiceSpec, options?: { knownTargets?: Map<string, KnownTarget>, lease?: ReconciliationLeaseGuard }): Promise<ApplyResult> {
   // A deployment already holds the lease for its whole source, so it passes its
   // own rather than taking a second one per service — the lease is not
@@ -963,12 +591,11 @@ export async function applyServiceSpec(ns: string, key: string, spec: ServiceSpe
 
 async function applyServiceSpecWithLease(ns: string, key: string, spec: ServiceSpec, lease: ReconciliationLeaseGuard, knownTargets?: Map<string, KnownTarget>): Promise<ApplyResult> {
   const config = getConfig();
-  const fly = flyClientForNamespaceOrg(resolveNamespaceOrg(ns));
   // A domain-holding service must satisfy the domain port rule on every spec write, not just
   // at attach time. The domain's public IPs outlive the attach: a later PUT that adds a
   // private sibling port would hand it to the proxy on those IPs, so the whole rule is
   // re-checked here rather than only its HTTP-port half.
-  if ((await listDomainClaimsForService(ns, key)).length > 0) {
+  if ((await currentDomainClaimsForService(ns, key)).length > 0) {
     assertServiceCanHoldADomain(key, spec.config.ports, spec.config.public, "Detach the service's custom domains first if this port set is what you want.");
   }
   const revision = computeRevision(spec);
@@ -977,27 +604,17 @@ async function applyServiceSpecWithLease(ns: string, key: string, spec: ServiceS
   const { stored, changed } = claimed;
   const ownedSpecEtag = claimed.etag;
 
-  // Unresolvable refs: persist the spec and report blocked WITHOUT touching machines or
+  // Unresolvable refs: persist the spec and report blocked WITHOUT touching runtime resources or
   // starting builds — the backend re-applies when the blocking output appears.
-  const resolved = await resolveEnv(fly, ns, stored.spec.env, knownTargets);
+  const resolved = await resolveEnv(ns, stored.spec.env, knownTargets);
   if (!resolved.ok) {
     return { revision, changed, state: await getServiceState(ns, key, stored, knownTargets), imageRef: null };
   }
 
-  // The app must exist before machines can be created into it, and its IPs must
-  // match what the ports ask for.
-  const appName = appNameForService(config.envId, ns, key);
-  const network = networkForNamespace(config.envId, ns);
-  await lease.assertOwned();
-  await fly.ensureApp(appName, network);
-  await lease.assertOwned();
-  await fly.ensureFlycastIp(appName, network);
-  await lease.assertOwned();
-  await reconcilePublicIps(fly, appName, specIsPublic(stored.spec) ? "public" : "private");
-
+  // The runtime must exist before its address and resolved image can be observed.
   // FUTURE (build-time env): env values are handed to the builder too (see buildTimeEnv),
   // because frameworks that inline them (NEXT_PUBLIC_*, VITE_*) need them at BUILD time. So
-  // an env-only change rolls the machines with the new value while the already-built image
+  // an env-only change rolls the runtime with the new value while the already-built image
   // keeps the old one baked in. That skew is ACCEPTED for now: a spec names an image that
   // has already been built, so nothing here can rebuild it. The fix is not in this function
   // but in the product surface: track which build-visible values an image was built from,
@@ -1012,7 +629,10 @@ async function applyServiceSpecWithLease(ns: string, key: string, spec: ServiceS
   }
   let imageRef: string | null = null;
   try {
-    imageRef = await applyMachines(fly, stored, stored.spec.source.image, resolved.env, lease);
+    // A claimed custom domain routes through the persistent-server gateway, so the apply has to
+    // know about it or it will tear that gateway down as though the service were merely private.
+    const hasDomainClaim = (await listDomainClaimsForService(ns, key)).length > 0;
+    imageRef = await applyRuntimeService(stored, stored.spec.source.image, resolved.env, lease, hasDomainClaim);
     stored.last_apply_error = null;
   } catch (error) {
     if (isReconciliationFencingError(error)) throw error;
@@ -1180,22 +800,22 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
   const buildTargets = targets.filter(targetIsBuilt);
   const prebuiltTargets = targets.filter((target) => !targetIsBuilt(target));
   return await withReconciliationLease(ns, sourceLeaseKey(sourceId), async (lease) => {
-    const fly = flyClientForNamespaceOrg(resolveNamespaceOrg(ns));
+    const context = await tenantContext(ns);
+    if (buildTargets.length > 0) {
+      await lease.assertOwned();
+      await context.artifactRegistry.ensureRepository();
+    }
 
     // A prebuilt target's image goes into the deployment exactly as the author
     // wrote it, normalized but NOT resolved: Marshal never contacts the image's
-    // registry, and Fly resolves whatever this names when it pulls.
+    // registry, and the target platform resolves whatever this names when it pulls.
     //
-    // What that costs the caller, stated once here because it is the whole
-    // contract for a tag:
-    //   - The bytes a tag names are fixed by FLY, at pull time, not by this
-    //     deployment. Two machines of one service, or one machine recreated
-    //     later, can therefore run different bytes under one revision if the
-    //     publisher moves the tag in between.
+    // What that costs the caller, stated once here because it is the whole contract for a tag:
+    //   - The bytes a tag names are fixed by the provider at deployment time, not by this request.
     //   - A redeploy of an unchanged tag is a no-op: the machine config is
     //     identical, so the config hash matches and nothing is pulled again.
     //     Moving forward onto a republished tag means changing the reference.
-    //   - A reference that does not exist is Fly's error at apply time, not a
+    //   - A reference that does not exist is the provider's error at apply time, not a
     //     400 on this request — and on a mixed deployment that lands after the
     //     build has already run.
     // An author who wants none of that writes a digest, which is fixed by
@@ -1220,9 +840,8 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
       const upload = await statUpload(ns, uploadId);
       if (upload === null) throw badRequest(`upload ${JSON.stringify(uploadId)} does not exist (expired, already consumed, or never uploaded)`);
       if (upload.sizeBytes > MAX_UPLOAD_BYTES) throw badRequest(`upload is ${upload.sizeBytes} bytes; the maximum is ${MAX_UPLOAD_BYTES}`);
-      const archive = await readUpload(ns, uploadId);
-      if (archive === null) throw badRequest(`upload ${JSON.stringify(uploadId)} disappeared before it could be consumed`);
-      await validateSourceArchive(archive);
+      const archive = await loadAndValidateSourceArchive(async () => await readUpload(ns, uploadId, upload.etag, MAX_UPLOAD_BYTES));
+      if (archive === null) throw badRequest(`upload ${JSON.stringify(uploadId)} disappeared, changed, or exceeded the size limit before it could be consumed`);
       validatedArchive = archive;
     }
 
@@ -1268,16 +887,6 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
       upload_id: uploadId,
     };
 
-    // Every target's app must exist BEFORE the build: registry.fly.io only accepts
-    // pushes to repositories of existing apps (real-Fly-verified — pushing first
-    // fails with "app repository not found"). Prebuilt targets need their app
-    // too, just for the apply rather than for a push.
-    const network = networkForNamespace(config.envId, ns);
-    for (const target of targets) {
-      await lease.assertOwned();
-      await fly.ensureApp(appNameForService(config.envId, ns, target.service_key), network);
-    }
-
     // Copy the validated bytes to a deployment-specific key the client cannot
     // overwrite, then record the deployment BEFORE starting the builder:
     // completion may land at any moment after startBuild, and a blind write
@@ -1308,7 +917,7 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
         // Dockerfile, nothing to detect, and nothing to push.
         targets: buildTargets.map((target) => ({
           serviceKey: target.service_key,
-          pushTarget: `${config.fly.registryHost}/${appNameForService(config.envId, ns, target.service_key)}:${deploymentId.toLowerCase()}`,
+          pushTarget: `${context.artifactRegistry.imageRepository(serviceName(config.envId, ns, target.service_key))}:${deploymentId.toLowerCase()}`,
           dockerfilePath: target.dockerfile_path ?? null,
           rootDirectory: target.root_directory ?? null,
           // Null unless the target builds from a GENERATED Dockerfile, which is
@@ -1349,33 +958,30 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
  * The deployment-level outcome for one service, from the state its apply reported.
  *
  * REGRESSION GUARD: this used to special-case only "blocked" and call everything
- * else "deployed", so a machine apply that FAILED was recorded as a success and
+ * else "deployed", so a runtime apply that FAILED was recorded as a success and
  * the deployment went on to report "succeeded" over it.
  *
  * Three things mean the apply did not converge and never will on its own:
  *
  *   - "blocked": a ref could not resolve — a `url` of a service that never came
  *     up. Nothing later in this deployment makes it resolvable.
- *   - "failed": the apply threw and left zero started machines. That error is
+ *   - "failed": the apply threw and left zero running instances. That error is
  *     caught INSIDE applyServiceSpec and stored as last_apply_error rather than
  *     rethrown, so it reaches callers only through the reported state — never
  *     through their own catch.
  *   - a non-null error under any other status ("degraded", when the same stored
- *     error left some machines up): partially rolled, still broken.
+ *     error left some runtime instances up): partially rolled, still broken.
  *
  * `error` is the load-bearing signal rather than the status: getServiceState
  * sets it only for unresolved refs or a stored last_apply_error, and
  * last_apply_error is cleared on every successful apply and on every spec change
  * — so it is never stale. That is also what keeps a "degraded" caused merely by
- * under-pinned machines (which carries no error) counted as deployed, instead of
+ * an under-scaled runtime (which carries no error) counted as deployed, instead of
  * failing deploys for a transient scale-up.
  */
 export function deploymentStateForApply(serviceKey: string, image: string, applied: { revision: string, state: ServiceState, imageRef: string | null }): DeploymentServiceState {
-  // What RAN, not what was asked for. `image` may name a tag, which Fly — not
-  // Marshal — resolves at pull time, so `applied.imageRef` is the digest that
-  // tag turned out to point at and is the only record of it. The reference as
-  // written is the fallback for an apply that rolled no machine, where there is
-  // no resolution to report.
+  // What the provider accepted for the running revision. The requested reference is the
+  // fallback for an apply that created no runtime.
   const ran = applied.imageRef ?? image;
   const failed = applied.state.status === "blocked" || applied.state.status === "failed" || applied.state.error !== null;
   if (!failed) {
@@ -1424,48 +1030,64 @@ export async function completeBuild(options: {
 }): Promise<void> {
   const existing = await readDeployment(options.ns, options.deploymentId);
   if (existing === null) return;
-  await withReconciliationLease(options.ns, sourceLeaseKey(existing.source_id), async (lease) => {
-    const current = await readDeploymentVersioned(options.ns, options.deploymentId);
-    // Terminal already (a retried webhook, or the stale-build backstop got there
-    // first): the first outcome wins.
-    if (current === null || current.value.status !== "building") return;
-    await lease.assertOwned();
+  try {
+    await withReconciliationLease(options.ns, sourceLeaseKey(existing.source_id), async (lease) => {
+      const current = await readDeploymentVersioned(options.ns, options.deploymentId);
+      // Terminal already (a retried webhook, or the stale-build backstop got there
+      // first): the first outcome wins.
+      if (current === null || current.value.status !== "building") return;
+      await lease.assertOwned();
 
-    if (options.status === "failed") {
-      await replaceDeployment(failDeployment(current.value, options.errorText ?? "the build failed"), current.etag);
-      await persistDeploymentLog(flyClientForNamespaceOrg(resolveNamespaceOrg(options.ns)), current.value);
+      if (options.status === "failed") {
+        await replaceDeployment(failDeployment(current.value, options.errorText ?? "the build failed"), current.etag);
+        await persistDeploymentLog(current.value);
+        await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
+        return;
+      }
+
+      const images = parseBuildImages(options.metadataJson, current.value);
+      // Only the targets that were BUILT need a digest from the build. A prebuilt
+      // target was resolved when the deployment was created and is already in
+      // `images`; asking the build for one would fail every mixed deployment.
+      const missing = current.value.targets
+        .filter((target) => targetIsBuilt(target) && lookup(images, target.service_key) === undefined)
+        .map((target) => target.service_key);
+      if (missing.length > 0) {
+        // The harness reports a digest per target; a missing one means the build
+        // ended in a state Marshal cannot map to images, which is a failure rather
+        // than something to half-apply.
+        await replaceDeployment(failDeployment(current.value, `the build reported no image for ${missing.join(", ")}`), current.etag);
+        await persistDeploymentLog(current.value);
+        await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
+        return;
+      }
+
+      await replaceDeployment({
+        ...current.value,
+        status: "deploying",
+        // MERGED, not replaced: the prebuilt entries were resolved before the build
+        // started and the build knows nothing about them.
+        images: { ...current.value.images, ...images },
+        services: Object.fromEntries(Object.entries(current.value.services).map(([key, service]) => [key, { ...service, status: "pending" as const }])),
+      }, current.etag);
+      await persistDeploymentLog(current.value);
       await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
-      return;
-    }
+    });
+  } finally {
+    await deleteBuilderBestEffort(existing);
+  }
+}
 
-    const images = parseBuildImages(options.metadataJson, current.value);
-    // Only the targets that were BUILT need a digest from the build. A prebuilt
-    // target was resolved when the deployment was created and is already in
-    // `images`; asking the build for one would fail every mixed deployment.
-    const missing = current.value.targets
-      .filter((target) => targetIsBuilt(target) && lookup(images, target.service_key) === undefined)
-      .map((target) => target.service_key);
-    if (missing.length > 0) {
-      // The harness reports a digest per target; a missing one means the build
-      // ended in a state Marshal cannot map to images, which is a failure rather
-      // than something to half-apply.
-      await replaceDeployment(failDeployment(current.value, `the build reported no image for ${missing.join(", ")}`), current.etag);
-      await persistDeploymentLog(flyClientForNamespaceOrg(resolveNamespaceOrg(options.ns)), current.value);
-      await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
-      return;
-    }
-
-    await replaceDeployment({
-      ...current.value,
-      status: "deploying",
-      // MERGED, not replaced: the prebuilt entries were resolved before the build
-      // started and the build knows nothing about them.
-      images: { ...current.value.images, ...images },
-      services: Object.fromEntries(Object.entries(current.value.services).map(([key, service]) => [key, { ...service, status: "pending" as const }])),
-    }, current.etag);
-    await persistDeploymentLog(flyClientForNamespaceOrg(resolveNamespaceOrg(options.ns)), current.value);
-    await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
-  });
+async function deleteBuilderBestEffort(deployment: StoredDeployment): Promise<void> {
+  if (deployment.builder_machine_id === null) return;
+  try {
+    await (await tenantContext(deployment.ns)).compute.deleteInstance(deployment.builder_machine_id);
+  } catch (error) {
+    // The VM has automaticRestart disabled and its build process is already terminal. A
+    // cleanup failure must not replace the recorded deployment result; project lifecycle
+    // cleanup remains the final backstop for an orphan.
+    console.error(`deleting builder VM for ${deployment.ns}/${deployment.id} failed`, error);
+  }
 }
 
 /**
@@ -1477,6 +1099,10 @@ export async function completeBuild(options: {
  */
 function parseBuildImages(metadataJson: string | null, deployment: StoredDeployment): Record<string, string> {
   const config = getConfig();
+  const tenantProjectId = deployment.builder_app
+    ?? config.gcp.existingProjectIdForTests
+    ?? projectIdForNamespace({ envId: config.envId, projectPrefix: config.gcp.projectPrefix }, deployment.ns);
+  const registryPrefix = `${config.gcp.region}-docker.pkg.dev/${tenantProjectId}/marshal`;
   // Prototype-less for the same reason as prebuiltImages: see startSourceDeployment.
   const images: Record<string, string> = Object.create(null);
   let parsed: unknown;
@@ -1495,7 +1121,7 @@ function parseBuildImages(metadataJson: string | null, deployment: StoredDeploym
     if (!targetIsBuilt(target)) continue;
     const digest = targets[target.service_key];
     if (typeof digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(digest)) continue;
-    images[target.service_key] = `${config.fly.registryHost}/${appNameForService(config.envId, deployment.ns, target.service_key)}@${digest}`;
+    images[target.service_key] = `${registryPrefix}/${serviceName(config.envId, deployment.ns, target.service_key)}@${digest}`;
   }
   return images;
 }
@@ -1504,7 +1130,7 @@ function parseBuildImages(metadataJson: string | null, deployment: StoredDeploym
  * Moves a deploying deployment forward by AT MOST ONE service, and returns its
  * current state.
  *
- * One service per call rather than a whole level: an apply rolls machines and
+ * One service per call rather than a whole level: an apply rolls runtime resources and
  * waits for them, so a call that drained a level could outlive the caller's
  * timeout — and the backend polls, so a bounded step per poll converges just as
  * fast while keeping every request short enough to answer.
@@ -1554,6 +1180,7 @@ async function applyNextService(ns: string, deployment: StoredDeployment, lease:
   // deploy still reads as public until its own apply lands, so a sibling applied
   // first bakes in a platform URL that the flip is about to take away.
   const knownTargets = new Map(deployment.targets.map((target) => [target.service_key, {
+    type: target.spec.config.type,
     ports: target.spec.config.ports,
     public: target.spec.config.public,
   }]));
@@ -1658,13 +1285,12 @@ async function deleteUploadBestEffort(ns: string, uploadId: string): Promise<voi
   }
 }
 
-// Durable build log: Marshal (not the harness) drains the builder machine's logs from the
-// Fly logs API at terminal state, scrubs every credential it handed to the build, and
-// persists JSONL to the bucket — outliving Fly's ~7d retention. The harness stays dumb.
+// Durable build log: Marshal drains the builder VM's serial output at terminal state,
+// scrubs every credential it handed to the build, and persists JSONL to the bucket.
 //
 // One log per DEPLOYMENT, covering every service it built: they shared a machine,
 // so their output is interleaved in one stream and there is nothing to split.
-async function persistDeploymentLog(fly: FlyClient, deployment: StoredDeployment): Promise<void> {
+async function persistDeploymentLog(deployment: StoredDeployment): Promise<void> {
   if (deployment.builder_app === null || deployment.builder_machine_id === null) {
     // Mock builds: a canned log so the has_logs contract holds in dev/e2e, and the only
     // vehicle e2e has for the redaction contract — the mock builder starts no machine, so
@@ -1688,7 +1314,7 @@ async function persistDeploymentLog(fly: FlyClient, deployment: StoredDeployment
       }),
       { at_millis: Date.now(), stream: "stdout" as const, instance: null, text: "MARSHAL_BUILD_DONE (mock builder)" },
     ];
-    const redactionValues = deploymentLogRedactionValues(fly, deployment);
+    const redactionValues = deploymentLogRedactionValues(deployment);
     await writeDeploymentLog(deployment.ns, deployment.id, lines
       .map((line) => ({ ...line, text: redactBuildLogText(line.text, redactionValues) }))
       .map((line) => JSON.stringify(line))
@@ -1696,17 +1322,21 @@ async function persistDeploymentLog(fly: FlyClient, deployment: StoredDeployment
     return;
   }
   try {
-    const lines = await fetchAllLogs(fly, deployment.builder_app, {
-      sinceMillis: deployment.started_at_millis - 60 * 1000,
+    const context = await tenantContext(deployment.ns);
+    const output = await context.compute.getSerialOutput(deployment.builder_machine_id);
+    // Redact before splitting: a secret may itself contain newlines, in which case no
+    // individual line contains the whole value and line-by-line redaction leaks every part.
+    const lines = redactBuildLogLines(output, deploymentLogRedactionValues(deployment)).map((text, index) => ({
+      at_millis: deployment.started_at_millis + index,
+      stream: "stdout" as const,
       instance: deployment.builder_machine_id,
-    });
+      text,
+    }));
     // Skip persisting an empty log object: a transient logs-API failure (rate limit,
     // ingestion lag) must not freeze `has_logs:true, lines:[], complete:true`. Leaving no
     // object makes the logs route fall back to the live proxy instead.
     if (lines.length === 0) return;
-    const redactionValues = deploymentLogRedactionValues(fly, deployment);
     const jsonl = lines
-      .map((line) => ({ ...line, text: redactBuildLogText(line.text, redactionValues) }))
       .map((line) => JSON.stringify(line))
       .join("\n");
     await writeDeploymentLog(deployment.ns, deployment.id, jsonl);
@@ -1721,9 +1351,9 @@ async function persistDeploymentLog(fly: FlyClient, deployment: StoredDeployment
  * Stage-1 redaction values: every credential Marshal handed the build, plus the
  * tenant's own build-time env values.
  *
- * The credentials are the org token (with and without its "FlyV1 " scheme), the
- * registry basic-auth blob, and the per-deployment webhook token (recomputed,
- * since it's derived, not stored). The presigned tarball URL isn't recomputable,
+ * The persisted credential is the per-deployment webhook token (recomputed because it is
+ * derived, not stored). The builder's registry token is short-lived and never enters this
+ * process. The presigned tarball URL isn't recomputable,
  * so its signature is scrubbed by shape in redactBuildLogText.
  *
  * Every plain env value of every target is scrubbed, not a chosen subset: one env
@@ -1732,11 +1362,14 @@ async function persistDeploymentLog(fly: FlyClient, deployment: StoredDeployment
  * them as the latter. They come from the deployment's own targets rather than
  * from current specs, so a value edited after the build is still scrubbed from
  * that build's log.
+ *
+ * Values shorter than MIN_REDACTED_ENV_VALUE_LENGTH are the one exception, and it is
+ * about legibility rather than secrecy: "1", "true" and "3000" occur all over an
+ * ordinary build log, so scrubbing them turns it into a wall of <redacted> that hides
+ * the build's actual output while protecting nothing worth hiding.
  */
-export function deploymentLogRedactionValues(fly: FlyClient, deployment: StoredDeployment): string[] {
-  const { fly: flyConfig } = getConfig();
-  const values = [flyConfig.token, fly.registryAuthBase64(), computeWebhookToken(deployment.id, deployment.ns)];
-  if (flyConfig.token.startsWith("FlyV1 ")) values.push(flyConfig.token.slice("FlyV1 ".length));
+export function deploymentLogRedactionValues(deployment: StoredDeployment): string[] {
+  const values = [computeWebhookToken(deployment.id, deployment.ns)];
   for (const target of deployment.targets) {
     for (const value of Object.values(buildTimeEnv(target.spec.env))) {
       if (value.length >= MIN_REDACTED_ENV_VALUE_LENGTH) values.push(value);
@@ -1753,6 +1386,30 @@ export function redactBuildLogText(text: string, values: string[]): string {
     .replace(/X-Amz-Credential=[A-Za-z0-9%/]+/gi, "X-Amz-Credential=<redacted>");
 }
 
+export function redactBuildLogLines(serialOutput: string, values: string[]): string[] {
+  // This ordering is a security boundary: multiline values must be removed while they are
+  // still contiguous in the original stream, before callers turn it into line records.
+  return redactBuildLogText(serialOutput, values).split("\n").filter((line) => line !== "");
+}
+
+export function builderOutputIsTerminal(serialOutput: string): boolean {
+  return /MARSHAL_BUILD_(?:DONE|FAILED|TIMEOUT)/.test(serialOutput);
+}
+
+/**
+ * A builder whose startup script died before the harness ever started.
+ *
+ * This is terminal even though the VM is still RUNNING, and the distinction matters: the
+ * harness arms the build watchdog itself and `shutdown -h now` is the last line of the very
+ * script that failed, so nothing on the machine will ever post a webhook, print a
+ * MARSHAL_BUILD_* marker, or power it off. Without this the liveness check below sees a
+ * RUNNING instance forever and the deployment stays "building" with no timeout that can
+ * rescue it. Same signal `waitForServiceReady` already uses for service VMs.
+ */
+export function builderStartupScriptFailed(serialOutput: string): boolean {
+  return /Script "startup-script" failed/.test(serialOutput);
+}
+
 /**
  * Lazy backstop for lost webhooks: a deployment still building long after the
  * harness watchdog must have fired gets finalized as failed on the next read.
@@ -1761,26 +1418,40 @@ export async function maybeFinalizeStaleDeployment(deployment: StoredDeployment)
   if (deployment.status !== "building") return deployment;
   const staleAfterMillis = deployment.started_at_millis + BUILD_TIMEOUT_SECONDS * 1000 + BUILD_STALE_GRACE_MS;
   if (Date.now() < staleAfterMillis) return deployment;
-  const fly = flyClientForNamespaceOrg(resolveNamespaceOrg(deployment.ns));
+  let startupScriptFailed = false;
+  let serialTail = "";
   if (deployment.builder_app !== null && deployment.builder_machine_id !== null) {
     let machine;
+    let serialOutput = "";
     try {
-      machine = await fly.getMachine(deployment.builder_app, deployment.builder_machine_id);
+      const compute = (await tenantContext(deployment.ns)).compute;
+      [machine, serialOutput] = await Promise.all([
+        compute.getInstance(deployment.builder_machine_id),
+        compute.getSerialOutput(deployment.builder_machine_id),
+      ]);
     } catch (error) {
-      // A transient Fly error here must not turn a read into a 502 — leave the
+      // A transient provider error here must not turn a read into a 502 — leave the
       // deployment as-is until the next read.
       console.error(`stale-build liveness check for ${deployment.ns}/${deployment.id} failed`, error);
       return deployment;
     }
-    // Still running: the watchdog has not fired yet (a clock skew, a long
-    // machine start), so leave it alone.
-    if (machine !== null && (machine.state === "started" || machine.state === "created" || machine.state === "starting")) return deployment;
+    // A VM can remain RUNNING briefly after its one-shot builder container exits. Terminal
+    // harness markers take precedence over the VM lifecycle state so a lost webhook cannot
+    // strand the deployment until the entire project is removed.
+    const harnessIsTerminal = builderOutputIsTerminal(serialOutput) || builderStartupScriptFailed(serialOutput);
+    if (!harnessIsTerminal && machine !== null && (machine.status === "RUNNING" || machine.status === "PROVISIONING" || machine.status === "STAGING")) return deployment;
+    startupScriptFailed = builderStartupScriptFailed(serialOutput);
+    serialTail = serialOutput.trim().split("\n").slice(-3).join(" | ").slice(0, 500);
   }
   const current = await readDeploymentVersioned(deployment.ns, deployment.id);
   if (current === null || current.value.status !== "building") return current?.value ?? deployment;
-  const failed = failDeployment(current.value, "the build did not report a result before its timeout");
+  const failed = failDeployment(current.value, startupScriptFailed
+    ? `the builder failed to start; last serial output: ${serialTail}`
+    : "the build did not report a result before its timeout");
   const etag = await replaceDeployment(failed, current.etag);
-  return etag === null ? (await readDeployment(deployment.ns, deployment.id)) ?? failed : failed;
+  const result = etag === null ? (await readDeployment(deployment.ns, deployment.id)) ?? failed : failed;
+  await deleteBuilderBestEffort(result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1788,113 +1459,70 @@ export async function maybeFinalizeStaleDeployment(deployment: StoredDeployment)
 
 export async function getServiceState(ns: string, key: string, preloadedSpec?: StoredSpec | null, knownTargets?: Map<string, KnownTarget>): Promise<ServiceState> {
   const config = getConfig();
-  const fly = flyClientForNamespaceOrg(resolveNamespaceOrg(ns));
-  const stored = preloadedSpec !== undefined ? preloadedSpec : await readSpec(ns, key);
-  if (stored === null) throw notFound(`service ${JSON.stringify(key)} not found in namespace ${JSON.stringify(ns)}`);
-  const appName = appNameForService(config.envId, ns, key);
-
-  // No build lookup: a spec always names an image that has already been built,
-  // so a service is never "building". Building belongs to the DEPLOYMENT that
-  // produced the image, which reports it (see advanceDeployment).
-  const [machines, certificates, resolved] = await Promise.all([
-    fly.listMachines(appName),
-    fly.listCertificates(appName),
-    // The SAME knownTargets the apply resolved with. Without it this read would re-resolve
-    // from stored specs alone and report `blocked` for a private `url(port)` naming a target
-    // of this deployment that has not been applied yet — failing the deployment over the
-    // very ordering independence knownTargets exists to provide.
-    resolveEnv(fly, ns, stored.spec.env, knownTargets),
+  const storedForGcp = preloadedSpec !== undefined ? preloadedSpec : await readSpec(ns, key);
+  if (storedForGcp === null) throw notFound(`service ${JSON.stringify(key)} not found in namespace ${JSON.stringify(ns)}`);
+  const [observation, resolvedForGcp, claimedDomainHostnames, pendingDomainHostnames] = await Promise.all([
+    observeRuntimeService(storedForGcp),
+    resolveEnv(ns, storedForGcp.spec.env, knownTargets),
+    currentDomainClaimsForService(ns, key),
+    listPendingDomainClaimsForService(ns, key),
   ]);
-
-  const domains = await computeDomainStates(fly, appName, certificates);
-  const verifiedHostnames = certificates.filter(certificateIsVerified).map((certificate) => certificate.hostname).sort();
-
-  const startedCount = machines.filter((machine) => machine.state === "started").length;
-  const machineRevisions = new Set(machines.map((machine) => machine.config.metadata?.hexclave_revision ?? "unknown"));
-  const allAtTarget = machines.length > 0 && machineRevisions.size === 1 && machineRevisions.has(stored.revision);
-  const runningRevision = machines.length === 0 ? null : machineRevisions.size === 1 ? [...machineRevisions][0] : [...machineRevisions].find((revision) => revision !== stored.revision) ?? stored.revision;
-
-  const status = ((): ServiceState["status"] => {
-    if (!resolved.ok) return "blocked";
-    // Checked BEFORE the no-machine branch: an apply that failed before it created anything
-    // (ensureApp/ensureFlycastIp/the first createMachine) leaves zero machines and a terminal
-    // last_apply_error, and reporting that as "pending" tells callers to keep waiting for a
-    // deploy that is already over. `error` below has always surfaced it — only status lied.
-    if (stored.last_apply_error !== null) return startedCount > 0 ? "degraded" : "failed";
-    if (machines.length === 0) return "pending";
-    if (!allAtTarget || machines.length !== desiredMachineCount(stored.spec)) return "deploying";
-    if (startedCount === 0) {
-      if (isServerful(stored.spec) || pinnedMachineCount(stored.spec) > 0) return "stopped";
-      return "idle";
-    }
-    if (startedCount < pinnedMachineCount(stored.spec)) return "degraded";
-    return "running";
-  })();
-
-  const error = ((): string | null => {
-    if (!resolved.ok) return `blocked on unresolved refs: ${resolved.blockedRefs.join(", ")}`;
-    if (stored.last_apply_error !== null) return stored.last_apply_error;
-    return null;
-  })();
-
+  const domainContext = await tenantContext(ns);
+  const claimedDomains = await Promise.all(claimedDomainHostnames.sort().map(async (hostname) => {
+    const claim = await readDomainClaimVersioned(hostname);
+    if (claim === null || claim.value.ns !== ns || claim.value.service_key !== key) return null;
+    const domain = await domainContext.domains.get(hostname);
+    return domain === null
+      ? { hostname, verified: false, dns_records: [], error: "custom-domain infrastructure is missing" }
+      : { hostname, verified: domain.verified, dns_records: domain.dnsRecords, error: null };
+  }));
+  const pendingDomains = await Promise.all(pendingDomainHostnames.sort().map(async (hostname) => {
+    const pending = await readPendingDomainClaimVersioned(ns, hostname);
+    if (pending === null || pending.value.service_key !== key) return null;
+    const routingRecords = await withPlatformDomainLease(async (platformLease) => {
+      await platformLease.assertOwned();
+      return await domainContext.domains.ensureFrontendDnsRecords(hostname);
+    });
+    return {
+      hostname,
+      verified: false,
+      dns_records: [domainVerificationRecord(hostname, pending.value.verification_token), ...routingRecords],
+      error: null,
+    };
+  }));
+  const domains = [...claimedDomains.filter((domain) => domain !== null), ...pendingDomains.filter((domain) => domain !== null)];
+  const status: ServiceState["status"] = !resolvedForGcp.ok
+    ? "blocked"
+    : storedForGcp.last_apply_error !== null
+      ? observation.instances > 0 ? "degraded" : "failed"
+      : !observation.exists
+        ? "pending"
+        : !observation.atTarget
+          ? "deploying"
+          : observation.instances === 0
+            ? storedForGcp.spec.config.min_instances === 0 ? "idle" : "stopped"
+            : observation.ready ? "running" : "degraded";
   return {
     key,
-    // Echo back the type the caller actually stored. Reporting a constant here
-    // meant a service PUT as "server" read back as something else entirely.
-    type: stored.spec.config.type,
+    type: storedForGcp.spec.config.type,
     status,
-    instances: startedCount,
-    revision: runningRevision,
-    target_revision: runningRevision === stored.revision && allAtTarget ? null : stored.revision,
+    instances: observation.instances,
+    revision: observation.revision,
+    target_revision: observation.atTarget ? null : storedForGcp.revision,
     outputs: {
-      hostname: hostnameForService(config.envId, ns, key),
-      // The private address of the service's sole HTTP port. Null when it
-      // declares several and so leaves a bare `url()` ambiguous — a ref that
-      // names its port resolves independently of this.
-      internal_url: ((httpPort) => httpPort === null ? null : `http://${hostnameForService(config.envId, ns, key)}:${httpPort}`)(soleHttpPort(stored.spec.config.ports)),
-      // Keep a public service's platform URL stable even while custom domains are added or
-      // removed. The backend prefers a verified custom domain for display, then falls back
-      // to this value; private services continue to expose only a verified custom domain.
-      url: !portEntries(stored.spec.config.ports).some((entry) => entry.protocol === "http")
-        ? null
-        : specIsPublic(stored.spec)
-          ? `https://${appName}.fly.dev`
-          : verifiedHostnames.length > 0 ? `https://${verifiedHostnames[0]}` : null,
+      // A service with no running VM has no address. The name-derived value below is a
+      // stable PLACEHOLDER for the API's non-null field, not something that resolves on
+      // GCP — connection refs deliberately no longer use it (see resolveEnv).
+      hostname: observation.hostname ?? privateHostnameForService(config.envId, ns, key),
+      internal_url: observation.internalUrl,
+      url: observation.platformUrl,
     },
     domains,
-    error,
+    error: !resolvedForGcp.ok
+      ? `blocked on unresolved refs: ${resolvedForGcp.blockedRefs.join(", ")}`
+      : storedForGcp.last_apply_error ?? observation.error,
     observed_at_millis: Date.now(),
   };
-}
-
-export async function computeDomainStates(fly: FlyClient, appName: string, certificates: FlyCertificate[]): Promise<ServiceDomainState[]> {
-  if (certificates.length === 0) return [];
-  const ips = await fly.getAppIps(appName);
-  return certificates
-    .slice()
-    .sort((a, b) => a.hostname < b.hostname ? -1 : 1)
-    .map((certificate) => ({
-      hostname: certificate.hostname,
-      verified: certificateIsVerified(certificate),
-      dns_records: dnsRecordsForCertificate(appName, certificate, ips.sharedIpv4, ips.dedicated.filter((ip) => ip.type === "v6").map((ip) => ip.address)),
-      error: null,
-    }));
-}
-
-export function dnsRecordsForCertificate(appName: string, certificate: FlyCertificate, sharedIpv4: string | null, v6Addresses: string[]): DnsRecord[] {
-  const records: DnsRecord[] = [];
-  if (certificate.isApex) {
-    if (sharedIpv4 !== null) records.push({ type: "A", name: certificate.hostname, value: sharedIpv4 });
-    for (const address of v6Addresses) records.push({ type: "AAAA", name: certificate.hostname, value: address });
-  } else {
-    records.push({ type: "CNAME", name: certificate.hostname, value: `${appName}.fly.dev` });
-  }
-  if (!certificateIsVerified(certificate)) {
-    // Pre-issuance DNS validation: lets the cert issue before (or without) the main
-    // record cutting over.
-    records.push({ type: "CNAME", name: certificate.dnsValidationHostname, value: certificate.dnsValidationTarget });
-  }
-  return records;
 }
 
 export async function listServices(ns: string): Promise<ServiceState[]> {
@@ -1921,51 +1549,37 @@ export async function deleteService(ns: string, key: string): Promise<void> {
 
 async function deleteServiceWithLease(ns: string, key: string, lease: ReconciliationLeaseGuard): Promise<void> {
   const config = getConfig();
-  const fly = flyClientForNamespaceOrg(resolveNamespaceOrg(ns));
-  const appName = appNameForService(config.envId, ns, key);
-  const storedVersion = await readSpecVersioned(ns, key);
-
-  // Release hostname claims first — the bucket registry would otherwise block the hostname
-  // forever. The certificate goes with it on BOTH paths below: on the destroy path certs die
-  // with the app, and on the detach path the app outlives the service, so a cert left behind
-  // would keep a hostname pointing at a machine-less app that nothing can serve — and would
-  // make Fly refuse the same hostname when it is re-attached elsewhere.
+  const storedForGcp = await readSpec(ns, key);
+  const domainContext = await tenantContext(ns);
   for (const hostname of await listDomainClaimsForService(ns, key)) {
     const claim = await readDomainClaimVersioned(hostname);
     if (claim !== null && claim.value.ns === ns && claim.value.service_key === key) {
-      await lease.assertOwned();
-      await fly.deleteCertificate(appName, hostname);
-      await releaseDomainClaim(claim);
+      await withPlatformDomainLease(async (platformLease) => {
+        await lease.assertOwned();
+        await platformLease.assertOwned();
+        const current = await readDomainClaimVersioned(hostname);
+        if (current === null
+          || current.etag !== claim.etag
+          || current.value.ns !== ns
+          || current.value.service_key !== key) return;
+        const deleting = await beginDomainClaimDeletion(current, Date.now());
+        if (deleting === null) return;
+        await domainContext.domains.delete(hostname);
+        await lease.assertOwned();
+        await platformLease.assertOwned();
+        if (!await releaseDomainClaim(deleting)) throw conflict(`domain ${JSON.stringify(hostname)} cleanup changed concurrently; retry service deletion`);
+      });
     }
   }
-
-  // Destroying a Fly app destroys its VOLUMES with it (smoke-verified against real Fly), so a
-  // volume-backed service is torn down by DETACHING instead: kill the machines and the public
-  // ingress, drop the spec, and leave the app holding its disks. That is what makes removing a
-  // service from a deploy file survivable — the contract is that the volume outlives the
-  // service and needs an explicit delete — and re-syncing the same service id adopts the disk
-  // again by name (ensureVolume selects it deterministically).
-  //
-  // Only a service with no volumes takes the destroy path, where nothing is lost and leaving
-  // an empty app behind would burn the org's app-count limit instead.
-  const volumes = await fly.listVolumes(appName);
-  if (volumes.length > 0) {
-    for (const machine of await fly.listMachines(appName)) {
-      await lease.assertOwned();
-      await fly.destroyMachine(appName, machine.id);
-    }
-    // Nothing serves this app any more, so its public IPs must go: the certificates above are
-    // already gone, which is what lets this release rather than no-op.
-    await lease.assertOwned();
-    await reconcilePublicIps(fly, appName, "private");
-  } else {
-    // force=true kills machines and releases IPs in one call. Build history is intentionally
-    // kept (it's namespaced under builds/<ns>/<key>/).
-    await lease.assertOwned();
-    await fly.deleteApp(appName);
+  for (const hostname of await listPendingDomainClaimsForService(ns, key)) {
+    const pending = await readPendingDomainClaimVersioned(ns, hostname);
+    if (pending !== null && pending.value.service_key === key) await deletePendingDomainClaim(pending);
   }
+  await deleteRuntimeService(storedForGcp, ns, key, lease);
+  const versionForGcp = await readSpecVersioned(ns, key);
   await lease.assertOwned();
-  if (storedVersion !== null) await deleteSpecConditionally(ns, key, storedVersion.etag);
+  if (versionForGcp !== null) await deleteSpecConditionally(ns, key, versionForGcp.etag);
+  return;
 }
 
 export { readDeployment, readSpec };

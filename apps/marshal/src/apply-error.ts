@@ -1,5 +1,5 @@
 import { MarshalError } from "./errors.js";
-import { FlyApiError } from "./fly/client.js";
+import { GcpApiError } from "./gcp/client.js";
 
 // The user-facing half of the same rule marshal-app.ts::errorResponse enforces for HTTP
 // responses, applied to the OTHER channel a failure travels down: the `error` string stored
@@ -9,7 +9,7 @@ import { FlyApiError } from "./fly/client.js";
 // under the failing service, and the dashboard renders it in the deployment panel — so
 // nothing the infrastructure provider produced may appear in it: not its wording, not its
 // status codes, and not the org/app identifiers that its endpoints (and therefore
-// FlyApiError.message) embed.
+// GcpApiError.message) embed.
 //
 // The relay is therefore an allowlist, not a filter: only messages this codebase authored
 // are passed through, and every other error collapses to a fixed string. Callers log the
@@ -29,12 +29,9 @@ export function applyErrorMessage(error: unknown): string {
   // (an unresolvable ref, a volume that may not shrink), and provider-free by
   // the same rule that lets marshal-app.ts return them over HTTP.
   if (error instanceof MarshalError) return error.message;
-  // A 408 can only come from waitForMachineState, and the only state applyMachines
-  // ever waits for is "started" — no other call in that path produces one. So a 408
-  // escaping it always means a machine never booted, which is worth saying plainly
-  // because it is both the most common failure and the one with an obvious next
-  // step. (Add another wait to the apply path and this has to be revisited.)
-  if (error instanceof FlyApiError && error.status === 408) {
+  // Runtime waits consistently use 408 for a service that did not become ready. Preserve
+  // the useful startup guidance without relaying the provider's endpoint or error body.
+  if (error instanceof GcpApiError && error.status === 408) {
     return "the service did not start in time. Check its logs for a crash on startup";
   }
   return GENERIC_APPLY_FAILURE;

@@ -1,4 +1,4 @@
-import { CONFIG_FILE_DEPLOYMENT_SOURCE_ID, buildSourceManifest, connectionRequiresTargetDeployed, deploymentPortEntries, deploymentPortEntry, deploymentPortOwnsStandardPorts, deploymentServiceIsBuilt, deploymentServiceUsesGeneratedDockerfile, parseConnectionValue, type DeploymentSourceManifest } from "@hexclave/shared/dist/deployments";
+import { CONFIG_FILE_DEPLOYMENT_SOURCE_ID, buildSourceManifest, connectionRequiresTargetDeployed, deploymentPortEntries, deploymentPortOwnsStandardPorts, deploymentServiceIsBuilt, deploymentServiceUsesGeneratedDockerfile, parseConnectionValue, type DeploymentSourceManifest } from "@hexclave/shared/dist/deployments";
 import { Command } from "commander";
 import fs from "node:fs";
 import path from "node:path";
@@ -489,15 +489,10 @@ function collectTransitiveDependents(failedServiceId: string, services: Map<stri
       if (parsed === null) continue;
       // Services of another deployment source are not part of this deploy, so
       // they can neither fail in it nor be skipped by it.
-      const target = services.get(parsed.serviceId);
-      if (target === undefined) continue;
-      const targetIsPublic = parsed.port === null || deploymentPortEntry(target.definition.ports, parsed.port) === null
-        ? null
-        : target.definition.public === true;
-      // Same rule as computeDeploymentLevels: a deterministic reference is not a
-      // dependency, so a failed target must not skip services that never needed
-      // it to be deployed.
-      if (!connectionRequiresTargetDeployed(parsed.outputKey, parsed.port, targetIsPublic)) continue;
+      if (!services.has(parsed.serviceId)) continue;
+      // Same rule as computeDeploymentLevels: only a reference that needed its
+      // target deployed makes its holder a dependent of it.
+      if (!connectionRequiresTargetDeployed(parsed.outputKey)) continue;
       const dependents = directDependents.get(parsed.serviceId) ?? new Set<string>();
       dependents.add(serviceId);
       directDependents.set(parsed.serviceId, dependents);

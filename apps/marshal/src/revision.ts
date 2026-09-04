@@ -7,12 +7,12 @@ import { portEntries, type ServiceSpec } from "./types.js";
 // Region/machine size are runtime policy and deliberately excluded, so a policy change
 // never triggers a rebuild/redeploy on its own. Env is hashed in its ORIGINAL EnvValue
 // form ({ref} unresolved) — a ref whose target output changes does not change the
-// revision; the backend re-applies and the machines converge under the same revision.
+// revision; the backend re-applies and the runtime converges under the same revision.
 export function computeRevision(spec: ServiceSpec, rootKey: Buffer = getConfig().dataEncryptionRootKey): string {
   const canonical = {
     config: {
       // The type decides the machine's autostop policy (suspend vs stop), so a type-only
-      // change has to roll the machines rather than hash identically.
+      // change has to roll the runtime rather than hash identically.
       type: spec.config.type,
       min_instances: spec.config.min_instances,
       max_instances: spec.config.max_instances,
@@ -20,7 +20,7 @@ export function computeRevision(spec: ServiceSpec, rootKey: Buffer = getConfig()
       // handlers on each port and the addresses the app holds.
       public: spec.config.public,
       // Normalized rather than taken verbatim: the ports decide the machine's
-      // Fly services array, so any change to one must roll the machines. Field
+      // provider networking config, so any change to one must roll the runtime. Field
       // order is fixed here so two equivalent specs that merely serialized their
       // keys differently still hash the same, and the list is sorted by port
       // NUMBER — object key order would put "80" after "8080", which would make
@@ -32,7 +32,7 @@ export function computeRevision(spec: ServiceSpec, rootKey: Buffer = getConfig()
       // It MUST be included: without it a volume-only change —
       // adding, resizing, removing, or RE-IDENTIFYING a disk — produces the same revision, so
       // applyServiceSpec takes the unchanged path, keeps the PREVIOUS spec, and silently drops
-      // the change. The id is part of it because it names the Fly volume: changing it means
+      // the change. The id is part of it because it contributes to the disk identity: changing it means
       // mounting a different disk.
       ...(spec.config.persistent_volumes !== undefined ? { persistent_volumes: spec.config.persistent_volumes } : {}),
       // It MUST be included, for the same reason as the volumes above: it is
