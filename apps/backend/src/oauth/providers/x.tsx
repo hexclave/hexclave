@@ -49,7 +49,7 @@ export class XProvider extends OAuthBaseProvider {
       accountId: userInfo?.id?.toString(),
       displayName: userInfo?.name || userInfo?.username,
       email: null, // There is no way of getting email from X OAuth2.0 API
-      profileImageUrl: userInfo?.profile_image_url as any,
+      profileImageUrl: userInfo?.profile_image_url,
       emailVerified: false,
     });
   }

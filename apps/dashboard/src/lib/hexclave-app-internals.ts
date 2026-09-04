@@ -6,8 +6,12 @@ import {
   type UserActivityResponse,
 } from "@hexclave/shared/dist/interface/admin-metrics";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
+import type { StackAdminApp, StackClientApp } from "@hexclave/next";
 
 export const hexclaveAppInternalsSymbol = Symbol.for("StackAuth--DO-NOT-USE-OR-YOU-WILL-BE-FIRED--StackAppInternals");
+
+type DashboardApp = StackClientApp | StackAdminApp;
 
 // Re-export the metrics response type tree from the shared package so dashboard
 // code can read these types without having to know where the schemas live.
@@ -63,8 +67,8 @@ type AdminAppInternalsHooks = {
   sendRequest: (path: string, requestOptions: RequestInit, requestType?: "client" | "server" | "admin") => Promise<Response>,
 };
 
-function getInternalsHookOrThrow<K extends keyof AdminAppInternalsHooks>(adminApp: object, hookName: K): AdminAppInternalsHooks[K] {
-  const internals = Reflect.get(adminApp, hexclaveAppInternalsSymbol);
+function getInternalsHookOrThrow<K extends keyof AdminAppInternalsHooks>(adminApp: DashboardApp, hookName: K): AdminAppInternalsHooks[K] {
+  const internals = adminApp[hexclaveAppInternalsSymbol];
   if (typeof internals !== "object" || internals == null || !(hookName in internals)) {
     throw new HexclaveAssertionError(`Admin app internals are unavailable: missing ${hookName}`);
   }
@@ -78,7 +82,7 @@ function getInternalsHookOrThrow<K extends keyof AdminAppInternalsHooks>(adminAp
 }
 
 export function useMetricsOrThrow(
-  adminApp: object,
+  adminApp: DashboardApp,
   includeAnonymous: boolean,
   filters?: AnalyticsOverviewFilters,
 ): MetricsResponse {
@@ -91,11 +95,11 @@ export function useMetricsOrThrow(
  * `GET /internal/user-activity`) in the same `{ date, activity }` shape the
  * metrics endpoints use.
  */
-export function useUserActivityOrThrow(adminApp: object, userId: string): UserActivityResponse {
+export function useUserActivityOrThrow(adminApp: DashboardApp, userId: string): UserActivityResponse {
   return getInternalsHookOrThrow(adminApp, "useUserActivity")(userId);
 }
 
-export function useMetricsUserCountsOrThrow(adminApp: object): MetricsUserCounts {
+export function useMetricsUserCountsOrThrow(adminApp: DashboardApp): MetricsUserCounts {
   return getInternalsHookOrThrow(adminApp, "useMetricsUserCounts")();
 }
 
@@ -142,7 +146,7 @@ function applyMetricsResponseDefaults(body: MetricsResponse): MetricsResponse {
   };
 }
 
-async function fetchJsonOrThrow(adminApp: object, path: string): Promise<unknown> {
+async function fetchJsonOrThrow(adminApp: DashboardApp, path: string): Promise<Json> {
   const response = await getInternalsHookOrThrow(adminApp, "sendRequest")(path, { method: "GET" }, "admin");
   if (!response.ok) {
     throw new HexclaveAssertionError(`Admin app internals request failed: ${path}`);
@@ -155,7 +159,7 @@ async function fetchJsonOrThrow(adminApp: object, path: string): Promise<unknown
  * request plumbing. Internal feature pages use this instead of rebuilding
  * client authentication headers in dashboard code.
  */
-export async function sendInternalUserRequest(adminApp: object, path: string, requestOptions: RequestInit = {}): Promise<Response> {
+export async function sendInternalUserRequest(adminApp: DashboardApp, path: string, requestOptions: RequestInit = {}): Promise<Response> {
   return await getInternalsHookOrThrow(adminApp, "sendRequest")(path, requestOptions, "client");
 }
 
@@ -163,12 +167,12 @@ export async function sendInternalUserRequest(adminApp: object, path: string, re
  * Sends a project-admin request through the dashboard app's request plumbing.
  * Use this for internal routes that return or mutate project-owner-only data.
  */
-export async function sendInternalAdminRequest(adminApp: object, path: string, requestOptions: RequestInit = {}): Promise<Response> {
+export async function sendInternalAdminRequest(adminApp: DashboardApp, path: string, requestOptions: RequestInit = {}): Promise<Response> {
   return await getInternalsHookOrThrow(adminApp, "sendRequest")(path, requestOptions, "admin");
 }
 
 export async function fetchMetricsOrThrow(
-  adminApp: object,
+  adminApp: DashboardApp,
   includeAnonymous: boolean,
   filters?: AnalyticsOverviewFilters,
 ): Promise<MetricsResponse> {
@@ -177,6 +181,6 @@ export async function fetchMetricsOrThrow(
   return applyMetricsResponseDefaults(await MetricsResponseBodySchema.validate(await fetchJsonOrThrow(adminApp, path)));
 }
 
-export async function fetchMetricsUserCountsOrThrow(adminApp: object): Promise<MetricsUserCounts> {
+export async function fetchMetricsUserCountsOrThrow(adminApp: DashboardApp): Promise<MetricsUserCounts> {
   return await MetricsUserCountsSchema.validate(await fetchJsonOrThrow(adminApp, "/internal/metrics/user-counts"));
 }

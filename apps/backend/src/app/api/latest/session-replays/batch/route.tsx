@@ -24,7 +24,7 @@ const MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024;
 
 // Gunzips application/octet-stream bodies (the client gzips large batches);
 // plain application/json bodies pass through untouched.
-function maybeDecodeBinaryBody(value: unknown): unknown {
+function decodeBinaryBody(value: unknown): unknown {
   let bytes: Uint8Array | undefined;
   if (value instanceof ArrayBuffer) {
     bytes = new Uint8Array(value);
@@ -89,7 +89,7 @@ export const POST = createSmartRouteHandler({
       started_at_ms: yupNumber().defined().integer().min(0),
       sent_at_ms: yupNumber().defined().integer().min(0),
       events: yupArray(yupMixed().defined()).defined(),
-    }).defined().transform((_value, originalValue) => maybeDecodeBinaryBody(originalValue)),
+    }).defined().transform((_value, originalValue) => decodeBinaryBody(originalValue)),
   }),
   response: yupObject({
     statusCode: yupNumber().oneOf([200]).defined(),

@@ -1111,7 +1111,9 @@ type DeepReplaceAllowFunctionsForObjects<T> = T extends object
   )
   :
   T;
-type ReplaceFunctionsWithObjects<T> = T & (T extends (arg: infer K extends string) => infer R ? Record<K, R> & object : unknown);
+type ReplaceFunctionsWithObjects<T> = T extends (arg: infer K extends string) => infer R
+  ? T & Record<K, R> & object
+  : T;
 type DeepReplaceFunctionsWithObjects<T> = T extends object ? { [K in keyof ReplaceFunctionsWithObjects<T>]: DeepReplaceFunctionsWithObjects<ReplaceFunctionsWithObjects<T>[K]> } : T;
 typeAssertIs<DeepReplaceFunctionsWithObjects<{ a: { b: 123 } & ((key: string) => number) }>, { a: { b: 123, [key: string]: number } }>()();
 
@@ -1122,7 +1124,7 @@ function deepReplaceFunctionsWithObjects(obj: any, paths: string[] = []): any {
   };
   const currentPaths = [...new Set(paths.map(p => p.split(".")[0]))];
   const nonDeepReplaced = {
-    ...typeof obj === "function" ? filterUndefined(Object.fromEntries(currentPaths.map(k => [k, obj(k)]))) : {},
+    ...typeof obj === "function" ? filterUndefined(Object.fromEntries(currentPaths.map(k => [k, obj(k)]))) : undefined,
     ...obj,
   };
   return mapValues(nonDeepReplaced, (v, k) => (isObjectLike(v) ? deepReplaceFunctionsWithObjects(v as any, subPaths(k as string)) : v));
@@ -1136,8 +1138,9 @@ import.meta.vitest?.test("deepReplaceFunctionsWithObjects", ({ expect }) => {
   expect(deepReplaceFunctionsWithObjects({ a: typedAssign(() => ({}), { b: { c: 1 } }) })).toEqual({ a: { b: { c: 1 } } });
 });
 
-type ApplyDefaults<D extends object | ((key: string) => unknown), C extends object> = {} extends D ? C : DeepMerge<DeepReplaceFunctionsWithObjects<D>, C>;  // the {} extends D makes TypeScript not recurse if the defaults are empty, hence allowing us more recursion until "type instantiation too deep" kicks in... it's a total hack, but it works, so hey?
-function applyDefaults<D extends object | ((key: string) => unknown), C extends object>(defaults: D, config: C): ApplyDefaults<D, C> {
+type ConfigDefaultFactory = (key: string) => object;
+type ApplyDefaults<D extends object | ConfigDefaultFactory, C extends object> = {} extends D ? C : DeepMerge<DeepReplaceFunctionsWithObjects<D>, C>;  // the {} extends D makes TypeScript not recurse if the defaults are empty, hence allowing us more recursion until "type instantiation too deep" kicks in... it's a total hack, but it works, so hey?
+function applyDefaults<D extends object | ConfigDefaultFactory, C extends object>(defaults: D, config: C): ApplyDefaults<D, C> {
   const res: any = deepReplaceFunctionsWithObjects(defaults);
 
   outer: for (const [key, mergeValue] of Object.entries(config)) {
@@ -1231,7 +1234,12 @@ export function applyBranchDefaults<T extends BranchRenderedConfigBeforeDefaults
   );
 }
 
+// SAFETY: Each cast bridges TypeScript's recursive instantiation limit; the
+// runtime calls apply the same defaults in the exact order described by the
+// nested ApplyDefaults return type.
 export function applyEnvironmentDefaults<T extends EnvironmentRenderedConfigBeforeDefaults>(config: T): ApplyDefaults<typeof environmentConfigDefaults, ApplyDefaults<typeof branchConfigDefaults, ApplyDefaults<typeof projectConfigDefaults, T>>> {
+  // SAFETY: The nested calls below apply the same defaults in the order
+  // described by the recursive ApplyDefaults return type.
   return applyDefaults(
     environmentConfigDefaults,
     applyDefaults(
@@ -1244,7 +1252,12 @@ export function applyEnvironmentDefaults<T extends EnvironmentRenderedConfigBefo
   ) as any;
 }
 
+// SAFETY: Each cast bridges TypeScript's recursive instantiation limit; the
+// runtime calls apply the same defaults in the exact order described by the
+// nested ApplyDefaults return type.
 export function applyOrganizationDefaults(config: OrganizationRenderedConfigBeforeDefaults): ApplyDefaults<typeof organizationConfigDefaults, ApplyDefaults<typeof environmentConfigDefaults, ApplyDefaults<typeof branchConfigDefaults, ApplyDefaults<typeof projectConfigDefaults, OrganizationRenderedConfigBeforeDefaults>>>> {
+  // SAFETY: The nested calls below apply the same defaults in the order
+  // described by the recursive ApplyDefaults return type.
   return applyDefaults(
     organizationConfigDefaults,
     applyDefaults(

@@ -44,9 +44,9 @@ export type AdminSendAttemptError = {
   attemptNumber: number,
   timestamp: string,
   externalMessage: string,
-  externalDetails: Record<string, unknown>,
+  externalDetails: Record<string, Json>,
   internalMessage: string,
-  internalDetails: Record<string, unknown>,
+  internalDetails: Record<string, Json>,
 };
 
 // =============================== BASE TYPES ===============================
@@ -158,7 +158,7 @@ export type AdminEmailOutboxSkipped = Omit<AdminEmailOutboxBase, "hasRendered"> 
   hasRendered: boolean,
   skippedAt: Date,
   skippedReason: string,
-  skippedDetails: Record<string, unknown>,
+  skippedDetails: Record<string, Json>,
   // Optional fields depending on when skipped
   startedRenderingAt?: Date,
   renderedAt?: Date,

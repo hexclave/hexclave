@@ -11,7 +11,7 @@ describe('validateRedirectUrl', () => {
     },
     callback: () => T,
   ): T => {
-    const processEnv = Reflect.get(process, "env");
+    const processEnv = process["env"];
     // Hexclave rebrand: getEnvVariable() in stack-shared/utils/env.tsx prefers the
     // HEXCLAVE_*-prefixed sibling of each STACK_* var. CI sets only the HEXCLAVE_*
     // variant (e.g. NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX), so writing only the STACK_*
@@ -24,7 +24,7 @@ describe('validateRedirectUrl', () => {
     ] as const;
     const hexclaveOf = (name: string) => name.replace("STACK_", "HEXCLAVE_");
     const allKeys = [...stackKeys, ...stackKeys.map(hexclaveOf)];
-    const oldValues = Object.fromEntries(allKeys.map((k) => [k, Reflect.get(processEnv, k)]));
+    const oldValues = Object.fromEntries(allKeys.map((k) => [k, processEnv[k]]));
     const newValues: Record<string, string | undefined> = {
       NEXT_PUBLIC_STACK_HOSTED_HANDLER_URL_TEMPLATE: values.hostedHandlerUrlTemplate,
       NEXT_PUBLIC_STACK_HOSTED_HANDLER_DOMAIN_SUFFIX: values.hostedHandlerDomainSuffix,

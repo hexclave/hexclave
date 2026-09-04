@@ -1,6 +1,7 @@
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { signJWT } from "@hexclave/shared/dist/utils/jwt";
+import { parseResponseJson } from "@hexclave/shared/dist/utils/http";
 
 // HTTP client for the internal tool's /api/backend/* ingest routes. The tool
 // owns all SpacetimeDB interaction (module, OIDC issuer, signing key); the
@@ -82,7 +83,7 @@ export async function callInternalTool<T = unknown>(path: string, options?: {
     if (res.status >= 400 && res.status < 500) throw new StatusError(res.status, detail);
     throw new StatusError(StatusError.BadGateway, detail);
   }
-  return await res.json() as T;
+  return await parseResponseJson<T>(res);
 }
 
 /**

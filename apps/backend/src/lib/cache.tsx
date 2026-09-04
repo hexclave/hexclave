@@ -35,6 +35,8 @@ export async function getOrSetCacheValue<T>(options: CacheGetOrSetOptions<T>): P
   });
 
   if (existing && existing.expiresAt.getTime() > Date.now()) {
+    // SAFETY: Cache entries are namespaced by the caller's key and are only
+    // read through the same generic loader contract that wrote the payload.
     return existing.payload as T;
   }
 

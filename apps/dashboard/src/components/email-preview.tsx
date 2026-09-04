@@ -578,7 +578,7 @@ const WYSIWYG_EDITOR_SCRIPT = `
  */
 export type EmailPreviewDebugInfo = {
   renderedHtml?: string,
-  editableRegions?: Record<string, unknown>,
+  editableRegions?: Record<string, EditableMetadata>,
 };
 
 /**

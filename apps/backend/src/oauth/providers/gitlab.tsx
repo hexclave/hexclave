@@ -35,7 +35,7 @@ export class GitlabProvider extends OAuthBaseProvider {
     return validateUserInfo({
       accountId: userInfo.id?.toString(),
       displayName: userInfo.name,
-      profileImageUrl: userInfo.avatar_url as any,
+      profileImageUrl: userInfo.avatar_url,
       email: userInfo.email,
       emailVerified: !!confirmed_at,
     });

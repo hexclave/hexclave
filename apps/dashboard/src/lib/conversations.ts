@@ -7,6 +7,7 @@ import type {
   ConversationStatus,
 } from "@/lib/conversation-types";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { parseResponseJson } from "@hexclave/shared/dist/utils/http";
 
 type ListConversationsOptions = {
   projectId: string,
@@ -52,7 +53,7 @@ export async function listConversations(currentUser: CurrentUser | null, options
   if (options.offset != null) params.set("offset", options.offset.toString());
 
   const response = await apiFetch(currentUser, `?${params.toString()}`);
-  return await response.json() as ConversationListResponse;
+  return await parseResponseJson<ConversationListResponse>(response);
 }
 
 export async function getConversation(currentUser: CurrentUser | null, options: {
@@ -62,7 +63,7 @@ export async function getConversation(currentUser: CurrentUser | null, options: 
   const params = new URLSearchParams();
   params.set("projectId", options.projectId);
   const response = await apiFetch(currentUser, `/${encodeURIComponent(options.conversationId)}?${params.toString()}`);
-  return await response.json() as ConversationDetailResponse;
+  return await parseResponseJson<ConversationDetailResponse>(response);
 }
 
 export async function createConversation(currentUser: CurrentUser | null, options: {
@@ -76,7 +77,7 @@ export async function createConversation(currentUser: CurrentUser | null, option
     method: "POST",
     body: JSON.stringify(options),
   });
-  return await response.json() as { conversationId: string };
+  return await parseResponseJson<{ conversationId: string }>(response);
 }
 
 export async function appendConversationUpdate(currentUser: CurrentUser | null, options:
@@ -116,5 +117,5 @@ export async function appendConversationUpdate(currentUser: CurrentUser | null, 
       ...payload,
     }),
   });
-  return await response.json() as ConversationDetailResponse;
+  return await parseResponseJson<ConversationDetailResponse>(response);
 }

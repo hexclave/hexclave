@@ -33,7 +33,7 @@ function isSuccessfulQueryToolPart(part: QueryToolPart): boolean {
   if (
     typeof part.result === "object"
     && "success" in part.result
-    && Reflect.get(part.result, "success") === false
+    && part.result["success"] === false
   ) {
     return false;
   }

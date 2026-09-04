@@ -6,11 +6,10 @@ import * as lmdb from "lmdb";
 import { readdirSync, statSync } from "node:fs";
 import { shouldSuppressPeriodicBulldozerLogs } from "../../../logging.js";
 import { traceSpanHot } from "../../../otel.js";
-import { DatabaseSeq } from "../../index.js";
+import { createDatabaseSeq, DatabaseSeq } from "../../index.js";
 import { LowLevelDatabase, LowLevelDatabaseDebugEntry, LowLevelKvDump, LowLevelKvStore } from "../index.js";
 import { unwrapLmdbCommitError } from "../unwrap-commit-error.js";
 
-type LmdbSeq = readonly [dbId: string, seqId: string] & { __brand: "hexclave-low-level-kv-store-seq" };
 type BinaryDatabase = lmdb.Database<Buffer, Uint8Array>;
 type VersionedBinaryDatabase = BinaryDatabase & {
   getEntry(key: Buffer): { value: Buffer, version?: number } | undefined,
@@ -331,8 +330,8 @@ export function declareLmdbLowLevelDatabase(options: {
     activityWindowStartedAt = now;
   }, 5_000);
   activityInterval.unref();
-  const initialSeq = [dbId, initialSeqId] as unknown as LmdbSeq;
-  const toSeq = (seqId: string) => [dbId, seqId] as unknown as LmdbSeq;
+  const initialSeq = createDatabaseSeq(dbId, initialSeqId);
+  const toSeq = (seqId: string) => createDatabaseSeq(dbId, seqId);
 
   const nextVersion = () => ++currentVersion;
   const nextSeqId = () => crypto.randomUUID();

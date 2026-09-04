@@ -2,9 +2,18 @@
 // standalone clickmap overlay). This module deliberately lives outside both
 // feature folders so either feature can be removed without affecting the other.
 
+type DomAttributeValue =
+  | string
+  | number
+  | boolean
+  | { [key: string]: string | number }
+  | (() => void)
+  | null
+  | undefined;
+
 export function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,
-  attrs?: Record<string, any> | null,
+  attrs?: Record<string, DomAttributeValue> | null,
   ...children: (string | Node | null | undefined)[]
 ): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag);
@@ -34,7 +43,7 @@ export function setHtml(el: HTMLElement, html: string) {
 }
 
 export function hasAppendChild(value: unknown): value is { appendChild(node: Node): void } {
-  return typeof value === 'object' && value !== null && typeof Reflect.get(value, 'appendChild') === 'function';
+  return typeof value === 'object' && value !== null && typeof value['appendChild'] === 'function';
 }
 
 export function canMountIntoDom(): boolean {
@@ -44,7 +53,7 @@ export function canMountIntoDom(): boolean {
   if (typeof document.createElement !== 'function') {
     return false;
   }
-  return hasAppendChild(Reflect.get(document, 'body'));
+  return hasAppendChild(document['body']);
 }
 
 // ---------------------------------------------------------------------------
@@ -57,12 +66,12 @@ export type UiGlobalInstance = {
 };
 
 function isUiGlobalInstance(value: unknown): value is UiGlobalInstance {
-  return typeof value === 'object' && value !== null && typeof Reflect.get(value, 'cleanup') === 'function';
+  return typeof value === 'object' && value !== null && typeof value['cleanup'] === 'function';
 }
 
 export function getGlobalUiInstance(key: string): UiGlobalInstance | null {
   if (typeof window === 'undefined') return null;
-  const value: unknown = Reflect.get(window, key);
+  const value: unknown = window[key];
   return isUiGlobalInstance(value) ? value : null;
 }
 

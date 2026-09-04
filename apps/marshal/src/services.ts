@@ -461,7 +461,8 @@ export type MachineConfig = {
     ports: { port: number, handlers?: string[] }[],
     concurrency: { type: string, soft_limit: number },
   }[],
-  [key: string]: unknown,
+  guest: { cpu_kind: string, cpus: number, memory_mb: number },
+  restart: { policy: string, max_retries: number },
 };
 
 export function machineConfigForSlot(options: {

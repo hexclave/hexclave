@@ -20,6 +20,7 @@
  */
 
 import { StackClientApp, useStackApp, useUser, hexclaveAppInternalsSymbol } from '@hexclave/next';
+import { isJsonSerializable, parseJson } from '@hexclave/shared/dist/utils/json';
 import { runAsynchronouslyWithAlert } from '@hexclave/shared/dist/utils/promises';
 import { Button, Card, CardContent, CardHeader, Typography } from '@hexclave/ui';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -34,8 +35,8 @@ type CliState = {
 
 const CLI_STORAGE_KEY = 'stack-cli-demo-state';
 
-function getStackInternals(app: unknown) {
-  return (app as any)[hexclaveAppInternalsSymbol];
+function getStackInternals(app: ReturnType<typeof useStackApp>) {
+  return app[hexclaveAppInternalsSymbol];
 }
 
 type RefreshCliSessionResult =
@@ -84,7 +85,13 @@ function loadCliState(): { refreshToken: string } | null {
   if (typeof window === 'undefined') return null;
   try {
     const stored = sessionStorage.getItem(CLI_STORAGE_KEY);
-    return stored ? JSON.parse(stored) as { refreshToken: string } : null;
+    if (stored == null) return null;
+    const parsed = parseJson(stored);
+    if (parsed.status === 'error' || !isJsonSerializable(parsed.data) || parsed.data === null || Array.isArray(parsed.data) || typeof parsed.data !== 'object') {
+      return null;
+    }
+    const refreshToken = parsed.data.refreshToken;
+    return typeof refreshToken === 'string' ? { refreshToken } : null;
   } catch {
     return null;
   }

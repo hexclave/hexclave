@@ -1,5 +1,6 @@
 import { KnownErrors } from "@hexclave/shared";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
+import { isJsonSerializable, type Json } from "@hexclave/shared/dist/utils/json";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { mergeScopeStrings } from "@hexclave/shared/dist/utils/strings";
@@ -47,22 +48,23 @@ function getStringProperty(obj: unknown, key: string): string | undefined {
   if (typeof obj !== "object" || obj === null || !(key in obj)) {
     return undefined;
   }
-  const value = Reflect.get(obj, key);
+  const value = obj[key];
   return typeof value === "string" ? value : undefined;
 }
 
-function getUnknownProperty(obj: unknown, key: string): unknown {
+function getUnknownProperty(obj: unknown, key: string): Json | undefined {
   if (typeof obj !== "object" || obj === null || !(key in obj)) {
     return undefined;
   }
-  return Reflect.get(obj, key);
+  const value = obj[key];
+  return isJsonSerializable(value) ? value : undefined;
 }
 
 function getNumberProperty(obj: unknown, key: string): number | undefined {
   if (typeof obj !== "object" || obj === null || !(key in obj)) {
     return undefined;
   }
-  const value = Reflect.get(obj, key);
+  const value = obj[key];
   return typeof value === "number" ? value : undefined;
 }
 

@@ -213,11 +213,11 @@ function readClientSocketIp(request: Request): string | undefined {
   // the underlying Node socket, neither of which exist on the standard Request type.
   // Read them defensively at runtime instead of casting; on other runtimes (e.g. the
   // Vercel serverless entry) these are simply absent and we fall through to undefined.
-  const directIp: unknown = Reflect.get(request, "ip");
+  const directIp: unknown = request["ip"];
   if (typeof directIp === "string" && directIp !== "") {
     return directIp;
   }
-  const runtime: unknown = Reflect.get(request, "runtime");
+  const runtime: unknown = request["runtime"];
   const node: unknown = isRecord(runtime) ? runtime.node : undefined;
   const req: unknown = isRecord(node) ? node.req : undefined;
   const socket: unknown = isRecord(req) ? req.socket : undefined;

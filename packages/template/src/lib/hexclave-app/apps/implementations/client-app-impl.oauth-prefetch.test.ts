@@ -4,7 +4,7 @@ import { StackClientApp } from "../interfaces/client-app";
 describe("StackClientApp OAuth prefetch", () => {
   it("does not prefetch cross-domain handoff params on construction", () => {
     const prefetchMethodName = "_prefetchCrossDomainHandoffParamsIfNeeded";
-    const originalPrefetch = Reflect.get(StackClientApp.prototype, prefetchMethodName);
+    const originalPrefetch = StackClientApp.prototype[prefetchMethodName];
     let prefetchCalls = 0;
     Reflect.set(StackClientApp.prototype, prefetchMethodName, () => {
       prefetchCalls += 1;

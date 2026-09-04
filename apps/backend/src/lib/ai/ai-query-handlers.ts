@@ -5,7 +5,7 @@ import type { ContentBlock, McpCallMetadata, MessageLike, ModeContext } from "@/
 import { listManagedProjectIds } from "@/lib/projects";
 import type { SmartRequestAuth } from "@/route-handlers/smart-request";
 import { captureError, StatusError } from "@hexclave/shared/dist/utils/errors";
-import { Json } from "@hexclave/shared/dist/utils/json";
+import { isJsonSerializable } from "@hexclave/shared/dist/utils/json";
 import { generateText, stepCountIs, streamText, type StepResult, type ToolSet } from "ai";
 
 export const USER_FACING_ERROR_MESSAGE = "The AI service is temporarily unavailable. Please try again later.";
@@ -163,7 +163,7 @@ export async function handleGenerateMode(ctx: ModeContext & {
         toolCallId: toolCall.toolCallId,
         args: toolCall.input,
         argsText: JSON.stringify(toolCall.input),
-        result: (toolResult?.output ?? null) as Json,
+        result: isJsonSerializable(toolResult?.output) ? toolResult.output : String(toolResult?.output),
       });
     }
   }

@@ -4,13 +4,14 @@ import { getPrismaClientForTenancy } from "@/prisma-client";
 import { KnownErrors } from "@hexclave/shared";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { extractScopes } from "@hexclave/shared/dist/utils/strings";
 
 function captureOAuthAccessTokenRefreshIssue(options: {
   location: string,
   message: string,
   providerInstance: OAuthBaseProvider,
-  errorContext: Record<string, unknown>,
+  errorContext: Record<string, Json>,
   refreshError: Exclude<OAuthAccessTokenRefreshError, { type: "invalid-refresh-token" }>,
 }) {
   const providerId = typeof options.errorContext.providerId === "string" ? options.errorContext.providerId : "unknown";
@@ -98,7 +99,7 @@ export async function retrieveOrRefreshAccessToken(options: {
   tenancyId: string,
   oauthAccountIds: string[],
   scope: string | undefined,
-  errorContext: Record<string, unknown>,
+  errorContext: Record<string, Json>,
 }): Promise<{ access_token: string }> {
   const { prisma, providerInstance, providerId, tenancyId, oauthAccountIds, scope, errorContext } = options;
   const accountIdFilter = oauthAccountIds.length === 1

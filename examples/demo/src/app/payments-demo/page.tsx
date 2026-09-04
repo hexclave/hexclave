@@ -15,6 +15,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function readStringField(value: unknown, key: string): string | null {
+  if (!isRecord(value)) return null;
+  const field = value[key];
+  return typeof field === "string" ? field : null;
+}
+
 function stringifyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -44,10 +50,11 @@ async function createCheckoutUrl(options: { teamId: string, productId: "team_pro
     body: JSON.stringify(options),
   });
   const data = await readJson(response);
-  if (!isRecord(data) || typeof data.url !== "string") {
+  const url = readStringField(data, "url");
+  if (url === null) {
     throw new Error("Checkout route returned an invalid response.");
   }
-  return data.url;
+  return url;
 }
 
 function resolveTeamPlan(products: ReadonlyArray<{ id: string | null, type?: string }>): string {

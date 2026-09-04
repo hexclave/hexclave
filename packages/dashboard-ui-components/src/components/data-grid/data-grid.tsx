@@ -44,6 +44,7 @@ import { resolveDataGridStrings } from "./strings";
 import type {
   DataGridCellContext,
   DataGridColumnDef,
+  DataGridCellValue,
   DataGridDateDisplay,
   DataGridFooterContext,
   DataGridHeaderContext,
@@ -358,7 +359,7 @@ function formatCellValue(value: unknown): React.ReactNode {
 }
 
 function renderDateCell<TRow>(
-  value: unknown,
+  value: DataGridCellValue,
   dateDisplay: DataGridDateDisplay,
   col: DataGridColumnDef<TRow>,
 ): React.ReactNode {

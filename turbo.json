@@ -163,6 +163,11 @@
       "cache": false
     },
     "lint": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/configs/eslint/**",
+        "$TURBO_ROOT$/tools/eslint/anti-slop/**"
+      ],
       "dependsOn": []
     },
     "codegen": {

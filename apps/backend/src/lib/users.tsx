@@ -115,8 +115,8 @@ import.meta.vitest?.test("getDerivedSignUpCountryCode", ({ expect }) => {
 
 import.meta.vitest?.describe("visible bot challenge sign-up policy", () => {
   const { expect, test, beforeEach, afterEach } = import.meta.vitest!;
-  const processEnv = Reflect.get(process, "env");
-  const originalFlag = Reflect.get(processEnv, "HEXCLAVE_ALLOW_SIGN_UP_ON_VISIBLE_BOT_CHALLENGE_FAILURE");
+  const processEnv = process["env"];
+  const originalFlag = processEnv["HEXCLAVE_ALLOW_SIGN_UP_ON_VISIBLE_BOT_CHALLENGE_FAILURE"];
 
   beforeEach(() => {
     Reflect.deleteProperty(processEnv, "HEXCLAVE_ALLOW_SIGN_UP_ON_VISIBLE_BOT_CHALLENGE_FAILURE");

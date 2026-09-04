@@ -34,7 +34,12 @@ export function createPromise<T>(callback: (resolve: Resolve<T>, reject: Reject)
     };
   });
 
+  // SAFETY: The Promise constructor synchronously assigns both callbacks before
+  // it returns, and Object.assign adds exactly the discriminated fields for the
+  // current status.
   callback(resolve!, reject!);
+  // SAFETY: Object.assign adds the discriminated fields that correspond to the
+  // current status, while `promise` already carries the same T.
   return Object.assign(promise, {
     status: status,
     ...status === "fulfilled" ? { value: valueOrReason as T } : {},
@@ -352,8 +357,8 @@ import.meta.vitest?.test("runAsynchronouslyWithAlert", ({ expect }) => {
   expect(typeof runAsynchronouslyWithAlert).toBe("function");
 });
 
-export function runAsynchronously(
-  promiseOrFunc: void | Promise<unknown> | (() => void | Promise<unknown>) | undefined,
+export function runAsynchronously<T>(
+  promiseOrFunc: void | Promise<T> | (() => void | Promise<T>) | undefined,
   options: {
     noErrorLogging?: boolean,
     onError?: (error: Error) => void,

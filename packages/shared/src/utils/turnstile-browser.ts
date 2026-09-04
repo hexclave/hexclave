@@ -42,7 +42,7 @@ export function getTurnstileApi(): TurnstileApi | undefined {
     return undefined;
   }
 
-  const maybeTurnstile = Reflect.get(window, "turnstile");
+  const maybeTurnstile = window["turnstile"];
   return isTurnstileApi(maybeTurnstile) ? maybeTurnstile : undefined;
 }
 

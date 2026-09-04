@@ -10,6 +10,8 @@ import { AsyncStore } from "./stores";
 export function cacheFunction<F extends Function>(f: F): F {
   const dependenciesMap = new DependenciesMap<any, any>();
 
+  // SAFETY: DependenciesMap keys each invocation by the forwarded argument
+  // tuple, and the wrapper returns exactly the original function's result.
   return ((...args: any) => {
     if (dependenciesMap.has(args)) {
       return dependenciesMap.get(args);

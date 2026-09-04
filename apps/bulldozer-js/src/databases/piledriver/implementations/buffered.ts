@@ -1,7 +1,7 @@
 import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
-import { DatabaseSeq } from "../../index.js";
+import { createDatabaseSeq, DatabaseSeq } from "../../index.js";
 import { PiledriverDatabase, PiledriverObject } from "../index.js";
 
 type PendingEntry = {
@@ -24,7 +24,7 @@ const getPendingKey = (key: ArrayBuffer) => ({
 
 export function declareBufferedPiledriverDatabase(wrapped: PiledriverDatabase): PiledriverDatabase {
   const dbId = `buffered-piledriver-${crypto.randomUUID()}`;
-  const initialSeq = [dbId, "initial"] as unknown as DatabaseSeq;
+  const initialSeq = createDatabaseSeq(dbId, "initial");
   const seqRecords = new WeakMap<object, SeqRecord>();
   const pending = new Map<string, PendingEntry>();
   const inFlight = new Map<string, PendingEntry>();
@@ -77,7 +77,7 @@ export function declareBufferedPiledriverDatabase(wrapped: PiledriverDatabase): 
   };
 
   const createSeq = () => {
-    const seq = [dbId, crypto.randomUUID()] as unknown as DatabaseSeq;
+    const seq = createDatabaseSeq(dbId, crypto.randomUUID());
     let resolve!: (value: DatabaseSeq) => void;
     let reject!: (error: unknown) => void;
     const flush = new Promise<DatabaseSeq>((resolvePromise, rejectPromise) => {

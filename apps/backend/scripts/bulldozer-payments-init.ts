@@ -134,7 +134,7 @@ function readProductLineId(product: unknown): string | null {
   if (typeof product !== "object" || product === null || Array.isArray(product)) {
     return null;
   }
-  const productLineId = Reflect.get(product, "productLineId");
+  const productLineId = product["productLineId"];
   return typeof productLineId === "string" ? productLineId : null;
 }
 

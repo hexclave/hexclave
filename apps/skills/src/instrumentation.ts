@@ -1,10 +1,10 @@
 import * as Sentry from "@sentry/nextjs";
 import { getEnvVariable, getNextRuntime, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
-import { registerErrorSink, type CaptureLevel } from "@hexclave/shared/dist/utils/errors";
+import { registerErrorSink } from "@hexclave/shared/dist/utils/errors";
 import { sentryBaseConfig } from "@hexclave/shared/dist/utils/sentry";
 import { nicify } from "@hexclave/shared/dist/utils/strings";
 
-const sentryErrorSink = (location: string, error: unknown, level: CaptureLevel) => {
+const sentryErrorSink: Parameters<typeof registerErrorSink>[0] = (location, error, level) => {
   Sentry.captureException(error, { extra: { location }, level });
 };
 

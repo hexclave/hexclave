@@ -8,6 +8,7 @@ import { DesignDialog } from "../dialog";
 import { formatGridDate, resolveColumnValue } from "./state";
 import type {
   DataGridColumnDef,
+  DataGridCellValue,
   DataGridExportField,
   DataGridExportFormat,
   DataGridExportOptions,
@@ -370,10 +371,10 @@ function buildColumnExportFields<TRow>(
   return fields;
 }
 
-function formatColumnExportValue<TRow>(
-  column: DataGridColumnDef<TRow>,
+function formatColumnExportValue<TRow, TValue extends DataGridCellValue = DataGridCellValue>(
+  column: DataGridColumnDef<TRow, TValue>,
   row: TRow,
-): unknown {
+): DataGridCellValue {
   const value = resolveColumnValue(column, row);
   if (column.formatValue != null) {
     return column.formatValue(value, row);

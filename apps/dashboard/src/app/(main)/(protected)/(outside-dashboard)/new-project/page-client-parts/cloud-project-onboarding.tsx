@@ -123,15 +123,15 @@ export function isCloudProjectOnboardingState(value: unknown): value is CloudPro
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
-  const version = Reflect.get(value, "version");
-  const step = Reflect.get(value, "step");
-  const journey = Reflect.get(value, "journey");
-  const primaryAppId = Reflect.get(value, "primary_app_id");
-  const additionalAppIds = Reflect.get(value, "additional_app_ids");
-  const selectedApps = Reflect.get(value, "selected_apps");
-  const selectedSignInMethods = Reflect.get(value, "selected_sign_in_methods");
-  const selectedEmailThemeId = Reflect.get(value, "selected_email_theme_id");
-  const projectLocation = Reflect.get(value, "project_location");
+  const version = value["version"];
+  const step = value["step"];
+  const journey = value["journey"];
+  const primaryAppId = value["primary_app_id"];
+  const additionalAppIds = value["additional_app_ids"];
+  const selectedApps = value["selected_apps"];
+  const selectedSignInMethods = value["selected_sign_in_methods"];
+  const selectedEmailThemeId = value["selected_email_theme_id"];
+  const projectLocation = value["project_location"];
   return (
     version === 1
     && isCloudOnboardingStep(step)
@@ -152,10 +152,10 @@ function readLegacyOnboardingState(value: unknown): LegacyOnboardingState | null
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const configChoice = Reflect.get(value, "selected_config_choice");
-  const apps = Reflect.get(value, "selected_apps");
-  const methods = Reflect.get(value, "selected_sign_in_methods");
-  const emailThemeId = Reflect.get(value, "selected_email_theme_id");
+  const configChoice = value["selected_config_choice"];
+  const apps = value["selected_apps"];
+  const methods = value["selected_sign_in_methods"];
+  const emailThemeId = value["selected_email_theme_id"];
   if (
     (configChoice !== "create-new" && configChoice !== "link-existing")
     || !Array.isArray(apps)

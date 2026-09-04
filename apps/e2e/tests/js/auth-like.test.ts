@@ -42,8 +42,8 @@ function parseAuthorizationHeaderValue(value: string): { accessToken: string | n
     throw new Error("Decoded authorization payload must be an object.");
   }
 
-  const accessToken = Reflect.get(parsed, "accessToken");
-  const refreshToken = Reflect.get(parsed, "refreshToken");
+  const accessToken = parsed["accessToken"];
+  const refreshToken = parsed["refreshToken"];
   if (accessToken != null && typeof accessToken !== "string") {
     throw new Error("Decoded authorization payload contains invalid accessToken.");
   }

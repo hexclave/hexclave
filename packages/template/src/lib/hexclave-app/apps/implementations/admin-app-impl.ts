@@ -4,12 +4,13 @@ import { InternalApiKeyCreateCrudResponse } from "@hexclave/shared/dist/interfac
 import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse, MetricsResponse, MetricsUserCounts, UserActivityResponse } from "@hexclave/shared/dist/interface/admin-metrics";
 import { EmailTemplateCrud } from "@hexclave/shared/dist/interface/crud/email-templates";
 import { InternalApiKeysCrud } from "@hexclave/shared/dist/interface/crud/internal-api-keys";
+import type { EmailOutboxCrud } from "@hexclave/shared/dist/interface/crud/email-outbox";
 import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
 import type { Transaction, TransactionType } from "@hexclave/shared/dist/interface/crud/transactions";
 import type { RestrictedReason } from "@hexclave/shared/dist/schema-fields";
 import type { MoneyAmount } from "@hexclave/shared/dist/utils/currency-constants";
 import { HexclaveAssertionError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
-import type { Json } from "@hexclave/shared/dist/utils/json";
+import type { EditableMetadata } from "@hexclave/shared/dist/utils/jsx-editable-transpiler";
 import { pick, typedEntries, typedValues } from "@hexclave/shared/dist/utils/objects";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { useMemo } from "react"; // THIS_LINE_PLATFORM react-like
@@ -1006,12 +1007,12 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
     return crud.html;
   }
   // END_PLATFORM
-  async getEmailPreviewWithEditableMarkers(options: { themeId?: string | null | false, themeTsxSource?: string, templateId?: string, templateTsxSource?: string, editableSource?: 'template' | 'theme' | 'both' }): Promise<{ html: string, editableRegions?: Record<string, unknown> }> {
+  async getEmailPreviewWithEditableMarkers(options: { themeId?: string | null | false, themeTsxSource?: string, templateId?: string, templateTsxSource?: string, editableSource?: 'template' | 'theme' | 'both' }): Promise<{ html: string, editableRegions?: Record<string, EditableMetadata> }> {
     const result = await this._interface.renderEmailPreview({ ...options, editableMarkers: true, editableSource: options.editableSource });
     return { html: result.html, editableRegions: result.editable_regions };
   }
   // IF_PLATFORM react-like
-  useEmailPreviewWithEditableMarkers(options: { themeId?: string | null | false, themeTsxSource?: string, templateId?: string, templateTsxSource?: string, editableSource?: 'template' | 'theme' | 'both' }): { html: string, editableRegions?: Record<string, unknown> } {
+  useEmailPreviewWithEditableMarkers(options: { themeId?: string | null | false, themeTsxSource?: string, templateId?: string, templateTsxSource?: string, editableSource?: 'template' | 'theme' | 'both' }): { html: string, editableRegions?: Record<string, EditableMetadata> } {
     const crud = useAsyncCache(this._emailPreviewWithEditableMarkersCache, [options.themeId, options.themeTsxSource, options.templateId, options.templateTsxSource, options.editableSource] as const, "adminApp.useEmailPreviewWithEditableMarkers()");
     return { html: crud.html, editableRegions: crud.editable_regions };
   }
@@ -1116,8 +1117,7 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
 
   // Email Outbox methods
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Complex discriminated union conversion from API response
-  private _emailOutboxCrudToAdmin(crud: any): AdminEmailOutbox {
+  private _emailOutboxCrudToAdmin(crud: EmailOutboxCrud["Admin"]["Read"]): AdminEmailOutbox {
     const recipient = crud.to;
     let to: AdminEmailOutbox["to"];
     if (recipient.type === "user-primary-email") {
@@ -1130,32 +1130,25 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
 
     // Base fields present on all emails
     const base = {
-      id: crud.id as string,
+      id: crud.id,
       createdAt: new Date(crud.created_at_millis),
       updatedAt: new Date(crud.updated_at_millis),
-      tsxSource: crud.tsx_source as string,
-      themeId: (crud.theme_id as string | null) ?? null,
+      tsxSource: crud.tsx_source,
+      themeId: crud.theme_id,
       to,
       scheduledAt: new Date(crud.scheduled_at_millis),
       // Source tracking for grouping emails by template/draft
-      createdWith: crud.created_with as "draft" | "programmatic-call",
-      emailDraftId: crud.email_draft_id as string | null,
-      emailProgrammaticCallTemplateId: crud.email_programmatic_call_template_id as string | null,
-      variables: (crud.variables ?? {}) as Record<string, Json>,
+      createdWith: crud.created_with,
+      emailDraftId: crud.email_draft_id,
+      emailProgrammaticCallTemplateId: crud.email_programmatic_call_template_id,
+      variables: crud.variables,
       isPaused: false as const,
       hasRendered: false as const,
       hasDelivered: false as const,
       // Retry tracking fields
-      sendRetries: crud.send_retries as number,
+      sendRetries: crud.send_retries,
       nextSendRetryAt: crud.next_send_retry_at_millis ? new Date(crud.next_send_retry_at_millis) : null,
-      sendAttemptErrors: crud.send_attempt_errors ? (crud.send_attempt_errors as Array<{
-        attempt_number: number,
-        timestamp: string,
-        external_message: string,
-        external_details: Record<string, unknown>,
-        internal_message: string,
-        internal_details: Record<string, unknown>,
-      }>).map((e) => ({
+      sendAttemptErrors: crud.send_attempt_errors ? crud.send_attempt_errors.map((e) => ({
         attemptNumber: e.attempt_number,
         timestamp: e.timestamp,
         externalMessage: e.external_message,
@@ -1170,12 +1163,12 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
       ...base,
       startedRenderingAt: new Date(crud.started_rendering_at_millis),
       renderedAt: new Date(crud.rendered_at_millis),
-      subject: crud.subject as string,
-      html: crud.html as string | null,
-      text: crud.text as string | null,
-      isTransactional: crud.is_transactional as boolean,
-      isHighPriority: crud.is_high_priority as boolean,
-      notificationCategoryId: crud.notification_category_id as string | null,
+      subject: crud.subject,
+      html: crud.html,
+      text: crud.text,
+      isTransactional: crud.is_transactional,
+      isHighPriority: crud.is_high_priority,
+      notificationCategoryId: crud.notification_category_id,
       hasRendered: true as const,
     } : null;
 
@@ -1266,8 +1259,8 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
             simpleStatus: "ok" as const,
             skippedAt: new Date(crud.skipped_at_millis),
             skippedReason: crud.skipped_reason,
-            skippedDetails: crud.skipped_details ?? {},
-            hasRendered: crud.has_rendered as boolean,
+            skippedDetails: crud.skipped_details,
+            hasRendered: crud.has_rendered,
             // Optional fields
             startedRenderingAt: crud.started_rendering_at_millis ? new Date(crud.started_rendering_at_millis) : undefined,
             renderedAt: crud.rendered_at_millis ? new Date(crud.rendered_at_millis) : undefined,
@@ -1336,8 +1329,8 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
         }
       }
     })();
-    // The type system has difficulty with spread + override patterns on discriminated unions,
-    // so we use a type assertion here. The switch statement above ensures we return the correct shape.
+    // SAFETY: The status switch above covers every schema variant, and each branch adds the fields
+    // required by that discriminated AdminEmailOutbox member.
     return result as AdminEmailOutbox;
   }
 

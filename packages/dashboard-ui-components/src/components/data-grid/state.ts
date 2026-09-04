@@ -2,6 +2,7 @@ import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import { clampColumnWidth, DEFAULT_COL_WIDTH } from "./data-grid-sizing";
 import type {
   DataGridColumnDef,
+  DataGridCellValue,
   DataGridDateDisplay,
   DataGridDateFormat,
   DataGridPaginationModel,
@@ -45,13 +46,13 @@ export function createDefaultDataGridState(
 
 // ─── Column value resolution ─────────────────────────────────────────
 
-export function resolveColumnValue<TRow>(
-  col: DataGridColumnDef<TRow>,
+export function resolveColumnValue<TRow, TValue extends DataGridCellValue = DataGridCellValue>(
+  col: DataGridColumnDef<TRow, TValue>,
   row: TRow,
-): unknown {
+): TValue {
   if (typeof col.accessor === "function") return col.accessor(row);
-  const key = (col.accessor ?? col.id) as keyof TRow;
-  return row[key];
+  const key = col.accessor ?? col.id;
+  return row[key as keyof TRow] as TValue;
 }
 
 // ─── Default sort comparator (used by client-mode useDataSource) ────
@@ -127,7 +128,7 @@ export function applyQuickSearch<TRow>(
 
 // ─── Date helpers ────────────────────────────────────────────────────
 
-export function defaultParseDate(value: unknown): Date | null {
+export function defaultParseDate(value: DataGridCellValue): Date | null {
   if (value == null) return null;
   if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
   if (typeof value === "number" || typeof value === "string") {
@@ -174,11 +175,11 @@ export function defaultFormatAbsolute(date: Date): string {
   return date.toLocaleString();
 }
 
-export function formatGridDate(
-  value: unknown,
+export function formatGridDate<TValue extends DataGridCellValue>(
+  value: TValue,
   mode: DataGridDateDisplay,
   opts?: {
-    parseValue?: (value: unknown) => Date | null;
+    parseValue?: (value: TValue) => Date | null;
     dateFormat?: DataGridDateFormat;
   },
 ): { display: string | null; tooltip: string | null } {

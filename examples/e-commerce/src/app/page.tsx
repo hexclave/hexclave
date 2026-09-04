@@ -4,7 +4,13 @@ import { hexclaveServerApp } from "@/hexclave";
 
 export default async function Home() {
   const users = await hexclaveServerApp.listUsers();
-  const shops: [ServerUser, Shop][] = users.map(user => [user, (user.serverMetadata as any)?.eCommerceExample?.shop] as any).filter(([_, shop]) => shop);
+  const shops: [ServerUser, Shop][] = users
+    .map((user): [ServerUser, Shop | undefined] => [
+      user,
+      // SAFETY: this example writes the eCommerceExample metadata below with the Shop contract.
+      (user.serverMetadata as { eCommerceExample?: { shop?: Shop } }).eCommerceExample?.shop,
+    ])
+    .filter((entry): entry is [ServerUser, Shop] => entry[1] !== undefined);
   const currentUser = await hexclaveServerApp.getUser();
 
   return (

@@ -64,7 +64,7 @@ export function PaymentsPage(props: { mockMode?: boolean, availableTeams?: Team[
         </div>
       ) : null}
       <PaymentsPanel
-        customer={customer as any}
+        customer={customer}
         customerType={customerType}
       />
     </PageLayout>

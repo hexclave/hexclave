@@ -1,6 +1,7 @@
 import Stripe from "stripe";
 import { getOrUndefined } from "@hexclave/shared/dist/utils/objects";
-export type StripeOverridesMap = Record<string, Record<string, any>>;
+import type { Json } from "@hexclave/shared/dist/utils/json";
+export type StripeOverridesMap = Record<string, Record<string, Json>>;
 
 export function createStripeProxy<T extends object = Stripe>(
   target: T,

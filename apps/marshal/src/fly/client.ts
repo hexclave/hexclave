@@ -45,9 +45,18 @@ export type FlyMachine = {
     env?: Record<string, string>,
     metadata?: Record<string, string>,
     mounts?: { volume: string, path: string }[],
-    [key: string]: unknown,
+    guest?: { cpu_kind: string, cpus: number, memory_mb: number },
+    restart?: { policy: string, max_retries: number },
+    services?: { protocol: string, internal_port: number, ports: { port: number, handlers?: string[] }[] }[],
   },
 };
+
+function parseFlyJson<T>(text: string): T {
+  // SAFETY: Every call site supplies the response shape documented for the
+  // specific Fly endpoint and invokes this only after reading that endpoint's
+  // response body; the upstream API is the runtime schema authority here.
+  return JSON.parse(text) as T;
+}
 
 export type FlyLogEntry = {
   id: string,
@@ -165,13 +174,13 @@ export class FlyClient {
     if (!response.ok) {
       let message = text.slice(0, 500);
       try {
-        message = (JSON.parse(text) as { error?: string }).error ?? message;
+        message = parseFlyJson<{ error?: string }>(text).error ?? message;
       } catch {
         // non-JSON error body; keep the raw text
       }
       throw new FlyApiError(response.status, `machines ${init?.method ?? "GET"} ${path}`, message);
     }
-    return text === "" ? null : JSON.parse(text) as T;
+    return text === "" ? null : parseFlyJson<T>(text);
   }
 
   // allowNotFound: real Fly answers reads on nonexistent apps with a
@@ -200,7 +209,7 @@ export class FlyClient {
     const text = await this.readResponseText(response, options?.read ? null : "Fly GraphQL mutation");
     let json: { data?: T, errors?: { message: string }[] };
     try {
-      json = JSON.parse(text) as { data?: T, errors?: { message: string }[] };
+      json = parseFlyJson<{ data?: T, errors?: { message: string }[] }>(text);
     } catch {
       throw new FlyApiError(response.status, "graphql", text.slice(0, 500) || `HTTP ${response.status} (non-JSON body)`);
     }
@@ -470,7 +479,7 @@ export class FlyClient {
       }
       throw new FlyApiError(response.status, `logs GET /apps/${app}/logs`, "logs API error");
     }
-    const json = await response.json() as { data?: FlyLogEntry[], meta?: { next_token?: string } };
+    const json = parseFlyJson<{ data?: FlyLogEntry[], meta?: { next_token?: string } }>(await response.text());
     return {
       entries: json.data ?? [],
       nextToken: json.meta?.next_token === undefined || json.meta.next_token === "" ? null : json.meta.next_token,

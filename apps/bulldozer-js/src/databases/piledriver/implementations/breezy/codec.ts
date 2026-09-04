@@ -7,6 +7,7 @@
  * module defines the format while the database implementation owns IO and sequence ordering.
  */
 import { decodeBase64, encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { PiledriverHeapObject, PiledriverObject } from "../../index.js";
 
 const encoder = new TextEncoder();
@@ -48,7 +49,7 @@ export function plannedHeapReferenceKeys(value: PlannedPiledriverObject): ArrayB
   return references;
 }
 
-const defineOwn = (object: object, key: string, value: unknown) => {
+const defineOwn = <T extends object>(object: T, key: string, value: Json) => {
   // Assignment would invoke Object.prototype.__proto__ instead of restoring an own property.
   Object.defineProperty(object, key, { value, enumerable: true, configurable: true, writable: true });
 };
@@ -64,12 +65,12 @@ export function decodePiledriverObject(
   buffer: ArrayBuffer,
   resolveHeapObject: (key: ArrayBuffer) => PiledriverHeapObject,
 ): PiledriverObject {
-  const decode = (value: unknown): PiledriverObject => {
+  const decode = (value: Json): PiledriverObject => {
     if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
     if (Array.isArray(value)) {
       // Every real array is tagged, leaving singleton arrays available for special numeric values.
-      const tag: unknown = value[0];
-      const payload: unknown = value[1];
+      const tag = value[0];
+      const payload = value[1];
       if (tag === "array" && value.length === 2 && Array.isArray(payload)) return payload.map(decode);
       if (tag === "heap-reference" && value.length === 2 && typeof payload === "string") {
         return resolveHeapObject(decodeBase64(payload).buffer);
@@ -96,7 +97,7 @@ export function decodePiledriverObject(
  * concerns out of the codec makes this operation a synchronous conversion to the persisted format.
  */
 export function encodePiledriverObject(value: PlannedPiledriverObject): ArrayBuffer {
-  const encode = (node: PlannedPiledriverObject): unknown => {
+  const encode = (node: PlannedPiledriverObject): Json => {
     if (typeof node === "number") {
       if (Number.isFinite(node) && !Object.is(node, -0)) return node;
       // JSON would otherwise collapse NaN/infinities to null and -0 to 0.
@@ -109,7 +110,7 @@ export function encodePiledriverObject(value: PlannedPiledriverObject): ArrayBuf
     if (Array.isArray(node)) {
       return ["array", node.map(encode)];
     }
-    const object: { [key: string]: unknown } = {};
+    const object: { [key: string]: Json } = {};
     for (const [key, child] of Object.entries(node)) defineOwn(object, key, encode(child));
     return object;
   };

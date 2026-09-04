@@ -3,7 +3,7 @@ const SPINNER_INTERVAL_MS = 80;
 
 type ProgressStream = {
   isTTY?: boolean,
-  write: (chunk: string) => unknown,
+  write: (chunk: string) => void,
 };
 
 export type Progress = {

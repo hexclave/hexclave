@@ -276,10 +276,10 @@ export function sanitizeBackendSentryEvent<T extends Event>(event: T): T {
     ? {
       ...(typeof requestId === "string" ? {
         requestId,
-        ...(typeof requestMethod === "string" ? { method: requestMethod } : {}),
-        ...(typeof requestRoute === "string" ? { route: requestRoute } : {}),
-      } : {}),
-      ...(requestHost == null ? {} : { host: requestHost }),
+        ...(typeof requestMethod === "string" ? { method: requestMethod } : undefined),
+        ...(typeof requestRoute === "string" ? { route: requestRoute } : undefined),
+      } : undefined),
+      ...(requestHost == null ? undefined : { host: requestHost }),
     }
     : undefined;
   if (traceContext != null) {

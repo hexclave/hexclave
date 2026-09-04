@@ -1265,7 +1265,7 @@ const ONBOARDING_EMAIL_THEME_PREVIEW_IMAGES = {
 export function OnboardingEmailThemePreview(props: {
   themeId: string,
 }) {
-  const previewImageSrc = Reflect.get(ONBOARDING_EMAIL_THEME_PREVIEW_IMAGES, props.themeId);
+  const previewImageSrc = ONBOARDING_EMAIL_THEME_PREVIEW_IMAGES[props.themeId];
   if (typeof previewImageSrc !== "string") {
     throw new Error(`Missing static onboarding preview image for email theme ${props.themeId}.`);
   }

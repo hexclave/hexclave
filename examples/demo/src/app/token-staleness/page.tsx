@@ -5,6 +5,16 @@ import { runAsynchronouslyWithAlert } from '@hexclave/shared/dist/utils/promises
 import { Button, Card, CardContent, CardHeader, Input, Typography } from '@hexclave/ui';
 import { useMemo, useState } from 'react';
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readType(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const type = value.type;
+  return typeof type === 'string' ? type : undefined;
+}
+
 // Helper to decode JWT payload (without verification)
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
@@ -63,7 +73,7 @@ export default function TokenStalenessPage() {
     if (isDifferent(jwtPayload.is_restricted, user.isRestricted)) {
       result.push({ field: 'isRestricted / is_restricted', token: jwtPayload.is_restricted, actual: user.isRestricted });
     }
-    if (isDifferent((jwtPayload.restricted_reason as any)?.type, (user.restrictedReason as any)?.type)) {
+    if (isDifferent(readType(jwtPayload.restricted_reason), readType(user.restrictedReason))) {
       result.push({ field: 'restrictedReason / restricted_reason', token: JSON.stringify(jwtPayload.restricted_reason), actual: JSON.stringify(user.restrictedReason) });
     }
     if (isDifferent(jwtPayload.selected_team_id, user.selectedTeam?.id)) {
@@ -346,4 +356,3 @@ export default function TokenStalenessPage() {
     </div>
   );
 }
-

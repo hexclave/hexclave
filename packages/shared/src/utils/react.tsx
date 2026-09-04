@@ -23,6 +23,8 @@ export function use<T>(promise: Promise<T>): T {
       if (result.status === "pending") {
         throw promise;
       } else if (result.status === "ok") {
+        // SAFETY: The cache is keyed by this Promise<T>; its erased AsyncResult
+        // value is therefore the same T associated with the function argument.
         return result.data as T;
       } else {
         throw result.error;

@@ -137,8 +137,8 @@ export class HexclaveSetupError extends Error {
     // an own property with the sentinel value, not just the name somewhere on the prototype chain; the brand decides
     // whether an error is shown to the developer verbatim, so a coincidental key must not be enough
     if (!Object.prototype.hasOwnProperty.call(error, hexclaveSetupErrorBrand)) return false;
-    if (Reflect.get(error, hexclaveSetupErrorBrand) !== true) return false;
-    return typeof Reflect.get(error, "title") === "string" && Array.isArray(Reflect.get(error, "howToFix"));
+    if (error[hexclaveSetupErrorBrand] !== true) return false;
+    return typeof error["title"] === "string" && Array.isArray(error["howToFix"]);
   }
 }
 HexclaveSetupError.prototype.name = "HexclaveSetupError";

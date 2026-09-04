@@ -426,7 +426,7 @@ type RunRow = {
   state: "QUEUED" | "RUNNING" | "SLEEPING" | "COMPLETED" | "FAILED" | "CANCELED",
   version: number,
   triggerType: string,
-  triggerPayload: unknown,
+  triggerPayload: Prisma.JsonValue,
   currentStepKey: string | null,
   errorSummary: string | null,
   failureKind: "USER" | "PLATFORM" | null,
@@ -437,11 +437,18 @@ type RunRow = {
   stepsRecorded: number,
 };
 
-function deriveTriggerSummary(triggerType: string, payloadEnvelope: unknown): string {
-  const data = (payloadEnvelope as { data?: unknown } | null)?.data as Record<string, unknown> | null | undefined;
+function triggerPayloadData(payloadEnvelope: Prisma.JsonValue): Prisma.JsonValue | null {
+  if (payloadEnvelope == null || typeof payloadEnvelope !== "object" || Array.isArray(payloadEnvelope)) return null;
+  return payloadEnvelope.data ?? null;
+}
+
+function deriveTriggerSummary(triggerType: string, payloadEnvelope: Prisma.JsonValue): string {
+  const data = triggerPayloadData(payloadEnvelope);
   if (triggerType === "schedule") {
-    const millis = (data as { scheduled_at_millis?: number } | null)?.scheduled_at_millis;
-    return millis != null ? `tick ${new Date(millis).toISOString()}` : "schedule tick";
+    if (data != null && typeof data === "object" && !Array.isArray(data) && typeof data.scheduled_at_millis === "number") {
+      return `tick ${new Date(data.scheduled_at_millis).toISOString()}`;
+    }
+    return "schedule tick";
   }
   if (data == null || typeof data !== "object") return "";
   for (const key of ["primary_email", "display_name", "run_id", "user_id", "team_id", "id"]) {
@@ -449,6 +456,24 @@ function deriveTriggerSummary(triggerType: string, payloadEnvelope: unknown): st
     if (typeof value === "string" && value.length > 0) return value;
   }
   return "";
+}
+
+function parseWorkflowAttemptError(value: Prisma.JsonValue | null): WorkflowStepAttemptJson["error"] {
+  if (value == null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new StatusError(500, "Stored workflow attempt error must be an object");
+  }
+  if (typeof value.name !== "string" || typeof value.message !== "string") {
+    throw new StatusError(500, "Stored workflow attempt error must contain name and message strings");
+  }
+  return typeof value.stack === "string"
+    ? { name: value.name, message: value.message, stack: value.stack }
+    : { name: value.name, message: value.message };
+}
+
+function workflowFailureKind(value: "USER" | "PLATFORM" | null): WorkflowRunJson["failure_kind"] {
+  if (value == null) return null;
+  return value === "USER" ? "user" : "platform";
 }
 
 function runRowToJson(row: RunRow): WorkflowRunJson {
@@ -464,7 +489,7 @@ function runRowToJson(row: RunRow): WorkflowRunJson {
     current_step_id: row.currentStepKey?.split("#")[0] || null,
     steps_recorded: row.stepsRecorded,
     error_summary: row.errorSummary,
-    failure_kind: row.failureKind == null ? null : row.failureKind.toLowerCase() as "user" | "platform",
+    failure_kind: workflowFailureKind(row.failureKind),
     last_upgrade_divergence: (row.lastUpgradeDivergence ?? null) as WorkflowRunJson["last_upgrade_divergence"],
     created_at_millis: row.createdAt.getTime(),
     completed_at_millis: row.completedAt?.getTime() ?? null,
@@ -555,8 +580,8 @@ export async function getWorkflowRunDetails(tenancy: Tenancy, runId: string): Pr
     retry_epoch: attempt.retryEpoch,
     attempt: attempt.attempt,
     outcome: attempt.outcome === "SUCCEEDED" ? "succeeded" : "failed",
-    error: attempt.error as WorkflowStepAttemptJson["error"],
-    failure_kind: attempt.failureKind == null ? null : attempt.failureKind.toLowerCase() as "user" | "platform",
+    error: parseWorkflowAttemptError(attempt.error),
+    failure_kind: workflowFailureKind(attempt.failureKind),
     logs: attempt.logs,
     started_at_millis: attempt.startedAt.getTime(),
     finished_at_millis: attempt.finishedAt.getTime(),
@@ -564,7 +589,7 @@ export async function getWorkflowRunDetails(tenancy: Tenancy, runId: string): Pr
 
   return {
     ...runRowToJson(row),
-    trigger_payload: (row.triggerPayload as { data?: unknown } | null)?.data ?? null,
+    trigger_payload: triggerPayloadData(row.triggerPayload),
     steps: stepsJson,
     step_attempts: attemptsJson,
   };

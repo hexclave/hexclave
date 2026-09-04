@@ -9,7 +9,7 @@ import { hexclaveAppInternalsSymbol } from "../lib/hexclave-app/common";
 import { HexclaveContext } from "../providers/hexclave-context";
 import { useCliAuthConfirmation } from "./cli-auth-confirm";
 
-const previousActEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+const previousActEnvironment = globalThis["IS_REACT_ACT_ENVIRONMENT"];
 
 function responseJson(data: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(data), {

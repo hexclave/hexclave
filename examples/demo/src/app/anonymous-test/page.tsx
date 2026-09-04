@@ -5,11 +5,21 @@ import { runAsynchronouslyWithAlert } from '@hexclave/shared/dist/utils/promises
 import { Button, Card, CardContent, CardHeader, Typography } from '@hexclave/ui';
 import { useState } from 'react';
 
+type TestResult = {
+  success: boolean,
+  error?: string,
+  status?: number,
+  expected?: string,
+  data?: unknown,
+};
+
+type TestResults = Record<string, TestResult>;
+
 export default function AnonymousTestPage() {
   const user = useUser({ or: "anonymous-if-exists[deprecated]" });
   const isAnonymous = user?.isAnonymous;
   const app = useStackApp();
-  const [testResults, setTestResults] = useState<{ [key: string]: any }>({});
+  const [testResults, setTestResults] = useState<TestResults>({});
   const [loading, setLoading] = useState<string | null>(null);
 
   const signUpAnonymously = async () => {

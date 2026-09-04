@@ -19,6 +19,7 @@ import { Link } from "@/components/link";
 import { useDashboardInternalUser } from "@/lib/dashboard-user";
 import { PLAN_LIMITS, resolvePlanId } from "@hexclave/shared/dist/plans";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ErrorBoundary } from "next/dist/client/components/error-boundary";
@@ -29,7 +30,7 @@ import { useAdminApp } from "../use-admin-app";
 // Types
 // ============================================================================
 
-export type RowData = Record<string, unknown>;
+export type RowData = Record<string, Json>;
 
 export type ConfigFolder = {
   displayName: string,

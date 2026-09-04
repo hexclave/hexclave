@@ -4,7 +4,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 
 type TraceAttributeValue = string | number | boolean | string[] | number[] | boolean[];
 type TraceSpan = {
-  setAttribute: (key: string, value: TraceAttributeValue) => unknown,
+  setAttribute: (key: string, value: TraceAttributeValue) => void,
 };
 
 const configuredTraceExporterUrl = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT;

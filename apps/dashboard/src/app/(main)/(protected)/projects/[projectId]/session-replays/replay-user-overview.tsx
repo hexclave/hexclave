@@ -136,7 +136,7 @@ function toNumberOrNull(value: unknown): number | null {
   return null;
 }
 
-function toCount(value: unknown): number {
+function parseCount(value: unknown): number {
   return toNumberOrNull(value) ?? 0;
 }
 
@@ -223,7 +223,7 @@ function useReplaySessionContext(replay: ReplayUserOverviewReplay): SessionConte
             screenHeight: entry === null ? null : toNumberOrNull(entry.screen_height),
             viewportWidth: entry === null ? null : toNumberOrNull(entry.viewport_width),
             viewportHeight: entry === null ? null : toNumberOrNull(entry.viewport_height),
-            activity: counts === null ? null : { pageViews: toCount(counts.page_views), clicks: toCount(counts.clicks) },
+            activity: counts === null ? null : { pageViews: parseCount(counts.page_views), clicks: parseCount(counts.clicks) },
             geo: geo !== null && geo.countryCode === null && geo.cityName === null ? null : geo,
           },
         });

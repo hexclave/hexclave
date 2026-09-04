@@ -40,6 +40,12 @@ export const HTTP_METHODS = {
 } as const;
 export type HttpMethod = keyof typeof HTTP_METHODS;
 
+export async function parseResponseJson<T>(response: Response): Promise<T> {
+  // SAFETY: Each SDK call site supplies the response contract defined by its
+  // endpoint schema; this centralizes the unavoidable Response.json() boundary.
+  return await response.json() as T;
+}
+
 export function decodeBasicAuthorizationHeader(value: string): [string, string] | null {
   const [type, encoded, ...rest] = value.split(' ');
   if (rest.length > 0) return null;

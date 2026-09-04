@@ -32,7 +32,7 @@ vi.mock("@hexclave/ui", async () => {
   };
 });
 
-const previousActEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+const previousActEnvironment = globalThis["IS_REACT_ACT_ENVIRONMENT"];
 
 function createAppTestDouble(options: {
   callOAuthCallback: () => Promise<boolean>,

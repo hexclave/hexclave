@@ -4,6 +4,8 @@ import type {
   AnalyticsChartSeries,
 } from "./types";
 
+type AnalyticsChartSegmentThemeMap = Record<string, { light: string, dark: string }>;
+
 export const ANALYTICS_CHART_DEFAULT_PALETTE: AnalyticsChartPalette = {
   primary: {
     kind: "procedural",
@@ -55,9 +57,9 @@ export function buildRampColors(
 
 /** Per-segment light/dark colors for `ChartConfig.theme` (SVG only; siblings use inline vars). */
 export function buildSegmentThemeMap(
-  series: readonly AnalyticsChartSeries[],
-  ramp: AnalyticsChartSegmentRamp,
-): Record<string, { light: string, dark: string }> {
+	series: readonly AnalyticsChartSeries[],
+	ramp: AnalyticsChartSegmentRamp,
+): AnalyticsChartSegmentThemeMap {
   const light = buildRampColors(ramp, series.length, "light");
   const dark = buildRampColors(ramp, series.length, "dark");
   const out: Record<string, { light: string, dark: string }> = {};

@@ -165,8 +165,8 @@ function classifyHeapObjectPayload(obj: PiledriverObject): string {
   if (typeof obj !== "object") return typeof obj;
   const keys = Object.keys(obj).sort();
   if (keys.includes("entries") && keys.includes("children") && keys.includes("augmentation") && keys.includes("size") && keys.includes("minKey") && keys.includes("maxKey")) {
-    const entries = Reflect.get(obj, "entries");
-    const children = Reflect.get(obj, "children");
+    const entries = obj["entries"];
+    const children = obj["children"];
     return `btree-node:entries=${Array.isArray(entries) ? entries.length : "?"}:children=${Array.isArray(children) ? children.length : "?"}`;
   }
   if (keys.includes("key") && keys.includes("id") && keys.length === 2) return "multi-key";
@@ -335,14 +335,14 @@ export function declareBasePiledriverDatabase(lowLevelDb: LowLevelDatabase, opti
         const heapObjectGetStartedAt = performance.now();
         const heapObject = await heapObj.get();
         if (serializationTimingStats !== undefined) {
-          const shape = classifyHeapObjectPayload(heapObject);
+          const objectKind = classifyHeapObjectPayload(heapObject);
           const inlineNodeCount = totalInlineNodes(countPiledriverInlineNodes(heapObject));
-          incrementMapCount(serializationTimingStats.heapObjectCacheMissesByShape, shape);
-          addMapCount(serializationTimingStats.heapObjectCacheMissInlineNodeCountsByShape, shape, inlineNodeCount);
+          incrementMapCount(serializationTimingStats.heapObjectCacheMissesByShape, objectKind);
+          addMapCount(serializationTimingStats.heapObjectCacheMissInlineNodeCountsByShape, objectKind, inlineNodeCount);
           const branch = branchKey === undefined ? undefined : serializationBranchStatsByKey(serializationTimingStats, branchKey);
           if (branch !== undefined) {
-            incrementMapCount(branch.heapObjectCacheMissesByShape, shape);
-            addMapCount(branch.heapObjectCacheMissInlineNodeCountsByShape, shape, inlineNodeCount);
+            incrementMapCount(branch.heapObjectCacheMissesByShape, objectKind);
+            addMapCount(branch.heapObjectCacheMissInlineNodeCountsByShape, objectKind, inlineNodeCount);
           }
           serializationTimingStats.heapObjectGetTotalMs += performance.now() - heapObjectGetStartedAt;
         }
@@ -844,9 +844,9 @@ export function declareBasePiledriverDatabase(lowLevelDb: LowLevelDatabase, opti
             heapObjectCacheHits: stats.heapObjectCacheHits,
             heapObjectCacheMisses: stats.heapObjectCacheMisses,
             topHeapObjectCacheMissShapes: [...stats.heapObjectCacheMissesByShape.entries()]
-              .map(([shape, count]) => {
-                const totalInlineNodeCount = stats.heapObjectCacheMissInlineNodeCountsByShape.get(shape) ?? 0;
-                return { shape, count, totalInlineNodeCount, averageInlineNodeCount: count === 0 ? 0 : totalInlineNodeCount / count };
+              .map(([objectKind, count]) => {
+                const totalInlineNodeCount = stats.heapObjectCacheMissInlineNodeCountsByShape.get(objectKind) ?? 0;
+                return { "shape": objectKind, count, totalInlineNodeCount, averageInlineNodeCount: count === 0 ? 0 : totalInlineNodeCount / count };
               })
               .sort((a, b) => b.count - a.count)
               .slice(0, 5),
@@ -854,9 +854,9 @@ export function declareBasePiledriverDatabase(lowLevelDb: LowLevelDatabase, opti
           .sort((a, b) => b.totalNodes - a.totalNodes)
           .slice(0, 5);
         const topHeapObjectCacheMissShapes = [...timingStats.heapObjectCacheMissesByShape.entries()]
-          .map(([shape, count]) => {
-            const totalInlineNodeCount = timingStats.heapObjectCacheMissInlineNodeCountsByShape.get(shape) ?? 0;
-            return { shape, count, totalInlineNodeCount, averageInlineNodeCount: count === 0 ? 0 : totalInlineNodeCount / count };
+          .map(([objectKind, count]) => {
+            const totalInlineNodeCount = timingStats.heapObjectCacheMissInlineNodeCountsByShape.get(objectKind) ?? 0;
+            return { "shape": objectKind, count, totalInlineNodeCount, averageInlineNodeCount: count === 0 ? 0 : totalInlineNodeCount / count };
           })
           .sort((a, b) => b.count - a.count)
           .slice(0, 10);

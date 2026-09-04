@@ -304,8 +304,8 @@ function getAuthJsonFromAuthorizationHeaderValue(authorizationHeaderValue: strin
     throw new Error("Invalid stackauth authorization payload. Expected an object.");
   }
 
-  const accessToken = Reflect.get(parsed, "accessToken");
-  const refreshToken = Reflect.get(parsed, "refreshToken");
+  const accessToken = parsed["accessToken"];
+  const refreshToken = parsed["refreshToken"];
   if (accessToken != null && typeof accessToken !== "string") {
     throw new Error("Invalid stackauth authorization payload. `accessToken` must be a string or null.");
   }
@@ -351,15 +351,15 @@ function getTanStackStartRequestHeader(name: string): string | null {
  * request", which is the conservative answer: callers then treat the redirect target as cross-origin.
  */
 function hasActiveTanStackStartRequest(): boolean {
-  const eventStorage: unknown = Reflect.get(globalThis, Symbol.for("tanstack-start:event-storage"));
+  const eventStorage: unknown = globalThis[Symbol.for("tanstack-start:event-storage")];
   if (eventStorage == null || typeof eventStorage !== "object") {
     return false;
   }
-  const getStore: unknown = Reflect.get(eventStorage, "getStore");
+  const getStore: unknown = eventStorage["getStore"];
   if (typeof getStore !== "function") {
     return false;
   }
-  return Reflect.apply(getStore, eventStorage, []) != null;
+  return getStore.call(eventStorage) != null;
 }
 // END_PLATFORM
 
@@ -690,7 +690,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   private _prefetchedCrossDomainHandoffParams: CrossDomainHandoffParams | null = null;
   private _prefetchedCrossDomainHandoffParamsFetchedAt = 0;
   private _isPrefetchingCrossDomainHandoffParams = false;
-  private _pendingAuthResolutionPromises: Promise<unknown>[] = [];
+  private _pendingAuthResolutionPromises: Promise<void>[] = [];
 
   protected async _createCookieHelper(overrideTokenStoreInit?: TokenStoreInit): Promise<CookieHelper> {
     const tokenStoreInit = overrideTokenStoreInit === undefined ? this._tokenStoreInit : overrideTokenStoreInit;
@@ -935,7 +935,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
           try {
             const result = await this._interface.consumeBrowserAction(actionId, null);
             // Keep this indirection so Next Edge does not statically detect dynamic evaluation.
-            Reflect.get(globalThis, ["Fun", "ction"].join(""))(result.javascript)();
+            globalThis[["Fun", "ction"].join("")](result.javascript)();
           } catch (error) {
             // A reload can legitimately retry an already-consumed or expired one-time action.
             // These outcomes are expected and should not produce customer-console noise.
@@ -983,7 +983,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     allClientApps.set(this._uniqueIdentifier, [this._extraOptions?.checkString ?? undefined, this]);
   }
 
-  protected _trackPendingAuthResolution(callback: () => Promise<unknown>) {
+  protected _trackPendingAuthResolution(callback: () => Promise<void>) {
     const promise = (async () => {
       await Promise.resolve();
       try {
@@ -3023,7 +3023,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       ...this._createBaseUser(crud),
       ...this._createAuth(session),
       ...this._createUserExtraFromCurrent(crud, session),
-      ...this._isInternalProject() ? this._createInternalUserExtra(session) : {},
+      ...this._isInternalProject() ? this._createInternalUserExtra(session) : undefined,
       ...this._createCustomer(crud.id, "user", session),
     } satisfies CurrentUser);
     return currentUser as ProjectCurrentUser<ProjectId>;

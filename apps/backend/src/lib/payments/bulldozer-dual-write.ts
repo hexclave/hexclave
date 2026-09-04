@@ -10,10 +10,12 @@
 import { Prisma } from "@/generated/prisma/client";
 import { bulldozerCustomerPath, fetchBulldozerServerJson } from "@/lib/bulldozer-server-client";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
+import { isJsonSerializable } from "@hexclave/shared/dist/utils/json";
 import {
   PAYMENT_PROVIDERS,
   TRANSACTION_TYPES,
   type ManualTransactionRow,
+  type Json as PaymentJson,
   type PaymentProvider,
   type TransactionEntryData,
   type TransactionType,
@@ -21,6 +23,13 @@ import {
 
 function dateToMillis(d: Date | null | undefined): number | null {
   return d ? d.getTime() : null;
+}
+
+function toStoredJson(value: unknown): PaymentJson {
+  if (!isJsonSerializable(value)) {
+    throw new Error("Payment row contains a value that cannot be stored as JSON");
+  }
+  return value;
 }
 
 // ── Conversion functions ──────────────────────────────────────────────
@@ -47,7 +56,7 @@ export function subscriptionToStoredRow(sub: {
   productRevokedAt: Date | null,
   creationSource: string,
   createdAt: Date,
-}): Record<string, unknown> {
+}): Record<string, PaymentJson> {
   return {
     id: sub.id,
     tenancyId: sub.tenancyId,
@@ -55,7 +64,7 @@ export function subscriptionToStoredRow(sub: {
     customerType: sub.customerType.toLowerCase(),
     productId: sub.productId,
     priceId: sub.priceId,
-    product: sub.product,
+    product: toStoredJson(sub.product),
     quantity: sub.quantity,
     stripeSubscriptionId: sub.stripeSubscriptionId,
     status: sub.status.toLowerCase(),
@@ -81,7 +90,7 @@ export function subscriptionInvoiceToStoredRow(inv: {
   amountTotal: number | null,
   hostedInvoiceUrl: string | null,
   createdAt: Date,
-}): Record<string, unknown> {
+}): Record<string, PaymentJson> {
   return {
     id: inv.id,
     tenancyId: inv.tenancyId,
@@ -109,7 +118,7 @@ export function oneTimePurchaseToStoredRow(p: {
   refundedAt: Date | null,
   creationSource: string,
   createdAt: Date,
-}): Record<string, unknown> {
+}): Record<string, PaymentJson> {
   return {
     id: p.id,
     tenancyId: p.tenancyId,
@@ -117,7 +126,7 @@ export function oneTimePurchaseToStoredRow(p: {
     customerType: p.customerType.toLowerCase(),
     productId: p.productId,
     priceId: p.priceId,
-    product: p.product,
+    product: toStoredJson(p.product),
     quantity: p.quantity,
     stripePaymentIntentId: p.stripePaymentIntentId,
     revokedAtMillis: dateToMillis(p.revokedAt),
@@ -137,7 +146,7 @@ export function itemQuantityChangeToStoredRow(c: {
   description: string | null,
   expiresAt: Date | null,
   createdAt: Date,
-}): Record<string, unknown> {
+}): Record<string, PaymentJson> {
   return {
     id: c.id,
     tenancyId: c.tenancyId,
@@ -151,7 +160,7 @@ export function itemQuantityChangeToStoredRow(c: {
   };
 }
 
-export function manualTransactionToStoredRow(transaction: ManualTransactionRow): Record<string, unknown> {
+export function manualTransactionToStoredRow(transaction: ManualTransactionRow): ManualTransactionRow {
   return transaction;
 }
 
@@ -191,7 +200,8 @@ export function manualTransactionToPrismaRow(transaction: ManualTransactionRow) 
     paymentProvider: transaction.paymentProvider,
     effectiveAt: new Date(transaction.effectiveAtMillis),
     createdAt: new Date(transaction.createdAtMillis),
-    // Prisma Json input is wider than our entry union; shape is validated on read-back.
+    // SAFETY: ManualTransactionRow entries are JSON-safe by construction; the
+    // Prisma input type is wider than that persisted entry union.
     entries: transaction.entries as unknown as Prisma.InputJsonValue,
   };
 }

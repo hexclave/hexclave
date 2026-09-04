@@ -5,6 +5,39 @@ import { type ToolCallContentPartProps } from "@assistant-ui/react";
 import { CaretDownIcon, DatabaseIcon, SpinnerGapIcon } from "@phosphor-icons/react";
 import { useState, type ReactNode } from "react";
 
+type ToolResult = {
+  success?: boolean,
+  result?: unknown[],
+  error?: string,
+  rowCount?: number,
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readToolResult(value: unknown): ToolResult | undefined {
+  if (!isRecord(value)) return undefined;
+  if ("success" in value && value.success !== undefined && typeof value.success !== "boolean") return undefined;
+  if ("result" in value && value.result !== undefined && !Array.isArray(value.result)) return undefined;
+  if ("error" in value && value.error !== undefined && typeof value.error !== "string") return undefined;
+  if ("rowCount" in value && value.rowCount !== undefined && typeof value.rowCount !== "number") return undefined;
+  return {
+    success: typeof value.success === "boolean" ? value.success : undefined,
+    result: Array.isArray(value.result) ? value.result : undefined,
+    error: typeof value.error === "string" ? value.error : undefined,
+    rowCount: typeof value.rowCount === "number" ? value.rowCount : undefined,
+  };
+}
+
+function readErrorMessage(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.message === "string" ? value.message : undefined;
+}
+
+function readQueryArg(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.query === "string" ? value.query : undefined;
+}
+
 /**
  * Shared assistant-ui tool fallback. Renders a collapsible card for any
  * tool call streamed from the unified AI endpoint (sql-query, docs, etc.).
@@ -23,13 +56,13 @@ export function ToolFallback({
   const isComplete = status.type === "complete";
   const isIncomplete = status.type === "incomplete";
 
-  const typed = (result ?? undefined) as { success?: boolean, result?: unknown[], error?: string, rowCount?: number } | undefined;
+  const typed = readToolResult(result);
   const hasOutput = typed !== undefined;
   const isSuccess = hasOutput && typed.success !== false && !isIncomplete;
   const errorMessage = hasOutput && typed.success === false
     ? typed.error
     : isIncomplete
-      ? (status.error as { message?: string } | undefined)?.message
+      ? readErrorMessage(status.error)
       : undefined;
 
   const label = toolName === "queryAnalytics"
@@ -37,7 +70,7 @@ export function ToolFallback({
     : toolName === "readBranchConfig"
       ? "Project Config"
       : toolName;
-  const queryArg = (args as { query?: string } | undefined)?.query ?? (argsText ? argsText : undefined);
+  const queryArg = readQueryArg(args) ?? (argsText ? argsText : undefined);
 
   return (
     <div

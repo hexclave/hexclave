@@ -7,7 +7,7 @@
  *                               Mutating statements (INSERT, UPDATE, DELETE, etc.) are treated as prompts.
  */
 export function classifyClickHouseSqlVsPrompt(
-  input: unknown,
+  input: string | null | undefined,
   options: { readonlyOnly?: boolean } = {}
 ): {
   kind: "sql" | "prompt",

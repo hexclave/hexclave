@@ -271,7 +271,7 @@ function getJwtPayloadClaim(token: string, claim: string): string | null {
     if (typeof payload !== 'object' || payload === null) {
       return null;
     }
-    const value = Reflect.get(payload, claim);
+    const value = payload[claim];
     return typeof value === 'string' ? value : null;
   } catch {
     return null;
@@ -1942,7 +1942,7 @@ export function openClickmapOverlay(app: StackClientApp<true>, onClosed: () => v
   if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
     return () => {};
   }
-  const body = Reflect.get(document, 'body');
+  const body = document['body'];
   if (!hasAppendChild(body)) return () => {};
 
   getGlobalUiInstance(GLOBAL_INSTANCE_KEY)?.cleanup();

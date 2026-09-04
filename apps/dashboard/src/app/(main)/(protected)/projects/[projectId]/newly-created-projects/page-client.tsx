@@ -23,7 +23,7 @@ import { ALL_APPS_FRONTEND } from "@/lib/apps-frontend";
 import { sendInternalUserRequest } from "@/lib/hexclave-app-internals";
 import { cn } from "@/lib/utils";
 import { ALL_APPS, type AppId } from "@hexclave/shared/dist/apps/apps-config";
-import { useStackApp, useUser } from "@hexclave/next";
+import { useStackApp, useUser, type StackClientApp } from "@hexclave/next";
 import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { use } from "@hexclave/shared/dist/utils/react";
@@ -203,7 +203,7 @@ const DEFAULT_FILTERS: ListFilters = {
 const sessionComponentKeys = new WeakMap<object, number>();
 let nextSessionComponentKey = 0;
 
-function getSessionComponentKey(session: object): number {
+function getSessionComponentKey<T extends object>(session: T): number {
   const existing = sessionComponentKeys.get(session);
   if (existing != null) return existing;
   const created = nextSessionComponentKey++;
@@ -214,9 +214,9 @@ function getSessionComponentKey(session: object): number {
 function isListResponse(value: unknown): value is LegacyCompatibleListResponse {
   return value != null
     && typeof value === "object"
-    && typeof Reflect.get(value, "generated_at") === "string"
-    && Array.isArray(Reflect.get(value, "projects"))
-    && Array.isArray(Reflect.get(value, "featured_app_ids"));
+    && typeof value["generated_at"] === "string"
+    && Array.isArray(value["projects"])
+    && Array.isArray(value["featured_app_ids"]);
 }
 
 function normalizeOwner(owner: LegacyCompatibleProjectRow["owner"]): ProjectOwner {
@@ -252,11 +252,11 @@ function normalizeProjectRow(project: LegacyCompatibleProjectRow): ProjectRow {
 function isProjectDetail(value: unknown): value is LegacyCompatibleProjectDetail {
   return value != null
     && typeof value === "object"
-    && typeof Reflect.get(value, "id") === "string"
-    && Array.isArray(Reflect.get(value, "session_replays"));
+    && typeof value["id"] === "string"
+    && Array.isArray(value["session_replays"]);
 }
 
-async function fetchListState(app: object, filters: ListFilters): Promise<ListState> {
+async function fetchListState(app: StackClientApp, filters: ListFilters): Promise<ListState> {
   const minUsersValue = String(Math.max(0, Number.parseInt(filters.minUsers || "0", 10) || 0));
   const activityValue = filters.activity24h === "yes" ? "true" : "false";
   try {
@@ -292,14 +292,14 @@ async function fetchListState(app: object, filters: ListFilters): Promise<ListSt
   }
 }
 
-function fetchInitialListState(app: object, _session: object): Promise<ListState> {
+function fetchInitialListState(app: StackClientApp, _session: object): Promise<ListState> {
   // The session argument deliberately scopes the memoized promise in AuthenticatedPage,
   // even though sendInternalUserRequest reads that session through the app.
   return fetchListState(app, DEFAULT_FILTERS);
 }
 
 async function fetchProjectDetailState(
-  app: object,
+  app: StackClientApp,
   projectId: string,
   replayCursor?: string,
 ): Promise<DetailState> {

@@ -62,9 +62,9 @@ export default function PageClient() {
     [config.apps.installed]
   );
 
-  const dashboard = config.customDashboards[dashboardId] as
-    | typeof config.customDashboards[string]
-    | undefined;
+  const dashboard = Object.hasOwn(config.customDashboards, dashboardId)
+    ? config.customDashboards[dashboardId]
+    : undefined;
 
   useEffect(() => {
     if (dashboard) {

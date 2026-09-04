@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { constructRedirectUrl } from "./url";
 
-const previousWindow = Reflect.get(globalThis, "window");
+const previousWindow = globalThis["window"];
 const hadPreviousWindow = Reflect.has(globalThis, "window");
 
 afterEach(() => {

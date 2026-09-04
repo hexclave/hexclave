@@ -1,18 +1,14 @@
 import http from "node:http";
 import { URL } from "node:url";
 import * as ELKModule from "elkjs/lib/elk.bundled.js";
+import type { ElkNode } from "elkjs/lib/elk-api.js";
 import { PiledriverObject } from "../piledriver/index.js";
 import { createExampleFungibleLedgerDatabase } from "./example-schema.js";
 import type { BulldozerDatabaseTableDescriptor } from "./index.js";
 
 type StudioRuntime = Awaited<ReturnType<typeof createRuntime>>;
-type ElkLayoutResult = {
-  children?: Array<{ id?: string, x?: number, y?: number }>,
-  width?: number,
-  height?: number,
-};
 type ElkInstance = {
-  layout(graph: unknown): Promise<ElkLayoutResult>,
+  layout(graph: ElkNode): Promise<ElkNode>,
 };
 type ElkConstructor = new () => ElkInstance;
 const DEFAULT_HOST = "127.0.0.1";
@@ -466,4 +462,3 @@ export async function runBulldozerStudio(options: { host?: string, port?: number
     close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
   };
 }
-

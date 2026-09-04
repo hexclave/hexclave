@@ -357,9 +357,9 @@ function extendWithReadReplicas<T extends PrismaClient>(client: T, replicaConnec
     replicas: [replicaClient],
   }));
 
-  // The $extends result doesn't structurally satisfy PrismaClient (e.g. it drops $on), but at runtime it supports
-  // everything extendWithReplicationWait uses ($extends, $transaction, $queryRaw), hence the cast.
-  return extendWithReplicationWait(clientWithReadReplicas as unknown as T, [replicaClient]) as unknown as PrismaClientWithReplica<T>;
+  // SAFETY: Prisma's extension type omits `$on`, but the runtime object keeps every method used by
+  // extendWithReplicationWait. The final type preserves the caller's original client shape.
+  return extendWithReplicationWait(clientWithReadReplicas as T, [replicaClient]) as PrismaClientWithReplica<T>;
 }
 
 function extendWithFakeReadReplica<T extends PrismaClient>(client: T): PrismaClientWithReplica<T> {

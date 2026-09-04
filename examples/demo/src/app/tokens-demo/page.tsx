@@ -2,29 +2,31 @@
 
 import { useStackApp, useUser } from "@hexclave/next";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import { isJsonSerializable, parseJson, type Json, type JsonObject } from "@hexclave/shared/dist/utils/json";
 import { Button, Card, Switch, Typography } from "@hexclave/ui";
 import { useState } from "react";
 
 // Decode JWT without verification (for display purposes only)
-function decodeJwt(token: string): Record<string, any> | null {
+function decodeJwt(token: string): JsonObject | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-    const payload = JSON.parse(atob(parts[1]));
-    return payload;
+    const parsed = parseJson(atob(parts[1]));
+    if (parsed.status !== "ok" || parsed.data === null || typeof parsed.data !== "object" || Array.isArray(parsed.data)) return null;
+    return parsed.data;
   } catch {
     return null;
   }
 }
 
 // Format timestamp fields as readable dates
-function formatPayload(payload: Record<string, any>): Record<string, any> {
-  const formatted: Record<string, any> = {};
+function formatPayload(payload: JsonObject): JsonObject {
+  const formatted: JsonObject = {};
   for (const [key, value] of Object.entries(payload)) {
     if ((key === 'iat' || key === 'exp' || key === 'nbf') && typeof value === 'number') {
       const date = new Date(value * 1000);
       formatted[key] = `${value} (${date.toLocaleString()})`;
-    } else if (typeof value === 'object' && value !== null) {
+    } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
       formatted[key] = formatPayload(value);
     } else {
       formatted[key] = value;
@@ -74,8 +76,10 @@ function TokenDisplay({ label, value, isLoading, showDecoded }: { label: string,
   );
 }
 
-function JsonDisplay({ label, value, isLoading, accessTokenKey }: { label: string, value: any, isLoading?: boolean, accessTokenKey?: string }) {
-  const accessToken = accessTokenKey && value ? value[accessTokenKey] : null;
+function JsonDisplay({ label, value, isLoading, accessTokenKey }: { label: string, value: Json | null | undefined, isLoading?: boolean, accessTokenKey?: string }) {
+  const accessToken = accessTokenKey && value !== null && value !== undefined && typeof value === "object" && !Array.isArray(value) && typeof value[accessTokenKey] === "string"
+    ? value[accessTokenKey]
+    : null;
   return (
     <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
       <Typography variant="secondary" className="text-xs font-medium mb-1 text-gray-500 dark:text-gray-400">
@@ -97,6 +101,41 @@ function JsonDisplay({ label, value, isLoading, accessTokenKey }: { label: strin
   );
 }
 
+type OptionalTokenMethodName =
+  | "useAccessToken"
+  | "useRefreshToken"
+  | "useAuthorizationHeader"
+  | "useAuthHeaders"
+  | "useAuthJson"
+  | "getAccessToken"
+  | "getRefreshToken"
+  | "getAuthorizationHeader";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readOptionalMethod(owner: unknown, name: OptionalTokenMethodName): unknown {
+  if (!isRecord(owner)) return undefined;
+  const method = owner[name];
+  return typeof method === "function" ? method.call(owner) : undefined;
+}
+
+function readOptionalToken(owner: unknown, name: OptionalTokenMethodName): string | null {
+  const value = readOptionalMethod(owner, name);
+  return typeof value === "string" ? value : null;
+}
+
+async function readOptionalTokenAsync(owner: unknown, name: OptionalTokenMethodName): Promise<string | null> {
+  const value = await readOptionalMethod(owner, name);
+  return typeof value === "string" ? value : null;
+}
+
+function readOptionalJson(owner: unknown, name: OptionalTokenMethodName): Json | null {
+  const value = readOptionalMethod(owner, name);
+  return isJsonSerializable(value) ? value : null;
+}
+
 function HookBasedTokens() {
   const user = useUser();
   const app = useStackApp();
@@ -112,19 +151,19 @@ function HookBasedTokens() {
   }
 
   // Using the hook variants
-  const accessToken = (user as any).useAccessToken?.() ?? null;
-  const refreshToken = (user as any).useRefreshToken?.() ?? null;
-  const authorizationHeader = (user as any).useAuthorizationHeader?.() ?? null;
-  const authHeaders = (user as any).useAuthHeaders?.() ?? null;
-  const authJson = (user as any).useAuthJson?.() ?? null;
+  const accessToken = readOptionalToken(user, "useAccessToken");
+  const refreshToken = readOptionalToken(user, "useRefreshToken");
+  const authorizationHeader = readOptionalToken(user, "useAuthorizationHeader");
+  const authHeaders = readOptionalJson(user, "useAuthHeaders");
+  const authJson = readOptionalJson(user, "useAuthJson");
   const sessionTokens = user.currentSession.useTokens();
 
   // App-level hooks
-  const appAccessToken = (app as any).useAccessToken?.() ?? null;
-  const appRefreshToken = (app as any).useRefreshToken?.() ?? null;
-  const appAuthorizationHeader = (app as any).useAuthorizationHeader?.() ?? null;
-  const appAuthHeaders = (app as any).useAuthHeaders?.() ?? null;
-  const appAuthJson = (app as any).useAuthJson?.() ?? null;
+  const appAccessToken = readOptionalToken(app, "useAccessToken");
+  const appRefreshToken = readOptionalToken(app, "useRefreshToken");
+  const appAuthorizationHeader = readOptionalToken(app, "useAuthorizationHeader");
+  const appAuthHeaders = readOptionalJson(app, "useAuthHeaders");
+  const appAuthJson = readOptionalJson(app, "useAuthJson");
 
   return (
     <div className="space-y-6">
@@ -187,17 +226,17 @@ function AsyncBasedTokens() {
       const results: typeof asyncResults = {};
 
       if (user) {
-        results.userAccessToken = await (user as any).getAccessToken?.();
-        results.userRefreshToken = await (user as any).getRefreshToken?.();
-        results.userAuthorizationHeader = await (user as any).getAuthorizationHeader?.();
+        results.userAccessToken = await readOptionalTokenAsync(user, "getAccessToken");
+        results.userRefreshToken = await readOptionalTokenAsync(user, "getRefreshToken");
+        results.userAuthorizationHeader = await readOptionalTokenAsync(user, "getAuthorizationHeader");
         results.userAuthHeaders = await user.getAuthHeaders();
         results.userAuthJson = await user.getAuthJson();
         results.sessionTokens = await user.currentSession.getTokens();
       }
 
-      results.appAccessToken = await (app as any).getAccessToken?.();
-      results.appRefreshToken = await (app as any).getRefreshToken?.();
-      results.appAuthorizationHeader = await (app as any).getAuthorizationHeader?.();
+      results.appAccessToken = await readOptionalTokenAsync(app, "getAccessToken");
+      results.appRefreshToken = await readOptionalTokenAsync(app, "getRefreshToken");
+      results.appAuthorizationHeader = await readOptionalTokenAsync(app, "getAuthorizationHeader");
       results.appAuthHeaders = await app.getAuthHeaders();
       results.appAuthJson = await app.getAuthJson();
 

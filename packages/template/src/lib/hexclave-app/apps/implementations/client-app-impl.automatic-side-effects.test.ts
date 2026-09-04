@@ -13,8 +13,8 @@ const baseOptions = {
 
 describe("HexclaveClientApp automatic side effects", () => {
   it("does not inspect browser state when disabled", () => {
-    const previousWindow = Reflect.get(globalThis, "window");
-    const previousDocument = Reflect.get(globalThis, "document");
+    const previousWindow = globalThis["window"];
+    const previousDocument = globalThis["document"];
     const hadPreviousWindow = Reflect.has(globalThis, "window");
     const hadPreviousDocument = Reflect.has(globalThis, "document");
     const browserGlobal = {};
@@ -57,7 +57,7 @@ describe("HexclaveClientApp automatic side effects", () => {
 
   it("does not initialize automatic side effects when disabled", () => {
     const methodName = "_initializeAutomaticSideEffects";
-    const originalInitializer = Reflect.get(HexclaveClientApp.prototype, methodName);
+    const originalInitializer = HexclaveClientApp.prototype[methodName];
     let initializationCalls = 0;
     Reflect.set(HexclaveClientApp.prototype, methodName, () => {
       initializationCalls += 1;
@@ -77,7 +77,7 @@ describe("HexclaveClientApp automatic side effects", () => {
 
   it.each([undefined, true])("retains automatic initialization when automaticSideEffects is %s", (automaticSideEffects) => {
     const methodName = "_initializeAutomaticSideEffects";
-    const originalInitializer = Reflect.get(HexclaveClientApp.prototype, methodName);
+    const originalInitializer = HexclaveClientApp.prototype[methodName];
     let initializationCalls = 0;
     Reflect.set(HexclaveClientApp.prototype, methodName, () => {
       initializationCalls += 1;
@@ -123,7 +123,7 @@ describe("HexclaveClientApp automatic side effects", () => {
 
   it("keeps stripping the browser action parameter after a router restores it", () => {
     vi.useFakeTimers();
-    const previousWindow = Reflect.get(globalThis, "window");
+    const previousWindow = globalThis["window"];
     const hadPreviousWindow = Reflect.has(globalThis, "window");
     let currentHref = "http://localhost:12345/?hexclave_action_id=action-id";
     const browserGlobal = {

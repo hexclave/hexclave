@@ -1,6 +1,7 @@
 import "server-only";
 
 import { StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { z } from "zod";
 
 export async function readJsonBody(req: Request): Promise<unknown> {
@@ -44,7 +45,7 @@ export function handleApiError(scope: string, err: unknown): Response {
   });
 }
 
-export function successResponse(extra?: Record<string, unknown>): Response {
+export function successResponse(extra?: Record<string, Json>): Response {
   return Response.json({ success: true, ...extra });
 }
 

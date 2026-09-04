@@ -1,12 +1,13 @@
 import { Result } from "./results";
 
+export type JsonObject = { [key: string]: Json };
 export type Json =
   | null
   | boolean
   | number
   | string
   | Json[]
-  | { [key: string]: Json };
+  | JsonObject;
 
 export type ReadonlyJson =
   | null

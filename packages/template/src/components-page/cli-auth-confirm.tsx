@@ -1,6 +1,7 @@
 'use client';
 
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import { isJsonSerializable, type Json } from "@hexclave/shared/dist/utils/json";
 import { Typography } from "@hexclave/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageCard } from "../components/message-cards/message-card";
@@ -47,14 +48,15 @@ function getError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
-function getObjectField(data: unknown, fieldName: string): unknown {
-  return typeof data === "object" && data !== null && fieldName in data
-    ? data[fieldName as keyof typeof data]
+function parseObjectField(data: unknown, fieldName: string): Json | undefined {
+  if (!isJsonSerializable(data) || data === null || Array.isArray(data)) return undefined;
+  return fieldName in data
+    ? data[fieldName]
     : undefined;
 }
 
-function getStringField(data: unknown, fieldName: string): string | undefined {
-  const value = getObjectField(data, fieldName);
+function parseStringField(data: unknown, fieldName: string): string | undefined {
+  const value = parseObjectField(data, fieldName);
   return typeof value === "string" ? value : undefined;
 }
 
@@ -160,7 +162,7 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
         throw new Error(`Failed to verify login code: ${checkResult.status} ${await checkResult.text()}`);
       }
       const checkData: unknown = await checkResult.json();
-      const cliSessionState = getStringField(checkData, "cli_session_state") ?? null;
+      const cliSessionState = parseStringField(checkData, "cli_session_state") ?? null;
 
       if (cliSessionState === "anonymous") {
         const claimResult = await postCliAuthComplete(app, { login_code: loginCode, mode: "claim-anon-session" });
@@ -170,8 +172,8 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
         }
 
         const tokens: unknown = await claimResult.json();
-        const accessToken = getStringField(tokens, "access_token");
-        const refreshToken = getStringField(tokens, "refresh_token");
+        const accessToken = parseStringField(tokens, "access_token");
+        const refreshToken = parseStringField(tokens, "refresh_token");
         if (!accessToken || !refreshToken) {
           throw new Error("Anonymous CLI session claim did not return tokens");
         }

@@ -63,26 +63,26 @@ export function isProjectOnboardingState(value: unknown): value is ProjectOnboar
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
-  const selectedConfigChoice = Reflect.get(value, "selected_config_choice");
+  const selectedConfigChoice = value["selected_config_choice"];
   if (selectedConfigChoice !== "create-new" && selectedConfigChoice !== "link-existing") {
     return false;
   }
-  const selectedApps = Reflect.get(value, "selected_apps");
+  const selectedApps = value["selected_apps"];
   if (!Array.isArray(selectedApps) || !selectedApps.every((entry) => ALL_APP_IDS.some((appId) => appId === entry))) {
     return false;
   }
-  const selectedSignInMethods = Reflect.get(value, "selected_sign_in_methods");
+  const selectedSignInMethods = value["selected_sign_in_methods"];
   if (
     !Array.isArray(selectedSignInMethods)
     || !selectedSignInMethods.every((entry) => SIGN_IN_METHODS.some((method) => method.id === entry))
   ) {
     return false;
   }
-  const selectedEmailThemeId = Reflect.get(value, "selected_email_theme_id");
+  const selectedEmailThemeId = value["selected_email_theme_id"];
   if (selectedEmailThemeId !== null && typeof selectedEmailThemeId !== "string") {
     return false;
   }
-  const selectedPaymentsCountry = Reflect.get(value, "selected_payments_country");
+  const selectedPaymentsCountry = value["selected_payments_country"];
   if (selectedPaymentsCountry !== "US" && selectedPaymentsCountry !== "OTHER") {
     return false;
   }
@@ -145,7 +145,7 @@ export function getStackAppInternals(appValue: unknown): HexclaveAppInternals {
     throw new Error("The Stack app instance is unavailable.");
   }
 
-  const internals = Reflect.get(appValue, hexclaveAppInternalsSymbol);
+  const internals = appValue[hexclaveAppInternalsSymbol];
   if (!isStackAppInternals(internals)) {
     throw new Error("The Stack client app cannot send internal requests.");
   }

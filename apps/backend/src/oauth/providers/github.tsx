@@ -107,7 +107,7 @@ export class GithubProvider extends OAuthBaseProvider {
     return validateUserInfo({
       accountId: rawUserInfo.id?.toString(),
       displayName: rawUserInfo.name,
-      profileImageUrl: rawUserInfo.avatar_url as any,
+      profileImageUrl: rawUserInfo.avatar_url,
       email: email,
       emailVerified: verified,
       accountCreatedAtMillis: parseOAuthAccountCreatedAtMillis(rawUserInfo.created_at),

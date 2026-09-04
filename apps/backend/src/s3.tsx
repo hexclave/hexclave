@@ -173,7 +173,7 @@ function isDestroyableBody(body: unknown): body is { destroy: () => void } {
   return typeof body === "object" && body !== null && "destroy" in body && typeof body.destroy === "function";
 }
 
-function isCancelableBody(body: unknown): body is { cancel: (reason?: unknown) => Promise<unknown> } {
+function isCancelableBody(body: unknown): body is { cancel: (reason?: unknown) => Promise<void> } {
   return typeof body === "object" && body !== null && "cancel" in body && typeof body.cancel === "function";
 }
 

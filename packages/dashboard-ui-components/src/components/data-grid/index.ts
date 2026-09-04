@@ -39,6 +39,7 @@ export type {
   DataGridColumnPin,
   DataGridDateDisplay,
   DataGridDateFormat,
+  DataGridCellValue,
   DataGridCellContext,
   DataGridHeaderContext,
   DataGridColumnDef,

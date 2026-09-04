@@ -44,13 +44,13 @@ type OAuthAuthorizeResult =
   | { ok: true, location: string }
   | { ok: false, code: string, message: string };
 
-function getDebugInternals(app: ReturnType<typeof useStackApp>): {
+function readDebugInternals(app: ReturnType<typeof useStackApp>): {
   sendRequest: (path: string, init: RequestInit) => Promise<Response>,
   signInWithTokens: (tokens: { accessToken: string, refreshToken: string }) => Promise<void>,
 } {
   const candidate = app[hexclaveAppInternalsSymbol];
-  const sendRequest = Reflect.get(candidate, "sendRequest");
-  const signInWithTokens = Reflect.get(candidate, "signInWithTokens");
+  const sendRequest = candidate["sendRequest"];
+  const signInWithTokens = candidate["signInWithTokens"];
 
   if (typeof sendRequest !== "function") {
     throw new Error("Expected demo app internals to expose sendRequest for Turnstile debug flows");
@@ -63,6 +63,20 @@ function getDebugInternals(app: ReturnType<typeof useStackApp>): {
     sendRequest: async (path, init) => await sendRequest(path, init),
     signInWithTokens: async (tokens) => await signInWithTokens(tokens),
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readStringField(value: unknown, key: string): string | null {
+  if (!isRecord(value)) return null;
+  const field = value[key];
+  return typeof field === "string" ? field : null;
+}
+
+async function readResponseJson(response: Response): Promise<unknown> {
+  return await response.json();
 }
 
 function getDemoApiUrl(): string {
@@ -133,7 +147,7 @@ async function debugSignup(
     turnstilePhase?: "invisible" | "visible",
   },
 ): Promise<SignupResult> {
-  const bodyObj: Record<string, unknown> = {
+  const bodyObj: Record<string, string> = {
     email: options.email,
     password: options.password,
   };
@@ -151,11 +165,14 @@ async function debugSignup(
       body: JSON.stringify(bodyObj),
     });
     if (res.ok) {
-      const resBody = await res.json().catch(() => ({}));
-      return { ok: true, accessToken: resBody.access_token, refreshToken: resBody.refresh_token };
+      const resBody = await readResponseJson(res);
+      const accessToken = readStringField(resBody, "access_token");
+      const refreshToken = readStringField(resBody, "refresh_token");
+      if (accessToken === null || refreshToken === null) throw new Error("Sign-up response did not include session tokens.");
+      return { ok: true, accessToken, refreshToken };
     }
-    const resBody = await res.json().catch(() => ({}));
-    return { ok: false, code: resBody.code ?? `HTTP_${res.status}`, message: resBody.message ?? res.statusText };
+    const resBody = await readResponseJson(res);
+    return { ok: false, code: readStringField(resBody, "code") ?? `HTTP_${res.status}`, message: readStringField(resBody, "message") ?? res.statusText };
   } catch (e: unknown) {
     // sendClientRequest throws KnownErrors instead of returning error responses
     if (e instanceof KnownErrors.BotChallengeRequired) {
@@ -185,7 +202,7 @@ async function debugMagicLinkSend(
     turnstilePhase?: "invisible" | "visible",
   },
 ): Promise<MagicLinkSendResult> {
-  const bodyObj: Record<string, unknown> = {
+  const bodyObj: Record<string, string> = {
     email: options.email,
     callback_url: options.callbackUrl,
   };
@@ -203,11 +220,11 @@ async function debugMagicLinkSend(
       body: JSON.stringify(bodyObj),
     });
     if (res.ok) {
-      const resBody = await res.json().catch(() => ({}));
-      return { ok: true, nonce: typeof resBody.nonce === "string" ? resBody.nonce : "" };
+      const resBody = await readResponseJson(res);
+      return { ok: true, nonce: readStringField(resBody, "nonce") ?? "" };
     }
-    const resBody = await res.json().catch(() => ({}));
-    return { ok: false, code: resBody.code ?? `HTTP_${res.status}`, message: resBody.message ?? res.statusText };
+    const resBody = await readResponseJson(res);
+    return { ok: false, code: readStringField(resBody, "code") ?? `HTTP_${res.status}`, message: readStringField(resBody, "message") ?? res.statusText };
   } catch (e: unknown) {
     if (e instanceof KnownErrors.BotChallengeRequired) {
       return { ok: false, code: "BOT_CHALLENGE_REQUIRED", message: e.message };
@@ -264,14 +281,15 @@ async function debugOAuthAuthorize(
       method: "GET",
     });
     if (res.ok) {
-      const resBody = await res.json().catch(() => ({}));
-      if (typeof resBody.location !== "string") {
+      const resBody = await readResponseJson(res);
+      const location = readStringField(resBody, "location");
+      if (location === null) {
         return { ok: false, code: "MISSING_LOCATION", message: "OAuth authorize response did not include a redirect location." };
       }
-      return { ok: true, location: resBody.location };
+      return { ok: true, location };
     }
-    const resBody = await res.json().catch(() => ({}));
-    return { ok: false, code: resBody.code ?? `HTTP_${res.status}`, message: resBody.message ?? res.statusText };
+    const resBody = await readResponseJson(res);
+    return { ok: false, code: readStringField(resBody, "code") ?? `HTTP_${res.status}`, message: readStringField(resBody, "message") ?? res.statusText };
   } catch (e: unknown) {
     if (e instanceof KnownErrors.BotChallengeRequired) {
       return { ok: false, code: "BOT_CHALLENGE_REQUIRED", message: e.message };
@@ -298,7 +316,7 @@ export default function TurnstileSignupPageClient() {
   const [loadingFlow, setLoadingFlow] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<FlowResult | null>(null);
 
-  const internals = getDebugInternals(app);
+  const internals = readDebugInternals(app);
   const sendRequest = internals.sendRequest;
   const signInWithTokens = internals.signInWithTokens;
   const apiUrl = getDemoApiUrl();

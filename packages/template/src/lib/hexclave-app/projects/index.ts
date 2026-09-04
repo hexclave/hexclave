@@ -2,6 +2,7 @@ import { ProductionModeError } from "@hexclave/shared/dist/helpers/production-mo
 import { AdminUserProjectsCrud, ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
 import { ProjectOnboardingStatus } from "@hexclave/shared/dist/schema-fields";
 
+import type { Config } from "@hexclave/shared/dist/config/format";
 import { CompleteConfig, EnvironmentConfigNormalizedOverride, EnvironmentConfigOverrideOverride } from "@hexclave/shared/dist/config/schema";
 import type { AdminDeploymentDomainJson, AdminDeploymentJson, AdminDeploymentServiceLogLineJson, AdminDeploymentServiceOutcomeJson, AdminProjectSecretJson, AdminDeploymentServiceJson } from "@hexclave/shared/dist/interface/admin-interface";
 import { StackAdminApp } from "../apps/interfaces/admin-app";
@@ -132,13 +133,13 @@ export type AdminProject = {
    * Gets the raw config override at the specified level (before merging/defaults).
    * Useful for inspecting exactly what's been set at each level.
    */
-  getConfigOverride(this: AdminProject, level: "branch" | "environment"): Promise<Record<string, unknown>>,
+  getConfigOverride(this: AdminProject, level: "branch" | "environment"): Promise<Config>,
 
   /**
    * Replaces the entire config override at the specified level.
    * For branch level, preserves the existing source metadata.
    */
-  replaceConfigOverride(this: AdminProject, level: "branch" | "environment", config: Record<string, unknown>): Promise<void>,
+  replaceConfigOverride(this: AdminProject, level: "branch" | "environment", config: Config): Promise<void>,
 
   getProductionModeErrors(this: AdminProject): Promise<ProductionModeError[]>,
   // NEXT_LINE_PLATFORM react-like

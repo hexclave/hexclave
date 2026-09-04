@@ -1,7 +1,10 @@
 import "server-only";
 
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
+import { isJsonSerializable } from "@hexclave/shared/dist/utils/json";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { spacetimeDbName } from "../spacetimedb-constants";
+import { z } from "zod";
 
 const SPACETIMEDB_FETCH_TIMEOUT_MS = 10_000;
 const WS_TO_HTTP_SCHEME = new Map([
@@ -55,7 +58,14 @@ export function opt<T>(value: T | null | undefined): { some: T } | { none: [] } 
   return value == null ? { none: [] } : { some: value };
 }
 
-export async function callSql(accessToken: string, sql: string): Promise<Record<string, unknown>[]> {
+const sqlResponseSchema = z.array(z.object({
+  schema: z.object({
+    elements: z.array(z.object({ name: z.object({ some: z.string().optional() }).nullable() })),
+  }),
+  rows: z.array(z.array(z.unknown())),
+}));
+
+export async function callSql(accessToken: string, sql: string): Promise<Record<string, Json>[]> {
   const base = httpBase();
   const res = await fetch(`${base}/v1/database/${encodeURIComponent(spacetimeDbName())}/sql`, {
     method: "POST",
@@ -67,17 +77,18 @@ export async function callSql(accessToken: string, sql: string): Promise<Record<
     const preview = (await res.text()).slice(0, 200);
     throw spacetimeDbError("SQL query failed", res.status, preview);
   }
-  const parsed = await res.json() as Array<{
-    schema: { elements: Array<{ name: { some?: string } | null }> },
-    rows: unknown[][],
-  }>;
+  const parsed = sqlResponseSchema.parse(await res.json());
   if (parsed.length === 0) return [];
   const first = parsed[0];
   const cols = first.schema.elements.map(e => e.name?.some ?? "");
   return first.rows.map(row => {
-    const obj: Record<string, unknown> = {};
+    const obj: Record<string, Json> = {};
     cols.forEach((col, i) => {
-      obj[col] = row[i];
+      const value = row[i];
+      if (!isJsonSerializable(value)) {
+        throw new HexclaveAssertionError(`SQL response contained a non-JSON value in column ${col}.`);
+      }
+      obj[col] = value;
     });
     return obj;
   });

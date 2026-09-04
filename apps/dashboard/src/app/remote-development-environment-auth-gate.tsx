@@ -32,12 +32,12 @@ function isHexclaveAppTokenInternals(value: unknown): value is HexclaveAppTokenI
   );
 }
 
-function getHexclaveAppTokenInternals(appValue: unknown): HexclaveAppTokenInternals {
+function getHexclaveAppTokenInternals(appValue: ReturnType<typeof useStackApp>): HexclaveAppTokenInternals {
   if (appValue == null || typeof appValue !== "object") {
     throw new Error("The Stack app instance is unavailable.");
   }
 
-  const internals = Reflect.get(appValue, hexclaveAppInternalsSymbol);
+  const internals = appValue[hexclaveAppInternalsSymbol];
   if (!isHexclaveAppTokenInternals(internals)) {
     throw new Error("The Stack client app cannot install remote development environment tokens.");
   }
@@ -101,7 +101,7 @@ async function getRemoteDevelopmentEnvironmentAccessToken(): Promise<RemoteDevel
   return parseRemoteDevelopmentEnvironmentAccessTokenResponse(await response.json());
 }
 
-async function installRemoteDevelopmentEnvironmentAccessToken(app: unknown): Promise<RemoteDevelopmentEnvironmentAccessTokenResponse> {
+async function installRemoteDevelopmentEnvironmentAccessToken(app: ReturnType<typeof useStackApp>): Promise<RemoteDevelopmentEnvironmentAccessTokenResponse> {
   const token = await getRemoteDevelopmentEnvironmentAccessToken();
   await getHexclaveAppTokenInternals(app).signInWithTokens({
     accessToken: token.accessToken,

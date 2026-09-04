@@ -36,7 +36,7 @@ describe("pushed config error overlay", () => {
     Reflect.set(app, "getProject", getProject);
     const appendChild = vi.fn();
     vi.stubEnv("NODE_ENV", "development");
-    expect(Reflect.get(envVars, "NODE_ENV")).toBe("development");
+    expect(envVars["NODE_ENV"]).toBe("development");
 
     vi.stubGlobal("window", {
       "__hexclave-pushed-config-error-overlay": null,

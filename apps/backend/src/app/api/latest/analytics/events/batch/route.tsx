@@ -42,7 +42,7 @@ function stripLoneSurrogates(value: unknown): unknown {
 // purely to evade keyword-matching adblockers (e.g. filters on "$click").
 // We gunzip + JSON.parse here so the rest of the schema can validate the
 // decoded object normally.
-function maybeDecodeBinaryBody(value: unknown): unknown {
+function decodeBinaryBody(value: unknown): unknown {
   let bytes: Uint8Array | undefined;
   if (value instanceof ArrayBuffer) {
     bytes = new Uint8Array(value);
@@ -92,7 +92,7 @@ export const POST = createSmartRouteHandler({
           data: yupMixed().defined(),
         }).defined(),
       ).defined().min(1).max(MAX_EVENTS),
-    }).defined().transform((_value, originalValue) => maybeDecodeBinaryBody(originalValue)),
+    }).defined().transform((_value, originalValue) => decodeBinaryBody(originalValue)),
   }),
   response: yupObject({
     statusCode: yupNumber().oneOf([200]).defined(),

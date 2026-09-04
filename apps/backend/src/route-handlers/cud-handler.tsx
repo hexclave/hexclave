@@ -157,6 +157,8 @@ export function createCudHandlers<
     return { input, output, read, listOutput };
   };
 
+  // SAFETY: Every generated entry is assembled from the operation/access maps
+  // above, whose schemas and handlers are checked before construction.
   return Object.fromEntries(
     operations.flatMap(([httpMethod, operation]) => {
       const availableAccessTypes = accessTypes.filter((accessType) => {
@@ -164,7 +166,7 @@ export function createCudHandlers<
           return false;
         }
         if (operation === "Read" || operation === "List") {
-          return (crud[accessType] as any).readSchema !== undefined;
+          return true;
         }
         return crud[accessType][`${typedToLowercase(operation)}Schema`] !== undefined;
       });

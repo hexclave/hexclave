@@ -37,7 +37,7 @@ describe("Breezy Piledriver", () => {
 
       const metadata = inspector.declareKvStore("piledriver-gc-reference-metadata-v3");
       const referenceCounts = (await listEntries(metadata))
-        .map(entry => Reflect.get(parseJson(entry.value), "referenceCount"))
+        .map(entry => parseJson(entry.value)["referenceCount"])
         .sort((a, b) => a - b);
       expect(referenceCounts).toEqual([1, 2]);
       expect(await listEntries(candidates)).toHaveLength(0);

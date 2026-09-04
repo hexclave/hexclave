@@ -514,6 +514,9 @@ type PageClientProps = {
 };
 
 export default function PageClient({ initialReplayId, lockedUserId }: PageClientProps) {
+  // SAFETY: The project app is the server-capable admin app; these session
+  // replay methods are part of its server interface but may be absent from an
+  // older generated SDK declaration.
   const adminApp = useAdminApp() as AdminAppWithSessionReplays;
   const serverApp = useServerApp();
   const isStandaloneReplayPage = initialReplayId != null;

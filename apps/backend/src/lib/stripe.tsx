@@ -4,7 +4,7 @@ import { ensureFreePlanForBillingTeam } from "@/lib/payments/ensure-free-plan";
 import { getProductVersion } from "@/lib/product-versions";
 import { getTenancy, Tenancy } from "@/lib/tenancies";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
-import type { productSchema } from "@hexclave/shared/dist/schema-fields";
+import { productSchema } from "@hexclave/shared/dist/schema-fields";
 import { typedIncludes } from "@hexclave/shared/dist/utils/arrays";
 import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
@@ -87,16 +87,25 @@ export async function resolveProductFromStripeMetadata(options: {
       tenancyId: options.tenancyId,
       productVersionId,
     });
-    return version.productJson as StripeMetadataProduct;
+    try {
+      return await productSchema.validate(version.productJson);
+    } catch (error) {
+      throw new HexclaveAssertionError("Stored product version has invalid product JSON.", {
+        ...options.context,
+        tenancyId: options.tenancyId,
+        productVersionId,
+        cause: error,
+      });
+    }
   }
 
   const productString = options.metadata.product ?? options.metadata.offer;
   if (productString) {
     try {
-      return JSON.parse(productString) as StripeMetadataProduct;
+      return await productSchema.validate(JSON.parse(productString));
     } catch (error) {
       throw new HexclaveAssertionError(
-        "Failed to parse product JSON from Stripe metadata. The 'product' or 'offer' field contains invalid JSON.",
+        "Failed to parse product JSON from Stripe metadata. The 'product' or 'offer' field contains invalid JSON or does not match the product schema.",
         {
           ...options.context,
           tenancyId: options.tenancyId,

@@ -4,6 +4,21 @@ import { Result } from "@hexclave/shared/dist/utils/results";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { WorkflowSandboxInput, WorkflowSandboxOutcome } from "./protocol";
 
+function isWorkflowSandboxOutcome(value: unknown): value is WorkflowSandboxOutcome {
+  if (typeof value !== "object" || value === null || !("type" in value)) return false;
+  switch (value.type) {
+    case "manifest": { return true; }
+    case "run-key": { return true; }
+    case "probe": { return true; }
+    case "step-completed": { return true; }
+    case "sleeping": { return true; }
+    case "completed": { return true; }
+    case "step-failed": { return true; }
+    case "handler-failed": { return true; }
+    default: { return false; }
+  }
+}
+
 // One sandbox invocation of a compiled workflow bundle. The per-invocation
 // input rides in a prelude prepended to the stored bundle (rather than env
 // vars or engine-specific channels) so the invocation shape is identical
@@ -106,8 +121,8 @@ export async function invokeWorkflowSandbox(options: {
     return Result.error({ kind: "runtime-error", invocationId, message: "The workflow runtime encountered an internal error. This is usually transient — retrying is safe." });
   }
 
-  const outcome = executeResult.data as WorkflowSandboxOutcome | null;
-  if (outcome == null || typeof outcome !== "object" || typeof (outcome as any).type !== "string") {
+  const outcome = executeResult.data;
+  if (!isWorkflowSandboxOutcome(outcome)) {
     throw new HexclaveAssertionError("Workflow sandbox returned a malformed outcome", { outcome, mode: options.input.mode });
   }
   return Result.ok(outcome);

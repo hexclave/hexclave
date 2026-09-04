@@ -826,7 +826,7 @@ class BulldozerDatabaseSnapshot {
   }
 }
 
-export type BulldozerTableDebugMetadata = Record<string, unknown>;
+export type BulldozerTableDebugMetadata = Record<string, PiledriverObject>;
 export type BulldozerDatabaseTableDescriptor = {
   tableId: string,
   inputTableIds: Record<string, string>,

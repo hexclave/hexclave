@@ -14,7 +14,7 @@ export default function PreviewProjectRedirect() {
   const user = useUser();
   const router = useRouter();
   const appInternals = useMemo(() => {
-    const internals = Reflect.get(app as any, hexclaveAppInternalsSymbol);
+    const internals = app as any[hexclaveAppInternalsSymbol];
     if (
       !internals ||
       typeof internals.sendRequest !== "function" ||

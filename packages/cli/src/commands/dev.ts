@@ -332,12 +332,16 @@ export function shouldRestartDashboard(latestVersion: string | undefined, runnin
 
 // Whether `pid` refers to a live process. EPERM means it exists but is owned by
 // another user — i.e. the pid was recycled onto something that isn't ours.
+function hasErrorCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
 export function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return hasErrorCode(error, "EPERM");
   }
 }
 
@@ -347,7 +351,7 @@ function signalDashboardProcess(pid: number, signal: NodeJS.Signals): void {
       process.kill(-pid, signal);
       return;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+      if (!hasErrorCode(error, "ESRCH")) {
         throw error;
       }
     }
@@ -397,10 +401,9 @@ export async function killLocalDashboard(url: string, port: number): Promise<voi
   try {
     signalDashboardProcess(pid, "SIGTERM");
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
     // ESRCH: already gone. EPERM: the pid was recycled onto a process we don't
     // own, so it isn't our dashboard — don't wait on it or escalate to SIGKILL.
-    if (code === "ESRCH" || code === "EPERM") return;
+    if (hasErrorCode(error, "ESRCH") || hasErrorCode(error, "EPERM")) return;
     throw error;
   }
 

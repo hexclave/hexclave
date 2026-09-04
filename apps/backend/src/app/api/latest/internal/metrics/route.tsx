@@ -67,6 +67,10 @@ function normalizeUuidFromEvent(value: string): string | null {
   return UUID_V4_JS_RE.test(n) ? n : null;
 }
 
+function parseEmailOutboxSimpleStatus(value: string): EmailOutboxSimpleStatus | null {
+  return Object.values(EmailOutboxSimpleStatus).find((status) => status === value) ?? null;
+}
+
 // ClickHouse `match()` uses re2; pattern matches UUID_V4_JS_RE.source.
 const MAU_UUID_V4_REGEX = UUID_V4_JS_RE.source;
 
@@ -1093,7 +1097,14 @@ export async function loadEmailOverview(tenancy: Tenancy, now: Date) {
     const count = Number(row.cnt);
     // Exhaustive switch over EmailOutboxSimpleStatus — adding a new enum
     // value will fail typecheck here so we can't silently miscount.
-    const status = row.status as EmailOutboxSimpleStatus;
+    const status = parseEmailOutboxSimpleStatus(row.status);
+    if (status == null) {
+      captureError("internal-metrics-unknown-email-simple-status", new HexclaveAssertionError(
+        `Unknown EmailOutboxSimpleStatus value: ${String(row.status)}`,
+        { status: row.status },
+      ));
+      continue;
+    }
     switch (status) {
       case 'OK': {
         entry.ok += count;

@@ -330,6 +330,8 @@ export async function seed() {
       const now = new Date();
       // Clone to ensure the stored JSON snapshot is independent of the config object
       // (mirrors the pattern used in seed-dummy-data.ts).
+      // SAFETY: growthProduct is a normalized config product made entirely of
+      // Prisma JSON-compatible primitives; the clone preserves that shape.
       const storedProduct = JSON.parse(JSON.stringify(growthProduct)) as Prisma.InputJsonValue;
       // Mirror what a real Stripe checkout would produce, based on whether
       // the internal project is running in test mode.

@@ -4,6 +4,8 @@ import { KnownErrors } from "../known-errors";
 import { inlineProductSchema } from "../schema-fields";
 import { AccessToken, InternalSession, RefreshToken } from "../sessions";
 import { HexclaveAssertionError } from "../utils/errors";
+import { parseResponseJson } from "../utils/http";
+import type { ReadonlyJson } from "../utils/json";
 import { filterUndefined } from "../utils/objects";
 import { Result } from "../utils/results";
 import { urlString } from "../utils/urls";
@@ -227,7 +229,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       {},
       null,
     );
-    const result = await response.json() as TeamInvitationCrud['Server']['List'];
+    const result = await parseResponseJson<TeamInvitationCrud['Server']['List']>(response);
     return result.items;
   }
 
@@ -249,7 +251,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       {},
       null,
     );
-    const result = await response.json() as TeamMemberProfilesCrud['Server']['List'];
+    const result = await parseResponseJson<TeamMemberProfilesCrud['Server']['List']>(response);
     return result.items;
   }
 
@@ -284,7 +286,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as TeamPermissionsCrud['Server']['List'];
+    const result = await parseResponseJson<TeamPermissionsCrud['Server']['List']>(response);
     return result.items;
   }
 
@@ -303,7 +305,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as ProjectPermissionsCrud['Server']['List'];
+    const result = await parseResponseJson<ProjectPermissionsCrud['Server']['List']>(response);
     return result.items;
   }
 
@@ -388,7 +390,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       {},
       null
     );
-    return await response.json() as TeamsCrud['Server']['List'];
+    return await parseResponseJson<TeamsCrud['Server']['List']>(response);
   }
 
   async getServerTeam(teamId: string): Promise<TeamsCrud['Server']['Read']> {
@@ -402,7 +404,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
 
   async listServerTeamUsers(teamId: string): Promise<UsersCrud['Server']['Read'][]> {
     const response = await this.sendServerRequest(`/users?team_id=${teamId}`, {}, null);
-    const result = await response.json() as UsersCrud['Server']['List'];
+    const result = await parseResponseJson<UsersCrud['Server']['List']>(response);
     return result.items;
   }
 
@@ -486,7 +488,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       {},
       null,
     );
-    const result = await response.json() as TeamInvitationCrud['Server']['List'];
+    const result = await parseResponseJson<TeamInvitationCrud['Server']['List']>(response);
     return result.items;
   }
 
@@ -762,7 +764,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       },
       null,
     );
-    const json = await response.json() as ContactChannelsCrud['Server']['List'];
+    const json = await parseResponseJson<ContactChannelsCrud['Server']['List']>(response);
     return json.items;
   }
 
@@ -776,7 +778,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       },
       null,
     );
-    const json = await response.json() as NotificationPreferenceCrud['Server']['List'];
+    const json = await parseResponseJson<NotificationPreferenceCrud['Server']['List']>(response);
     return json.items;
   }
 
@@ -965,7 +967,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
     subject?: string,
     notificationCategoryName?: string,
     templateId?: string,
-    variables?: Record<string, any>,
+    variables?: Record<string, ReadonlyJson>,
     draftId?: string,
     scheduledAt?: Date,
   }): Promise<Result<void, KnownErrors["RequiresCustomEmailServer"] | KnownErrors["SchemaError"] | KnownErrors["UserIdDoesNotExist"]>> {

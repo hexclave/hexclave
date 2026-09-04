@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 
-export function getSearchParams(): Partial<Record<string, string>> {
+type SearchParams = Partial<Record<string, string>>;
+
+export function getSearchParams(): SearchParams {
   if (typeof window === "undefined") {
     return {};
   }
 
-  const params: Partial<Record<string, string>> = {};
+  const params: SearchParams = {};
   new URLSearchParams(window.location.search).forEach((value, key) => {
     params[key] = value;
   });

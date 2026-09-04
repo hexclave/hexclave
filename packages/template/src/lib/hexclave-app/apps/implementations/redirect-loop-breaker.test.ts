@@ -14,7 +14,7 @@ function createMockSessionStorage() {
   };
 }
 
-const previousWindow = Reflect.get(globalThis, "window");
+const previousWindow = globalThis["window"];
 const hadPreviousWindow = Reflect.has(globalThis, "window");
 
 function record(from: string, to: string) {

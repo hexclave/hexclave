@@ -8,14 +8,15 @@
  */
 
 import type { OAuthConnection } from "@hexclave/next";
+import { isJsonSerializable, type Json, type JsonObject } from "@hexclave/shared/dist/utils/json";
 
 export const GITHUB_SCOPE_REQUIREMENTS = ["repo", "workflow"];
 
-export function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export function isObject(value: unknown): value is JsonObject {
+  return isJsonSerializable(value) && typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function getObjectString(value: Record<string, unknown>, key: string): string | null {
+export function getObjectString(value: JsonObject, key: string): string | null {
   const field = value[key];
   return typeof field === "string" ? field : null;
 }
@@ -42,7 +43,7 @@ export function githubRepositoryContentsUrl(owner: string, repo: string, path: s
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeGitHubPath(path)}`;
 }
 
-export type GithubFetch = (path: string, requestInit?: RequestInit) => Promise<unknown>;
+export type GithubFetch = (path: string, requestInit?: RequestInit) => Promise<Json | null>;
 
 /**
  * Returns a `githubFetch` helper bound to the given OAuth connection. The

@@ -67,6 +67,13 @@ const GENERIC_PLATFORM_ERROR_SUMMARY = "A platform error occurred while executin
 const HANDLER_STEP_KEY = "#handler";
 const COMPLETION_STEP_KEY = "#completion";
 
+function parseWorkflowTriggerPayload(value: unknown): { ts_millis: number, data: unknown } {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || !("ts_millis" in value) || typeof value.ts_millis !== "number" || !("data" in value)) {
+    throw new HexclaveAssertionError("Workflow run has malformed trigger payload");
+  }
+  return { ts_millis: value.ts_millis, data: value.data };
+}
+
 function jitteredBackoffMs(attempt: number): number {
   // Backoff before retry N: 10s / 1m / 10m, jittered ±25%.
   const base = WORKFLOW_STEP_RETRY_BACKOFF_MS[Math.min(attempt - 1, WORKFLOW_STEP_RETRY_BACKOFF_MS.length - 1)];
@@ -887,7 +894,7 @@ async function executeClaimedRun(run: ClaimedRunRow, tenancy: Tenancy, deadlineM
     secretServerKey: runToken,
   };
 
-  const triggerPayload = run.triggerPayload as { ts_millis: number, data: unknown };
+  const triggerPayload = parseWorkflowTriggerPayload(run.triggerPayload);
   const event: WorkflowSandboxEvent = {
     id: run.triggerEventId ?? throwErr("WorkflowRun has no triggerEventId — runs are always created from events, so this should be impossible"),
     type: run.triggerType,
@@ -1272,7 +1279,7 @@ export async function upgradeWorkflowRuns(tenancy: Tenancy, options: { workflowI
     }
 
     const bag = await loadStepBag(tenancy.id, candidate.id);
-    const triggerPayload = candidate.triggerPayload as { ts_millis: number, data: unknown };
+    const triggerPayload = parseWorkflowTriggerPayload(candidate.triggerPayload);
     const probeResult = await invokeWorkflowSandbox({
       compiledBundle: targetVersion.compiledBundle,
       input: {

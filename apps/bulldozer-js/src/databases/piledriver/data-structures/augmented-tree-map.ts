@@ -669,6 +669,9 @@ export class AugmentedTreeMultiMap<Key extends PiledriverObject, Value extends P
   }
 
   private indexRange(range: { lte?: Key, gte?: Key, lt?: Key, gt?: Key, limit?: number, reverse?: boolean }) {
+    // SAFETY: The four sentinel IDs are internal ordering markers. They never
+    // enter persisted entries, and compareEntryIds handles them before calling
+    // the user-supplied EntryId comparator.
     return {
       ...range,
       gte: range.gte === undefined ? undefined : { key: range.gte, id: lowerEntryId } as unknown as MultiKey<Key, EntryId>,

@@ -7,7 +7,7 @@ import { AccessToken, InternalSession, RefreshToken } from '../sessions';
 import { generateSecureRandomString } from '../utils/crypto';
 import { HexclaveAssertionError, throwErr } from '../utils/errors';
 import { globalVar } from '../utils/globals';
-import { HTTP_METHODS, HttpMethod } from '../utils/http';
+import { HTTP_METHODS, HttpMethod, parseResponseJson } from '../utils/http';
 import { ReadonlyJson } from '../utils/json';
 import { publishableClientKeyNotNecessarySentinel } from '../utils/oauth';
 import { filterUndefined, filterUndefinedOrNull } from '../utils/objects';
@@ -32,6 +32,15 @@ import { TeamInvitationCrud } from './crud/team-invitation';
 import { TeamMemberProfilesCrud } from './crud/team-member-profiles';
 import { TeamPermissionsCrud } from './crud/team-permissions';
 import { TeamsCrud } from './crud/teams';
+
+type AuthenticatedResponse = Response & {
+  usedTokens: {
+    accessToken: AccessToken,
+    refreshToken: RefreshToken | null,
+  } | null,
+};
+type RequestResult = AuthenticatedResponse;
+type KnownErrorRequestResult<E extends typeof KnownErrors[keyof KnownErrors]> = Result<AuthenticatedResponse, InstanceType<E>>;
 
 export type ApiUrlFailure = {
   url: string,
@@ -188,6 +197,47 @@ export class HexclaveClientInterface {
   private _currentTargetApiUrl: string | null = null;
 
   constructor(public readonly options: ClientInterfaceOptions) {}
+
+  /**
+   * Server-interface methods are overridden by HexclaveServerInterface. The
+   * base implementation fails loudly if a client-only instance is asked to use
+   * a server transport, while shared CRUD methods can dispatch without casts.
+   */
+  protected async sendServerRequest(_path: string, _options: RequestInit, _session: InternalSession | null, _requestType: "server" | "admin" = "server"): Promise<RequestResult> {
+    throw new HexclaveAssertionError("Server requests require HexclaveServerInterface");
+  }
+
+  protected async sendServerRequestAndCatchKnownError<E extends typeof KnownErrors[keyof KnownErrors]>(
+    _path: string,
+    _requestOptions: RequestInit,
+    _tokenStoreOrNull: InternalSession | null,
+    _errorsToCatch: readonly E[],
+  ): Promise<KnownErrorRequestResult<E>> {
+    throw new HexclaveAssertionError("Server requests require HexclaveServerInterface");
+  }
+
+  private sendRequestForType(
+    path: string,
+    requestOptions: RequestInit,
+    session: InternalSession | null,
+    requestType: "client" | "server" | "admin",
+  ): Promise<RequestResult> {
+    return requestType === "client"
+      ? this.sendClientRequest(path, requestOptions, session, requestType)
+      : this.sendServerRequest(path, requestOptions, session, requestType);
+  }
+
+  private sendRequestAndCatchKnownErrorForType<E extends typeof KnownErrors[keyof KnownErrors]>(
+    path: string,
+    requestOptions: RequestInit,
+    session: InternalSession | null,
+    requestType: "client" | "server" | "admin",
+    errorsToCatch: readonly E[],
+  ): Promise<KnownErrorRequestResult<E>> {
+    return requestType === "client"
+      ? this.sendClientRequestAndCatchKnownError(path, requestOptions, session, errorsToCatch)
+      : this.sendServerRequestAndCatchKnownError(path, requestOptions, session, errorsToCatch);
+  }
 
   addRequestListener(listener: RequestListener): () => void {
     this._requestListeners.add(listener);
@@ -1652,7 +1702,7 @@ export class HexclaveClientInterface {
       }
     }
     const response = responseOrError.data;
-    const user: CurrentUserCrud["Client"]["Read"] = await response.json();
+    const user = await parseResponseJson<CurrentUserCrud["Client"]["Read"]>(response);
     if (!(user as any)) throw new HexclaveAssertionError("User endpoint returned null; this should never happen");
     return user;
   }
@@ -1668,7 +1718,7 @@ export class HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as TeamInvitationCrud['Client']['List'];
+    const result = await parseResponseJson<TeamInvitationCrud['Client']['List']>(response);
     return result.items;
   }
 
@@ -1680,7 +1730,7 @@ export class HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as TeamInvitationCrud['Client']['List'];
+    const result = await parseResponseJson<TeamInvitationCrud['Client']['List']>(response);
     return result.items;
   }
 
@@ -1722,7 +1772,7 @@ export class HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as TeamMemberProfilesCrud['Client']['List'];
+    const result = await parseResponseJson<TeamMemberProfilesCrud['Client']['List']>(response);
     return result.items;
   }
 
@@ -1829,7 +1879,7 @@ export class HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as TeamPermissionsCrud['Client']['List'];
+    const result = await parseResponseJson<TeamPermissionsCrud['Client']['List']>(response);
     return result.items;
   }
 
@@ -1844,7 +1894,7 @@ export class HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as ProjectPermissionsCrud['Client']['List'];
+    const result = await parseResponseJson<ProjectPermissionsCrud['Client']['List']>(response);
     return result.items;
   }
 
@@ -1854,7 +1904,7 @@ export class HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as TeamsCrud["Client"]["List"];
+    const result = await parseResponseJson<TeamsCrud["Client"]["List"]>(response);
     return result.items;
   }
 
@@ -1864,7 +1914,7 @@ export class HexclaveClientInterface {
       return Result.error(responseOrError.error);
     }
     const response = responseOrError.data;
-    const project: ClientProjectsCrud['Client']['Read'] = await response.json();
+    const project = await parseResponseJson<ClientProjectsCrud['Client']['Read']>(response);
     return Result.ok(project);
   }
 
@@ -1888,7 +1938,7 @@ export class HexclaveClientInterface {
       throw new Error("Failed to list projects: " + response.status + " " + (await response.text()));
     }
 
-    const json = await response.json() as AdminUserProjectsCrud['Client']['List'];
+    const json = await parseResponseJson<AdminUserProjectsCrud['Client']['List']>(response);
     return json.items;
   }
 
@@ -2100,7 +2150,7 @@ export class HexclaveClientInterface {
       },
       session,
     );
-    const json = await response.json() as ContactChannelsCrud['Client']['List'];
+    const json = await parseResponseJson<ContactChannelsCrud['Client']['List']>(response);
     return json.items;
   }
 
@@ -2175,7 +2225,8 @@ export class HexclaveClientInterface {
     session: InternalSession | null,
     requestType: "client" | "server" | "admin",
   ): Promise<(UserApiKeysCrud['Client']['Read'] | TeamApiKeysCrud['Client']['Read'])[]> {
-    const sendRequest = (requestType === "client" ? this.sendClientRequest : (this as any).sendServerRequest as never).bind(this);
+    const sendRequest = (path: string, requestOptions: RequestInit, session: InternalSession | null) =>
+      this.sendRequestForType(path, requestOptions, session, requestType);
     const { endpoint, queryParams } = await this._getApiKeyRequestInfo(options);
 
     const response = await sendRequest(
@@ -2184,7 +2235,6 @@ export class HexclaveClientInterface {
         method: "GET",
       },
       session,
-      requestType,
     );
     const json = await response.json();
     return json.items;
@@ -2198,7 +2248,8 @@ export class HexclaveClientInterface {
     session: InternalSession | null,
     requestType: "client" | "server" | "admin",
   ): Promise<yup.InferType<typeof userApiKeysCreateOutputSchema> | yup.InferType<typeof teamApiKeysCreateOutputSchema>> {
-    const sendRequest = (requestType === "client" ? this.sendClientRequest : (this as any).sendServerRequest as never).bind(this);
+    const sendRequest = (path: string, requestOptions: RequestInit, session: InternalSession | null) =>
+      this.sendRequestForType(path, requestOptions, session, requestType);
     const { endpoint } = await this._getApiKeyRequestInfo(data);
 
     const response = await sendRequest(
@@ -2211,7 +2262,6 @@ export class HexclaveClientInterface {
         body: JSON.stringify(data),
       },
       session,
-      requestType,
     );
     return await response.json();
   }
@@ -2225,7 +2275,8 @@ export class HexclaveClientInterface {
     session: InternalSession | null,
     requestType: "client" | "server" | "admin",
   ): Promise<UserApiKeysCrud['Client']['Read'] | TeamApiKeysCrud['Client']['Read']> {
-    const sendRequest = (requestType === "client" ? this.sendClientRequest : (this as any).sendServerRequest as never).bind(this);
+    const sendRequest = (path: string, requestOptions: RequestInit, session: InternalSession | null) =>
+      this.sendRequestForType(path, requestOptions, session, requestType);
     const { endpoint, queryParams } = await this._getApiKeyRequestInfo(options);
 
     const response = await sendRequest(
@@ -2234,7 +2285,6 @@ export class HexclaveClientInterface {
         method: "GET",
       },
       session,
-      requestType,
     );
     return await response.json();
   }
@@ -2249,7 +2299,8 @@ export class HexclaveClientInterface {
     session: InternalSession | null,
     requestType: "client" | "server" | "admin",
   ): Promise<UserApiKeysCrud['Client']['Read'] | TeamApiKeysCrud['Client']['Read']> {
-    const sendRequest = (requestType === "client" ? this.sendClientRequest : (this as any).sendServerRequest as never).bind(this);
+    const sendRequest = (path: string, requestOptions: RequestInit, session: InternalSession | null) =>
+      this.sendRequestForType(path, requestOptions, session, requestType);
     const { endpoint, queryParams } = await this._getApiKeyRequestInfo(options);
 
     const response = await sendRequest(
@@ -2262,7 +2313,6 @@ export class HexclaveClientInterface {
         body: JSON.stringify(data),
       },
       session,
-      requestType,
     );
     return await response.json();
   }
@@ -2271,7 +2321,8 @@ export class HexclaveClientInterface {
   checkProjectApiKey(type: "team", apiKey: string, session: InternalSession | null, requestType: "client" | "server" | "admin"): Promise<TeamApiKeysCrud['Client']['Read'] | null>;
   checkProjectApiKey(type: "user" | "team", apiKey: string, session: InternalSession | null, requestType: "client" | "server" | "admin"): Promise<UserApiKeysCrud['Client']['Read'] | TeamApiKeysCrud['Client']['Read'] | null>;
   async checkProjectApiKey(type: "user" | "team", apiKey: string, session: InternalSession | null, requestType: "client" | "server" | "admin"): Promise<UserApiKeysCrud['Client']['Read'] | TeamApiKeysCrud['Client']['Read'] | null> {
-    const sendRequest = (requestType === "client" ? this.sendClientRequestAndCatchKnownError : (this as any).sendServerRequestAndCatchKnownError as never).bind(this);
+    const sendRequest = <E extends typeof KnownErrors[keyof KnownErrors]>(path: string, requestOptions: RequestInit, session: InternalSession | null, errorsToCatch: readonly E[]) =>
+      this.sendRequestAndCatchKnownErrorForType(path, requestOptions, session, requestType, errorsToCatch);
     const result = await sendRequest(
       `/${type}-api-keys/check`,
       {
@@ -2298,7 +2349,7 @@ export class HexclaveClientInterface {
       {},
       session,
     );
-    const result = await response.json() as NotificationPreferenceCrud['Client']['List'];
+    const result = await parseResponseJson<NotificationPreferenceCrud['Client']['List']>(response);
     return result.items;
   }
 
@@ -2414,12 +2465,12 @@ export class HexclaveClientInterface {
       throw new HexclaveAssertionError("getItem requires one of userId, teamId, or customCustomerId");
     }
 
-    const sendRequest = (requestType === "client" ? this.sendClientRequest : (this as any).sendServerRequest as never).bind(this);
+    const sendRequest = (path: string, requestOptions: RequestInit, session: InternalSession | null) =>
+      this.sendRequestForType(path, requestOptions, session, requestType);
     const response = await sendRequest(
       urlString`/payments/items/${customerType}/${customerId}/${options.itemId}`,
       {},
       session,
-      requestType,
     );
     return await response.json();
   }
@@ -2434,12 +2485,12 @@ export class HexclaveClientInterface {
       limit: options.limit !== undefined ? options.limit.toString() : undefined,
     }));
     const path = urlString`/payments/products/${options.customer_type}/${options.customer_id}`;
-    const sendRequest = (requestType === "client" ? this.sendClientRequest : (this as any).sendServerRequest as never).bind(this);
+    const sendRequest = (path: string, requestOptions: RequestInit, session: InternalSession | null) =>
+      this.sendRequestForType(path, requestOptions, session, requestType);
     const response = await sendRequest(
       `${path}${queryParams.toString() ? `?${queryParams.toString()}` : ''}`,
       {},
       session,
-      requestType,
     );
     return await response.json();
   }
@@ -2523,7 +2574,8 @@ export class HexclaveClientInterface {
     const productBody = typeof productIdOrInline === "string" ?
       { product_id: productIdOrInline } :
       { product_inline: productIdOrInline };
-    const sendRequest = (requestType === "client" ? this.sendClientRequest : (this as any).sendServerRequest as never).bind(this);
+    const sendRequest = (path: string, requestOptions: RequestInit, session: InternalSession | null) =>
+      this.sendRequestForType(path, requestOptions, session, requestType);
     const response = await sendRequest(
       "/payments/purchases/create-purchase-url",
       {
@@ -2534,9 +2586,8 @@ export class HexclaveClientInterface {
         body: JSON.stringify({ customer_type, customer_id, ...productBody, return_url: returnUrl }),
       },
       session,
-      requestType,
     );
-    const { url } = await response.json() as { url: string };
+    const { url } = await parseResponseJson<{ url: string }>(response);
     return url;
   }
 

@@ -20,10 +20,10 @@ function createTestSetup(getUser: () => Promise<unknown>) {
     redirectMethod: "none",
     noAutomaticPrefetch: true,
   });
-  Reflect.set(Reflect.get(clientApp, "_interface"), "getClientUserByToken", getUser);
-  const privateMethod = (name: string) => (...args: unknown[]) => Reflect.get(clientApp, name).apply(clientApp, args);
+  Reflect.set(clientApp["_interface"], "getClientUserByToken", getUser);
+  const privateMethod = (name: string) => (...args: unknown[]) => clientApp[name].apply(clientApp, args);
   return {
-    currentUserCache: Reflect.get(clientApp, "_currentUserCache"),
+    currentUserCache: clientApp["_currentUserCache"],
     signIn: (refreshToken: string) => privateMethod("_signInToAccountWithTokens")({
       accessToken: createAccessTokenString(`${refreshToken}-id`),
       refreshToken,

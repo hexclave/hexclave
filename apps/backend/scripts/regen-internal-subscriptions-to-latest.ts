@@ -34,7 +34,7 @@ const TEAM_BATCH_SIZE = 500;
 // Real Stripe clients are structurally compatible.
 export type StripeSubscriptionsClient = {
   retrieve(id: string): Promise<{ metadata: Stripe.Metadata | null }>,
-  update(id: string, params: { metadata: Record<string, string | null> }): Promise<unknown>,
+  update(id: string, params: { metadata: Record<string, string | null> }): Promise<Stripe.Response<Stripe.Subscription>>,
 };
 export type StripeClientForRegen = {
   subscriptions: StripeSubscriptionsClient,

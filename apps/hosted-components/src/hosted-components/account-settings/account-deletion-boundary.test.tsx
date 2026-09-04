@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AccountDeletionBoundary } from "./account-deletion-boundary";
 
-const previousActEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+const previousActEnvironment = globalThis["IS_REACT_ACT_ENVIRONMENT"];
 let container: HTMLDivElement | undefined;
 let root: Root | undefined;
 

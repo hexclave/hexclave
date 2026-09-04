@@ -213,7 +213,7 @@ function warnRemoteDevelopmentEnvironment(message: string, details?: Record<stri
 
 function formatErrorForRemoteDevelopmentEnvironmentLog(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
-    const cause = Reflect.get(error, "cause");
+    const cause = error["cause"];
     return {
       errorName: error.name,
       errorMessage: error.message,
@@ -350,7 +350,7 @@ function getStackAppRequestInternals(appValue: unknown): HexclaveAppRequestInter
     throw new Error("The Stack app instance is unavailable.");
   }
 
-  const internals = Reflect.get(appValue, hexclaveAppInternalsSymbol);
+  const internals = appValue[hexclaveAppInternalsSymbol];
   if (!isStackAppRequestInternals(internals)) {
     throw new Error("The Stack app cannot send remote development environment onboarding updates.");
   }

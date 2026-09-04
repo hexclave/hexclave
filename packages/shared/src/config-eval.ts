@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "fs";
 import { createJiti } from "jiti";
 import path from "path";
 import { showOnboardingHexclaveConfigValue } from "./config-authoring";
+import { isValidConfig, type Config } from "./config/format";
 import { detectConfigImportPackage } from "./config-rendering";
 
 const jiti = createJiti(import.meta.url, { moduleCache: false });
@@ -51,7 +52,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** A config object, or the `"show-onboarding"` sentinel that stands in for one. */
-export type ParsedConfigValue = Record<string, unknown> | typeof showOnboardingHexclaveConfigValue;
+export type ParsedConfigValue = Config | typeof showOnboardingHexclaveConfigValue;
 
 function invalidConfigShape(filePath: string): ConfigFileEvalError {
   return new ConfigFileEvalError(`Invalid config in ${filePath}. The file must export a plain \`config\` object or "${showOnboardingHexclaveConfigValue}".`);
@@ -82,7 +83,7 @@ export function evalConfigFileContent(content: string, filePath: string): Parsed
     }
     return config;
   }
-  if (isRecord(config)) return config;
+  if (isValidConfig(config)) return config;
   throw invalidConfigShape(filePath);
 }
 

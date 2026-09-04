@@ -20,8 +20,7 @@ import { runAsynchronously, runAsynchronouslyWithAlert } from "@hexclave/shared/
 import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notFound } from "next/navigation";
-
-const hexclaveAppInternalsSymbol = Symbol.for("StackAuth--DO-NOT-USE-OR-YOU-WILL-BE-FIRED--StackAppInternals");
+import { getStackAppInternals } from "@/lib/transfer-utils";
 const AUTO_REFRESH_INTERVAL_MS = 5000;
 
 type SequenceStats = {
@@ -146,14 +145,6 @@ type ExternalDbSyncFuseboxResponse = {
   ok: true,
   sequencer_enabled: boolean,
   poller_enabled: boolean,
-};
-
-type AdminAppInternals = {
-  sendRequest: (path: string, requestOptions: RequestInit, requestType?: "client" | "server" | "admin") => Promise<Response>,
-};
-
-type AdminAppWithInternals = ReturnType<typeof useAdminApp> & {
-  [hexclaveAppInternalsSymbol]: AdminAppInternals,
 };
 
 function formatBigInt(value: string | null) {
@@ -415,7 +406,8 @@ function SyncEngineDataGrid({ rows, loading }: { rows: MappingStats[], loading: 
 }
 
 export default function PageClient() {
-  const adminApp = useAdminApp() as AdminAppWithInternals;
+  const adminApp = useAdminApp();
+  const internals = getStackAppInternals(adminApp);
   const [status, setStatus] = useState<ExternalDbSyncStatus | null>(null);
   const [fusebox, setFusebox] = useState<ExternalDbSyncFusebox | null>(null);
   const [savedFusebox, setSavedFusebox] = useState<ExternalDbSyncFusebox | null>(null);
@@ -439,7 +431,7 @@ export default function PageClient() {
     setLoading(true);
 
     const result = await Result.fromPromise((async () => {
-      const response = await adminApp[hexclaveAppInternalsSymbol].sendRequest(
+      const response = await internals.sendRequest(
         "/internal/external-db-sync/status?scope=all",
         { method: "GET" },
         "admin",
@@ -464,11 +456,11 @@ export default function PageClient() {
     setError(null);
     setLoading(false);
     inFlightRef.current = false;
-  }, [adminApp]);
+  }, [internals]);
 
   const loadFusebox = useCallback(async () => {
     const result = await Result.fromPromise((async () => {
-      const response = await adminApp[hexclaveAppInternalsSymbol].sendRequest(
+      const response = await internals.sendRequest(
         urlString`/internal/external-db-sync/fusebox`,
         { method: "GET" },
         "admin",
@@ -494,13 +486,13 @@ export default function PageClient() {
     setFusebox(nextFusebox);
     setSavedFusebox(nextFusebox);
     setError(null);
-  }, [adminApp]);
+  }, [internals]);
 
   const saveFusebox = useCallback(async () => {
     if (!fusebox) return;
     setSavingFusebox(true);
     const result = await Result.fromPromise((async () => {
-      const response = await adminApp[hexclaveAppInternalsSymbol].sendRequest(
+      const response = await internals.sendRequest(
         urlString`/internal/external-db-sync/fusebox`,
         {
           method: "POST",
@@ -534,7 +526,7 @@ export default function PageClient() {
     setFusebox(nextFusebox);
     setSavedFusebox(nextFusebox);
     setError(null);
-  }, [adminApp, fusebox]);
+  }, [internals, fusebox]);
 
   const refreshWithAlert = useCallback(() => {
     runAsynchronouslyWithAlert(loadStatus);
@@ -550,7 +542,7 @@ export default function PageClient() {
         "/internal/external-db-sync/poller",
       ];
       await Promise.all(endpoints.map(async (endpoint) => {
-        const response = await adminApp[hexclaveAppInternalsSymbol].sendRequest(
+        const response = await internals.sendRequest(
           endpoint,
           { method: "GET", signal: abortController.signal },
           "admin",
@@ -569,7 +561,7 @@ export default function PageClient() {
       forceSyncAbortRef.current = null;
       setForceSyncRunning(false);
     }
-  }, [adminApp, loadStatus]);
+  }, [internals, loadStatus]);
 
   const cancelForceSync = useCallback(() => {
     forceSyncAbortRef.current?.abort();

@@ -1,6 +1,7 @@
 import { KnownErrors } from "@hexclave/shared/dist/known-errors";
 import { isBrowserLike } from "@hexclave/shared/dist/utils/env";
 import { captureWarning, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { parseJson, type JsonObject } from "@hexclave/shared/dist/utils/json";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 
@@ -47,6 +48,15 @@ export type AnalyticsOptions = {
   replays?: AnalyticsReplayOptions,
 };
 
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSerializedRegexp(value: unknown): value is { __regexp: string, __flags: string } {
+  if (!isJsonObject(value)) return false;
+  return typeof value.__regexp === "string" && typeof value.__flags === "string";
+}
+
 export function getSessionReplayOptions(analyticsOptions: AnalyticsOptions | undefined): AnalyticsReplayOptions {
   return {
     ...analyticsOptions?.replays,
@@ -81,13 +91,12 @@ export function analyticsOptionsToJson(options: AnalyticsOptions | undefined): A
 export function analyticsOptionsFromJson(json: AnalyticsOptions | undefined): AnalyticsOptions | undefined {
   if (!json?.replays?.blockClass) return json;
   const { blockClass, ...rest } = json.replays;
-  if (typeof blockClass === 'object' && '__regexp' in blockClass) {
-    const bc = blockClass as unknown as { __regexp: string, __flags: string };
+  if (isSerializedRegexp(blockClass)) {
     return {
       ...json,
       replays: {
         ...rest,
-        blockClass: new RegExp(bc.__regexp, bc.__flags),
+        blockClass: new RegExp(blockClass.__regexp, blockClass.__flags),
       },
     };
   }
@@ -128,16 +137,13 @@ export type StoredSession = {
 
 export function safeParseStoredSession(raw: string | null): StoredSession | null {
   if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return null;
-    if (typeof parsed.session_id !== "string") return null;
-    if (typeof parsed.created_at_ms !== "number") return null;
-    if (typeof parsed.last_activity_ms !== "number") return null;
-    return parsed as StoredSession;
-  } catch {
-    return null;
-  }
+  const parsed = parseJson(raw);
+  if (parsed.status === "error" || !isJsonObject(parsed.data)) return null;
+  const sessionId = parsed.data.session_id;
+  const createdAtMs = parsed.data.created_at_ms;
+  const lastActivityMs = parsed.data.last_activity_ms;
+  if (typeof sessionId !== "string" || typeof createdAtMs !== "number" || typeof lastActivityMs !== "number") return null;
+  return { session_id: sessionId, created_at_ms: createdAtMs, last_activity_ms: lastActivityMs };
 }
 
 export function makeStorageKey(projectId: string) {

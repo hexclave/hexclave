@@ -219,7 +219,7 @@ export type InfiniteListWindow = {
 export function useInfiniteListWindow(
   totalCount: number,
   /** Reset visible count when this flag changes (e.g. tab switch). */
-  resetKey?: unknown,
+  resetKey?: string,
   /** Enable observation only when list UI is mounted. */
   enabled: boolean = true,
 ): InfiniteListWindow {

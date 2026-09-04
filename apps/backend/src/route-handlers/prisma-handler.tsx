@@ -143,17 +143,17 @@ export function createPrismaCrudHandlers<
     }),
     onCreate: wrapper(false, async (data, context) => {
       const prismaModel = globalPrismaClient[prismaModelName];
-      const createMethod = Reflect.get(prismaModel, "create");
+      const createMethod = prismaModel["create"];
       if (typeof createMethod !== "function") {
         throw new Error(`Prisma model ${prismaModelName} does not support create()`);
       }
-      const prisma = await Reflect.apply(createMethod, prismaModel, [{
+      const prisma = await createMethod.call(prismaModel, {
         include: await options.include(context),
         data: {
           ...await options.baseFields(context),
           ...await crudToPrisma(data, { ...context, type: 'create' }),
         },
-      }]);
+      });
       // TODO pass the same transaction to onCreate as the one that creates the user row
       // we should probably do this with all functions and pass a transaction around in the context
       await options.onCreate?.(prisma, context);

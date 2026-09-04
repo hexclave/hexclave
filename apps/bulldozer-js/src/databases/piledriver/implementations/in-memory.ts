@@ -1,5 +1,5 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
-import { DatabaseSeq } from "../../index.js";
+import { createDatabaseSeq, DatabaseSeq } from "../../index.js";
 import { PiledriverDatabase, PiledriverObject } from "../index.js";
 import { zeroPiledriverGarbageCollectionResult } from "../gc.js";
 
@@ -16,7 +16,7 @@ const inMemoryPiledriverRoots = new Map<string, Map<string, PiledriverObject>>()
 export function declareInMemoryPiledriverDatabase(dbId: string): PiledriverDatabase {
   const roots = inMemoryPiledriverRoots.get(dbId) ?? new Map<string, PiledriverObject>();
   inMemoryPiledriverRoots.set(dbId, roots);
-  const initialSeq = [] as unknown as DatabaseSeq;
+  const initialSeq = createDatabaseSeq();
   return {
     getDebugInfo() {
       return { backend: "piledriver-in-memory", constructorArguments: { dbId }, roots };

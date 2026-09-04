@@ -69,7 +69,7 @@ function setMockWindow(mockWindow: {
  * Calls one of the app's `protected` methods, which are part of the flows under test but not of the public SDK surface.
  */
 function callProtectedMethod(app: StackClientApp<true>, methodName: string, ...args: unknown[]): Promise<unknown> {
-  const method = Reflect.get(app, methodName);
+  const method = app[methodName];
   if (typeof method !== "function") {
     throw new Error(`Expected StackClientApp to have a ${methodName} method in tests.`);
   }
@@ -177,7 +177,7 @@ describe("StackClientApp cross-domain auth", () => {
   );
 
   it("exposes redirect-back-aware handler URLs for devtool previews", async () => {
-    const previousWindow = Reflect.get(globalThis, "window");
+    const previousWindow = globalThis["window"];
     const hadPreviousWindow = Reflect.has(globalThis, "window");
     Reflect.set(globalThis, "window", {
       location: {
@@ -214,7 +214,7 @@ describe("StackClientApp cross-domain auth", () => {
   });
 
   it("rejects hosted sign-in redirects that cannot set the cross-domain verifier cookie", async () => {
-    const previousWindow = Reflect.get(globalThis, "window");
+    const previousWindow = globalThis["window"];
     const hadPreviousWindow = Reflect.has(globalThis, "window");
     Reflect.deleteProperty(globalThis, "window");
 
@@ -243,7 +243,7 @@ describe("StackClientApp cross-domain auth", () => {
   });
 
   it("rejects custom cross-origin sign-in redirects on the server too", async () => {
-    const previousWindow = Reflect.get(globalThis, "window");
+    const previousWindow = globalThis["window"];
     const hadPreviousWindow = Reflect.has(globalThis, "window");
     Reflect.deleteProperty(globalThis, "window");
 
@@ -286,16 +286,16 @@ describe("StackClientApp cross-domain auth", () => {
       devTool: false,
     });
 
-    const clientInterface = Reflect.get(clientApp, "_interface");
-    const originalSendClientRequest = Reflect.get(clientInterface, "sendClientRequest");
-    const originalFetchNewAccessToken = Reflect.get(clientInterface, "fetchNewAccessToken");
+    const clientInterface = clientApp["_interface"];
+    const originalSendClientRequest = clientInterface["sendClientRequest"];
+    const originalFetchNewAccessToken = clientInterface["fetchNewAccessToken"];
     const capturedRefreshTokens: string[] = [];
     const capturedAccessTokenRefreshTokenIds: string[] = [];
     const refreshedRawRefreshTokens: string[] = [];
 
     Reflect.set(clientInterface, "sendClientRequest", async (_path: unknown, _requestOptions: unknown, session: unknown) => {
-      const getRefreshToken = Reflect.get(session ?? {}, "getRefreshToken");
-      const getOrFetchLikelyValidTokens = Reflect.get(session ?? {}, "getOrFetchLikelyValidTokens");
+      const getRefreshToken = session ?? {}["getRefreshToken"];
+      const getOrFetchLikelyValidTokens = session ?? {}["getOrFetchLikelyValidTokens"];
       if (typeof getRefreshToken !== "function") {
         throw new Error("Expected cross-domain auth to pass a session to the client interface.");
       }
@@ -303,7 +303,7 @@ describe("StackClientApp cross-domain auth", () => {
         throw new Error("Expected cross-domain auth to pass a session with token accessors.");
       }
       const refreshToken = getRefreshToken.call(session);
-      const refreshTokenString = Reflect.get(refreshToken ?? {}, "token");
+      const refreshTokenString = refreshToken ?? {}["token"];
       if (typeof refreshTokenString !== "string") {
         throw new Error("Expected cross-domain auth to pass a refresh-token-backed session.");
       }
@@ -316,7 +316,7 @@ describe("StackClientApp cross-domain auth", () => {
       };
     });
     Reflect.set(clientInterface, "fetchNewAccessToken", async (refreshToken: unknown) => {
-      const refreshTokenString = Reflect.get(refreshToken ?? {}, "token");
+      const refreshTokenString = refreshToken ?? {}["token"];
       if (typeof refreshTokenString !== "string") {
         throw new Error("Expected refresh token while fetching a new access token.");
       }
@@ -327,7 +327,7 @@ describe("StackClientApp cross-domain auth", () => {
     });
 
     try {
-      const createCrossDomainAuthRedirectUrl = Reflect.get(clientApp, "_createCrossDomainAuthRedirectUrl");
+      const createCrossDomainAuthRedirectUrl = clientApp["_createCrossDomainAuthRedirectUrl"];
       if (typeof createCrossDomainAuthRedirectUrl !== "function") {
         throw new Error("Expected StackClientApp to expose _createCrossDomainAuthRedirectUrl in tests.");
       }
@@ -428,7 +428,7 @@ describe("StackClientApp cross-domain auth", () => {
       noAutomaticPrefetch: true,
       devTool: false,
     });
-    const tokenStore = Reflect.get(clientApp, "_memoryTokenStore");
+    const tokenStore = clientApp["_memoryTokenStore"];
     if (!(tokenStore instanceof Store)) {
       throw new Error("Expected StackClientApp to use a memory token store in this test.");
     }
@@ -447,8 +447,8 @@ describe("StackClientApp cross-domain auth", () => {
     const previousWindow = globalThis.window;
     const previousDocument = globalThis.document;
     let redirectedUrl = "";
-    const clientInterface = Reflect.get(clientApp, "_interface");
-    const originalFetchNewAccessToken = Reflect.get(clientInterface, "fetchNewAccessToken");
+    const clientInterface = clientApp["_interface"];
+    const originalFetchNewAccessToken = clientInterface["fetchNewAccessToken"];
     Reflect.set(clientInterface, "fetchNewAccessToken", async () => {
       return AccessToken.createIfValid(hostedAccessToken) ?? (() => {
         throw new Error("Expected test access token to be valid");
@@ -507,8 +507,8 @@ describe("StackClientApp cross-domain auth", () => {
       noAutomaticPrefetch: true,
       devTool: false,
     });
-    const clientInterface = Reflect.get(clientApp, "_interface");
-    const originalFetchNewAccessToken = Reflect.get(clientInterface, "fetchNewAccessToken");
+    const clientInterface = clientApp["_interface"];
+    const originalFetchNewAccessToken = clientInterface["fetchNewAccessToken"];
     const refreshedRawRefreshTokens: string[] = [];
 
     // Cookie-store writes queue a background trusted-parent-domain lookup. Without this stub, that
@@ -518,7 +518,7 @@ describe("StackClientApp cross-domain auth", () => {
     vi.spyOn(clientApp as any, "_getTrustedParentDomain").mockResolvedValue(null);
 
     try {
-      const getBrowserCookieTokenStore = Reflect.get(clientApp, "_getBrowserCookieTokenStore");
+      const getBrowserCookieTokenStore = clientApp["_getBrowserCookieTokenStore"];
       if (typeof getBrowserCookieTokenStore !== "function") {
         throw new Error("Expected StackClientApp to expose _getBrowserCookieTokenStore in tests.");
       }
@@ -533,7 +533,7 @@ describe("StackClientApp cross-domain auth", () => {
         updated_at_millis: 1,
       })}`;
       Reflect.set(clientInterface, "fetchNewAccessToken", async (refreshToken: unknown) => {
-        const refreshTokenString = Reflect.get(refreshToken ?? {}, "token");
+        const refreshTokenString = refreshToken ?? {}["token"];
         if (typeof refreshTokenString !== "string") {
           throw new Error("Expected refresh token while fetching a new access token.");
         }
@@ -543,7 +543,7 @@ describe("StackClientApp cross-domain auth", () => {
         })();
       });
 
-      const fetchCurrentRefreshTokenIdIfSignedIn = Reflect.get(clientApp, "_fetchCurrentRefreshTokenIdIfSignedIn");
+      const fetchCurrentRefreshTokenIdIfSignedIn = clientApp["_fetchCurrentRefreshTokenIdIfSignedIn"];
       if (typeof fetchCurrentRefreshTokenIdIfSignedIn !== "function") {
         throw new Error("Expected StackClientApp to expose _fetchCurrentRefreshTokenIdIfSignedIn in tests.");
       }
@@ -587,7 +587,7 @@ describe("StackClientApp cross-domain auth", () => {
         automaticSideEffects: false,
         devTool: false,
       });
-      const getBrowserCookieTokenStore = Reflect.get(clientApp, "_getBrowserCookieTokenStore");
+      const getBrowserCookieTokenStore = clientApp["_getBrowserCookieTokenStore"];
       if (typeof getBrowserCookieTokenStore !== "function") {
         throw new Error("Expected StackClientApp to expose _getBrowserCookieTokenStore in tests.");
       }
@@ -972,8 +972,8 @@ describe("StackClientApp cross-domain auth", () => {
     });
     const currentHref = "https://demo.stack-auth.com/settings?tab=profile";
 
-    const clientInterface = Reflect.get(clientApp, "_interface");
-    const originalSignOut = Reflect.get(clientInterface, "signOut");
+    const clientInterface = clientApp["_interface"];
+    const originalSignOut = clientInterface["signOut"];
     Reflect.set(clientInterface, "signOut", async () => {});
     const previousWindow = globalThis.window;
     const previousDocument = globalThis.document;
@@ -991,11 +991,11 @@ describe("StackClientApp cross-domain auth", () => {
     } as any;
 
     try {
-      const signOut = Reflect.get(clientApp, "_signOut");
+      const signOut = clientApp["_signOut"];
       if (typeof signOut !== "function") {
         throw new Error("Expected StackClientApp to expose _signOut in tests.");
       }
-      await expect(signOut.call(clientApp, Reflect.get(clientInterface, "createSession").call(clientInterface, {
+      await expect(signOut.call(clientApp, clientInterface["createSession"].call(clientInterface, {
         refreshToken: null,
       }))).rejects.toThrowError("INTENTIONAL_TEST_ABORT");
     } finally {
@@ -1153,8 +1153,8 @@ describe("StackClientApp cross-domain auth", () => {
       refreshToken: "old-refresh-token",
       accessToken: oldAccessToken,
     });
-    const clientInterface = Reflect.get(clientApp, "_interface");
-    const originalFetchNewAccessToken = Reflect.get(clientInterface, "fetchNewAccessToken");
+    const clientInterface = clientApp["_interface"];
+    const originalFetchNewAccessToken = clientInterface["fetchNewAccessToken"];
     Reflect.set(clientInterface, "fetchNewAccessToken", async () => {
       return AccessToken.createIfValid(refreshedOldAccessToken) ?? (() => {
         throw new Error("Expected test access token to be valid");
@@ -1162,7 +1162,7 @@ describe("StackClientApp cross-domain auth", () => {
     });
 
     try {
-      const getSessionFromTokenStore = Reflect.get(clientApp, "_getSessionFromTokenStore");
+      const getSessionFromTokenStore = clientApp["_getSessionFromTokenStore"];
       if (typeof getSessionFromTokenStore !== "function") {
         throw new Error("Expected StackClientApp to expose _getSessionFromTokenStore in tests.");
       }

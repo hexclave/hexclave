@@ -123,7 +123,7 @@ export function setLayerById(
 export function patchLayerById(
   layers: AnalyticsChartLayers,
   id: string,
-  patch: Record<string, unknown>,
+  patch: Partial<AnalyticsChartLayer>,
 ): AnalyticsChartLayers {
   return layers.map((l) => (l.id === id ? ({ ...l, ...patch } as AnalyticsChartLayer) : l));
 }

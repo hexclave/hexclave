@@ -1,6 +1,8 @@
+import type { Json } from "@hexclave/shared/dist/utils/json";
 
+export type PurchaseBody = Record<string, Json>;
 
-export function normalizePurchaseBody(body: Record<string, any>): Record<string, any> {
+export function normalizePurchaseBody(body: PurchaseBody): PurchaseBody {
   const productId = body.product_id ?? body.offer_id;
   const productInline = body.product_inline ?? body.offer_inline;
   const result: Record<string, any> = { ...body, product_id: productId, product_inline: productInline };

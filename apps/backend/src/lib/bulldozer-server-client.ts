@@ -1,5 +1,6 @@
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { parseResponseJson } from "@hexclave/shared/dist/utils/http";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
 import type { ManualTransactionRow } from "@/lib/payments/schema/types";
 
@@ -130,7 +131,7 @@ export async function fetchBulldozerServerJson<T>(options: {
     });
   }
 
-  return await response.json() as T;
+  return await parseResponseJson<T>(response);
 }
 
 export type BulldozerManualTransactionsPage = {

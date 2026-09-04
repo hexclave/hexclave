@@ -1,7 +1,7 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { traceSpanHot } from "../../../otel.js";
-import { DatabaseSeq } from "../../index.js";
+import { createDatabaseSeq, DatabaseSeq } from "../../index.js";
 import { LowLevelDatabase, LowLevelKvDump, LowLevelKvStore } from "../index.js";
 
 function arrayBuffersAreEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
@@ -14,7 +14,6 @@ function arrayBuffersAreEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
   return true;
 }
 
-type InstantAvailabilitySeq = readonly [dbId: string, seqId: string] & { __brand: "hexclave-low-level-kv-store-seq" };
 type SeqRecord = {
   underlyingSeq: DatabaseSeq,
   underlyingAvailable: Promise<void>,
@@ -46,7 +45,7 @@ export function declareInstantAvailabilityLowLevelDatabase(wrapped: LowLevelData
   const maxPendingSeqRecords = options.maxPendingSeqRecords ?? 20_000;
   if (!Number.isFinite(maxPendingSeqRecords) || maxPendingSeqRecords <= 0) throw new Error("maxPendingSeqRecords must be a positive finite number");
   const initialSeqId = "initial";
-  const initialSeq = [dbId, initialSeqId] as unknown as InstantAvailabilitySeq;
+  const initialSeq = createDatabaseSeq(dbId, initialSeqId);
   const seqRecords = new WeakMap<object, SeqRecord>();
   let createdSeqRecords = 1;
   let underlyingAvailableSeqRecords = 1;
@@ -65,7 +64,7 @@ export function declareInstantAvailabilityLowLevelDatabase(wrapped: LowLevelData
   });
   const cacheMaps = new Set<Map<string, CachedValue>>();
 
-  const toSeq = (seqId: string) => [dbId, seqId] as unknown as InstantAvailabilitySeq;
+  const toSeq = (seqId: string) => createDatabaseSeq(dbId, seqId);
   const getSeqId = (seq: DatabaseSeq | undefined) => {
     if (seq === undefined) return initialSeqId;
     if (seq[0] !== dbId || typeof seq[1] !== "string") throw new Error("Instant-availability sequence does not belong to this database");

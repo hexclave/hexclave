@@ -17,6 +17,14 @@ export type ExpectStatusCode = <T = any>(
   request: RequestInit,
 ) => Promise<T>;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isEndpointOutput(value: unknown): value is EndpointOutput {
+  return isRecord(value) && typeof value.status === "number" && "responseJson" in value;
+}
+
 /**
  * Reads an output file that may be in either format:
  * - Legacy: a single JSON object keyed by endpoint. This was old
@@ -44,7 +52,10 @@ export function loadOutputData(filePath: string): OutputData {
     // Not JSONL — fall through to legacy parse
   }
 
-  const legacy = JSON.parse(content) as Record<string, EndpointOutput[]>;
+  const legacy = JSON.parse(content);
+  if (!isRecord(legacy) || !Object.values(legacy).every((outputs) => Array.isArray(outputs) && outputs.every(isEndpointOutput))) {
+    throw new HexclaveAssertionError("Legacy integrity output has an invalid shape");
+  }
   for (const [endpoint, outputs] of Object.entries(legacy)) {
     data.set(endpoint, outputs);
   }

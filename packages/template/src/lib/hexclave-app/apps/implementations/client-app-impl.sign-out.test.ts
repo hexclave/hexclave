@@ -40,22 +40,22 @@ describe("StackClientApp sign-out", () => {
       noAutomaticPrefetch: true,
       devTool: false,
     });
-    const clientInterface = Reflect.get(clientApp, "_interface");
+    const clientInterface = clientApp["_interface"];
     Reflect.set(clientInterface, "getClientUserByToken", async () => ({
       id: "user-id",
       is_anonymous: false,
       is_restricted: false,
     }));
 
-    const signInToAccountWithTokens = Reflect.get(clientApp, "_signInToAccountWithTokens");
+    const signInToAccountWithTokens = clientApp["_signInToAccountWithTokens"];
     await signInToAccountWithTokens.call(clientApp, {
       accessToken: createAccessTokenString("refresh-token-id"),
       refreshToken: "refresh-token",
     });
 
-    const createCookieHelper = Reflect.get(clientApp, "_createCookieHelper");
-    const getOrCreateTokenStore = Reflect.get(clientApp, "_getOrCreateTokenStore");
-    const getSessionFromTokenStore = Reflect.get(clientApp, "_getSessionFromTokenStore");
+    const createCookieHelper = clientApp["_createCookieHelper"];
+    const getOrCreateTokenStore = clientApp["_getOrCreateTokenStore"];
+    const getSessionFromTokenStore = clientApp["_getSessionFromTokenStore"];
     const tokenStore = getOrCreateTokenStore.call(clientApp, await createCookieHelper.call(clientApp));
     const session = getSessionFromTokenStore.call(clientApp, tokenStore);
 
@@ -73,7 +73,7 @@ describe("StackClientApp sign-out", () => {
     const unrelatedStore = new AsyncStore<void>();
     expect(unrelatedStore.setAsync(new Promise<void>(() => {}))).toBeInstanceOf(Promise);
 
-    const signOut = Reflect.get(clientApp, "_signOut");
+    const signOut = clientApp["_signOut"];
     const signOutPromise = signOut.call(clientApp, session);
     await redirectStarted.promise;
 

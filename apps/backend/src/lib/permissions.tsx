@@ -4,7 +4,9 @@ import { CompleteConfig } from "@hexclave/shared/dist/config/schema";
 import { ProjectPermissionsCrud } from "@hexclave/shared/dist/interface/crud/project-permissions";
 import { TeamPermissionDefinitionsCrud, TeamPermissionsCrud } from "@hexclave/shared/dist/interface/crud/team-permissions";
 import { groupBy } from "@hexclave/shared/dist/utils/arrays";
+import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { getOrUndefined, has, typedEntries, typedFromEntries } from "@hexclave/shared/dist/utils/objects";
+import { parseJson } from "@hexclave/shared/dist/utils/json";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import { overrideEnvironmentConfigOverride } from "./config";
 import { recordExternalDbSyncDeletion, withExternalDbSyncUpdate } from "./external-db-sync";
@@ -48,12 +50,13 @@ export async function listPermissions<S extends "team" | "project">(
     tenancy: options.tenancy,
   });
   const permissionsMap = new Map(permissionDefs.map(p => [p.id, p]));
+  const teamId = "teamId" in options ? options.teamId : undefined;
   const results = options.scope === "team" ?
     await tx.teamMemberDirectPermission.findMany({
       where: {
         tenancyId: options.tenancy.id,
         projectUserId: options.userId ?? (options.userIds == null ? undefined : { in: options.userIds }),
-        teamId: (options as any).teamId
+        teamId,
       },
     }) :
     await tx.projectUserDirectPermission.findMany({
@@ -64,9 +67,17 @@ export async function listPermissions<S extends "team" | "project">(
     });
 
   const finalResults: { id: string, team_id?: string, user_id: string }[] = [];
-  const groupedBy = groupBy(results, (result) => JSON.stringify([result.projectUserId, ...(options.scope === "team" ? [(result as any).teamId] : [])]));
+  const groupedBy = groupBy(results, (result) => JSON.stringify([result.projectUserId, ...(options.scope === "team" && "teamId" in result ? [result.teamId] : [])]));
   for (const [compositeKey, groupedResults] of groupedBy) {
-    const [userId, teamId] = JSON.parse(compositeKey) as [string, string | undefined];
+    const parsedCompositeKey = parseJson(compositeKey);
+    if (parsedCompositeKey.status === "error" || !Array.isArray(parsedCompositeKey.data)) {
+      throw new HexclaveAssertionError("Permission group key is not a JSON array", { compositeKey });
+    }
+    const [userId, parsedTeamId] = parsedCompositeKey.data;
+    if (typeof userId !== "string" || (parsedCompositeKey.data.length > 1 && parsedTeamId !== null && typeof parsedTeamId !== "string")) {
+      throw new HexclaveAssertionError("Permission group key has an invalid shape", { compositeKey });
+    }
+    const teamId = typeof parsedTeamId === "string" ? parsedTeamId : undefined;
     const idsToProcess = groupedResults.map(p => p.permissionId);
 
     const result = new Map<string, typeof permissionDefs[number]>();

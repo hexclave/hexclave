@@ -172,12 +172,12 @@ describe("deploymentToApiShape", () => {
   });
 
   it("reports the deployment source and every planned service, outcome or not", () => {
-    const shape = deploymentRow();
-    expect(shape.deployment_source_id).toBe("backend");
-    expect(shape.status).toBe("building");
+    const deployment = deploymentRow();
+    expect(deployment.deployment_source_id).toBe("backend");
+    expect(deployment.status).toBe("building");
     // `api` has no outcome yet: it is still pending rather than missing from
     // the list, which is what lets the dashboard show what a deploy will ship.
-    expect(shape.services).toEqual([
+    expect(deployment.services).toEqual([
       { service_id: "web", status: "deployed", url: "https://web.example.com", revision: null, image: null, error: null },
       { service_id: "api", status: "pending", url: null, revision: null, image: null, error: null },
     ]);
@@ -190,8 +190,8 @@ describe("deploymentToApiShape", () => {
 
   it("keeps an outcome whose service is missing from the plan", () => {
     // A hand-edited row: showing the outcome beats silently dropping it.
-    const shape = deploymentRow({ plannedServiceIds: [], services: { ghost: { status: "failed", error: "boom" } } });
-    expect(shape.services).toEqual([{ service_id: "ghost", status: "failed", url: null, revision: null, image: null, error: "boom" }]);
+    const deployment = deploymentRow({ plannedServiceIds: [], services: { ghost: { status: "failed", error: "boom" } } });
+    expect(deployment.services).toEqual([{ service_id: "ghost", status: "failed", url: null, revision: null, image: null, error: "boom" }]);
   });
 
   it("survives a plannedServiceIds value that is not a string array", () => {

@@ -1,4 +1,8 @@
 import type { ReactNode } from "react";
+import type { Json } from "@hexclave/shared/dist/utils/json";
+
+/** Values the grid can render and serialize without an opaque escape hatch. */
+export type DataGridCellValue = Json | Date;
 
 // ─── Row identity ────────────────────────────────────────────────────
 /** Every row must be uniquely identifiable. The grid resolves identity
@@ -33,11 +37,11 @@ export type DataGridDateFormat = {
 };
 
 /** Context passed to `renderCell`. */
-export type DataGridCellContext<TRow> = {
+export type DataGridCellContext<TRow, TValue extends DataGridCellValue = DataGridCellValue> = {
   row: TRow;
   rowId: RowId;
   rowIndex: number;
-  value: unknown;
+  value: TValue;
   columnId: string;
   isSelected: boolean;
   /** Current date display mode — consumers writing custom `renderCell`
@@ -55,7 +59,7 @@ export type DataGridHeaderContext<TRow> = {
 };
 
 /** A single column's full configuration. Generic over the row type. */
-export type DataGridColumnDef<TRow> = {
+export type DataGridColumnDef<TRow, TValue extends DataGridCellValue = DataGridCellValue> = {
   /** Unique identifier for this column. */
   id: string;
 
@@ -64,10 +68,10 @@ export type DataGridColumnDef<TRow> = {
 
   /** Accessor — either a key of TRow or a function. If omitted, `id` is
    * used as the key. */
-  accessor?: keyof TRow | ((row: TRow) => unknown);
+  accessor?: keyof TRow | ((row: TRow) => TValue);
 
   /** Custom cell renderer. Falls back to plain text of the resolved value. */
-  renderCell?: (ctx: DataGridCellContext<TRow>) => ReactNode;
+  renderCell?: (ctx: DataGridCellContext<TRow, TValue>) => ReactNode;
 
   // ── Sizing ──────────────────────────────────────────────────
   /** Initial width in pixels. Defaults to 150. */
@@ -105,25 +109,25 @@ export type DataGridColumnDef<TRow> = {
   // ── Overrides ──────────────────────────────────────────────
   /** Custom sort comparator. Receives two resolved cell values.
    * Return negative if a < b, positive if a > b, 0 if equal. */
-  sortComparator?: (a: unknown, b: unknown) => number;
+  sortComparator?: (a: TValue, b: TValue) => number;
   /** Format a cell value to a plain string — used for export and
    * clipboard copy. Defaults to `String(value)`. */
-  formatValue?: (value: unknown, row: TRow) => string;
+  formatValue?: (value: TValue, row: TRow) => string;
 
   // ── Date / dateTime ─────────────────────────────────────────
   /** Parse a raw cell value into a `Date`. Only consulted when `type` is
    * `"date"` or `"dateTime"`. Defaults to `new Date(value)` with graceful
    * handling of `null` / `undefined` / invalid dates. Override for
    * non-standard formats (e.g. ClickHouse's space-separated UTC strings). */
-  parseValue?: (value: unknown) => Date | null;
+  parseValue?: (value: TValue) => Date | null;
   /** Per-column override for the relative / absolute date formatters. */
   dateFormat?: DataGridDateFormat;
 
   // ── Cell-level callbacks ──────────────────────────────────────
   /** Fired when a cell in this column is clicked. */
-  onCellClick?: (ctx: DataGridCellContext<TRow>, event: React.MouseEvent) => void;
+  onCellClick?: (ctx: DataGridCellContext<TRow, TValue>, event: React.MouseEvent) => void;
   /** Fired when a cell in this column is double-clicked. */
-  onCellDoubleClick?: (ctx: DataGridCellContext<TRow>, event: React.MouseEvent) => void;
+  onCellDoubleClick?: (ctx: DataGridCellContext<TRow, TValue>, event: React.MouseEvent) => void;
 };
 
 export type DataGridSelectOption = {
@@ -226,11 +230,11 @@ export type DataGridExportFormat = "csv" | "json";
 
 export type DataGridExportScope = "all" | "filtered";
 
-export type DataGridExportField<TRow> = {
+export type DataGridExportField<TRow, TValue extends DataGridCellValue = DataGridCellValue> = {
   key: string;
   label: string;
   enabled: boolean;
-  getValue: (row: TRow) => unknown;
+  getValue: (row: TRow) => TValue;
 };
 
 export type DataGridExportRowsOptions = {
@@ -259,7 +263,7 @@ export type DataGridExportOptions<TRow> = {
 export type DataGridCallbacks<TRow> = {
   onRowClick?: (row: TRow, rowId: RowId, event: React.MouseEvent) => void;
   onRowDoubleClick?: (row: TRow, rowId: RowId, event: React.MouseEvent) => void;
-  onCellClick?: (row: TRow, columnId: string, value: unknown, event: React.MouseEvent) => void;
+  onCellClick?: (row: TRow, columnId: string, value: DataGridCellValue, event: React.MouseEvent) => void;
   /**
    * Fires when the selection set changes. **Page-scoped:** the header "select
    * all" checkbox and `selectedRows` only cover the rows currently rendered

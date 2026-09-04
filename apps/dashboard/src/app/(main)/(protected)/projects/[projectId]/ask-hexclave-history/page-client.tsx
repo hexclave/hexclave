@@ -21,7 +21,7 @@ import {
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import type { Json } from "@hexclave/shared/dist/utils/json";
 import { use } from "@hexclave/shared/dist/utils/react";
-import { useStackApp, useUser } from "@hexclave/next";
+import { useStackApp, useUser, type StackClientApp } from "@hexclave/next";
 import {
   createDefaultDataGridState,
   DataGrid,
@@ -164,7 +164,7 @@ const columns: DataGridColumnDef<AskCall>[] = [
 const sessionComponentKeys = new WeakMap<object, number>();
 let nextSessionComponentKey = 0;
 
-function getSessionComponentKey(session: object): number {
+function getSessionComponentKey<T extends object>(session: T): number {
   const existing = sessionComponentKeys.get(session);
   if (existing != null) return existing;
   const created = nextSessionComponentKey++;
@@ -173,7 +173,7 @@ function getSessionComponentKey(session: object): number {
 }
 
 async function fetchHistoryState(
-  app: object,
+  app: StackClientApp,
   filters: Filters,
   cursor: string | null = null,
 ): Promise<HistoryState> {
@@ -206,7 +206,7 @@ async function fetchHistoryState(
   }
 }
 
-function fetchInitialHistoryState(app: object, _session: object): Promise<HistoryState> {
+function fetchInitialHistoryState(app: StackClientApp, _session: object): Promise<HistoryState> {
   return fetchHistoryState(app, DEFAULT_FILTERS);
 }
 
@@ -248,7 +248,7 @@ function AuthenticatedPage() {
 }
 
 function HistoryContent(props: {
-  app: object,
+  app: StackClientApp,
   initialStatePromise: Promise<HistoryState>,
 }) {
   const initialState = use(props.initialStatePromise);

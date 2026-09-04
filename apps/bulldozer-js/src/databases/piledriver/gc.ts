@@ -238,10 +238,10 @@ function parseNonNegativeInteger(value: unknown, name: string) {
 function parseReferenceMetadata(buffer: ArrayBuffer): ReferenceMetadata {
   const parsed = parseJson(buffer);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Invalid Piledriver GC reference metadata");
-  const schemaVersion = Reflect.get(parsed, "schemaVersion");
-  const generation = Reflect.get(parsed, "generation");
-  const lastDereferencedAtMillis = Reflect.get(parsed, "lastDereferencedAtMillis");
-  const deletionValue = Reflect.get(parsed, "deletion");
+  const schemaVersion = parsed["schemaVersion"];
+  const generation = parsed["generation"];
+  const lastDereferencedAtMillis = parsed["lastDereferencedAtMillis"];
+  const deletionValue = parsed["deletion"];
   if (schemaVersion !== GC_SCHEMA_VERSION || typeof generation !== "string") {
     throw new Error("Invalid Piledriver GC reference metadata header");
   }
@@ -253,8 +253,8 @@ function parseReferenceMetadata(buffer: ArrayBuffer): ReferenceMetadata {
   if (deletionValue !== null) {
     if (typeof deletionValue !== "object" || Array.isArray(deletionValue)) throw new Error("Invalid Piledriver GC deletion metadata");
     deletion = {
-      nextReferenceIndex: parseNonNegativeInteger(Reflect.get(deletionValue, "nextReferenceIndex"), "nextReferenceIndex"),
-      totalReferences: parseNonNegativeInteger(Reflect.get(deletionValue, "totalReferences"), "totalReferences"),
+      nextReferenceIndex: parseNonNegativeInteger(deletionValue["nextReferenceIndex"], "nextReferenceIndex"),
+      totalReferences: parseNonNegativeInteger(deletionValue["totalReferences"], "totalReferences"),
     };
     if (deletion.nextReferenceIndex > deletion.totalReferences) throw new Error("Invalid Piledriver GC deletion progress");
   }
@@ -262,8 +262,8 @@ function parseReferenceMetadata(buffer: ArrayBuffer): ReferenceMetadata {
   return {
     schemaVersion,
     generation,
-    referenceCount: parseNonNegativeInteger(Reflect.get(parsed, "referenceCount"), "referenceCount"),
-    createdAtMillis: parseNonNegativeInteger(Reflect.get(parsed, "createdAtMillis"), "createdAtMillis"),
+    referenceCount: parseNonNegativeInteger(parsed["referenceCount"], "referenceCount"),
+    createdAtMillis: parseNonNegativeInteger(parsed["createdAtMillis"], "createdAtMillis"),
     lastDereferencedAtMillis: parsedLastDereferencedAtMillis,
     deletion,
   };
@@ -272,10 +272,10 @@ function parseReferenceMetadata(buffer: ArrayBuffer): ReferenceMetadata {
 function parseGarbageCollectionState(buffer: ArrayBuffer): GarbageCollectionState {
   const parsed = parseJson(buffer);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Invalid Piledriver GC state");
-  const schemaVersion = Reflect.get(parsed, "schemaVersion");
-  const generation = Reflect.get(parsed, "generation");
-  const status = Reflect.get(parsed, "status");
-  const repairCursorBase64 = Reflect.get(parsed, "repairCursorBase64");
+  const schemaVersion = parsed["schemaVersion"];
+  const generation = parsed["generation"];
+  const status = parsed["status"];
+  const repairCursorBase64 = parsed["repairCursorBase64"];
   if (
     schemaVersion !== GC_SCHEMA_VERSION
     || typeof generation !== "string"

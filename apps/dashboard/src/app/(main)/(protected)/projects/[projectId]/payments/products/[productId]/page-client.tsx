@@ -87,7 +87,9 @@ export default function PageClient({ productId }: { productId: string }) {
   const project = adminApp.useProject();
   const config = project.useConfig();
   const updateConfig = useUpdateConfig();
-  const product = config.payments.products[productId] as Product | undefined;
+  const product: Product | undefined = Object.hasOwn(config.payments.products, productId)
+    ? config.payments.products[productId]
+    : undefined;
 
   if (product == null) {
     return (

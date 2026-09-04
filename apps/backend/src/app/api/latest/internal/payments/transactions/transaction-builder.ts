@@ -30,8 +30,8 @@ export function resolveSelectedPriceFromProduct(product: ProductWithPrices, pric
   if (!priceId) return null;
   const prices = product.prices;
   if (!prices) return null;
-  const selected = prices[priceId as keyof typeof prices] as ProductPriceEntry | undefined;
-  if (!selected) return null;
-  const { serverOnly: _serverOnly, freeTrial: _freeTrial, ...rest } = selected as any;
-  return rest as SelectedPrice;
+  if (!Object.hasOwn(prices, priceId)) return null;
+  const selected = prices[priceId];
+  const { serverOnly: _serverOnly, freeTrial: _freeTrial, ...rest } = selected;
+  return rest;
 }

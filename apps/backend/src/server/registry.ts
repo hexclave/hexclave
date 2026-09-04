@@ -5,8 +5,8 @@ type HttpMethod = typeof httpMethodNames[number];
 type RouteParams = Record<string, string | string[]>;
 type RouteHandlerOptions = { params: Promise<RouteParams> };
 type RouteHandler = (request: Request, options: RouteHandlerOptions) => Promise<Response> | Response;
-export type UnknownRouteModule = Partial<Record<HttpMethod, unknown>>;
-type UnknownRouteFunction = (request: Request, options: RouteHandlerOptions) => unknown;
+export type UnknownRouteModule = Partial<Record<HttpMethod, RouteHandler>>;
+type UnknownRouteFunction = RouteHandler;
 export type RouteMethods = Map<HttpMethod, RouteHandler>;
 
 type RouteEntry = {

@@ -5,6 +5,8 @@ import { KnownErrors } from "../known-errors";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type RestrictedReason } from "../schema-fields";
 import { AccessToken, InternalSession, RefreshToken } from "../sessions";
 import type { MoneyAmount } from "../utils/currency-constants";
+import { parseResponseJson } from "../utils/http";
+import type { EditableMetadata } from "../utils/jsx-editable-transpiler";
 import { Result } from "../utils/results";
 import { urlString } from "../utils/urls";
 import type { AnalyticsClickmapDevice, AnalyticsClickmapKind, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse, MetricsResponse, MetricsUserCounts, UserActivityResponse } from "./admin-metrics";
@@ -300,7 +302,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
 
   async listInternalApiKeys(): Promise<InternalApiKeysCrud["Admin"]["Read"][]> {
     const response = await this.sendAdminRequest("/internal/api-keys", {}, null);
-    const result = await response.json() as InternalApiKeysCrud["Admin"]["List"];
+    const result = await parseResponseJson<InternalApiKeysCrud["Admin"]["List"]>(response);
     return result.items;
   }
 
@@ -326,7 +328,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
 
   async listInternalEmailTemplates(): Promise<{ id: string, display_name: string, theme_id?: string, tsx_source: string }[]> {
     const response = await this.sendAdminRequest(`/internal/email-templates`, {}, null);
-    const result = await response.json() as { templates: { id: string, display_name: string, theme_id?: string, tsx_source: string }[] };
+    const result = await parseResponseJson<{ templates: { id: string, display_name: string, theme_id?: string, tsx_source: string }[] }>(response);
     return result.templates;
   }
 
@@ -334,7 +336,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
 
   async listWorkflows(): Promise<WorkflowSummaryJson[]> {
     const response = await this.sendAdminRequest(`/internal/workflows`, {}, null);
-    const result = await response.json() as { workflows: WorkflowSummaryJson[] };
+    const result = await parseResponseJson<{ workflows: WorkflowSummaryJson[] }>(response);
     return result.workflows;
   }
 
@@ -387,7 +389,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
 
   async listWorkflowVersions(workflowId: string): Promise<WorkflowVersionJson[]> {
     const response = await this.sendAdminRequest(urlString`/internal/workflows/${workflowId}/versions`, {}, null);
-    const result = await response.json() as { versions: WorkflowVersionJson[] };
+    const result = await parseResponseJson<{ versions: WorkflowVersionJson[] }>(response);
     return result.versions;
   }
 
@@ -463,7 +465,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
 
   async listInternalEmailDrafts(): Promise<{ id: string, display_name: string, theme_id?: string | undefined | false, tsx_source: string, sent_at_millis?: number | null }[]> {
     const response = await this.sendAdminRequest(`/internal/email-drafts`, {}, null);
-    const result = await response.json() as { drafts: { id: string, display_name: string, theme_id?: string | undefined | false, tsx_source: string, sent_at_millis?: number | null }[] };
+    const result = await parseResponseJson<{ drafts: { id: string, display_name: string, theme_id?: string | undefined | false, tsx_source: string, sent_at_millis?: number | null }[] }>(response);
     return result.drafts;
   }
 
@@ -508,7 +510,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
 
   async listEmailThemes(): Promise<{ id: string, display_name: string }[]> {
     const response = await this.sendAdminRequest(`/internal/email-themes`, {}, null);
-    const result = await response.json() as { themes: { id: string, display_name: string }[] };
+    const result = await parseResponseJson<{ themes: { id: string, display_name: string }[] }>(response);
     return result.themes;
   }
 
@@ -516,7 +518,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
   // Team permission definitions methods
   async listTeamPermissionDefinitions(): Promise<TeamPermissionDefinitionsCrud['Admin']['Read'][]> {
     const response = await this.sendAdminRequest(`/team-permission-definitions`, {}, null);
-    const result = await response.json() as TeamPermissionDefinitionsCrud['Admin']['List'];
+    const result = await parseResponseJson<TeamPermissionDefinitionsCrud['Admin']['List']>(response);
     return result.items;
   }
 
@@ -528,7 +530,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
     if (options.cursor) params.set("cursor", options.cursor);
     if (options.query) params.set("query", options.query);
     const response = await this.sendAdminRequest(`/team-permission-definitions?${params.toString()}`, {}, null);
-    const result = await response.json() as TeamPermissionDefinitionsCrud['Admin']['List'];
+    const result = await parseResponseJson<TeamPermissionDefinitionsCrud['Admin']['List']>(response);
     return {
       items: result.items,
       nextCursor: result.pagination?.next_cursor ?? null,
@@ -575,7 +577,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
 
   async listProjectPermissionDefinitions(): Promise<ProjectPermissionDefinitionsCrud['Admin']['Read'][]> {
     const response = await this.sendAdminRequest(`/project-permission-definitions`, {}, null);
-    const result = await response.json() as ProjectPermissionDefinitionsCrud['Admin']['List'];
+    const result = await parseResponseJson<ProjectPermissionDefinitionsCrud['Admin']['List']>(response);
     return result.items;
   }
 
@@ -673,7 +675,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       },
       null,
     );
-    const body = (await response.json()) as MetricsResponse;
+    const body = await parseResponseJson<MetricsResponse>(response);
     // The yup schema's .optional().default(...) fallbacks only run during
     // backend response validation, not on this client-side cast — apply them
     // here too so the one-release-cycle tolerance for older servers that the
@@ -724,7 +726,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       },
       null,
     );
-    return (await response.json()) as UserActivityResponse;
+    return await parseResponseJson<UserActivityResponse>(response);
   }
 
   async getAnalyticsClickmap(options: {
@@ -751,7 +753,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       },
       null,
     );
-    return (await response.json()) as AnalyticsClickmapResponse;
+    return await parseResponseJson<AnalyticsClickmapResponse>(response);
   }
 
   async createAnalyticsClickmapToken(options: {
@@ -766,7 +768,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       },
       null,
     );
-    return (await response.json()) as AnalyticsClickmapTokenResponse;
+    return await parseResponseJson<AnalyticsClickmapTokenResponse>(response);
   }
 
   async getMetricsUserCounts(): Promise<MetricsUserCounts> {
@@ -777,7 +779,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       },
       null,
     );
-    return (await response.json()) as MetricsUserCounts;
+    return await parseResponseJson<MetricsUserCounts>(response);
   }
 
   async sendTestEmail(data: {
@@ -947,7 +949,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
     templateTsxSource?: string,
     editableMarkers?: boolean,
     editableSource?: 'template' | 'theme' | 'both',
-  }): Promise<{ html: string, editable_regions?: Record<string, unknown> }> {
+  }): Promise<{ html: string, editable_regions?: Record<string, EditableMetadata> }> {
     const response = await this.sendAdminRequest(`/emails/render-email`, {
       method: "POST",
       headers: {
@@ -1316,7 +1318,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       { method: 'GET' },
       null,
     );
-    const json = await response.json() as { transactions: Transaction[], next_cursor: string | null };
+    const json = await parseResponseJson<{ transactions: Transaction[], next_cursor: string | null }>(response);
     return { transactions: json.transactions, nextCursor: json.next_cursor };
   }
 

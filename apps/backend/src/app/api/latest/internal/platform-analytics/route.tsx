@@ -51,7 +51,7 @@ function rowsToMap(rows: CountRow[]): Map<string, number> {
   return out;
 }
 
-function num(value: unknown): number {
+function parseFiniteNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
 }
@@ -538,10 +538,10 @@ export const GET = createSmartRouteHandler({
     }
 
     // ---- Assemble series ----
-    const dauByDay = new Map(ch.dauSeries.map((r) => [r.day.split("T")[0], num(r.c)]));
-    const pvByDay = new Map(ch.pvSeries.map((r) => [r.day.split("T")[0], { pv: num(r.pv), visitors: num(r.visitors) }]));
-    const signupByDay = new Map(ch.signupSeries.map((r) => [r.day.split("T")[0], num(r.c)]));
-    const revenueByDay = new Map(pg.revenueDaily.map((r) => [r.day, num(r.cents)]));
+    const dauByDay = new Map(ch.dauSeries.map((r) => [r.day.split("T")[0], parseFiniteNumber(r.c)]));
+    const pvByDay = new Map(ch.pvSeries.map((r) => [r.day.split("T")[0], { pv: parseFiniteNumber(r.pv), visitors: parseFiniteNumber(r.visitors) }]));
+    const signupByDay = new Map(ch.signupSeries.map((r) => [r.day.split("T")[0], parseFiniteNumber(r.c)]));
+    const revenueByDay = new Map(pg.revenueDaily.map((r) => [r.day, parseFiniteNumber(r.cents)]));
     const series = windowDays.map((date) => ({
       date,
       signups: signupByDay.get(date) ?? 0,
@@ -554,7 +554,7 @@ export const GET = createSmartRouteHandler({
     // ---- Activity split ----
     const splitByDay = new Map(ch.split.map((r) => [r.day.split("T")[0], r]));
     const splitField = (field: "total_count" | "new_count" | "retained_count" | "reactivated_count") =>
-      windowDays.map((date) => ({ date, activity: num(splitByDay.get(date)?.[field]) }));
+      windowDays.map((date) => ({ date, activity: parseFiniteNumber(splitByDay.get(date)?.[field]) }));
     const activity_split = {
       total: splitField("total_count"),
       new: splitField("new_count"),
@@ -566,8 +566,8 @@ export const GET = createSmartRouteHandler({
     const mp = ch.mauProjects[0] ?? { mauCur: 0, mauPrev: 0, projCur: 0, projPrev: 0 };
     const uc = ch.userCounts[0] ?? { total: 0, totalPrev: 0, verified: 0, verifiedPrev: 0, anonymous: 0 };
     const dauAvgCur = Math.round(series.reduce((s, p) => s + p.active_users, 0) / Math.max(1, WINDOW_DAYS));
-    const mauCur = num(mp.mauCur);
-    const mauPrev = num(mp.mauPrev);
+    const mauCur = parseFiniteNumber(mp.mauCur);
+    const mauPrev = parseFiniteNumber(mp.mauPrev);
     const stick = (dau: number, mau: number) => mau > 0 ? Number(((dau / mau) * 100).toFixed(1)) : 0;
     const signupsCur = series.reduce((s, p) => s + p.signups, 0);
     const emailRow = pg.email[0] ?? { sent: 0, delivered: 0, bounced: 0, error: 0, in_progress: 0, deliveredCur: 0, finishedCur: 0, deliveredPrev: 0, finishedPrev: 0 };
@@ -576,13 +576,13 @@ export const GET = createSmartRouteHandler({
     // MRR (true recurring, normalized to monthly cents).
     let mrrCents = 0;
     for (const s of pg.subscriptions) {
-      mrrCents += monthlyRecurringCents(s.product, s.priceId, num(s.quantity));
+      mrrCents += monthlyRecurringCents(s.product, s.priceId, parseFiniteNumber(s.quantity));
     }
 
     const kpis = {
-      active_projects: { value: num(mp.projCur), prev: num(mp.projPrev) },
-      total_users: { value: num(uc.total), prev: num(uc.totalPrev) },
-      verified_users: { value: num(uc.verified), prev: num(uc.verifiedPrev) },
+      active_projects: { value: parseFiniteNumber(mp.projCur), prev: parseFiniteNumber(mp.projPrev) },
+      total_users: { value: parseFiniteNumber(uc.total), prev: parseFiniteNumber(uc.totalPrev) },
+      verified_users: { value: parseFiniteNumber(uc.verified), prev: parseFiniteNumber(uc.verifiedPrev) },
       mau: { value: mauCur, prev: mauPrev },
       dau_avg: { value: dauAvgCur, prev: null },
       stickiness: { value: stick(dauAvgCur, mauCur), prev: null },
@@ -598,17 +598,17 @@ export const GET = createSmartRouteHandler({
     // ---- Breakdowns ----
     const usersByCountryMap = new Map<string, number>();
     for (const r of ch.country) {
-      if (r.country_code) usersByCountryMap.set(r.country_code.toUpperCase(), num(r.c));
+      if (r.country_code) usersByCountryMap.set(r.country_code.toUpperCase(), parseFiniteNumber(r.c));
     }
     const usersByCountry = Object.fromEntries(usersByCountryMap);
-    const nonAnon = num(uc.total);
-    const verified = num(uc.verified);
+    const nonAnon = parseFiniteNumber(uc.total);
+    const verified = parseFiniteNumber(uc.verified);
     const breakdowns = {
-      auth_methods: pg.authMethods.map((m) => ({ method: m.method, count: num(m.count) })).filter((m) => m.count > 0),
+      auth_methods: pg.authMethods.map((m) => ({ method: m.method, count: parseFiniteNumber(m.count) })).filter((m) => m.count > 0),
       users_by_status: {
         verified,
         unverified: Math.max(0, nonAnon - verified),
-        anonymous: num(uc.anonymous),
+        anonymous: parseFiniteNumber(uc.anonymous),
       },
       users_by_country: usersByCountry,
       email: {
@@ -618,7 +618,7 @@ export const GET = createSmartRouteHandler({
         error: emailRow.error,
         in_progress: emailRow.in_progress,
       },
-      dead_click_rate: rate(num(ch.deadClicks[0]?.dead), num(ch.deadClicks[0]?.clicks)),
+      dead_click_rate: rate(parseFiniteNumber(ch.deadClicks[0]?.dead), parseFiniteNumber(ch.deadClicks[0]?.clicks)),
     };
 
     // ---- Feature adoption ----
@@ -649,9 +649,9 @@ export const GET = createSmartRouteHandler({
     // ---- Per-project leaderboard ----
     const totalsMap = rowsToMap(ch.totalsByProject);
     const verifiedMap = rowsToMap(ch.verifiedByProject);
-    const signupsMap = new Map(ch.signupsByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
-    const activeMap = new Map(ch.activeByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
-    const revenueMap = new Map(pg.revenueByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
+    const signupsMap = new Map(ch.signupsByProject.map((r) => [r.projectId, { cur: parseFiniteNumber(r.cur), prev: parseFiniteNumber(r.prev) }]));
+    const activeMap = new Map(ch.activeByProject.map((r) => [r.projectId, { cur: parseFiniteNumber(r.cur), prev: parseFiniteNumber(r.prev) }]));
+    const revenueMap = new Map(pg.revenueByProject.map((r) => [r.projectId, { cur: parseFiniteNumber(r.cur), prev: parseFiniteNumber(r.prev) }]));
     const sparkIndex = new Map<string, Map<string, number>>();
     for (const r of ch.sparkByProject) {
       const day = r.day.split("T")[0];
@@ -660,7 +660,7 @@ export const GET = createSmartRouteHandler({
         m = new Map();
         sparkIndex.set(r.projectId, m);
       }
-      m.set(day, num(r.c));
+      m.set(day, parseFiniteNumber(r.c));
     }
     const featureSet = (id: string): string[] => {
       const f: string[] = [];

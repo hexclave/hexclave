@@ -47,7 +47,7 @@ function getStackAppInternals(appValue: unknown): HexclaveAppInternals {
     throw new Error("The Stack app instance is unavailable.");
   }
 
-  const internals = Reflect.get(appValue, hexclaveAppInternalsSymbol);
+  const internals = appValue[hexclaveAppInternalsSymbol];
   if (!isStackAppInternals(internals)) {
     throw new Error("The Stack client app cannot send internal requests.");
   }

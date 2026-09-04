@@ -17,7 +17,7 @@ export function TeamProfileImageSection(props: { team: Team }) {
       description="Upload an image for your team"
     >
       <ProfileImageEditor
-        user={props.team as any}
+        user={props.team}
         onProfileImageUrlChange={async (profileImageUrl) => {
           await props.team.update({ profileImageUrl });
         }}

@@ -197,7 +197,7 @@ function prismaModelToCrud(prismaModel: EmailOutbox): EmailOutboxCrud["Server"][
       return {
         ...base,
         // Include rendered fields if available
-        ...(rendered ? rendered : {}),
+        ...(rendered ?? undefined),
         // Override has_rendered based on whether we actually have rendered content
         has_rendered: !!rendered,
         status: "skipped",
@@ -557,4 +557,3 @@ function parseEmailOutboxFromJson(j: Record<string, unknown>): EmailOutbox {
     shouldUpdateSequenceId: j.shouldUpdateSequenceId as boolean,
   };
 }
-

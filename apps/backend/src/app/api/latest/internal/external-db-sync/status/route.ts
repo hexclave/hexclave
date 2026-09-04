@@ -205,7 +205,7 @@ function toBigIntString(value: unknown): string | null {
   return null;
 }
 
-function toBigIntStringOrThrow(value: unknown, label: string): string {
+function parseBigIntStringOrThrow(value: unknown, label: string): string {
   return toBigIntString(value) ?? throwErr(`Expected ${label} to be a bigint-compatible value.`, { value });
 }
 
@@ -532,10 +532,10 @@ async function fetchInternalStats(tenancyId: string | null) {
 
 function formatPollerStats(outgoingStats: OutgoingStatsRow) {
   return {
-    total: toBigIntStringOrThrow(outgoingStats.total, "outgoing total"),
-    pending: toBigIntStringOrThrow(outgoingStats.pending, "outgoing pending"),
-    in_flight: toBigIntStringOrThrow(outgoingStats.in_flight, "outgoing in_flight"),
-    stale: toBigIntStringOrThrow(outgoingStats.stale, "outgoing stale"),
+    total: parseBigIntStringOrThrow(outgoingStats.total, "outgoing total"),
+    pending: parseBigIntStringOrThrow(outgoingStats.pending, "outgoing pending"),
+    in_flight: parseBigIntStringOrThrow(outgoingStats.in_flight, "outgoing in_flight"),
+    stale: parseBigIntStringOrThrow(outgoingStats.stale, "outgoing stale"),
     oldest_created_at_millis: toMillis(outgoingStats.oldest_created_at),
     newest_created_at_millis: toMillis(outgoingStats.newest_created_at),
   };
@@ -543,9 +543,9 @@ function formatPollerStats(outgoingStats: OutgoingStatsRow) {
 
 function formatSequenceStats(row: SequenceStatsRow) {
   return {
-    total: toBigIntStringOrThrow(row.total, "sequence stats total"),
-    pending: toBigIntStringOrThrow(row.pending, "sequence stats pending"),
-    null_sequence_id: toBigIntStringOrThrow(row.null_sequence_id, "sequence stats null_sequence_id"),
+    total: parseBigIntStringOrThrow(row.total, "sequence stats total"),
+    pending: parseBigIntStringOrThrow(row.pending, "sequence stats pending"),
+    null_sequence_id: parseBigIntStringOrThrow(row.null_sequence_id, "sequence stats null_sequence_id"),
     min_sequence_id: toBigIntString(row.min_sequence_id),
     max_sequence_id: toBigIntString(row.max_sequence_id),
   };
@@ -1191,8 +1191,8 @@ export const GET = createSmartRouteHandler({
           ok: true,
           generated_at_millis: Date.now(),
           global: shouldIncludeGlobal && globalStats && globalTenanciesCount && globalDbSyncCount ? {
-            tenancies_total: toBigIntStringOrThrow(globalTenanciesCount.total, "tenancies total"),
-            tenancies_with_db_sync: toBigIntStringOrThrow(globalDbSyncCount.total, "tenancies with db sync"),
+            tenancies_total: parseBigIntStringOrThrow(globalTenanciesCount.total, "tenancies total"),
+            tenancies_with_db_sync: parseBigIntStringOrThrow(globalDbSyncCount.total, "tenancies with db sync"),
             sequencer: {
               project_users: globalStats.projectUsersStats,
               contact_channels: globalStats.contactChannelStats,

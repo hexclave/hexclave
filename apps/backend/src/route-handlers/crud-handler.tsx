@@ -108,7 +108,7 @@ export function createCrudHandlers<
     querySchema?: QS,
   },
 ): CrudHandlersFromOptions<CrudTypeOf<S>, PS, QS, RH> {
-  const optionsAsPartial = options as Partial<CrudRouteHandlersUnfiltered<CrudTypeOf<S>, any, any>>;
+  const optionsAsPartial: Partial<CrudRouteHandlersUnfiltered<CrudTypeOf<S>, yup.InferType<PS>, yup.InferType<QS>>> = options;
 
   const operations = [
     ["GET", "Read"],
@@ -121,6 +121,9 @@ export function createCrudHandlers<
 
   const paramsSchema = options.paramsSchema;
 
+  // SAFETY: The dynamic entries are built only for operations and access types
+  // whose schemas and handlers were validated above; this cast preserves the
+  // mapped CRUD API shape that Object.fromEntries cannot infer.
   return Object.fromEntries(
     operations.filter(([_, crudOperation]) => optionsAsPartial[`on${crudOperation}`] !== undefined)
       .flatMap(([httpMethod, crudOperation]) => {

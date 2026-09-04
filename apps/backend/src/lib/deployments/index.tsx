@@ -84,6 +84,8 @@ export const DEFAULT_MAX_INSTANCES = 1;
 
 export type DeploymentServiceRow = Prisma.DeploymentServiceGetPayload<{ include: { source: true } }>;
 
+type AutoInjectedEnvVars = Record<string, { value: string, secret: boolean }>;
+
 /** The Marshal namespace of a tenancy. One place so it cannot drift. */
 export function marshalNamespaceForTenancy(tenancy: Tenancy): string {
   return tenancy.id;
@@ -751,13 +753,13 @@ export function autoInjectedEnvVars(options: {
   apiUrl: string,
   publishableClientKey: string,
   secretServerKey: string,
-}): Record<string, { value: string, secret: boolean }> {
+}): AutoInjectedEnvVars {
   const publicValues = {
     HEXCLAVE_PROJECT_ID: options.projectId,
     HEXCLAVE_API_URL: options.apiUrl,
     HEXCLAVE_PUBLISHABLE_CLIENT_KEY: options.publishableClientKey,
   };
-  const injected: Record<string, { value: string, secret: boolean }> = {
+  const injected: AutoInjectedEnvVars = {
     HEXCLAVE_SECRET_SERVER_KEY: { value: options.secretServerKey, secret: true },
   };
   for (const [key, value] of Object.entries(publicValues)) {

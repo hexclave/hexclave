@@ -56,7 +56,7 @@ export const POST = createSmartRouteHandler({
     };
 
     const registrationOptionsRaw = await generateRegistrationOptions(opts);
-    const registrationHints = Reflect.get(registrationOptionsRaw, "hints");
+    const registrationHints = registrationOptionsRaw["hints"];
     const registrationOptions = Array.isArray(registrationHints) && registrationHints.length === 0
       ? (() => {
         const optionsWithoutHints = { ...registrationOptionsRaw };

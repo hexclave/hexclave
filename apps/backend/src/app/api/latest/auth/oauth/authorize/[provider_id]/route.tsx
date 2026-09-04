@@ -62,6 +62,9 @@ export const GET = createSmartRouteHandler({
       response_type: yupString().defined(),
     }).noUnknown(/* Allow unknown query params such as ttclid, other stuff that's being injected by browsers */ false).defined(),
   }),
+  // SAFETY: Both union branches describe the only SmartResponse variants this
+  // handler returns; yup's inferred union is narrower than the shared response
+  // interface because it intentionally omits unrelated status/body variants.
   response: yupUnion(
     yupObject({
       // The SDK uses hexclave_response_mode=json (legacy: stack_response_mode=json) so it can intercept bot challenges before navigating.

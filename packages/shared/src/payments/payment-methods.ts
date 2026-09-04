@@ -20,6 +20,8 @@ export type PaymentMethodConfig = {
   dependencies?: string[],
 };
 
+type PaymentMethodsByCategory = Record<PaymentMethodCategory, string[]>;
+
 /**
  * All supported payment methods with their display names, categories, and dependencies.
  * This is the single source of truth - both backend and frontend should import from here.
@@ -148,8 +150,8 @@ export const PAYMENT_METHOD_DEPENDENCIES: Record<string, string[]> = Object.from
 /**
  * Group payment method IDs by category.
  */
-export function getPaymentMethodsByCategory(): Record<PaymentMethodCategory, string[]> {
-  const result: Record<PaymentMethodCategory, string[]> = {
+export function getPaymentMethodsByCategory(): PaymentMethodsByCategory {
+  const result: PaymentMethodsByCategory = {
     cards: [],
     wallets: [],
     bnpl: [],

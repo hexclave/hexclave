@@ -1,6 +1,8 @@
 import { BUNDLED_DASHBOARD_UI_TYPES, BUNDLED_TYPE_DEFINITIONS } from "@/generated/bundled-type-definitions";
 import { ALL_APPS_FRONTEND, type AppId, getItemPath, hasNavigationItems } from "@/lib/apps-frontend";
 import { buildHexclaveHeaders, type CurrentUser } from "@/lib/api-headers";
+import { parseResponseJson } from "@hexclave/shared/dist/utils/http";
+import { parseJson } from "@hexclave/shared/dist/utils/json";
 
 /**
  * Builds a formatted list of available dashboard routes based on enabled apps.
@@ -77,7 +79,7 @@ No markdown, no explanation — just the JSON.`;
       }),
     });
 
-    const result = await response.json() as { content?: Array<{ type: string, text?: string }> };
+    const result = await parseResponseJson<{ content?: Array<{ type: string, text?: string }> }>(response);
     const content = Array.isArray(result.content) ? result.content : [];
     const textBlock = content.find((b) => b.type === "text");
     const responseText = textBlock?.text;
@@ -91,12 +93,18 @@ No markdown, no explanation — just the JSON.`;
       return availableFiles;
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as { selectedFiles?: string[] };
-    if (!Array.isArray(parsed.selectedFiles) || parsed.selectedFiles.length === 0) {
+    const parsed = parseJson(jsonMatch[0]);
+    if (parsed.status === "error" || typeof parsed.data !== "object" || parsed.data === null || Array.isArray(parsed.data)) {
+      return availableFiles;
+    }
+    const selectedFiles = Array.isArray(parsed.data.selectedFiles)
+      ? parsed.data.selectedFiles.filter((file): file is string => typeof file === "string")
+      : [];
+    if (selectedFiles.length === 0) {
       return availableFiles;
     }
 
-    const selected = parsed.selectedFiles.filter((f) => availableFiles.includes(f));
+    const selected = selectedFiles.filter((f) => availableFiles.includes(f));
 
     return selected;
   } catch (e) {

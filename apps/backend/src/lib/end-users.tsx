@@ -159,12 +159,12 @@ function getBrowserEndUserInfo(allHeaders: Headers, trustedProxy: TrustedProxy):
     latitude: parseCoordinate(allHeaders.get("x-vercel-ip-latitude")),
     longitude: parseCoordinate(allHeaders.get("x-vercel-ip-longitude")),
     tzIdentifier: allHeaders.get("x-vercel-ip-timezone") || undefined,
-  } : {};
+  } : undefined;
 
   if (trustedIp) {
     return { maybeSpoofed: false, exactInfo: { ip, ...geoLocation } };
   }
-  return { maybeSpoofed: true, spoofedInfo: { ip, ...(trustedProxy === "" ? spoofedGeoLocation : {}) } };
+  return { maybeSpoofed: true, spoofedInfo: { ip, ...(trustedProxy === "" ? spoofedGeoLocation : undefined) } };
 }
 
 export async function getEndUserInfo(): Promise<

@@ -2,12 +2,13 @@ import { refineGenerationUsage } from "@/lib/ai/openrouter-usage";
 import type { AiQueryLogEntry, LogAiQueryArgs } from "@/lib/ai/types";
 import { runAsynchronouslyAndWaitUntil } from "@/utils/background-tasks";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { type StepResult, type ToolSet } from "ai";
 import { callInternalTool } from "../internal-tool-client";
 
 const MAX_TOOL_RESULT_CHARS = 50_000;
 
-function truncateLargeToolResult(toolName: string, output: unknown): unknown {
+function truncateLargeToolResult(toolName: string, output: Json | undefined): Json {
   const serializableOutput = output === undefined || typeof output === "function" || typeof output === "symbol"
     ? {
       _nonJsonResult: true,

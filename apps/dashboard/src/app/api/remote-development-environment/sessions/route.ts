@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAllowedRemoteDevelopmentEnvironmentApiBaseUrl } from "@/lib/remote-development-environment/api-base-url";
 import { RemoteDevelopmentEnvironmentApiUnavailableError, registerRemoteDevelopmentEnvironmentSession } from "@/lib/remote-development-environment/manager";
-import { readRemoteDevelopmentEnvironmentJsonBody } from "@/lib/remote-development-environment/route-json";
+import { isJsonObjectBody, readRemoteDevelopmentEnvironmentJsonBody } from "@/lib/remote-development-environment/route-json";
 import { assertRemoteDevelopmentEnvironmentRequest } from "@/lib/remote-development-environment/security";
 
 
@@ -12,10 +12,10 @@ export async function POST(req: NextRequest) {
   const parsedBody = await readRemoteDevelopmentEnvironmentJsonBody(req);
   if (parsedBody instanceof NextResponse) return parsedBody;
 
-  const body = parsedBody as {
-    api_base_url?: unknown,
-    config_path?: unknown,
-  };
+  if (!isJsonObjectBody(parsedBody)) {
+    return NextResponse.json({ error: "Request body must be a JSON object." }, { status: 400 });
+  }
+  const body = parsedBody;
   if (typeof body.api_base_url !== "string" || typeof body.config_path !== "string") {
     return NextResponse.json({ error: "api_base_url and config_path are required." }, { status: 400 });
   }

@@ -66,11 +66,11 @@ function catchError(error: unknown, requestId: string): StatusError {
   return new InternalServerError(error, requestId);
 }
 
-function getErrorDigest(error: unknown): unknown {
+function getErrorDigest(error: unknown): string | undefined {
   if (error == null || typeof error !== "object" || !("digest" in error)) {
     return undefined;
   }
-  return error.digest;
+  return typeof error.digest === "string" ? error.digest : undefined;
 }
 
 /**

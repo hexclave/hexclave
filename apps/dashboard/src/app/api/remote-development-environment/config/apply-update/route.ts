@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { applyRemoteDevelopmentEnvironmentConfigUpdate } from "@/lib/remote-development-environment/manager";
-import { readRemoteDevelopmentEnvironmentJsonBody } from "@/lib/remote-development-environment/route-json";
+import { isJsonObjectBody, readRemoteDevelopmentEnvironmentJsonBody } from "@/lib/remote-development-environment/route-json";
 import { assertRemoteDevelopmentEnvironmentBrowserRequest, assertRemoteDevelopmentEnvironmentRequest } from "@/lib/remote-development-environment/security";
 import { isValidConfig } from "@hexclave/shared/dist/config/format";
 
@@ -14,12 +14,10 @@ export async function POST(req: NextRequest) {
   const parsedBody = await readRemoteDevelopmentEnvironmentJsonBody(req);
   if (parsedBody instanceof NextResponse) return parsedBody;
 
-  const body = parsedBody as {
-    session_id?: unknown,
-    project_id?: unknown,
-    config_update?: unknown,
-    wait_for_sync?: unknown,
-  };
+  if (!isJsonObjectBody(parsedBody)) {
+    return NextResponse.json({ error: "Request body must be a JSON object." }, { status: 400 });
+  }
+  const body = parsedBody;
   if (
     (body.session_id !== undefined && typeof body.session_id !== "string") ||
     (body.project_id !== undefined && typeof body.project_id !== "string") ||

@@ -178,6 +178,8 @@ export function deepMerge<T extends {}, U extends {}>(baseObj: T, mergeObj: U): 
     }
     set(res, key, mergeValue);
   }
+  // SAFETY: deepMerge only writes cloned values from baseObj/mergeObj and
+  // recursively applies the DeepMerge operation for nested object pairs.
   return res as any;
 }
 import.meta.vitest?.test("deepMerge", ({ expect }) => {

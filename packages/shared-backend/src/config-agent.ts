@@ -1,4 +1,5 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { NormalizedConfig } from "@hexclave/shared/dist/config/format";
 import path from "path";
 
 const DEFAULT_PROXY_URL = "https://api.hexclave.com/api/latest/integrations/ai-proxy";
@@ -27,7 +28,7 @@ export type RunClaudeAgentOptions = {
   timeoutMs?: number,
   strictIsolation?: boolean,
   stderr?: (data: string) => void,
-  onMessage?: (message: unknown) => void,
+  onMessage?: (message: SDKMessage) => void,
   onPreToolUse?: (input: ClaudeAgentPreToolUseInput) => Promise<ClaudeAgentHookResult> | ClaudeAgentHookResult,
 };
 
@@ -41,7 +42,7 @@ export const CONFIG_AGENT_REPO_TOOLS = [...CONFIG_AGENT_FILE_TOOLS, "Bash"] as c
 type ConfigAgentPromptTarget =
   | {
     mode: "complete",
-    completeConfig: Record<string, unknown>,
+    completeConfig: NormalizedConfig,
   }
   | {
     mode: "partial",
@@ -87,7 +88,7 @@ Rules:
 
 export function buildCompleteConfigAgentPrompt(options: {
   scope: ConfigAgentPromptScope,
-  completeConfig: Record<string, unknown>,
+  completeConfig: NormalizedConfig,
   commandPolicy: string,
 }): string {
   return buildConfigAgentPrompt({
@@ -136,7 +137,7 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-export function stripClaudeCodeEnv(): Record<string, string | undefined> {
+export function stripClaudeCodeEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   // CLAUDECODE must be unset for nested agents; ANTHROPIC_API_KEY must be non-empty (proxy ignores it).
   delete env.CLAUDECODE;

@@ -135,6 +135,10 @@ const CONNECTION_REF_MARKER = Symbol("hexclave-connection-ref");
 // it without calling can be reported as the missing call it is.
 const UNCALLED_OUTPUT_MARKER = Symbol("hexclave-uncalled-output");
 
+type ServiceOutput = (port?: number) => ConnectionRef;
+type ServiceOutputs = Record<string, ServiceOutput>;
+type HexclaveOutputs = Record<string, ConnectionRef>;
+
 type SecretRef = {
   [SECRET_REF_MARKER]: true,
   secretKey: string,
@@ -184,7 +188,7 @@ const PROBED_PROPERTY_NAMES = new Set(["then", "toJSON", "constructor", "$$typeo
  * outputs — a typo like `service("db").ur` should fail at evaluation time with
  * a precise message, not serialize into a broken definition.
  */
-function createOutputsProxy(subject: string, outputKeys: readonly string[], resolveOutput: (outputKey: string) => unknown): Record<string, unknown> {
+function createOutputsProxy<T>(subject: string, outputKeys: readonly string[], resolveOutput: (outputKey: string) => T) {
   return new Proxy({}, {
     get: (_target, property) => {
       if (typeof property !== "string" || PROBED_PROPERTY_NAMES.has(property)) {
@@ -208,15 +212,15 @@ function createOutputsProxy(subject: string, outputKeys: readonly string[], reso
 
 export type ServicesFunctionContext = {
   isDev: boolean,
-  secret: (key: string, defaultValue?: string) => unknown,
-  service: (serviceId: string) => unknown,
-  hexclave: Record<string, unknown>,
+  secret: (key: string, defaultValue?: string) => SecretRef,
+  service: (serviceId: string) => ServiceOutputs | null,
+  hexclave: HexclaveOutputs,
 };
 
 function createServicesContext(mode: "deploy" | "dev"): { context: ServicesFunctionContext, referencedServiceIds: Set<string> } {
   const referencedServiceIds = new Set<string>();
 
-  const secret = (key: unknown, defaultValue?: unknown): unknown => {
+  const secret = (key: unknown, defaultValue?: unknown): SecretRef => {
     if (typeof key !== "string" || !PROJECT_SECRET_KEY_REGEX.test(key)) {
       throw new CliError(`secret() must be called with a secret key containing only letters, numbers, underscores, and hyphens (got ${JSON.stringify(key)}).`);
     }
@@ -231,7 +235,7 @@ function createServicesContext(mode: "deploy" | "dev"): { context: ServicesFunct
     return preventStringCoercion({ [SECRET_REF_MARKER]: true, secretKey: key, defaultValue } satisfies SecretRef, `secret(${JSON.stringify(key)})`);
   };
 
-  const service = (serviceId: unknown): unknown => {
+  const service = (serviceId: unknown): ServiceOutputs | null => {
     if (typeof serviceId !== "string" || serviceId.length === 0) {
       throw new CliError(`service() must be called with a service id string (got ${JSON.stringify(serviceId)}).`);
     }
@@ -260,8 +264,8 @@ function createServicesContext(mode: "deploy" | "dev"): { context: ServicesFunct
     // Both outputs are CALLS: `url` because a URL names exactly one port, and
     // `hostname` for symmetry — one shape to remember rather than a rule about
     // which of two outputs happens to take parentheses.
-    return createOutputsProxy(subject, SERVICE_OUTPUT_KEYS, (outputKey) => {
-      const output = (port?: unknown): unknown => {
+    return createOutputsProxy<ServiceOutput>(subject, SERVICE_OUTPUT_KEYS, (outputKey) => {
+      const output = (port?: number): ConnectionRef => {
         if (outputKey === "hostname") {
           if (port !== undefined) {
             throw new CliError(`${subject}.hostname() takes no arguments — it is the service's address without a port. Use ${subject}.url(${JSON.stringify(port)}) for a URL, or pair the hostname with a literal port number.`);
@@ -284,7 +288,7 @@ function createServicesContext(mode: "deploy" | "dev"): { context: ServicesFunct
   // hexclave.* returns connection refs in BOTH modes: at deploy time the
   // backend resolves them, and in dev mode the refs are resolved from the
   // development-environment session's env (see resolveDevEnv).
-  const hexclave = createOutputsProxy("hexclave", HEXCLAVE_OUTPUT_KEYS, (outputKey) => preventStringCoercion({
+  const hexclave = createOutputsProxy<ConnectionRef>("hexclave", HEXCLAVE_OUTPUT_KEYS, (outputKey) => preventStringCoercion({
     [CONNECTION_REF_MARKER]: true,
     reference: `${HEXCLAVE_SERVICE_ID}.${outputKey}`,
     hexclaveOutputKey: outputKey as HexclaveOutputKey,
@@ -652,7 +656,9 @@ export function evaluateDeploymentConfig(options: {
   const { context, referencedServiceIds } = createServicesContext(mode);
   let deployRaw: unknown;
   try {
-    deployRaw = (deployExport as (ctx: ServicesFunctionContext) => unknown)(context);
+    // SAFETY: `deployExport` was checked to be callable above; the returned
+    // value is still validated for null, arrays, and required fields below.
+    deployRaw = (deployExport as (ctx: ServicesFunctionContext) => object)(context);
   } catch (error) {
     if (error instanceof CliError) throw error;
     // The most common dev-mode crash: calling `.url()` on service()'s null
@@ -702,12 +708,15 @@ export function evaluateDeploymentConfig(options: {
         throw new CliError(`deploy.services.${serviceId} has an unknown field ${JSON.stringify(field)}. Known fields: ${[...KNOWN_SERVICE_FIELDS].join(", ")}.`);
       }
     }
-    if (!(DEPLOYMENT_SERVICE_TYPES as readonly unknown[]).includes(record.type)) {
+    if (!DEPLOYMENT_SERVICE_TYPES.some((knownType) => knownType === record.type)) {
       throw new CliError(record.type === undefined
         ? `deploy.services.${serviceId} has no \`type\`. Add \`type: "server"\` (single suspending instance, may have persistentVolumes) or \`type: "serverless"\` (scales out, stops on scale-down).`
         : `deploy.services.${serviceId}.type must be ${DEPLOYMENT_SERVICE_TYPES.map((knownType: string) => JSON.stringify(knownType)).join(" or ")} (got ${JSON.stringify(record.type)}).`);
     }
-    const serviceType = record.type as DeploymentServiceType;
+    if (record.type !== "server" && record.type !== "serverless") {
+      throw new CliError(`deploy.services.${serviceId}.type is invalid`);
+    }
+    const serviceType = record.type;
     // Visibility is the SERVICE's, not a port's: the runtime serves every declared
     // port on every address the service has, so there is no such thing as a
     // public port with a private sibling.
@@ -1158,11 +1167,20 @@ function resolveHexclaveOutputFromSessionEnv(envVarKey: string, outputKey: Hexcl
  * config-file loaders below so both fail with the same error on an unloadable
  * file; `description` names which of the two it was.
  */
-async function importModule(filePath: string, description: string): Promise<Record<string, unknown>> {
+type LoadedModule = {
+  deploymentGroupId?: unknown,
+  id?: unknown,
+  deploy?: unknown,
+  config?: unknown,
+};
+
+async function importModule<T extends LoadedModule>(filePath: string, description: string): Promise<T> {
   const { createJiti } = await import("jiti");
   const jiti = createJiti(import.meta.url);
   try {
-    return await jiti.import(filePath) as Record<string, unknown>;
+    // SAFETY: jiti loads an arbitrary user module; each caller validates the
+    // exported values before using them.
+    return await jiti.import(filePath) as T;
   } catch (error: unknown) {
     throw new CliError(`Failed to load ${description} ${filePath}: ${errorMessage(error)}`);
   }
@@ -1175,7 +1193,7 @@ async function importModule(filePath: string, description: string): Promise<Reco
  * reporting a missing export.
  */
 export async function importDeployModule(deployFilePath: string): Promise<{ deploymentGroupId: unknown, legacyId: unknown, deploy: unknown }> {
-  const module = await importModule(deployFilePath, "deploy file");
+  const module = await importModule<LoadedModule>(deployFilePath, "deploy file");
   return { deploymentGroupId: module.deploymentGroupId, legacyId: module.id, deploy: module.deploy };
 }
 
@@ -1188,6 +1206,6 @@ export async function importDeployModule(deployFilePath: string): Promise<{ depl
  * with the deploy files of other repositories deploying into the same project.
  */
 export async function importConfigModule(configPath: string): Promise<{ config: unknown, deploy: unknown }> {
-  const module = await importModule(configPath, "config file");
+  const module = await importModule<LoadedModule>(configPath, "config file");
   return { config: module.config, deploy: module.deploy };
 }

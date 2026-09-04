@@ -34,7 +34,7 @@ export async function findExistingOAuthAccount(
     });
   }
 
-  const account = existingAccounts[0] as (typeof existingAccounts)[number] | undefined;
+  const account = existingAccounts[0];
   return account ?? null;
 }
 

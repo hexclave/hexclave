@@ -30,7 +30,7 @@ export function getAdminInterface(adminApp: StackAdminApp<false> | null | undefi
   // `Reflect.get` returns `any`; the typed annotation documents the contract
   // without an explicit cast (and without an `instanceof`, which is unreliable
   // across package-boundary copies of the class).
-  const iface: HexclaveAdminInterface | undefined = Reflect.get(adminApp, "_interface");
+  const iface: HexclaveAdminInterface | undefined = adminApp["_interface"];
   return iface ?? null;
 }
 

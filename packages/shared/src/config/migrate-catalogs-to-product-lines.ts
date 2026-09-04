@@ -1,4 +1,5 @@
 import { HexclaveAssertionError } from "../utils/errors";
+import type { Json } from "../utils/json";
 import { isObjectLike, set, typedEntries } from "../utils/objects";
 
 /**
@@ -38,7 +39,7 @@ function renameProperty(obj: Record<string, any>, oldPath: string | ((path: stri
  *
  * This handles all config formats (nested objects, flat dot-notation, or mixed).
  */
-export function migrateCatalogsToProductLines(obj: Record<string, any>): Record<string, any> {
+export function migrateCatalogsToProductLines(obj: Record<string, Json>): Record<string, Json> {
   // Step 1: Collect catalogId -> customerType mappings from products
   const catalogCustomerTypes = new Map<string, string>();
   collectCatalogCustomerTypes(obj, [], catalogCustomerTypes);

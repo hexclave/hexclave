@@ -44,6 +44,10 @@ import { clientVersion, createCache, createCacheBySession, getDefaultExtraReques
 
 import { useAsyncCache } from "./common"; // THIS_LINE_PLATFORM react-like
 
+function withNextCursor<T>(items: T[], nextCursor: string | null): T[] & { nextCursor: string | null } {
+  return Object.assign(items, { nextCursor });
+}
+
 export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, ProjectId extends string> extends _HexclaveClientAppImplIncomplete<HasTokenStore, ProjectId> {
   declare protected _interface: HexclaveServerInterface;
 
@@ -1026,7 +1030,7 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
     const currentUser = withUserDestructureGuard({
       ...this._serverUserFromCrud(crud),
       ...this._createAuth(session),
-      ...this._isInternalProject() ? this._createInternalUserExtra(session) : {},
+      ...this._isInternalProject() ? this._createInternalUserExtra(session) : undefined,
     } satisfies ServerUser);
 
     return currentUser as ProjectCurrentServerUser<ProjectId>;
@@ -1407,18 +1411,16 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
   async listUsers(options?: ServerListUsersOptions): Promise<ServerUser[] & { nextCursor: string | null }> {
     const excludedEmailDomains = options?.excludedEmailDomains && options.excludedEmailDomains.length > 0 ? options.excludedEmailDomains.join(",") : undefined;
     const crud = Result.orThrow(await this._serverUsersCache.getOrWait([options?.cursor, options?.limit, options?.orderBy, options?.desc, options?.query, options?.includeRestricted, options?.includeAnonymous, options?.onlyAnonymous, options?.teamId, excludedEmailDomains], "write-only"));
-    const result: any = crud.items.map((j) => this._serverUserFromCrud(j));
-    result.nextCursor = crud.pagination?.next_cursor ?? null;
-    return result as any;
+    const result = crud.items.map((j) => this._serverUserFromCrud(j));
+    return withNextCursor(result, crud.pagination?.next_cursor ?? null);
   }
 
   // IF_PLATFORM react-like
   useUsers(options?: ServerListUsersOptions): ServerUser[] & { nextCursor: string | null } {
     const excludedEmailDomains = options?.excludedEmailDomains && options.excludedEmailDomains.length > 0 ? options.excludedEmailDomains.join(",") : undefined;
     const crud = useAsyncCache(this._serverUsersCache, [options?.cursor, options?.limit, options?.orderBy, options?.desc, options?.query, options?.includeRestricted, options?.includeAnonymous, options?.onlyAnonymous, options?.teamId, excludedEmailDomains] as const, "serverApp.useUsers()");
-    const result: any = crud.items.map((j) => this._serverUserFromCrud(j));
-    result.nextCursor = crud.pagination?.next_cursor ?? null;
-    return result as any;
+    const result = crud.items.map((j) => this._serverUserFromCrud(j));
+    return withNextCursor(result, crud.pagination?.next_cursor ?? null);
   }
   // END_PLATFORM
 
@@ -1559,18 +1561,16 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
 
   async listTeams(options?: ServerListTeamsOptions): Promise<ServerTeam[] & { nextCursor: string | null }> {
     const crud = Result.orThrow(await this._serverTeamsCache.getOrWait([undefined, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query] as const, "write-only"));
-    const teams: any = crud.items.map((t) => this._serverTeamFromCrud(t));
-    teams.nextCursor = crud.pagination?.next_cursor ?? null;
-    return teams as any;
+    const teams = crud.items.map((t) => this._serverTeamFromCrud(t));
+    return withNextCursor(teams, crud.pagination?.next_cursor ?? null);
   }
 
   // IF_PLATFORM react-like
   useTeams(options?: ServerListTeamsOptions): ServerTeam[] & { nextCursor: string | null } {
     const crud = useAsyncCache(this._serverTeamsCache, [undefined, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query] as const, "serverApp.useTeams()");
     return useMemo(() => {
-      const teams: any = crud.items.map((t) => this._serverTeamFromCrud(t));
-      teams.nextCursor = crud.pagination?.next_cursor ?? null;
-      return teams as any;
+      const teams = crud.items.map((t) => this._serverTeamFromCrud(t));
+      return withNextCursor(teams, crud.pagination?.next_cursor ?? null);
     }, [crud]);
   }
   // END_PLATFORM

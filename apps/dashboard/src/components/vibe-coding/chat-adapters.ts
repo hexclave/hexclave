@@ -10,6 +10,7 @@ import {
 import { StackAdminApp } from "@hexclave/next";
 import { ChatContent } from "@hexclave/shared/dist/interface/admin-interface";
 import type { EditableMetadata } from "@hexclave/shared/dist/utils/jsx-editable-transpiler";
+import { parseResponseJson } from "@hexclave/shared/dist/utils/http";
 
 export type ToolCallContent = Extract<ChatContent[number], { type: "tool-call" }>;
 
@@ -272,7 +273,7 @@ Please update the source code to change "${oldText}" to "${newText}" at the spec
     throw new Error(`Wysiwyg edit request failed: ${response.status} ${response.statusText}`);
   }
 
-  const json = await response.json() as { content?: Array<{ type: string, text?: string }> };
+  const json = await parseResponseJson<{ content?: Array<{ type: string, text?: string }> }>(response);
   const textBlock = Array.isArray(json.content)
     ? json.content.find((b) => b.type === "text" && b.text)
     : undefined;

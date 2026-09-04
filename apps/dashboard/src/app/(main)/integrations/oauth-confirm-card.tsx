@@ -19,7 +19,7 @@ export default function ConfirmCard(props: {
 
   const [selectedProject, setSelectedProject] = useState<AdminProject | null>(
     projects.find((project) => project.id === searchParams.get("default_selected_project_id"))
-    ?? projects.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] as any
+    ?? [...projects].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]
     ?? null
   );
 

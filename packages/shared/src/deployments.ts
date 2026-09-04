@@ -1644,8 +1644,13 @@ import.meta.vitest?.test("deploymentSecretDefaultsSchema accepts env-var-keyed d
 // Type-level check that the yup schema stays assignable to the hand-written
 // definition type (yup's InferType makes optional fields `| undefined`, which
 // matches under exactOptionalPropertyTypes only if the shapes agree).
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _assertEnvVarSchemaMatchesType: DeploymentEnvVarDefinition = undefined as unknown as yup.InferType<typeof deploymentEnvVarSchema>;
+type EnvVarSchemaMatchesDefinition =
+  DeploymentEnvVarDefinition extends yup.InferType<typeof deploymentEnvVarSchema>
+    ? yup.InferType<typeof deploymentEnvVarSchema> extends DeploymentEnvVarDefinition
+      ? true
+      : false
+    : false;
+const _assertEnvVarSchemaMatchesType: EnvVarSchemaMatchesDefinition = true;
 
 import.meta.vitest?.test("buildSourceManifest keeps the LARGEST files when it has to drop some", ({ expect }) => {
   // Largest-first is the whole point of the cap: the question a manifest answers

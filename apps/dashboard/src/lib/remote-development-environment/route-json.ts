@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export function isJsonObjectBody(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export async function readRemoteDevelopmentEnvironmentJsonBody(req: NextRequest): Promise<unknown | NextResponse> {
   try {
     return await req.json();

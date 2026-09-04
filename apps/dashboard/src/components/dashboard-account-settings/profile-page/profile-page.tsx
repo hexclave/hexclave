@@ -46,7 +46,7 @@ export function ProfilePage(props?: {
         description="Upload your own image as your avatar"
       >
         <ProfileImageEditor
-          user={user as any}
+          user={user}
           onProfileImageUrlChange={async (profileImageUrl: string | null) => {
             await user.update({ profileImageUrl });
           }}

@@ -49,7 +49,7 @@ export function declareBreezyPiledriverDatabase(
     return value;
   };
   const lastTransactionId = () => {
-    const value = Reflect.get(lmdbRoot.getStats(), "lastTxnId");
+    const value = lmdbRoot.getStats()["lastTxnId"];
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("LMDB returned an invalid transaction ID");
     return value;
   };
@@ -98,17 +98,17 @@ export function declareBreezyPiledriverDatabase(
   const parseMetadata = (value: Uint8Array): ReferenceMetadata => {
     const parsed: unknown = JSON.parse(new TextDecoder().decode(value));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Invalid Piledriver GC reference metadata");
-    const generation = Reflect.get(parsed, "generation");
-    const lastDereferencedAtMillis = Reflect.get(parsed, "lastDereferencedAtMillis");
-    const deletion = Reflect.get(parsed, "deletion");
-    if (Reflect.get(parsed, "schemaVersion") !== gcSchemaVersion || typeof generation !== "string" || deletion !== null) {
+    const generation = parsed["generation"];
+    const lastDereferencedAtMillis = parsed["lastDereferencedAtMillis"];
+    const deletion = parsed["deletion"];
+    if (parsed["schemaVersion"] !== gcSchemaVersion || typeof generation !== "string" || deletion !== null) {
       throw new Error("Cannot reference invalid or deleting Piledriver GC metadata");
     }
     return {
       schemaVersion: gcSchemaVersion,
       generation,
-      referenceCount: nonNegativeInteger(Reflect.get(parsed, "referenceCount"), "referenceCount"),
-      createdAtMillis: nonNegativeInteger(Reflect.get(parsed, "createdAtMillis"), "createdAtMillis"),
+      referenceCount: nonNegativeInteger(parsed["referenceCount"], "referenceCount"),
+      createdAtMillis: nonNegativeInteger(parsed["createdAtMillis"], "createdAtMillis"),
       lastDereferencedAtMillis: lastDereferencedAtMillis === null
         ? null
         : nonNegativeInteger(lastDereferencedAtMillis, "lastDereferencedAtMillis"),
@@ -120,10 +120,10 @@ export function declareBreezyPiledriverDatabase(
     const value = lmdbGcState.get(Buffer.from("state"));
     if (value === undefined) throw new Error("Piledriver GC must be initialized before heap publication");
     const parsed: unknown = JSON.parse(new TextDecoder().decode(value));
-    if (typeof parsed !== "object" || parsed === null || Reflect.get(parsed, "schemaVersion") !== gcSchemaVersion || Reflect.get(parsed, "status") !== "ready") {
+    if (typeof parsed !== "object" || parsed === null || parsed["schemaVersion"] !== gcSchemaVersion || parsed["status"] !== "ready") {
       throw new Error("Invalid Piledriver GC state");
     }
-    const generation = Reflect.get(parsed, "generation");
+    const generation = parsed["generation"];
     if (typeof generation !== "string") throw new Error("Invalid Piledriver GC generation");
     gcGeneration = generation;
     return generation;

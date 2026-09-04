@@ -446,7 +446,7 @@ export function parseOverload(options: {
             content: {
               'application/json': {
                 schema: {
-                  ...responseDesc ? toSchema(responseDesc, endpointDocumentation.crudOperation) : {},
+                  ...responseDesc ? toSchema(responseDesc, endpointDocumentation.crudOperation) : undefined,
                   required: responseDesc ? toRequired(responseDesc, endpointDocumentation.crudOperation) : undefined,
                 },
               },

@@ -18,14 +18,15 @@ export function SmartFormDialog<S extends yup.ObjectSchema<any, any, any, any>>(
   const formId = `${useId()}-form`;
   const [submitting, setSubmitting] = useState(false);
   const [openState, setOpenState] = useState(false);
+  const inheritedOkButton = typeof props.okButton === "boolean" ? undefined : props.okButton;
   const okButton = props.okButton === false ? false : {
     onClick: async () => "prevent-close" as const,
-    ...(typeof props.okButton === "boolean" ? {} : props.okButton),
+    ...inheritedOkButton,
     props: {
       form: formId,
       type: "submit" as const,
       loading: submitting,
-      ...((typeof props.okButton === "boolean") ? {} : props.okButton?.props),
+      ...inheritedOkButton?.props,
     },
   };
   const handleSubmit = async (values: yup.InferType<S>) => {
@@ -76,14 +77,15 @@ export function FormDialog<F extends FieldValues>(
   });
   const [openState, setOpenState] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const inheritedOkButton = typeof props.okButton === "boolean" ? undefined : props.okButton;
   const okButton = props.okButton === false ? false : {
     onClick: async () => "prevent-close" as const,
-    ...(typeof props.okButton == "boolean" ? {} : props.okButton),
+    ...inheritedOkButton,
     props: {
       form: formId,
       type: "submit" as const,
       loading: submitting,
-      ...((typeof props.okButton == "boolean") ? {} : props.okButton?.props),
+      ...inheritedOkButton?.props,
     },
   };
 

@@ -1,8 +1,8 @@
 export type BackendShutdownDependencies = {
-  stopAcceptingRequests: (timeoutMs: number) => Promise<unknown>,
-  drainBackgroundTasks: (timeoutMs: number) => Promise<unknown>,
-  disconnectDatabases: (timeoutMs: number) => Promise<unknown>,
-  closeInstrumentation: (timeoutMs: number) => Promise<unknown>,
+  stopAcceptingRequests: (timeoutMs: number) => Promise<void>,
+  drainBackgroundTasks: (timeoutMs: number) => Promise<void>,
+  disconnectDatabases: (timeoutMs: number) => Promise<void>,
+  closeInstrumentation: (timeoutMs: number) => Promise<void>,
   log: (event: BackendShutdownLogEvent) => void,
 };
 
@@ -30,7 +30,7 @@ export type BackendShutdownLogEvent = {
 
 type ShutdownStep = {
   name: string,
-  run: () => Promise<unknown>,
+  run: () => Promise<void>,
 };
 
 export async function runShutdownOperationWithTimeout<T>(

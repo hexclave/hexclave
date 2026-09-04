@@ -1,6 +1,6 @@
 import type { AskHexclaveRequestMetadata } from "@/lib/ai/ask-hexclave-history";
 import type { selectModel } from "@/lib/ai/models";
-import type { Json } from "@hexclave/shared/dist/utils/json";
+import type { Json, JsonObject } from "@hexclave/shared/dist/utils/json";
 import type { LanguageModelUsage, ModelMessage, StepResult, ToolSet } from "ai";
 
 export type ContentBlock =
@@ -28,7 +28,7 @@ export type McpCallMetadata = {
 export type MessageLike = { role: string, content: unknown };
 
 export type SanitizedBody = {
-  parsed: { model: string } & Record<string, unknown>,
+  parsed: { model: string } & JsonObject,
   bytes: Uint8Array,
 };
 
@@ -95,7 +95,7 @@ export type LogAiQueryArgs =
 
 export type ProxyLogFields = {
   correlationId: string,
-  parsed: { model: string } & Record<string, unknown>,
+  parsed: { model: string } & JsonObject,
   apiKey: string,
   durationMs: number,
   responseStatus: number,

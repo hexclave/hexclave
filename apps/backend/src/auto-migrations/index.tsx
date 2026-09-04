@@ -6,6 +6,11 @@ import { MIGRATION_FILES } from './../generated/migration-files';
 
 // The bigint key for the pg advisory lock
 const MIGRATION_LOCK_ID = 59129034;
+
+function isMigrationRow(value: unknown): value is { migrationName: string } {
+  return typeof value === "object" && value !== null && "migrationName" in value && typeof value.migrationName === "string";
+}
+
 class MigrationNeededError extends Error {
   constructor() {
     super('MIGRATION_NEEDED');
@@ -225,7 +230,7 @@ export async function runMigrationNeeded(options: {
       ORDER BY "finishedAt" ASC
     `);
     for (const migration of migrationFiles) {
-      if (!(result as any).includes(migration.migrationName)) {
+      if (!Array.isArray(result) || !result.some((row) => isMigrationRow(row) && row.migrationName === migration.migrationName)) {
         throw new MigrationNeededError();
       }
     }

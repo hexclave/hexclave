@@ -1,0 +1,9 @@
+{
+  "name": "eslint-plugin-anti-slop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.cjs",
+  "engines": { "node": ">=24.0.0" },
+  "peerDependencies": { "eslint": "^8.57.0" }
+}

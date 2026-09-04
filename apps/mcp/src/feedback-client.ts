@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { HexclaveAskDiagnostic, HexclaveAskRequestMetadata } from "../../../packages/shared/src/ai/hexclave-ask";
 
 export const HEXCLAVE_FEEDBACK_INGEST_TIMEOUT_MS = 10_000;
@@ -19,16 +20,7 @@ export type HexclaveFeedbackResult = {
   message: string,
 };
 
-function parseFeedbackResponse(value: unknown): { correlationId: string } {
-  if (typeof value !== "object" || value === null) {
-    throw new Error("Feedback response was not a JSON object");
-  }
-  const correlationId = (value as Record<string, unknown>)["correlationId"];
-  if (typeof correlationId !== "string") {
-    throw new Error("Feedback response did not include a correlationId");
-  }
-  return { correlationId };
-}
+const feedbackResponseSchema = z.object({ correlationId: z.string() });
 
 
 export async function sendHexclaveFeedback(options: {
@@ -86,14 +78,12 @@ export async function sendHexclaveFeedback(options: {
       return { status: "error", message: HEXCLAVE_FEEDBACK_PUBLIC_ERROR_MESSAGE };
     }
 
-    let parsed: { correlationId: string };
-    try {
-      parsed = parseFeedbackResponse(responseJson);
-    } catch (error) {
-      options.onDiagnostic?.({ event: "malformed-json", error });
+    const parsed = feedbackResponseSchema.safeParse(responseJson);
+    if (!parsed.success) {
+      options.onDiagnostic?.({ event: "malformed-json", error: parsed.error });
       return { status: "error", message: HEXCLAVE_FEEDBACK_PUBLIC_ERROR_MESSAGE };
     }
-    return { status: "ok", correlationId: parsed.correlationId };
+    return { status: "ok", correlationId: parsed.data.correlationId };
   } catch (error) {
     if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
       options.onDiagnostic?.({ event: "timeout", timeoutMs });

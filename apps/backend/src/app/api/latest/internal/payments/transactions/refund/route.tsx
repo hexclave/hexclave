@@ -41,7 +41,7 @@ export function buildStripeRefundParams(args: {
 }
 
 function readProductLineId(product: InferType<typeof productSchema>): string | null {
-  const productLineId = Reflect.get(product, "productLineId");
+  const productLineId = product["productLineId"];
   return typeof productLineId === "string" ? productLineId : null;
 }
 
@@ -219,20 +219,20 @@ export function computeOutstandingItemGrants(
     for (let index = 0; index < entries.length; index++) {
       const entry = entries[index];
       if (typeof entry !== "object" || entry === null) continue;
-      const type = Reflect.get(entry, "type");
+      const type = entry["type"];
       if (type === "item-quantity-change") {
-        const expiresWhen = Reflect.get(entry, "expiresWhen");
+        const expiresWhen = entry["expiresWhen"];
         if (expiresWhen !== "when-purchase-expires" && expiresWhen !== "when-repeated") {
           // Permanent grants survive revocation (matches sub-end semantics).
           continue;
         }
-        const itemId = Reflect.get(entry, "itemId");
-        const quantity = Reflect.get(entry, "quantity");
+        const itemId = entry["itemId"];
+        const quantity = entry["quantity"];
         if (typeof itemId !== "string" || typeof quantity !== "number") continue;
         grants.push({ txnId, entryIndex: index, itemId, quantity });
       } else if (type === "item-quantity-expire") {
-        const adjustedTxnId = Reflect.get(entry, "adjustedTransactionId");
-        const adjustedIdx = Reflect.get(entry, "adjustedEntryIndex");
+        const adjustedTxnId = entry["adjustedTransactionId"];
+        const adjustedIdx = entry["adjustedEntryIndex"];
         if (typeof adjustedTxnId !== "string" || typeof adjustedIdx !== "number") continue;
         expiredKeys.add(grantKey(adjustedTxnId, adjustedIdx));
       }

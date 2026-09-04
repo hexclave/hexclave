@@ -92,7 +92,7 @@ const bulldozerDb = declareBulldozerDatabase(
 console.log(`Stored bulldozerDb in globalThis for pid ${process.pid}. Run \`kill -USR1 ${process.pid} && node inspect 127.0.0.1:9229\` and then \`exec("globalThis.bulldozerDb")\` to inspect it.`);
 await traceSpan("bulldozer-js.applyRemainingMigrations", async () => await bulldozerDb.applyRemainingMigrations());
 
-function jsonResponse(body: unknown, init?: ResponseInit) {
+function jsonResponse(body: Json, init?: ResponseInit) {
   return new Response(JSON.stringify(body), {
     ...init,
     headers: {
@@ -290,7 +290,7 @@ function scheduleHeapGcMaintenanceIfNeeded(label: string) {
   });
 }
 
-async function handler(label: string, operation: () => Promise<unknown>) {
+async function handler<T extends Json>(label: string, operation: () => Promise<T>) {
   const startedAt = performance.now();
   return await traceSpan("bulldozer-js.http.handler", async () => {
     logBulldozerService("http-handler-start", {
@@ -560,8 +560,8 @@ function parseCursor(cursor: string): LedgerCursor {
     throw new StatusError(StatusError.BadRequest, "Invalid cursor");
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new StatusError(StatusError.BadRequest, "Invalid cursor");
-  const createdAtMillis = Reflect.get(parsed, "createdAtMillis");
-  const txnId = Reflect.get(parsed, "txnId");
+  const createdAtMillis = parsed["createdAtMillis"];
+  const txnId = parsed["txnId"];
   if (typeof createdAtMillis !== "number" || !Number.isInteger(createdAtMillis) || createdAtMillis < 0 || typeof txnId !== "string" || txnId.length === 0) {
     throw new StatusError(StatusError.BadRequest, "Invalid cursor");
   }

@@ -1,4 +1,5 @@
 import { sendInternalAdminRequest } from "@/lib/hexclave-app-internals";
+import type { StackAdminApp } from "@hexclave/next";
 import { yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import type { InferType } from "yup";
@@ -12,7 +13,7 @@ const browserActionResponseSchema = yupObject({
 export type BrowserActionResponse = InferType<typeof browserActionResponseSchema>;
 
 export async function openBrowserActionInNewTab(
-  adminApp: object,
+  adminApp: StackAdminApp<false>,
   options: Parameters<typeof createBrowserAction>[1],
 ): Promise<boolean> {
   const popup = window.open("about:blank", "_blank");
@@ -33,7 +34,7 @@ export async function openBrowserActionInNewTab(
 }
 
 export async function createBrowserAction(
-  adminApp: object,
+  adminApp: StackAdminApp<false>,
   options: {
     type: "impersonation" | "clickmap-overlay",
     origin: string,

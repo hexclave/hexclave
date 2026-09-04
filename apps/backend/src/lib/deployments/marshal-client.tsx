@@ -279,6 +279,8 @@ export class MarshalClient {
         `${method} ${path}`,
       );
     }
+    // SAFETY: A successful response is decoded against the endpoint-specific
+    // generic at every call site; non-OK responses are handled above.
     return json as T;
   }
 

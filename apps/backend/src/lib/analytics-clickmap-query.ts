@@ -1,6 +1,7 @@
 import { ClickHouseError, type ClickHouseClient } from "@clickhouse/client";
 import { DEV_TOOL_CLASS_PREFIX, DEV_TOOL_LEGACY_CLASS, DEV_TOOL_ROOT_ID } from "@hexclave/shared/dist/utils/dev-tool";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 
 // Canonical owner of the ClickHouse clickmap query: filter/param builders, the
 // shared aggregate queries, and result scaling. Both the admin route
@@ -43,7 +44,7 @@ export function isClickhouseRegexpError(error: ClickHouseError): boolean {
 export function throwClickhouseClickmapError(error: unknown, options: {
   captureLabel: string,
   routeRegex?: string,
-  context: Record<string, unknown>,
+  context: Record<string, Json>,
 }): never {
   if (!(error instanceof ClickHouseError)) {
     throw error;
@@ -320,7 +321,7 @@ export async function runClickmapClicksQuery(
     elementsChainLimit: input.elementsChainLimit,
     samplingPct,
     ...(input.linkedLimit != null ? { linkedLimit: input.linkedLimit } : {}),
-    ...(input.origin != null ? getClickmapOriginParams(input.origin) : {}),
+    ...(input.origin != null ? getClickmapOriginParams(input.origin) : undefined),
     ...(input.routePath ? { routePath: input.routePath } : {}),
     ...(input.routeRegex ? { routeRegex: input.routeRegex } : {}),
     ...(urlPatternLike != null ? { urlPatternLike } : {}),

@@ -1,6 +1,6 @@
 import { Prisma } from "@/generated/prisma/client";
 import type { ConfigAgentRun as ConfigAgentRunRow } from "@/generated/prisma/client";
-import { Config, getInvalidConfigReason, normalize, override, removeKeysFromConfig } from "@hexclave/shared/dist/config/format";
+import { Config, getInvalidConfigReason, normalize, override, removeKeysFromConfig, type NormalizedConfig } from "@hexclave/shared/dist/config/format";
 import { BranchConfigOverride, BranchConfigOverrideOverride, BranchIncompleteConfig, BranchRenderedConfig, CompleteConfig, EnvironmentConfigOverride, EnvironmentConfigOverrideOverride, EnvironmentIncompleteConfig, EnvironmentRenderedConfig, OrganizationConfigOverride, OrganizationConfigOverrideOverride, OrganizationIncompleteConfig, ProjectConfigOverride, ProjectConfigOverrideOverride, ProjectIncompleteConfig, ProjectRenderedConfig, applyBranchDefaults, applyEnvironmentDefaults, applyOrganizationDefaults, applyProjectDefaults, branchConfigSchema, environmentConfigSchema, getConfigOverrideErrors, getIncompleteConfigWarnings, migrateConfigOverride, organizationConfigSchema, projectConfigSchema, sanitizeBranchConfig, sanitizeEnvironmentConfig, sanitizeOrganizationConfig, sanitizeProjectConfig } from "@hexclave/shared/dist/config/schema";
 import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type ConfigAgentSafeErrorMessage, yupBoolean, yupMixed, yupObject, yupRecord, yupString, yupUnion } from "@hexclave/shared/dist/schema-fields";
@@ -400,6 +400,8 @@ export async function getBranchConfigOverrideSource(options: {
     return { type: "unlinked" };
   }
 
+  // SAFETY: `source` is written through branchConfigSourceSchema and this
+  // query selects that persisted field without transformations.
   return result.source as BranchConfigSourceApi;
 }
 
@@ -504,14 +506,14 @@ async function lockConfigAgentRun(tx: PrismaClientTransaction, runId: string): P
 export async function getCompleteBranchConfigForFile(options: {
   projectId: string,
   branchId: string,
-  configUpdate: Record<string, unknown>,
-}): Promise<Record<string, unknown>> {
+  configUpdate: Config,
+}): Promise<NormalizedConfig> {
   const current = await rawQuery(globalPrismaClient, getBranchConfigOverrideQuery({ projectId: options.projectId, branchId: options.branchId }));
   const merged = override(current as Config, options.configUpdate as Config);
   // Dashboard saves usually arrive as dot-notation deltas (for example
   // `auth.allowSignUp: false`). The branch override can be empty, so missing
   // parents must be materialized instead of silently dropping the pending edit.
-  return normalize(merged, { onDotIntoNonObject: "ignore", onDotIntoNull: "empty-object" }) as Record<string, unknown>;
+  return normalize(merged, { onDotIntoNonObject: "ignore", onDotIntoNull: "empty-object" });
 }
 
 /**

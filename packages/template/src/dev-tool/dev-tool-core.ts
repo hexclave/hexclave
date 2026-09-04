@@ -349,12 +349,12 @@ function createTrigger(onClick: () => void): { element: HTMLElement; cleanup: ()
 
   function isPosition(value: unknown): value is Position {
     if (typeof value !== 'object' || value === null) return false;
-    return typeof Reflect.get(value, 'left') === 'number' && typeof Reflect.get(value, 'top') === 'number';
+    return typeof value['left'] === 'number' && typeof value['top'] === 'number';
   }
 
   function isPlacement(value: unknown): value is Placement {
     if (typeof value !== 'object' || value === null) return false;
-    const corner = Reflect.get(value, 'corner');
+    const corner = value['corner'];
     return ['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(String(corner));
   }
 
@@ -368,8 +368,8 @@ function createTrigger(onClick: () => void): { element: HTMLElement; cleanup: ()
 
       // Migrate old side-based placement { side, offset } to nearest corner.
       if (typeof parsed === 'object' && parsed !== null && 'side' in parsed && 'offset' in parsed) {
-        const side = String(Reflect.get(parsed, 'side'));
-        const offset = Number(Reflect.get(parsed, 'offset'));
+        const side = String(parsed['side']);
+        const offset = Number(parsed['offset']);
         const vw = window.innerWidth;
         const vh = window.innerHeight;
         let corner: TriggerCorner;
@@ -2334,7 +2334,7 @@ export function createDevTool(app: StackClientApp<true>): () => void {
   if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
     return () => {};
   }
-  const body = Reflect.get(document, 'body');
+  const body = document['body'];
   if (!hasAppendChild(body)) return () => {};
 
   getGlobalUiInstance(GLOBAL_INSTANCE_KEY)?.cleanup();

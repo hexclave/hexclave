@@ -123,7 +123,7 @@ export function parseCopySpecifiedTenancySubscriptionsArgs(args: string[]): Copy
 
 function readProductLineId(product: unknown): string | null {
   if (product == null || typeof product !== "object") return null;
-  const lineId = Reflect.get(product, "productLineId");
+  const lineId = product["productLineId"];
   return typeof lineId === "string" ? lineId : null;
 }
 

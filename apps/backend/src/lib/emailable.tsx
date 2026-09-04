@@ -1,5 +1,6 @@
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { isJsonSerializable, type Json } from "@hexclave/shared/dist/utils/json";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { traceSpan } from "@hexclave/shared/dist/utils/telemetry";
 import createEmailableClient from "emailable";
@@ -10,7 +11,13 @@ export const EMAILABLE_NOT_DELIVERABLE_TEST_DOMAIN = "emailable-not-deliverable.
 // ── Types ──────────────────────────────────────────────────────────────
 
 const VERIFY_STATES = ["deliverable", "undeliverable", "risky", "unknown"] as const;
-type EmailableVerifyResponse = ReturnType<typeof validateVerifyResponse>;
+type EmailableVerifyState = (typeof VERIFY_STATES)[number];
+type EmailableVerifyResponse = {
+  state: EmailableVerifyState,
+  disposable: boolean,
+  score: number | null,
+  [key: string]: Json,
+};
 
 export type EmailableCheckResult =
   | { status: "deliverable", emailableScore: number | null }
@@ -25,30 +32,39 @@ function isReservedExampleDomain(emailDomain: string): boolean {
   return emailDomain === "example.com" || emailDomain.endsWith(".example.com");
 }
 
+function isEmailableVerifyState(value: Json): value is EmailableVerifyState {
+  return typeof value === "string" && VERIFY_STATES.some((state) => state === value);
+}
+
 function validateVerifyResponse(value: unknown) {
-  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+  if (!isJsonSerializable(value) || value == null || Array.isArray(value)) {
     throw new HexclaveAssertionError("Emailable returned a non-object response body", { value });
   }
-  const response = Object.assign(Object.create(null), value) as Record<string, unknown>;
+  const response = value;
   const { state, disposable, score } = response;
-  if (typeof state !== "string" || !VERIFY_STATES.some(s => s === state)) {
+  if (!isEmailableVerifyState(state)) {
     throw new HexclaveAssertionError("Emailable verify response has invalid or missing state", { response });
   }
   const parsedScore = typeof score === "number" && score >= 0 && score <= 100 ? score : null;
-  return { ...response, state, disposable: disposable === true, score: parsedScore };
+  const parsed: EmailableVerifyResponse = { ...response, state, disposable: disposable === true, score: parsedScore };
+  return parsed;
 }
 
-async function verifyWithRetries(verifyFn: () => Promise<unknown>, maxAttempts: number, delayBaseMs: number) {
+async function verifyWithRetries(verifyFn: () => Promise<Json>, maxAttempts: number, delayBaseMs: number): Promise<EmailableVerifyResponse> {
   for (let i = 0; i < maxAttempts; i++) {
-    const res: any = await verifyFn();
+    const res = await verifyFn();
+    if (!isJsonSerializable(res) || res == null || typeof res !== "object" || Array.isArray(res)) {
+      throw new HexclaveAssertionError("Emailable returned an unexpected response body", { response: res });
+    }
     if (!("state" in res)) {
-      if ("message" in res && (res.message.includes("Your request is taking longer than normal") || res.message.includes("Your email is still being verified"))) {
+      const message = res.message;
+      if (typeof message === "string" && (message.includes("Your request is taking longer than normal") || message.includes("Your email is still being verified"))) {
         await wait((Math.random() + 0.5) * delayBaseMs * (2 ** i));
         continue;
       }
       throw new HexclaveAssertionError("Emailable returned an unexpected response body", { response: res });
     }
-    return res;
+    return validateVerifyResponse(res);
   }
   throw new HexclaveAssertionError("Timed out while verifying email address with Emailable");
 }
@@ -75,7 +91,7 @@ export async function checkEmailWithEmailable(
   options?: {
     retryExponentialDelayBaseMs?: number,
     /** @internal — used by tests to inject a fake client */
-    _clientFactory?: (apiKey: string) => { verify: (email: string) => Promise<unknown> },
+    _clientFactory?: (apiKey: string) => { verify: (email: string) => Promise<Json> },
   },
 ): Promise<EmailableCheckResult> {
   try {
@@ -124,7 +140,7 @@ export async function checkEmailWithEmailable(
 import.meta.vitest?.describe("checkEmailWithEmailable(...)", () => {
   const { vi, test, beforeEach, expect } = import.meta.vitest!;
 
-  const fakeClient = (verifyFn: (email: string) => Promise<unknown>) => (_apiKey: string) => ({ verify: verifyFn });
+  const fakeClient = (verifyFn: (email: string) => Promise<Json>) => (_apiKey: string) => ({ verify: verifyFn });
   const stubEmailableApiKey = (value: string) => {
     vi.stubEnv("HEXCLAVE_EMAILABLE_API_KEY", value);
     vi.stubEnv("STACK_EMAILABLE_API_KEY", value);

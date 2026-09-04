@@ -47,7 +47,7 @@ function formatUnknownError(value: unknown, fallback: string, depth = 0): string
   if (typeof value !== "object") return fallback;
 
   for (const property of ["message", "error", "reason", "statusText"]) {
-    const propertyValue = Reflect.get(value, property);
+    const propertyValue = value[property];
     if (typeof propertyValue === "string" && propertyValue !== "") {
       return propertyValue;
     }
@@ -55,7 +55,7 @@ function formatUnknownError(value: unknown, fallback: string, depth = 0): string
 
   if (depth < 2) {
     for (const property of ["error", "cause", "event"]) {
-      const propertyValue: unknown = Reflect.get(value, property);
+      const propertyValue: unknown = value[property];
       if (propertyValue != null && propertyValue !== value) {
         const nestedMessage = formatUnknownError(propertyValue, "", depth + 1);
         if (nestedMessage !== "") {

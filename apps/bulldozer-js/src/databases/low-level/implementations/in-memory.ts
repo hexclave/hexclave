@@ -1,7 +1,7 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import { traceSpanHot } from "../../../otel.js";
-import { Database, DatabaseSeq } from "../../index.js";
+import { createDatabaseSeq, Database, DatabaseSeq } from "../../index.js";
 import { LowLevelDatabase, LowLevelDatabaseDebugEntry, LowLevelKvDump, LowLevelKvStore } from "../index.js";
 
 const inMemoryLowLevelKvStores = new Map<`${"store" | "dump"}-${string}`, LowLevelKvStore & LowLevelKvDump>();
@@ -225,6 +225,6 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
         return { stores, dumps };
       });
     },
-    initialSeq: [] as unknown as DatabaseSeq,
+    initialSeq: createDatabaseSeq(),
   };
 }

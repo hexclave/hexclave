@@ -55,7 +55,7 @@ function createAppWithFailingHandoff(options: {
     devTool: false,
   });
   const accessToken = createAccessTokenString("source-refresh-token-id");
-  const clientInterface = Reflect.get(app, "_interface");
+  const clientInterface = app["_interface"];
   Reflect.set(clientInterface, "fetchNewAccessToken", async () => {
     return AccessToken.createIfValid(accessToken) ?? (() => {
       throw new Error("Expected the test access token to be valid.");
@@ -66,7 +66,7 @@ function createAppWithFailingHandoff(options: {
 }
 
 function createCrossDomainAuthRedirectUrl(app: StackClientApp<true>, redirectUri: string): Promise<unknown> {
-  const method = Reflect.get(app, "_createCrossDomainAuthRedirectUrl");
+  const method = app["_createCrossDomainAuthRedirectUrl"];
   if (typeof method !== "function") {
     throw new Error("Expected StackClientApp to expose _createCrossDomainAuthRedirectUrl in tests.");
   }
@@ -117,7 +117,7 @@ describe("cross-domain handoff rejected by the server", () => {
     // The handoff query parameters have nothing to do with the rejection, so the message keeps only the checked part.
     expect(caught.message).toBe("Cross-domain auth redirect URL https://demo.example.test/ is not trusted.");
     // The full URL is still handed to the error sinks, which is where `customCaptureExtraArgs` ends up.
-    expect(Reflect.get(caught, "customCaptureExtraArgs")).toMatchObject([{ url: untrustedUrl }]);
+    expect(caught["customCaptureExtraArgs"]).toMatchObject([{ url: untrustedUrl }]);
     expect(caught.cause).toBeInstanceOf(KnownErrors.RedirectUrlNotWhitelisted);
 
     expect(overlayRoots()).toHaveLength(1);

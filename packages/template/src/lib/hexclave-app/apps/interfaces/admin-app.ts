@@ -2,6 +2,7 @@ import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClic
 import type { Transaction, TransactionType } from "@hexclave/shared/dist/interface/crud/transactions";
 import { InternalSession } from "@hexclave/shared/dist/sessions";
 import type { MoneyAmount } from "@hexclave/shared/dist/utils/currency-constants";
+import type { EditableMetadata } from "@hexclave/shared/dist/utils/jsx-editable-transpiler";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { AsyncStoreProperty, EmailConfig } from "../../common";
 import { AdminEmailOutbox, AdminSentEmail } from "../../email";
@@ -76,7 +77,7 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
   & AsyncStoreProperty<"projectPermissionDefinitions", [], AdminProjectPermissionDefinition[], true>
   & AsyncStoreProperty<"emailThemes", [], { id: string, displayName: string }[], true>
   & AsyncStoreProperty<"emailPreview", [{ themeId?: string | null | false, themeTsxSource?: string, templateId?: string, templateTsxSource?: string }], string, false>
-  & AsyncStoreProperty<"emailPreviewWithEditableMarkers", [{ themeId?: string | null | false, themeTsxSource?: string, templateId?: string, templateTsxSource?: string, editableSource?: 'template' | 'theme' | 'both' }], { html: string, editableRegions?: Record<string, unknown> }, false> // THIS_LINE_PLATFORM react-like
+  & AsyncStoreProperty<"emailPreviewWithEditableMarkers", [{ themeId?: string | null | false, themeTsxSource?: string, templateId?: string, templateTsxSource?: string, editableSource?: 'template' | 'theme' | 'both' }], { html: string, editableRegions?: Record<string, EditableMetadata> }, false> // THIS_LINE_PLATFORM react-like
   & AsyncStoreProperty<"emailTemplates", [], { id: string, displayName: string, themeId?: string, tsxSource: string }[], true>
   & AsyncStoreProperty<"emailDrafts", [], { id: string, displayName: string, themeId: string | undefined | false, tsxSource: string, sentAt: Date | null }[], true>
   & AsyncStoreProperty<"workflows", [], AdminWorkflow[], true>
@@ -153,7 +154,7 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
     cancelWorkflowRuns(workflowId: string, filter?: { runKey?: string, runId?: string, state?: "queued" | "running" | "sleeping", version?: number }): Promise<{ canceledCount: number }>,
     upgradeWorkflowRuns(workflowId: string, options: { toVersion: number, runKey?: string, fromVersion?: number }): Promise<AdminWorkflowUpgradeResult>,
     retryWorkflowRun(runId: string): Promise<void>,
-    sendWorkflowEvent(name: string, data?: unknown): Promise<{ eventId: string }>,
+    sendWorkflowEvent(name: string, data?: Json): Promise<{ eventId: string }>,
 
     setupPayments(): Promise<{ url: string }>,
     createStripeWidgetAccountSession(): Promise<{ client_secret: string }>,

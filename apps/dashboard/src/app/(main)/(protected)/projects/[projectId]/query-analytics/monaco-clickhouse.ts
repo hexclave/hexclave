@@ -1373,4 +1373,4 @@ export const language: MonarchLanguage = {
   },
 };
 
-export const clickhouseKeywords = language.keywords as string[];
+export const clickhouseKeywords = language.keywords;

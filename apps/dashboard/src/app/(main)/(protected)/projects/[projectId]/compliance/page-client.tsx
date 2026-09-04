@@ -115,7 +115,7 @@ type AppInternals = {
 
 function getAppInternals(appValue: unknown): AppInternals {
   if (appValue == null || typeof appValue !== "object") throw new Error("The Stack app instance is unavailable.");
-  const internals = Reflect.get(appValue, hexclaveAppInternalsSymbol);
+  const internals = appValue[hexclaveAppInternalsSymbol];
   if (internals == null || typeof internals !== "object" || !("sendRequest" in internals) || typeof internals.sendRequest !== "function") {
     throw new Error("The Stack client app cannot send internal requests.");
   }

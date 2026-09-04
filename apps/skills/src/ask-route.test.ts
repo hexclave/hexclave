@@ -52,7 +52,7 @@ describe("skill-site ask route", () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(_input)).toBe("https://api.hexclave.test/api/latest/ai/query/generate");
       expect(init?.signal).toBeInstanceOf(AbortSignal);
-      const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+      const body = await new Response(init?.body).json();
       expect(body).toMatchInlineSnapshot(`
         {
           "mcpCallMetadata": {

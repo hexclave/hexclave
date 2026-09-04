@@ -262,9 +262,9 @@ export function getIssueCardCSS(scopeSelector: string): string {
 }
 
 export async function copyTextToClipboard(text: string): Promise<void> {
-  const clipboard: unknown = Reflect.get(navigator, "clipboard");
+  const clipboard: unknown = navigator["clipboard"];
   const writeText = clipboard != null && typeof clipboard === "object"
-    ? Reflect.get(clipboard, "writeText")
+    ? clipboard["writeText"]
     : null;
   if (typeof writeText === "function") {
     await writeText.call(clipboard, text);
@@ -300,7 +300,7 @@ function renderCopyButton(options: {
   title: string,
   ariaLabel: string,
   getText: () => string,
-  onCopyError: (error: unknown) => void,
+  onCopyError: (error: Error) => void,
 }): HTMLElement {
   const idleHtml = options.variant === "text" ? `${COPY_ICON_SVG}Copy` : COPY_ICON_SVG;
   const button = h("button", {
@@ -342,8 +342,8 @@ export type IssueCardOptions = {
   ariaLabel: string,
   /** Prompt for the "copy AI prompt" button, ie. the message plus enough context for a coding agent to fix it. */
   aiPrompt: string,
-  onCopyError: (error: unknown) => void,
-  onCopyAiPromptError: (error: unknown) => void,
+  onCopyError: (error: Error) => void,
+  onCopyAiPromptError: (error: Error) => void,
   onMinimize: () => void,
 };
 

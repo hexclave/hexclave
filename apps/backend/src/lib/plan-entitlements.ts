@@ -1,6 +1,6 @@
 import { isActiveSubscription } from "@/lib/payments";
 import { getItemQuantityForCustomer, getSubscriptionMapForCustomer } from "@/lib/payments/customer-data";
-import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
+import { getPrismaClientForTenancy, globalPrismaClient, type PrismaClientTransaction } from "@/prisma-client";
 import { BASE_PLAN_IDS_BY_TIER, ITEM_IDS, type PlanId } from "@hexclave/shared/dist/plans";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
@@ -46,9 +46,9 @@ type OwnedBillingScope = {
 };
 
 type ItemCapacityReaders = {
-  getPrismaForTenancy: (tenancy: Tenancy) => Promise<unknown>,
+  getPrismaForTenancy: (tenancy: Tenancy) => Promise<PrismaClientTransaction>,
   getItemQuantityForCustomer: (options: {
-    prisma: unknown,
+    prisma: PrismaClientTransaction,
     tenancyId: string,
     customerId: string,
     customerType: "team",

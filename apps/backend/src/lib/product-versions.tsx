@@ -1,6 +1,7 @@
 import { PrismaClientTransaction } from "@/prisma-client";
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import crypto from "crypto";
 
 /**
@@ -29,7 +30,7 @@ export function canonicalJsonStringify(obj: unknown): string {
  * Inline products (null productId) with identical JSON will still share a row,
  * which is acceptable since if they have the same productJson, semantically they are the same product.
  */
-export function computeProductVersionId(productId: string | null, productJson: unknown): string {
+export function computeProductVersionId(productId: string | null, productJson: Json): string {
   const canonical = canonicalJsonStringify({ productId, productJson });
   const hash = crypto.createHash("sha256").update(canonical).digest();
   return encodeBase64(hash);
@@ -43,7 +44,7 @@ export async function upsertProductVersion(options: {
   prisma: PrismaClientTransaction,
   tenancyId: string,
   productId: string | null,
-  productJson: unknown,
+  productJson: Json,
 }): Promise<string> {
   const productVersionId = computeProductVersionId(options.productId, options.productJson);
 
@@ -58,7 +59,7 @@ export async function upsertProductVersion(options: {
       tenancyId: options.tenancyId,
       productVersionId,
       productId: options.productId,
-      productJson: options.productJson as object,
+      productJson: options.productJson,
     },
     update: {},
   });
@@ -74,7 +75,7 @@ export async function getProductVersion(options: {
   prisma: PrismaClientTransaction,
   tenancyId: string,
   productVersionId: string,
-}): Promise<{ productId: string | null, productJson: unknown }> {
+}): Promise<{ productId: string | null, productJson: Json }> {
   const version = await options.prisma.productVersion.findUnique({
     where: {
       tenancyId_productVersionId: {

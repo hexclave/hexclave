@@ -23,8 +23,10 @@
  */
 
 import { buildCompleteConfigAgentPrompt, CONFIG_AGENT_REPO_TOOLS } from "@hexclave/shared-backend/config-agent";
+import type { NormalizedConfig } from "@hexclave/shared/dist/config/format";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { Sandbox } from "@vercel/sandbox";
 import { applyPatch, parsePatch } from "diff";
 import { PRODUCTION_AI_PROXY_BASE_URL } from "../ai/proxy-url";
@@ -278,7 +280,7 @@ const PROGRESS_POLL_MS = 1500;
  */
 async function pollAgentProgress(
   sandbox: Sandbox,
-  command: { wait: () => Promise<unknown> },
+  command: Pick<Awaited<ReturnType<Sandbox["runCommand"]>>, "wait">,
   onProgress: AgentProgressSink,
 ): Promise<void> {
   let finished = false;
@@ -470,7 +472,7 @@ export type ConfigUpdateApplyResult =
 export async function applyConfigUpdate(options: {
   getGithubToken: GithubTokenProvider,
   ref: GithubRepoRef,
-  completeConfig: Record<string, unknown>,
+  completeConfig: NormalizedConfig,
   onSandboxId?: (sandboxId: string) => Promise<void>,
   onStage?: (stage: ConfigAgentInFlightStage) => Promise<void>,
   onProgress?: AgentProgressSink,
@@ -553,7 +555,18 @@ const GITHUB_API_BASE = "https://api.github.com";
 // files; mode changes aren't carried by the textual diff, so everything is 100644.
 const TREE_FILE_MODE = "100644";
 
-type GithubFetchResult = { ok: boolean, status: number, json: any };
+type GithubFetchResult = { ok: boolean, status: number, json: Json | null };
+
+function jsonObjectField(value: Json | null, key: string): Json | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value[key]
+    : undefined;
+}
+
+function jsonStringField(value: Json | null, key: string): string | undefined {
+  const field = jsonObjectField(value, key);
+  return typeof field === "string" ? field : undefined;
+}
 
 /** One reconstructed file ready for the commit tree. Deletions carry no content. */
 export type CommitFile = { path: string, newContent: string } | { path: string, deleted: true };
@@ -569,7 +582,7 @@ function encodeFilePath(path: string): string {
 }
 
 /** Authenticated api.github.com request. The token is sent only as a header, never in a URL. */
-async function githubFetch(token: string, method: string, path: string, body?: unknown): Promise<GithubFetchResult> {
+async function githubFetch(token: string, method: string, path: string, body?: Json): Promise<GithubFetchResult> {
   const res = await fetch(`${GITHUB_API_BASE}${path}`, {
     method,
     headers: {
@@ -581,7 +594,7 @@ async function githubFetch(token: string, method: string, path: string, body?: u
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  let json: any = null;
+  let json: Json | null = null;
   try {
     json = await res.json();
   } catch {
@@ -591,10 +604,10 @@ async function githubFetch(token: string, method: string, path: string, body?: u
 }
 
 /** Like {@link githubFetch} but throws on a non-2xx response. Error messages never include the token. */
-async function githubJson(token: string, method: string, path: string, body?: unknown): Promise<any> {
+async function githubJson(token: string, method: string, path: string, body?: Json): Promise<Json | null> {
   const r = await githubFetch(token, method, path, body);
   if (!r.ok) {
-    const detail = typeof r.json?.message === "string" ? `: ${r.json.message}` : "";
+    const detail = jsonStringField(r.json, "message") === undefined ? "" : `: ${jsonStringField(r.json, "message")}`;
     throw new ConfigRepoAgentError(`GitHub API ${method} ${path} failed (${r.status})${detail}`);
   }
   return r.json;
@@ -615,17 +628,22 @@ async function fetchBaseFileContent(token: string, repoPath: string, filePath: s
   const r = await githubFetch(token, "GET", `${repoPath}/contents/${encodeFilePath(filePath)}?ref=${baseSha}`);
   if (r.status === 404) return "";
   if (!r.ok) {
-    const detail = typeof r.json?.message === "string" ? `: ${r.json.message}` : "";
+    const detail = jsonStringField(r.json, "message") === undefined ? "" : `: ${jsonStringField(r.json, "message")}`;
     throw new ConfigRepoAgentError(`GitHub API GET ${repoPath}/contents failed (${r.status})${detail}`);
   }
-  if (r.json?.encoding === "base64" && typeof r.json?.content === "string") {
-    return Buffer.from(r.json.content, "base64").toString("utf-8");
+  const encoding = jsonStringField(r.json, "encoding");
+  const content = jsonStringField(r.json, "content");
+  if (encoding === "base64" && content !== undefined) {
+    return Buffer.from(content, "base64").toString("utf-8");
   }
   // Large files: the contents API returns no inline content; fetch the blob by sha.
-  if (typeof r.json?.sha === "string") {
-    const blob = await githubJson(token, "GET", `${repoPath}/git/blobs/${r.json.sha}`);
-    if (blob?.encoding === "base64" && typeof blob?.content === "string") {
-      return Buffer.from(blob.content, "base64").toString("utf-8");
+  const sha = jsonStringField(r.json, "sha");
+  if (sha !== undefined) {
+    const blob = await githubJson(token, "GET", `${repoPath}/git/blobs/${sha}`);
+    const blobEncoding = jsonStringField(blob, "encoding");
+    const blobContent = jsonStringField(blob, "content");
+    if (blobEncoding === "base64" && blobContent !== undefined) {
+      return Buffer.from(blobContent, "base64").toString("utf-8");
     }
   }
   throw new ConfigRepoAgentError(`Could not read the base content of ${filePath} from GitHub.`);
@@ -684,7 +702,7 @@ export async function commitConfigUpdate(options: {
   // 1. Fast-forward guard: the branch must still be at the commit we cloned. (The
   //    non-forced ref update in step 6 guards the remaining race window too.)
   const refData = await githubJson(token, "GET", `${repoPath}/git/ref/heads/${encodedBranch}`);
-  if (refData?.object?.sha !== change.baseSha) {
+  if (jsonStringField(jsonObjectField(refData, "object"), "sha") !== change.baseSha) {
     throw new ConfigRepoCommitConflictError();
   }
 
@@ -698,7 +716,7 @@ export async function commitConfigUpdate(options: {
 
   // 3. Resolve the base tree so we only have to specify changed entries.
   const baseCommit = await githubJson(token, "GET", `${repoPath}/git/commits/${change.baseSha}`);
-  const baseTreeSha = baseCommit?.tree?.sha;
+  const baseTreeSha = jsonStringField(jsonObjectField(baseCommit, "tree"), "sha");
   if (typeof baseTreeSha !== "string") {
     throw new ConfigRepoAgentError("Could not resolve the base tree for the config commit.");
   }
@@ -714,15 +732,17 @@ export async function commitConfigUpdate(options: {
       content: Buffer.from(file.newContent, "utf-8").toString("base64"),
       encoding: "base64",
     });
-    if (typeof blob?.sha !== "string") {
+    const blobSha = jsonStringField(blob, "sha");
+    if (blobSha === undefined) {
       throw new ConfigRepoAgentError("GitHub did not return a blob sha for a config file.");
     }
-    treeEntries.push({ path: file.path, mode: TREE_FILE_MODE, type: "blob", sha: blob.sha });
+    treeEntries.push({ path: file.path, mode: TREE_FILE_MODE, type: "blob", sha: blobSha });
   }
 
   // 5. Build the new tree on top of the base.
   const tree = await githubJson(token, "POST", `${repoPath}/git/trees`, { base_tree: baseTreeSha, tree: treeEntries });
-  if (typeof tree?.sha !== "string") {
+  const treeSha = jsonStringField(tree, "sha");
+  if (treeSha === undefined) {
     throw new ConfigRepoAgentError("GitHub did not return a tree sha for the config commit.");
   }
 
@@ -730,13 +750,13 @@ export async function commitConfigUpdate(options: {
   const identity = { name: GIT_BOT_NAME, email: GIT_BOT_EMAIL };
   const commitObj = await githubJson(token, "POST", `${repoPath}/git/commits`, {
     message: commitMessage,
-    tree: tree.sha,
+    tree: treeSha,
     parents: [change.baseSha],
     author: identity,
     committer: identity,
   });
-  const commitSha = commitObj?.sha;
-  if (typeof commitSha !== "string") {
+  const commitSha = jsonStringField(commitObj, "sha");
+  if (commitSha === undefined) {
     throw new ConfigRepoAgentError("GitHub did not return a commit sha.");
   }
 
@@ -747,7 +767,7 @@ export async function commitConfigUpdate(options: {
     if (update.status === 422) {
       throw new ConfigRepoCommitConflictError();
     }
-    const detail = typeof update.json?.message === "string" ? `: ${update.json.message}` : "";
+    const detail = jsonStringField(update.json, "message") === undefined ? "" : `: ${jsonStringField(update.json, "message")}`;
     throw new ConfigRepoAgentError(`Failed to update the branch ref (${update.status})${detail}`);
   }
 

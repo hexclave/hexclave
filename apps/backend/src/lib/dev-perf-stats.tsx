@@ -264,6 +264,8 @@ export function initPerfStats(): void {
   isInitialized = true;
 
   try {
+    // SAFETY: The runtime guard above restricts this require to Node.js, whose
+    // perf_hooks module exposes monitorEventLoopDelay with this signature.
     const { monitorEventLoopDelay } = require("node:perf_hooks") as typeof import("node:perf_hooks");
     eventLoopHistogram = monitorEventLoopDelay({ resolution: 5 });
     eventLoopHistogram.enable();
@@ -365,4 +367,3 @@ export function getAggregatePerfStats(windowMs: number = 60000): {
 
   return { pgPool, eventLoopDelay, eventLoopUtilization, memory };
 }
-

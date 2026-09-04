@@ -2151,6 +2151,8 @@ export default function PageClient() {
     isLoading: isAnalyticsLoading,
   } = useSignUpRulesAnalytics();
 
+  // SAFETY: CompleteConfig is normalized with the sign-up-rules defaults before
+  // it reaches the dashboard, so these fields are present at runtime.
   const configWithRules = config as ConfigWithSignUpRules;
 
   const serverRules = useMemo(() =>

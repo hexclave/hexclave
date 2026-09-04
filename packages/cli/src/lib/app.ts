@@ -40,7 +40,10 @@ export async function getInternalUser(auth: SessionAuth): Promise<CurrentInterna
   if (user.isRestricted) {
     throw new AuthError(`Finish setting up your account at ${onboardingUrlFor(auth.dashboardUrl)} before using the CLI.`);
   }
-  return user as CurrentInternalUser;
+  if (!("listOwnedProjects" in user)) {
+    throw new AuthError("Your session is not authorized for internal projects. Run `hexclave login` again.");
+  }
+  return user;
 }
 
 export async function getAdminProject(auth: ProjectAuthWithRefreshToken): Promise<AdminOwnedProject> {

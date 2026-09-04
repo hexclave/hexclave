@@ -151,7 +151,7 @@ export function formatPriceDisplay(price: Price): string {
  * default-plan grant flow once that exists; the interval is only here to
  * keep Stripe's recurring-sub path happy.
  */
-export function createFreePrice(): { [priceId: string]: Price } {
+export function createFreePrice(): PricesObject {
   return {
     [generateUniqueId('price')]: {
       USD: '0.00',

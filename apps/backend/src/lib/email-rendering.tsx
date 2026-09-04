@@ -9,6 +9,7 @@ import {
   convertSentinelTokensToComments,
 } from "@hexclave/shared/dist/utils/jsx-editable-transpiler";
 import { Result } from "@hexclave/shared/dist/utils/results";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { deindent } from "@hexclave/shared/dist/utils/strings";
 import { Tenancy } from './tenancies';
 
@@ -120,7 +121,7 @@ export async function renderEmailWithTemplate(
   options: {
     user?: { displayName: string | null },
     project?: { displayName: string },
-    variables?: Record<string, any>,
+    variables?: Record<string, Json>,
     editableMarkers?: boolean,
     editableSource?: 'template' | 'theme' | 'both',
     themeProps?: {
@@ -249,7 +250,7 @@ export type RenderEmailRequestForTenancy = {
   input: {
     user: { displayName: string | null },
     project: { displayName: string },
-    variables?: Record<string, any>,
+    variables?: Record<string, Json>,
     unsubscribeLink?: string,
     themeProps?: {
       projectLogos: {

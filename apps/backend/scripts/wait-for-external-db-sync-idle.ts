@@ -148,7 +148,7 @@ async function getQstashWaitListSize(): Promise<number> {
   if (body == null || typeof body !== "object") {
     throw new Error(`QStash flow-control status returned a non-object: ${JSON.stringify(body)}`);
   }
-  const waitListSize = Reflect.get(body, "waitListSize");
+  const waitListSize = body["waitListSize"];
   if (typeof waitListSize !== "number" || !Number.isSafeInteger(waitListSize) || waitListSize < 0) {
     throw new Error(`QStash flow-control status returned an invalid waitListSize: ${JSON.stringify(body)}`);
   }

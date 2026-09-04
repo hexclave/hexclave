@@ -675,7 +675,7 @@ import.meta.vitest?.test("nicifyPropertyString", ({ expect }) => {
   expect(nicifyPropertyString('"')).toBe('"\\""');
 });
 
-function getNicifiableKeys(value: Nicifiable | object) {
+function getNicifiableKeys<T extends object>(value: Nicifiable | T) {
   const overridden = ("getNicifiableKeys" in value ? value.getNicifiableKeys?.bind(value) : null)?.();
   if (overridden != null) return overridden;
   if (value instanceof Response) {
@@ -705,7 +705,7 @@ import.meta.vitest?.test("getNicifiableKeys", ({ expect }) => {
   expect(getNicifiableKeys(customObject)).toEqual(["customKey1", "customKey2"]);
 });
 
-function getNicifiableEntries(value: Nicifiable | object): [PropertyKey, unknown][] {
+function getNicifiableEntries<T extends object>(value: Nicifiable | T): [PropertyKey, unknown][] {
   const recordLikes = [Headers];
   function isRecordLike(value: unknown): value is InstanceType<typeof recordLikes[number]> {
     return recordLikes.some(x => value instanceof x);
@@ -715,9 +715,9 @@ function getNicifiableEntries(value: Nicifiable | object): [PropertyKey, unknown
     return [...value.entries()].sort(([a], [b]) => stringCompare(`${a}`, `${b}`));
   }
   const keys = getNicifiableKeys(value);
-  return keys.map((k) => [k, value[k as never]] as [PropertyKey, unknown]);
+  return keys.map((k) => [k, Object.getOwnPropertyDescriptor(value, k)?.value] as [PropertyKey, unknown]);
 }
 
-function getNicifiedObjectExtraLines(value: Nicifiable | object) {
+function getNicifiedObjectExtraLines<T extends object>(value: Nicifiable | T) {
   return ("getNicifiedObjectExtraLines" in value ? value.getNicifiedObjectExtraLines : null)?.() ?? [];
 }

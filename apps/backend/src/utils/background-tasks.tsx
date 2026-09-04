@@ -24,13 +24,13 @@ let isReportingMissingVercelRequestContext = false;
  * this does not depend on package internals beyond that stable contract.
  */
 function hasVercelRequestContextWaitUntil(): boolean {
-  const contextHolder: unknown = Reflect.get(globalThis, Symbol.for("@vercel/request-context"));
+  const contextHolder: unknown = globalThis[Symbol.for("@vercel/request-context")];
   if (contextHolder == null || typeof contextHolder !== "object") return false;
-  const getter: unknown = Reflect.get(contextHolder, "get");
+  const getter: unknown = contextHolder["get"];
   if (typeof getter !== "function") return false;
   const context: unknown = getter.call(contextHolder);
   if (context == null || typeof context !== "object") return false;
-  return typeof Reflect.get(context, "waitUntil") === "function";
+  return typeof context["waitUntil"] === "function";
 }
 
 function reportMissingVercelRequestContext(): void {
@@ -232,7 +232,7 @@ if (vitest != null) {
   vitest.test("reporting a missing Vercel request context cannot recursively schedule itself", ({ expect }) => {
     const contextSymbol = Symbol.for("@vercel/request-context");
     const hadContextHolder = Object.prototype.hasOwnProperty.call(globalThis, contextSymbol);
-    const previousContextHolder: unknown = Reflect.get(globalThis, contextSymbol);
+    const previousContextHolder: unknown = globalThis[contextSymbol];
     let sinkIsActive = true;
     let reentrantSinkCalls = 0;
     const consoleErrorSpy = vitest.vi.spyOn(console, "error").mockImplementation(() => {});

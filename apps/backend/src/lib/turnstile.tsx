@@ -256,7 +256,7 @@ export async function getRequestContextAndBotChallengeAssessment(
 import.meta.vitest?.describe("verifyTurnstileToken(...)", () => {
   const { vi, test, afterEach } = import.meta.vitest!;
 
-  const stubFetch = (response: object, status = 200) => {
+  const stubFetch = (response: Partial<SiteverifyResponse>, status = 200) => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify(response), {
       status,
       headers: { "Content-Type": "application/json" },
@@ -358,10 +358,10 @@ import.meta.vitest?.describe("verifyTurnstileToken(...)", () => {
   });
 
   test("uses development secret key when none is configured", async ({ expect }) => {
-    const processEnv = Reflect.get(process, "env");
-    const originalNodeEnv = Reflect.get(processEnv, "NODE_ENV");
-    const originalHexclaveKey = Reflect.get(processEnv, "HEXCLAVE_TURNSTILE_SECRET_KEY");
-    const originalStackKey = Reflect.get(processEnv, "STACK_TURNSTILE_SECRET_KEY");
+    const processEnv = process["env"];
+    const originalNodeEnv = processEnv["NODE_ENV"];
+    const originalHexclaveKey = processEnv["HEXCLAVE_TURNSTILE_SECRET_KEY"];
+    const originalStackKey = processEnv["STACK_TURNSTILE_SECRET_KEY"];
     Reflect.set(processEnv, "NODE_ENV", "development");
     // Clear both spellings so the value resolves to the dev-key default; the
     // canonical HEXCLAVE_ name is set in .env.development and otherwise wins.
@@ -402,9 +402,9 @@ import.meta.vitest?.describe("verifyTurnstileToken(...)", () => {
 
 import.meta.vitest?.describe("verifyTurnstileTokenWithOptionalVisibleChallenge(...)", () => {
   const { vi, test, afterEach, beforeEach } = import.meta.vitest!;
-  const processEnv = Reflect.get(process, "env");
-  const originalFlag = Reflect.get(processEnv, "HEXCLAVE_ALLOW_SIGN_UP_ON_VISIBLE_BOT_CHALLENGE_FAILURE");
-  const originalDisableFlag = Reflect.get(processEnv, "HEXCLAVE_DISABLE_BOT_CHALLENGE");
+  const processEnv = process["env"];
+  const originalFlag = processEnv["HEXCLAVE_ALLOW_SIGN_UP_ON_VISIBLE_BOT_CHALLENGE_FAILURE"];
+  const originalDisableFlag = processEnv["HEXCLAVE_DISABLE_BOT_CHALLENGE"];
 
   beforeEach(() => {
     Reflect.deleteProperty(processEnv, "HEXCLAVE_ALLOW_SIGN_UP_ON_VISIBLE_BOT_CHALLENGE_FAILURE");

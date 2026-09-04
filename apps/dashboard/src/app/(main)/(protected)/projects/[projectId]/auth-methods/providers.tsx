@@ -426,29 +426,31 @@ function OAuthProviderSettingsForm(props: {
 }
 
 export function ProviderSettingDialog(props: Props & { open: boolean, onClose: () => void }) {
-  const hasSharedKeys = sharedProviders.includes(props.id as any);
-  const bundleIdsArray = (props.provider as any)?.appleBundleIds ?? [];
+  const hasSharedKeys = sharedProviders.some((providerId) => providerId === props.id);
+  const providerWithCredentials = props.provider?.type === "standard" || props.provider?.type === "custom_oidc" ? props.provider : undefined;
+  const standardProvider = props.provider?.type === "standard" ? props.provider : undefined;
+  const bundleIdsArray = standardProvider?.appleBundleIds ?? [];
   // Existing Apple providers with only a client secret are legacy integrations;
   // providers with any key credentials should open on the key-based path.
   const isNonEmpty = (value: unknown) => typeof value === "string" && value !== "";
   const initialAppleCredentialMode: ProviderFormValues["appleCredentialMode"] =
-    isNonEmpty((props.provider as any)?.clientSecret)
-      && !isNonEmpty((props.provider as any)?.appleTeamId)
-      && !isNonEmpty((props.provider as any)?.appleKeyId)
-      && !isNonEmpty((props.provider as any)?.applePrivateKey)
+    isNonEmpty(providerWithCredentials?.clientSecret)
+      && !isNonEmpty(standardProvider?.appleTeamId)
+      && !isNonEmpty(standardProvider?.appleKeyId)
+      && !isNonEmpty(standardProvider?.applePrivateKey)
       ? "client-secret"
       : "private-key";
 
   const defaultValues = {
     shared: props.provider ? (props.provider.type === 'shared') : hasSharedKeys,
-    clientId: (props.provider as any)?.clientId ?? "",
-    clientSecret: (props.provider as any)?.clientSecret ?? "",
-    appleTeamId: (props.provider as any)?.appleTeamId ?? "",
-    appleKeyId: (props.provider as any)?.appleKeyId ?? "",
-    applePrivateKey: (props.provider as any)?.applePrivateKey ?? "",
+    clientId: providerWithCredentials?.clientId ?? "",
+    clientSecret: providerWithCredentials?.clientSecret ?? "",
+    appleTeamId: standardProvider?.appleTeamId ?? "",
+    appleKeyId: standardProvider?.appleKeyId ?? "",
+    applePrivateKey: standardProvider?.applePrivateKey ?? "",
     appleCredentialMode: initialAppleCredentialMode,
-    facebookConfigId: (props.provider as any)?.facebookConfigId ?? "",
-    microsoftTenantId: (props.provider as any)?.microsoftTenantId ?? "",
+    facebookConfigId: standardProvider?.facebookConfigId ?? "",
+    microsoftTenantId: standardProvider?.microsoftTenantId ?? "",
     appleBundleIds: Array.isArray(bundleIdsArray) ? bundleIdsArray : [],
   };
 
