@@ -45,6 +45,7 @@ export async function runClickhouseMigrations() {
     client.command({ query: REFRESH_TOKENS_TABLE_BASE_SQL }),
     client.command({ query: CONNECTED_ACCOUNTS_TABLE_BASE_SQL }),
     client.command({ query: CLICKMAP_EVENTS_TABLE_SQL }),
+    client.command({ query: FEATURE_FLAG_EXPOSURES_TABLE_SQL }),
   ]);
 
   await client.command({ query: CLICKMAP_EVENTS_ADD_DEAD_COLUMN_SQL });
@@ -55,6 +56,10 @@ export async function runClickhouseMigrations() {
   // Clickmap materialized view depends on the events table existing; create after the ALTER above
   // so the view sees the replay columns. IF NOT EXISTS makes this idempotent across reboots.
   await client.command({ query: CLICKMAP_EVENTS_MV_SQL });
+
+  // Same ordering constraint as the clickmap MV: created after the events table
+  // (and its ALTERs) so the view definition resolves against the final schema.
+  await client.command({ query: FEATURE_FLAG_EXPOSURES_MV_SQL });
 
   // Create all views in parallel
   await Promise.all([
@@ -681,9 +686,9 @@ WHERE sync_is_deleted = 0;
 // hardcoded schema in the prompt.
 const COLUMN_COMMENT_STATEMENTS: string[] = [
   // ── events ──
-  `ALTER TABLE default.events COMMENT COLUMN event_type 'Event type identifier. Known types: \$page-view, \$click, \$token-refresh, \$sign-up-rule-trigger'`,
+  `ALTER TABLE default.events COMMENT COLUMN event_type 'Event type identifier. Reserved types start with \$: \$page-view, \$click, \$token-refresh, \$sign-up-rule-trigger, \$feature-flag-exposure. Other values are customer-defined event names'`,
   `ALTER TABLE default.events COMMENT COLUMN event_at 'When the event occurred (UTC)'`,
-  `ALTER TABLE default.events COMMENT COLUMN data 'Event payload as JSON. MUST use toString(data) before JSONExtract* functions. Payload varies by event_type: \$page-view → {is_anonymous, path, referrer}; \$click → {is_anonymous, selector, url, viewport_width, viewport_height, x, y, ...}; \$token-refresh → {is_anonymous, refresh_token_id, ip_info: {country_code, city_name, region_code, is_trusted, latitude, longitude, tz_identifier, ip}}'`,
+  `ALTER TABLE default.events COMMENT COLUMN data 'Event payload as JSON. MUST use toString(data) before JSONExtract* functions. Payload varies by event_type: \$page-view → {is_anonymous, path, referrer}; \$click → {is_anonymous, selector, url, viewport_width, viewport_height, x, y, ...}; \$token-refresh → {is_anonymous, refresh_token_id, ip_info: {country_code, city_name, region_code, is_trusted, latitude, longitude, tz_identifier, ip}}; customer-defined events → {properties: {...}, value: Nullable numeric observation}'`,
   `ALTER TABLE default.events COMMENT COLUMN project_id 'Project identifier. Auto-filtered by row-level security — do not use in WHERE clauses'`,
   `ALTER TABLE default.events COMMENT COLUMN branch_id 'Branch identifier. Auto-filtered by row-level security — do not use in WHERE clauses'`,
   `ALTER TABLE default.events COMMENT COLUMN user_id 'User who triggered the event. Always populated despite Nullable type'`,
@@ -927,6 +932,77 @@ CREATE TABLE IF NOT EXISTS analytics_internal.clickmap_events (
 ENGINE MergeTree
 PARTITION BY toYYYYMM(event_at)
 ORDER BY (project_id, branch_id, toDate(event_at), path, viewport_width);
+`;
+
+// Feature-flag exposure rows, extracted from reserved $feature-flag-exposure
+// events (ingested via POST /api/latest/feature-flags/exposures/batch — the
+// only producer of that event type; customer conversion events stay as plain
+// rows in analytics_internal.events).
+//
+// Dedupe contract: exposure ingestion is idempotent by event_id (a client
+// generated UUID, signature-bound to the evaluation token). The engine is
+// ReplacingMergeTree over an ORDER BY key ending in event_id, so re-sent
+// batches collapse to one row *eventually* — but merges are async, so every
+// query against this table MUST also be duplicate-safe (uniqExact(...),
+// min()/argMin() per subject, or LIMIT 1 BY event_id). Never plain count().
+//
+// Order key: results queries always filter by project/branch/experiment/run
+// and then aggregate per subject, which is exactly the prefix order here.
+//
+// subject_hash is a project-scoped SHA-256 of the user/team id (computed
+// server-side at ingest) rather than the raw id, so experiment analytics
+// stay pseudonymous at rest. It is deliberately not secret-salted: results
+// queries recompute the same hash inside ClickHouse.
+//
+// No default.* view, row policy, or limited_user grant: exposures are consumed
+// exclusively by the internal experiment-results endpoints through the admin
+// client (with explicit parameterized project/branch filters), and are not
+// part of the customer-facing analytics query surface.
+const FEATURE_FLAG_EXPOSURES_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS analytics_internal.feature_flag_exposures (
+    project_id           String,
+    branch_id            String,
+    event_id             String,
+    run_id               String,
+    config_revision_hash String,
+    experiment_id        LowCardinality(String),
+    flag_id              LowCardinality(String),
+    variant_id           LowCardinality(String),
+    subject_type         LowCardinality(String),
+    subject_hash         String,
+    rule_id              Nullable(String),
+    reason               LowCardinality(String),
+    event_at             DateTime64(3, 'UTC'),
+    created_at           DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE ReplacingMergeTree(created_at)
+PARTITION BY toYYYYMM(event_at)
+ORDER BY (project_id, branch_id, experiment_id, run_id, subject_hash, event_id);
+`;
+
+// Fed ONLY by reserved $feature-flag-exposure rows; every other event type is
+// untouched. No POPULATE (same reasoning as clickmap_events_mv): the event
+// type is new, so there is no pre-existing backlog to backfill.
+const FEATURE_FLAG_EXPOSURES_MV_SQL = `
+CREATE MATERIALIZED VIEW IF NOT EXISTS analytics_internal.feature_flag_exposures_mv
+TO analytics_internal.feature_flag_exposures
+AS
+SELECT
+    project_id,
+    branch_id,
+    toString(data.event_id) AS event_id,
+    toString(data.run_id) AS run_id,
+    toString(data.config_revision_hash) AS config_revision_hash,
+    toString(data.experiment_id) AS experiment_id,
+    toString(data.flag_id) AS flag_id,
+    toString(data.variant_id) AS variant_id,
+    toString(data.subject_type) AS subject_type,
+    toString(data.subject_hash) AS subject_hash,
+    nullIf(toString(data.rule_id), '') AS rule_id,
+    toString(data.reason) AS reason,
+    event_at
+FROM analytics_internal.events
+WHERE event_type = '$feature-flag-exposure';
 `;
 
 const CLICKMAP_EVENTS_ADD_DEAD_COLUMN_SQL = `

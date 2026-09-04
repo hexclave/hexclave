@@ -1,0 +1,82 @@
+---
+title: "Feature Flags"
+description: "Typed feature flags with targeting rules, percentage rollouts, kill switches, and A/B experiments."
+icon: "/images/app-icons/feature-flags.svg"
+---
+
+The Feature Flags app lets you ship code behind flags and decide at runtime who sees what. Flags are typed, support multiple variants, and are evaluated per user (or per team) with ordered targeting rules and percentage rollouts. When you want to measure the impact of a change, you can attach a flag to an [experiment](/guides/apps/feature-flags/experiments) and read the results through the Analytics app.
+
+<Warning>
+  **Feature flags are not an authorization mechanism.** Flag values are delivered to and evaluated for clients, so they can be inspected and tampered with client-side. Never let a flag be the only thing protecting sensitive data or privileged actions — a flag can hide a button, but it cannot protect the endpoint behind it. Use [RBAC permissions](/guides/apps/rbac/overview) for authorization, and enforce them on the server.
+</Warning>
+
+## Flag types and variants
+
+Every flag has a type and a set of named variants:
+
+- **boolean** — the classic on/off toggle (`true`/`false` variants)
+- **string** — e.g. `"control"`, `"compact"`, `"spacious"` for layout variants
+- **number** — e.g. a request limit or a pricing threshold
+- **json** — structured payloads, e.g. `{ "maxItems": 10, "showBadge": true }`
+
+One variant is the **default**: it is served when no targeting rule matches. The SDK types the returned value based on the `fallback` you pass when reading the flag, so a boolean flag read with `fallback: false` gives you a `boolean` back.
+
+## Targeting rules
+
+Each flag has an ordered list of targeting rules, evaluated top to bottom — the first matching rule decides the served variant. A rule consists of:
+
+- **Conditions** on user attributes (email, sign-up date, team membership, custom metadata, ...)
+- **A variant to serve**, or a **percentage split** across variants
+
+Percentage splits are deterministic: the same user always lands in the same bucket for the same flag, so rollouts don't flicker between page loads.
+
+A typical setup for a gradual rollout:
+
+1. Rule 1: internal users (`emailDomain == "yourcompany.com"`) → always `true`
+2. Rule 2: everyone else → 10% `true`, 90% `false`
+3. Default: `false`
+
+Increase the percentage in rule 2 as you gain confidence, then remove the rules and change the default once the rollout is complete.
+
+## Kill switches
+
+Every flag has a kill switch. Killing a flag immediately stops targeting and serves the flag definition's configured fallback variant. The caller-provided SDK `fallback` remains the safety net when the flag is missing or evaluation is unavailable.
+
+Kill switches are stored in branch config, so you can kill a misbehaving feature in production while keeping it enabled in a development branch.
+
+## Prerequisites
+
+A flag can declare another flag as a prerequisite. The dependent flag only evaluates its own rules when the prerequisite evaluates to the required variant; otherwise it serves its configured fallback variant. Use this to gate a family of sub-flags behind one master flag, e.g. `checkout-redesign-animations` requiring `checkout-redesign` to be `true`.
+
+## Holdouts and mutual exclusion
+
+Two tools keep overlapping changes from contaminating each other:
+
+- **Holdouts** carve out a portion of users who are excluded from a set of flags and experiments entirely. They always see defaults, giving you a long-running baseline to measure cumulative impact against.
+- **Mutual exclusion groups** ensure that a user is only ever enrolled in one experiment within the group. Use them when two experiments touch the same surface and would confound each other's results.
+
+## Experiments
+
+When you want statistical evidence instead of a gut feeling, attach a flag to an experiment: define a hypothesis, split traffic across variants, and measure exposures and conversions through the Analytics app. See [Experiments](/guides/apps/feature-flags/experiments) for the full lifecycle, from drafting to declaring a winner.
+
+## Anonymous visitors
+
+Flags don't require a signed-in user:
+
+- Anonymous visitors are evaluated using a stable anonymous ID, so percentage rollouts and experiment assignments are consistent across page loads.
+- Targeting rules that reference user attributes treat those attributes as absent for anonymous visitors — a rule like `emailDomain == "yourcompany.com"` simply doesn't match.
+- When an anonymous visitor signs up, their assignments carry over to the new user, so they don't flip variants mid-session (and experiment data stays clean).
+
+## Next steps
+
+<Card title="Quickstart" href="/guides/apps/feature-flags/quickstart" horizontal>
+  Create your first flag and read it in React and on the server.
+</Card>
+
+<Card title="Experiments" href="/guides/apps/feature-flags/experiments" horizontal>
+  Run A/B tests on flags and read the results.
+</Card>
+
+<Card title="Config as code" href="/guides/apps/feature-flags/config-as-code" horizontal>
+  Version flags and experiments with your codebase.
+</Card>

@@ -124,7 +124,133 @@ it("accepts valid $page-view events", async ({ expect }) => {
   expect(res).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 200,
-      "body": { "inserted": 2 },
+      "body": {
+        "dropped": 0,
+        "inserted": 2,
+      },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("accepts batches from clients with a skewed clock", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await Auth.Otp.signIn();
+
+  // A device clock that is hours off is common. Both sent_at_ms and
+  // event_at_ms come from that clock, so neither may cause a rejection.
+  const skewed = Date.now() + 3 * 60 * 60 * 1000;
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: randomUUID(),
+    batchId: randomUUID(),
+    sentAtMs: skewed,
+    events: [
+      { event_type: "$page-view", event_at_ms: skewed - 100, data: { path: "/skewed" } },
+      { event_type: "$page-view", event_at_ms: skewed, data: { path: "/skewed-2" } },
+    ],
+  });
+
+  expect(res).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": {
+        "dropped": 0,
+        "inserted": 2,
+      },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("drops events with implausible timestamps instead of rejecting the batch", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await Auth.Otp.signIn();
+
+  const now = Date.now();
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: randomUUID(),
+    batchId: randomUUID(),
+    sentAtMs: now,
+    events: [
+      { event_type: "$page-view", event_at_ms: now - 100, data: { path: "/ok" } },
+      { event_type: "$page-view", event_at_ms: now + 2 * 24 * 60 * 60 * 1000, data: { path: "/far-future" } },
+      { event_type: "$page-view", event_at_ms: now - 8 * 24 * 60 * 60 * 1000, data: { path: "/far-past" } },
+    ],
+  });
+
+  expect(res).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": {
+        "dropped": 2,
+        "inserted": 1,
+      },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("keeps stable event ids anchored to the original batch position when earlier events are dropped", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await Auth.fastSignUp();
+
+  const sessionReplaySegmentId = randomUUID();
+  const batchId = randomUUID();
+  const now = Date.now();
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId,
+    batchId,
+    sentAtMs: now,
+    events: [
+      { event_type: "$page-view", event_at_ms: now + 30 * 24 * 60 * 60 * 1000, data: { path: "/dropped" } },
+      { event_type: "$page-view", event_at_ms: now - 100, data: { path: "/kept" } },
+    ],
+  });
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({ inserted: 1, dropped: 1 });
+
+  // The id is batch_id:<position in the uploaded batch>, so the surviving
+  // event is :1 even though it is the only row stored. A retried batch that
+  // later accepts the first event must not renumber this one to :0.
+  let queryRes;
+  for (let attempt = 0; attempt < 15; attempt++) {
+    await wait(500);
+    queryRes = await niceBackendFetch("/api/v1/analytics/query", {
+      method: "POST",
+      accessType: "server",
+      body: {
+        query: "SELECT toString(data.event_id) AS event_id, toString(data.path) AS path FROM events WHERE session_replay_segment_id = {segId:String}",
+        params: { segId: sessionReplaySegmentId },
+      },
+    });
+    if (queryRes.status === 200 && queryRes.body?.result?.length === 1) break;
+  }
+  expect(queryRes?.status).toBe(200);
+  expect(queryRes?.body.result).toEqual([{ event_id: `${batchId.toLowerCase()}:1`, path: "/kept" }]);
+});
+
+it("returns 200 with nothing inserted when every event is implausible, so the client can move on", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await Auth.Otp.signIn();
+
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: randomUUID(),
+    batchId: randomUUID(),
+    sentAtMs: Date.now(),
+    events: [{ event_type: "$page-view", event_at_ms: Date.now() + 365 * 24 * 60 * 60 * 1000, data: { path: "/next-year" } }],
+  });
+
+  expect(res).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": {
+        "dropped": 1,
+        "inserted": 0,
+      },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
@@ -163,7 +289,10 @@ it("accepts valid $click events", async ({ expect }) => {
   expect(res).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 200,
-      "body": { "inserted": 1 },
+      "body": {
+        "dropped": 0,
+        "inserted": 1,
+      },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
@@ -205,7 +334,10 @@ it("accepts a gzipped binary body (adblocker-evasion encoding)", async ({ expect
   expect(res).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 200,
-      "body": { "inserted": 1 },
+      "body": {
+        "dropped": 0,
+        "inserted": 1,
+      },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
@@ -317,7 +449,10 @@ it("handles click event data containing a truncated surrogate pair (lone high su
   expect(res).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 200,
-      "body": { "inserted": 1 },
+      "body": {
+        "dropped": 0,
+        "inserted": 1,
+      },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
@@ -481,11 +616,14 @@ it("rejects invalid batch_id", async ({ expect }) => {
   `);
 });
 
-it("rejects invalid event_type", async ({ expect }) => {
+it("rejects unknown reserved event_type", async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
   await Auth.fastSignUp();
 
+  // Since custom events were introduced, non-$ names are accepted as customer
+  // events; only unknown RESERVED ($-prefixed) types are rejected, now by the
+  // handler rather than the request schema.
   const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
     method: "POST",
     accessType: "client",
@@ -500,23 +638,8 @@ it("rejects invalid event_type", async ({ expect }) => {
   expect(res).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 400,
-      "body": {
-        "code": "SCHEMA_ERROR",
-        "details": {
-          "message": deindent\`
-            Request validation failed on POST /api/v1/analytics/events/batch:
-              - body.events[0].event_type must be one of the following values: $page-view, $click
-          \`,
-        },
-        "error": deindent\`
-          Request validation failed on POST /api/v1/analytics/events/batch:
-            - body.events[0].event_type must be one of the following values: $page-view, $click
-        \`,
-      },
-      "headers": Headers {
-        "x-stack-known-error": "SCHEMA_ERROR",
-        <some fields may have been hidden>,
-      },
+      "body": "Reserved event type \\"$invalid-type\\" cannot be uploaded via this endpoint",
+      "headers": Headers { <some fields may have been hidden> },
     }
   `);
 });
@@ -549,7 +672,10 @@ it("inserted events are queryable via analytics query endpoint", async ({ expect
   expect(uploadRes).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 200,
-      "body": { "inserted": 2 },
+      "body": {
+        "dropped": 0,
+        "inserted": 2,
+      },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
@@ -668,6 +794,35 @@ it("accepts batch and debits event quota correctly", { timeout: 120_000 }, async
 
   const afterQuantity = await getItemQuantity(ownerTeamId, ITEM_IDS.analyticsEvents);
   expect(afterQuantity).toBe(quantityBeforeBatch - eventCount);
+});
+
+it("does not debit event quota for dropped implausible events", { timeout: 120_000 }, async ({ expect }) => {
+  const { ownerTeamId } = await setupProjectWithPlan("free");
+  await Auth.Otp.signIn();
+
+  const quantityBeforeBatch = await waitForItemQuantityToStabilize(
+    ownerTeamId,
+    ITEM_IDS.analyticsEvents,
+    { minimumElapsedMs: 5000 },
+  );
+
+  const now = Date.now();
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: randomUUID(),
+    batchId: randomUUID(),
+    sentAtMs: now,
+    events: [
+      { event_type: "$page-view", event_at_ms: now - 1, data: { path: "/ok-1" } },
+      { event_type: "$page-view", event_at_ms: now - 2, data: { path: "/ok-2" } },
+      { event_type: "$page-view", event_at_ms: now + 30 * 24 * 60 * 60 * 1000, data: { path: "/next-month" } },
+    ],
+  });
+
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({ inserted: 2, dropped: 1 });
+
+  const afterQuantity = await getItemQuantity(ownerTeamId, ITEM_IDS.analyticsEvents);
+  expect(afterQuantity).toBe(quantityBeforeBatch - 2);
 });
 
 // We don't support metered pricing or partial batches for now, so the entire

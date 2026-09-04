@@ -1,6 +1,6 @@
 import type { JSX } from "react";
 import { Link } from "@/components/link";
-import { ChartLineIcon, ChatCircleDotsIcon, ClipboardTextIcon, CodeIcon, CreditCardIcon, CursorClickIcon, EnvelopeSimpleIcon, FingerprintSimpleIcon, GraphIcon, KeyIcon, MailboxIcon, MonitorPlayIcon, RocketIcon, ShieldCheckIcon, ShieldWarningIcon, SparkleIcon, TelevisionSimpleIcon, TerminalWindowIcon, TreeStructureIcon, TriangleIcon, UserGearIcon, UsersIcon, VaultIcon, WebhooksLogoIcon } from "@phosphor-icons/react";
+import { ChartLineIcon, ChatCircleDotsIcon, ClipboardTextIcon, CodeIcon, CreditCardIcon, CursorClickIcon, EnvelopeSimpleIcon, FingerprintSimpleIcon, FlagIcon, GraphIcon, KeyIcon, MailboxIcon, MonitorPlayIcon, RocketIcon, ShieldCheckIcon, ShieldWarningIcon, SparkleIcon, TelevisionSimpleIcon, TerminalWindowIcon, TreeStructureIcon, TriangleIcon, UserGearIcon, UsersIcon, VaultIcon, WebhooksLogoIcon } from "@phosphor-icons/react";
 import { StackAdminApp } from "@hexclave/next";
 import type { AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { getRelativePart, isChildUrl } from "@hexclave/shared/dist/utils/urls";
@@ -16,6 +16,11 @@ export type { AppId };
 const getScreenshots = (appName: string, count: number): string[] => {
   return Array.from({ length: count }, (_, i) => `/storeDesc-${appName}-${i + 1}.webp`);
 };
+
+const FEATURE_FLAGS_NAVIGATION_ITEMS: AppNavigationItem[] = [
+  { displayName: "Flags", href: "./flags" },
+  { displayName: "Experiments", href: "./experiments" },
+];
 
 export const DUMMY_ORIGIN = "https://example.com";
 
@@ -457,6 +462,19 @@ export const ALL_APPS_FRONTEND = {
       <>
         <p>CLI Auth shows real-time insight into how CLI authentication is used in your project.</p>
         <p>Monitor recent login attempts, see which users have active CLI refresh tokens, and track session health at a glance.</p>
+      </>
+    ),
+  },
+  "feature-flags": {
+    icon: FlagIcon,
+    href: "feature-flags",
+    navigationItems: FEATURE_FLAGS_NAVIGATION_ITEMS,
+    screenshots: getScreenshots("feature-flags", 0),
+    storeDescription: (
+      <>
+        <p>Feature Flags lets you ship features safely with kill switches, targeted rollouts, and percentage-based releases.</p>
+        <p>Define boolean, string, number, or JSON flags with typed variants, order targeting rules visually, and roll out gradually with basis-point precision.</p>
+        <p>Pair flags with A/B experiments powered by the Analytics app to measure conversion impact before rolling out to everyone.</p>
       </>
     ),
   },

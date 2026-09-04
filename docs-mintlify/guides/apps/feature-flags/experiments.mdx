@@ -1,0 +1,99 @@
+---
+title: "Experiments"
+description: "Run A/B experiments on feature flags and read the results measured through Analytics."
+icon: "/images/app-icons/feature-flags.svg"
+---
+
+Experiments turn a feature flag into a controlled A/B test: you split traffic across the flag's variants, define what "better" means as metrics, and let real usage data tell you which variant wins.
+
+<Note>
+  Experiments require the [Analytics app](/guides/apps/analytics/overview) to be enabled — exposures and conversions are measured through your project's analytics dataset. The dashboard blocks the Experiments section until Analytics is enabled.
+</Note>
+
+## Setting up an experiment
+
+An experiment consists of:
+
+- **Hypothesis** — a short statement of what you expect and why, e.g. "The redesigned checkout reduces drop-off on the payment step." Writing it down keeps you honest when reading results later.
+- **Linked flag and variants** — the experiment controls the flag's variant assignment for enrolled users. One variant is the **control**; the others are treatments.
+- **Assignment unit** — assign by **user** (default) or by **team**. Use team assignment when the feature is experienced collectively, e.g. a shared workspace layout — otherwise teammates in different variants contaminate each other.
+- **Traffic allocation** — the share of eligible traffic enrolled in the experiment. Users outside the allocation see the flag's default and are not counted.
+
+### Metrics
+
+Each experiment has one **primary metric** — the metric you'll make the ship/no-ship decision on — plus optional **secondary metrics** (things you're curious about) and **guardrail metrics** (things that must not regress, like error rate or page load conversions).
+
+Metric types:
+
+| Type | Measures |
+|---|---|
+| **Page view** | Users who viewed a matching page after exposure |
+| **Click** | Users who clicked a matching element after exposure |
+| **Funnel** | Users who completed an ordered sequence of events |
+| **Custom event** | Users who fired a named event you capture in code |
+| **Numeric value** | The value carried by a custom event, e.g. order total |
+
+Each metric has an **attribution window**: a conversion only counts if it happens within that window after the user's first exposure. Shorter windows give faster, tighter reads; longer windows capture slower-converting behavior.
+
+### Keeping experiments clean
+
+- **Mutual exclusion groups** — put experiments that touch the same surface into one group, and each user is enrolled in at most one of them. Overlapping experiments would otherwise confound each other's results.
+- **Schedules** — set a start and end time in advance so the experiment runs over comparable traffic (e.g. whole weeks, to avoid weekday/weekend skew).
+
+## Tracking custom conversions
+
+Page views and clicks are captured automatically by the Analytics SDK. For anything else — a completed purchase, an upgraded plan — capture a custom event from your client:
+
+```tsx
+import { useStackApp } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+const app = useStackApp();
+await app.trackEvent("purchase-completed", { value: 49.99 });
+```
+
+For a team-assigned experiment, pass the same selected team used for flag evaluation:
+
+```tsx
+await app.trackEvent("purchase-completed", { teamId: team.id, value: 49.99 });
+```
+
+The backend verifies that the current user belongs to the selected team. After a team-scoped flag evaluation, automatically captured page views and clicks also use that team context.
+
+Reference the event name (`purchase-completed`) in a custom-event metric, or use the numeric payload (`value`) in a numeric-value metric to measure revenue per user instead of just conversion rate.
+
+Exposures need no extra code: reading the flag with `useFeatureFlag` or `getFeatureFlag` records an exposure automatically. Read the flag as close as possible to where the user actually experiences the difference — exposing users who never see the change dilutes your results.
+
+## Lifecycle
+
+An experiment moves through four states:
+
+1. **Draft** — configure everything; nothing is served yet.
+2. **Running** — traffic is enrolled, assignments are locked in, data accumulates.
+3. **Paused** — enrollment stops; already-assigned users keep their variant so data stays consistent if you resume.
+4. **Completed** — enrollment is over. Results continue to honor the frozen attribution window, and Hexclave displays a winner only when the evidence threshold is met.
+
+Avoid editing variants or metrics on a running experiment — changing what you measure mid-flight invalidates the comparison. If the setup was wrong, complete the experiment and start a new one.
+
+## Reading results
+
+The results page shows, per variant:
+
+- **Exposures** — how many users (or teams) were assigned and exposed
+- **Conversion rate** (or mean value, for numeric metrics)
+- **Lift vs. control** with a **95% credible interval**
+- **Probability to be best** — the probability that this variant is the best-performing one given the data so far
+
+<Note>
+  Results are Bayesian estimates, not guarantees. A 92% probability-to-be-best means exactly that — there is still a real chance the variant is not better. Credible intervals tell you the plausible range of the true effect; treat narrow intervals far from zero as strong evidence, and wide intervals spanning zero as "we don't know yet."
+</Note>
+
+Also watch for two automatic alerts:
+
+- **Sample-ratio mismatch** — the observed split across variants deviates from the configured allocation more than chance explains. This usually indicates a bug in exposure logging or enrollment; results from an experiment with a sample-ratio mismatch should not be trusted.
+- **Insufficient data** — the experiment hasn't accumulated enough exposures or conversions for the estimates to be meaningful yet. Keep it running; checking early and often is fine, but deciding early on thin evidence is how experiments mislead.
+
+## Winner selection and rollout
+
+Hexclave marks a winner only when every variant has at least 100 exposed subjects, the leading variant has at least 95% probability-to-be-best, guardrails have not regressed, and there is no sample-ratio mismatch. Once you complete a qualifying experiment, the results page offers a one-click rollout: the flag's default is updated to the winning variant for 100% of traffic. From there you can eventually remove the flag from your code and clean up.
+
+If no variant shows convincing evidence of improvement, that is also a result: keep the control, write down what you learned, and move on to the next hypothesis.

@@ -4,6 +4,7 @@ import { cssEscapeIdent } from "@hexclave/shared/dist/utils/dom";
 import { buildElementsChain, ELEMENTS_CHAIN_MAX_DEPTH } from "@hexclave/shared/dist/utils/elements-chain";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
+import { isJsonSerializable, type Json } from "@hexclave/shared/dist/utils/json";
 import { generateUuid, isAdBlockerNetworkError, isAnalyticsNotEnabledError } from "./session-replay";
 
 const FLUSH_INTERVAL_MS = 10_000;
@@ -104,10 +105,51 @@ export type EventTrackerDeps = {
 };
 
 type TrackedEvent = {
-  event_type: "$page-view" | "$click",
+  event_type: string,
   event_at_ms: number,
   data: Record<string, unknown>,
+  value?: number,
+  team_id?: string,
 };
+
+type PendingEventBatch = {
+  body: string,
+};
+
+export type TrackEventOptions = {
+  properties?: Record<string, Json>,
+  value?: number,
+  /** Team assignment context for team-scoped experiments. Membership is verified by the server. */
+  teamId?: string,
+};
+
+function validateEventPropertyValue(value: Json, depth = 0): void {
+  if (depth > 5) throw new Error("Analytics event properties cannot be nested more than 5 levels.");
+  if (typeof value === "number" && !Number.isFinite(value)) throw new Error("Analytics event property numbers must be finite.");
+  if (Array.isArray(value)) {
+    for (const item of value) validateEventPropertyValue(item, depth + 1);
+  } else if (value != null && typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error("Analytics event properties must use plain JSON objects.");
+    for (const item of Object.values(value)) validateEventPropertyValue(item, depth + 1);
+  }
+}
+
+export function validateCustomerEvent(name: string, options?: TrackEventOptions): void {
+  if (name.startsWith("$")) throw new Error("Analytics event names beginning with '$' are reserved by Hexclave.");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(name)) {
+    throw new Error("Analytics event names must be 1-128 characters and contain only letters, numbers, periods, underscores, colons, or hyphens.");
+  }
+  if (options?.value != null && !Number.isFinite(options.value)) throw new Error("Analytics event values must be finite numbers.");
+  const properties = options?.properties ?? {};
+  if (Object.keys(properties).length > 50) throw new Error("Analytics events can contain at most 50 properties.");
+  for (const [key, value] of Object.entries(properties)) {
+    if (key.length === 0 || key.length > 64) throw new Error("Analytics event property names must be between 1 and 64 characters.");
+    if (!isJsonSerializable(value)) throw new Error(`Analytics event property ${JSON.stringify(key)} must be JSON serializable.`);
+    validateEventPropertyValue(value);
+  }
+  if (new TextEncoder().encode(JSON.stringify(properties)).byteLength > 16_384) throw new Error("Analytics event properties cannot exceed 16384 bytes.");
+}
 
 export class EventTracker {
   private _started = false;
@@ -117,9 +159,15 @@ export class EventTracker {
   private _flushTimer: ReturnType<typeof setInterval> | null = null;
   private _events: TrackedEvent[] = [];
   private _approxBytes = 0;
+  // A failed delivery remains separate from newly buffered events. Retrying the
+  // exact serialized body preserves its batch id and makes server-side
+  // idempotency effective even when the first response was lost.
+  private _pendingBatch: PendingEventBatch | null = null;
+  private _flushInFlight: Promise<void> | null = null;
   private _lastUrl: string | null = null;
   private readonly _sessionReplaySegmentId: string;
   private readonly _deps: EventTrackerDeps;
+  private _teamId: string | null = null;
 
   private _originalPushState: History["pushState"] | null = null;
   private _originalReplaceState: History["replaceState"] | null = null;
@@ -174,13 +222,33 @@ export class EventTracker {
   clearBuffer() {
     this._events = [];
     this._approxBytes = 0;
+    this._pendingBatch = null;
     this._unclassifiedClicks.clear();
+    this._teamId = null;
+  }
+
+  setTeamContext(teamId: string | null): void {
+    this._teamId = teamId;
+  }
+
+  async trackEvent(name: string, options?: TrackEventOptions): Promise<void> {
+    validateCustomerEvent(name, options);
+    this._pushEvent({
+      event_type: name,
+      event_at_ms: Date.now(),
+      data: options?.properties ?? {},
+      ...(options?.teamId == null ? {} : { team_id: options.teamId }),
+      ...(options?.value == null ? {} : { value: options.value }),
+    });
   }
 
   private _pushEvent(event: TrackedEvent) {
     if (this._disabled) return;
-    this._events.push(event);
-    this._approxBytes += JSON.stringify(event).length;
+    const contextualizedEvent = event.team_id !== undefined || this._teamId === null
+      ? event
+      : { ...event, team_id: this._teamId };
+    this._events.push(contextualizedEvent);
+    this._approxBytes += JSON.stringify(contextualizedEvent).length;
     if (this._events.length >= MAX_EVENTS_PER_BATCH || this._approxBytes >= MAX_APPROX_BYTES_PER_BATCH) {
       runAsynchronously(() => this._flush({ keepalive: false }));
     }
@@ -470,6 +538,23 @@ export class EventTracker {
   }
 
   private async _flush(options: { keepalive: boolean }) {
+    if (this._flushInFlight != null) {
+      await this._flushInFlight;
+      // An unload flush must drain whatever the ordinary in-flight request did
+      // not deliver; returning here would strand newer events as the page exits.
+      if (options.keepalive) await this._flush(options);
+      return;
+    }
+    const flush = this._flushOnce(options);
+    this._flushInFlight = flush;
+    try {
+      await flush;
+    } finally {
+      if (this._flushInFlight === flush) this._flushInFlight = null;
+    }
+  }
+
+  private async _flushOnce(options: { keepalive: boolean }) {
     if (this._disabled) return;
 
     // A keepalive flush means the page is unloading — a click still awaiting
@@ -482,23 +567,24 @@ export class EventTracker {
     // Clicks still awaiting classification stay buffered so the sweep can
     // mark them dead in place; classification finishes well within one flush
     // interval, so they ride the next flush at the latest.
-    const events = this._events.filter((event) => !this._unclassifiedClicks.has(event));
-    if (events.length === 0) return;
-    this._events = this._events.filter((event) => this._unclassifiedClicks.has(event));
-    this._approxBytes = this._events.reduce((total, event) => total + JSON.stringify(event).length, 0);
-
-    const nowMs = Date.now();
-
-    const batchId = generateUuid();
-    const payload = {
-      session_replay_segment_id: this._sessionReplaySegmentId,
-      batch_id: batchId,
-      sent_at_ms: nowMs,
-      events,
-    };
+    if (this._pendingBatch == null) {
+      const events = this._events.filter((event) => !this._unclassifiedClicks.has(event));
+      if (events.length === 0) return;
+      this._events = this._events.filter((event) => this._unclassifiedClicks.has(event));
+      this._approxBytes = this._events.reduce((total, event) => total + JSON.stringify(event).length, 0);
+      this._pendingBatch = {
+        body: JSON.stringify({
+          session_replay_segment_id: this._sessionReplaySegmentId,
+          batch_id: generateUuid(),
+          sent_at_ms: Date.now(),
+          events,
+        }),
+      };
+    }
+    const pendingBatch = this._pendingBatch;
 
     const res = await this._deps.sendBatch(
-      JSON.stringify(payload),
+      pendingBatch.body,
       { keepalive: options.keepalive },
     );
 
@@ -510,6 +596,7 @@ export class EventTracker {
       // Ad blockers commonly block analytics endpoints, causing network
       // errors. These are expected and should not pollute the console.
       if (isAdBlockerNetworkError(res.error)) {
+        this._pendingBatch = null;
         return;
       }
       console.warn("EventTracker flush failed:", res.error);
@@ -518,11 +605,14 @@ export class EventTracker {
 
     if (!res.data.ok) {
       console.warn("EventTracker flush failed:", res.data.status, await res.data.text());
+      return;
     }
+    if (this._pendingBatch === pendingBatch) this._pendingBatch = null;
   }
 
   private _disable() {
     this._disabled = true;
+    this._pendingBatch = null;
     if (this._flushTimer !== null) {
       clearInterval(this._flushTimer);
       this._flushTimer = null;
@@ -532,7 +622,7 @@ export class EventTracker {
 
   private _tick() {
     if (this._cancelled) return;
-    if (this._events.length > 0) {
+    if (this._pendingBatch != null || this._events.length > 0) {
       runAsynchronously(() => this._flush({ keepalive: false }));
     }
   }

@@ -51,6 +51,12 @@ export default mergeConfig(
       alias: {
         "@hexclave/tanstack-start/tanstack-start-server-context": tanstackStartServerContextStub, // THIS_LINE_PLATFORM template
       },
+      // Component tests render with this package's react-dom, but hooks such as
+      // `use` are imported from @hexclave/shared, whose devDependency can pin a
+      // different React patch release in the pnpm store. Two React copies in one
+      // render tree fail with "Invalid hook call"; in a real app peer deps
+      // guarantee a single copy, so force the same here.
+      dedupe: ["react", "react-dom"],
     },
     plugins: [replaceCompileTimeClientVersion()],
   }),

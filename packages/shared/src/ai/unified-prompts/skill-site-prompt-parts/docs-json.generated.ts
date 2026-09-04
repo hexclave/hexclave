@@ -169,7 +169,17 @@ const docsJson = {
               "guides/apps/api-keys/overview",
               "guides/apps/data-vault/overview",
               "guides/apps/webhooks/overview",
-              "guides/apps/launch-checklist/overview"
+              "guides/apps/launch-checklist/overview",
+              {
+                "group": "Feature Flags",
+                "icon": "/images/app-icons/feature-flags.svg",
+                "pages": [
+                  "guides/apps/feature-flags/overview",
+                  "guides/apps/feature-flags/quickstart",
+                  "guides/apps/feature-flags/experiments",
+                  "guides/apps/feature-flags/config-as-code"
+                ]
+              }
             ]
           },
           {

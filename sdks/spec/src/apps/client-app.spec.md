@@ -63,6 +63,72 @@ routers cannot restore the action URL after hydration. If consumption reports an
 already-used or expired action, treat it as an expected no-op.
 
 
+## Feature flags
+
+Public JSON types:
+
+```
+FeatureFlagOptions {
+  context?: map<string, Json>
+  teamId?: string
+  exposure?: "auto" | "manual" | "none"  // default "auto"
+}
+
+FeatureFlagRequest { key: string, fallback: Json, options?: FeatureFlagOptions }
+
+FeatureFlagDetails<T> {
+  flagKey: string
+  value: T
+  variantKey: string?
+  reason: string
+  ruleId: string?
+  configVersion: string
+  experimentId: string?
+  experimentRunId: string?
+  isStale: bool
+  exposureToken: string?
+}
+```
+
+Methods:
+
+- `getFeatureFlag<T>(key, fallback, options?) -> T`
+- `getFeatureFlagDetails<T>(key, fallback, options?) -> FeatureFlagDetails<T>`
+- `getFeatureFlags(requests) -> Map<string, FeatureFlagDetails<Json>>`
+- `trackFeatureFlagExposure(details) -> void`
+- `useFeatureFlag<T>(key, fallback, options?) -> T` [REACT-LIKE]
+- `useFeatureFlagDetails<T>(key, fallback, options?) -> FeatureFlagDetails<T>` [REACT-LIKE]
+
+Before evaluation, call `getUser({ or: "anonymous" })`. This reuses the authenticated user when present and otherwise creates/reuses the SDK's persistent anonymous user. Build trusted evaluation attributes from that canonical user only: ID, verified primary email (or null), primary-email verification state, and sign-up timestamp. Never accept a user ID, verified-email state, or other trusted identity attribute from feature-flag options. `teamId` is only a selection hint and must be ignored unless the API can derive and authorize it from the current session.
+
+Request:
+
+```
+POST /api/v1/feature-flags/evaluate [authenticated client]
+{
+  flag_keys: string[1..50],
+  fallbacks: map<string, Json>,
+  team_id?: string,
+  context?: map<string, Json>
+}
+```
+
+Context is limited to 32 keys, 64 characters per key, 8192 serialized bytes, five nested levels, finite numbers, and JSON-serializable values. All requests in one batch must use the same context and team ID. Duplicate flag keys are invalid.
+
+The response has a `results` object keyed by public flag key. Fail loudly if any requested key is absent, metadata is malformed, or a result crosses the fallback's JSON kind. Normalize request order before caching, scope caches by the current user/session identity, and invalidate older entries when a response reveals a new config version. Bound evaluation, result, and identity-version caches with deterministic oldest-entry eviction (the JS implementation defaults to 1000 entries); bound exposure deduplication/retry state separately (the JS implementation uses 10000 entries). Hooks must suspend on the stable cached evaluation promise and surface evaluation errors to the nearest error boundary.
+
+For `exposure: "auto"`, batch non-null signed exposure tokens to `POST /api/v1/feature-flags/exposures/batch`. Deduplicate by identity + config version + flag + experiment run, including concurrent calls. `manual` returns the token without sending it; `none` neither sends nor requires a token. `trackFeatureFlagExposure` applies the same deduplication and retries after failed sends.
+
+Feature flags are delivery controls, not authorization checks. Security decisions must remain on a trusted server.
+
+
+## trackEvent(name, options?)
+
+Records a customer-defined analytics conversion event. Names are 1-128 characters, use letters/numbers plus `. _ : -`, and cannot begin with `$` because those names are reserved. `options.properties` contains at most 50 JSON-serializable entries and 16384 serialized bytes; `options.value` must be finite. `options.teamId` selects the team assignment context and is accepted only after the backend verifies that the current user belongs to that team.
+
+Browser implementations append custom events to the same `/api/v1/analytics/events/batch` buffer used for page views and clicks. Every resolved feature-flag call, including a cache hit, sets the active team context for subsequently captured page views and clicks; a user-scoped call clears it. Perform this update after the asynchronous evaluation resolves, never during React render. An explicit `trackEvent` team ID applies only to that event. Preserve event order and put a failed non-blocked batch back at the front of the buffer for retry. Clear buffered events and team context on sign-out to prevent cross-user leakage. Server-like implementations send a bounded one-event batch immediately. Fail explicitly when analytics is disabled.
+
+
 ## signInWithOAuth(provider, options?)  [BROWSER-LIKE]
 
 Starts an OAuth authentication flow with the specified provider.

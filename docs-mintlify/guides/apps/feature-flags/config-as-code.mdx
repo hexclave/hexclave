@@ -1,0 +1,53 @@
+---
+title: "Config as Code"
+description: "Version feature flags and experiments with your codebase in your Hexclave config."
+icon: "/images/app-icons/feature-flags.svg"
+---
+
+Flags and experiments live in your project's branch config under the `featureFlags` namespace, just like the rest of your [Hexclave config](/guides/going-further/hexclave-config). That means they version with your codebase: a flag definition can be reviewed in a pull request, audited in git history, and rolled back with a revert.
+
+```ts title="hexclave.config.ts"
+export const config: HexclaveConfig = {
+  featureFlags: {
+    flags: {
+      // This map key is an immutable internal ID. The public key below can be renamed.
+      "flag_checkout_redesign": {
+        key: "checkout-redesign",
+        displayName: "Checkout redesign",
+        type: "boolean",
+        enabled: true,
+        killed: false,
+        allocationSalt: "flag_checkout_redesign",
+        variants: {
+          off: { value: false, description: "Current checkout" },
+          on: { value: true, description: "Redesigned checkout" },
+        },
+        fallbackVariantKey: "off",
+        rules: {
+          __default: {
+            priority: 0,
+            rolloutBasisPoints: 10_000,
+            allocationSalt: "flag_checkout_redesign.__default",
+            stickyBy: "distinctId",
+            variantKey: "off",
+          },
+        },
+      },
+    },
+  },
+};
+```
+
+We recommend defining flags in your config file rather than ad-hoc in the dashboard — it keeps flag changes in the same review flow as the code that depends on them.
+
+## Development environments
+
+In a [development environment](/guides/going-further/local-vs-cloud-dashboard) (local dashboard running against your dev config), flag and experiment definitions come from your config file. Edits in the dashboard are read-only against deployed environments until you push your config — the same behavior as every other config surface. This prevents dashboard clicks from silently diverging from what's in your repository.
+
+## Dashboard edits use config paths
+
+When you do edit a flag in the dashboard (e.g. on a cloud project), the dashboard applies the change as a config path update like `featureFlags.flags.<internal-id>`, so renaming the public key does not change the flag's identity and sibling config is left alone. This is the same path-notation mechanism used across Hexclave config, which is why dashboard edits and config-file edits compose cleanly.
+
+## Kill switches are versioned branch configuration
+
+The `killed` field is part of branch config. Dashboard kill-switch changes use the same config publishing flow as other flag changes, so development and production branches can still be controlled independently and every change remains reviewable.

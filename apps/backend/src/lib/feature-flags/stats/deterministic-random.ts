@@ -1,0 +1,133 @@
+import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+
+/**
+ * Deterministic PRNG + distribution samplers for experiment statistics.
+ *
+ * Experiment results must be reproducible: the same exposure/conversion counts
+ * must always produce the same probability-to-be-best and credible intervals,
+ * otherwise refreshing the results page would show slightly different numbers
+ * every time and any snapshot-based test would be flaky. So instead of
+ * Math.random() we use a counter-based deterministic generator seeded from a
+ * caller-provided string (typically the experiment run id + metric id).
+ */
+
+/** FNV-1a 32-bit hash, used to turn an arbitrary seed string into PRNG state. */
+function fnv1a(str: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+export class DeterministicRandom {
+  private _state: [number, number, number, number];
+  private _spareNormal: number | null = null;
+
+  constructor(seed: string) {
+    // Derive four 32-bit words of state by hashing the seed with different suffixes.
+    // xoshiro128** requires a not-all-zero state; the +1 offsets and distinct
+    // suffixes make an all-zero state practically impossible, but we still guard.
+    const state: [number, number, number, number] = [
+      fnv1a(seed + "\0a"),
+      fnv1a(seed + "\0b"),
+      fnv1a(seed + "\0c"),
+      fnv1a(seed + "\0d"),
+    ];
+    if (state.every((s) => s === 0)) {
+      state[0] = 1;
+    }
+    this._state = state;
+    // Discard a few outputs so nearly-identical seeds decorrelate.
+    for (let i = 0; i < 8; i++) this._nextUint32();
+  }
+
+  private _nextUint32(): number {
+    // xoshiro128** by Blackman & Vigna (public domain reference implementation).
+    const [s0, s1, s2, s3] = this._state;
+    const result = Math.imul((Math.imul(s1, 5) << 7) | (Math.imul(s1, 5) >>> 25), 9);
+    const t = s1 << 9;
+    let ns2 = s2 ^ s0;
+    let ns3 = s3 ^ s1;
+    const ns1 = s1 ^ ns2;
+    const ns0 = s0 ^ ns3;
+    ns2 ^= t;
+    ns3 = (ns3 << 11) | (ns3 >>> 21);
+    this._state = [ns0 >>> 0, ns1 >>> 0, ns2 >>> 0, ns3 >>> 0];
+    return result >>> 0;
+  }
+
+  /** Uniform in (0, 1) — never returns exactly 0 or 1 so log()/division are always safe. */
+  uniform(): number {
+    return (this._nextUint32() + 0.5) / 4294967296;
+  }
+
+  /** Standard normal via Box-Muller (with spare caching). */
+  normal(): number {
+    if (this._spareNormal !== null) {
+      const spare = this._spareNormal;
+      this._spareNormal = null;
+      return spare;
+    }
+    const u1 = this.uniform();
+    const u2 = this.uniform();
+    const r = Math.sqrt(-2 * Math.log(u1));
+    const theta = 2 * Math.PI * u2;
+    this._spareNormal = r * Math.sin(theta);
+    return r * Math.cos(theta);
+  }
+
+  /** Gamma(shape, 1) via Marsaglia-Tsang; shape < 1 handled with the standard boost. */
+  gamma(shape: number): number {
+    if (!(shape > 0)) {
+      throw new HexclaveAssertionError(`gamma() requires shape > 0, got ${shape}; posterior parameters must be positive`);
+    }
+    if (shape < 1) {
+      // Boost: Gamma(a) = Gamma(a + 1) * U^(1/a)
+      const u = this.uniform();
+      return this.gamma(shape + 1) * Math.pow(u, 1 / shape);
+    }
+    const d = shape - 1 / 3;
+    const c = 1 / Math.sqrt(9 * d);
+    // Marsaglia-Tsang rejection loop; acceptance rate is >96% so this terminates fast.
+    while (true) {
+      let x: number;
+      let v: number;
+      do {
+        x = this.normal();
+        v = 1 + c * x;
+      } while (v <= 0);
+      v = v * v * v;
+      const u = this.uniform();
+      if (u < 1 - 0.0331 * x * x * x * x) return d * v;
+      if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+    }
+  }
+
+  /** Beta(alpha, beta) via two gamma draws. */
+  beta(alpha: number, beta: number): number {
+    const x = this.gamma(alpha);
+    const y = this.gamma(beta);
+    return x / (x + y);
+  }
+}
+
+/**
+ * Quantile of a sorted numeric array via linear interpolation, used for
+ * credible intervals computed from posterior samples.
+ */
+export function sortedQuantile(sortedValues: readonly number[], q: number): number {
+  if (sortedValues.length === 0) {
+    throw new HexclaveAssertionError("sortedQuantile() requires at least one sample");
+  }
+  if (!(q >= 0 && q <= 1)) {
+    throw new HexclaveAssertionError(`sortedQuantile() requires 0 <= q <= 1, got ${q}`);
+  }
+  const pos = q * (sortedValues.length - 1);
+  const lower = Math.floor(pos);
+  const upper = Math.ceil(pos);
+  if (lower === upper) return sortedValues[lower];
+  const frac = pos - lower;
+  return sortedValues[lower] * (1 - frac) + sortedValues[upper] * frac;
+}

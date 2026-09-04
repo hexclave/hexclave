@@ -6,6 +6,10 @@ on:
       - dev
   pull_request:
 
+# This workflow only checks out code and runs tests; it never pushes or calls the GitHub API.
+permissions:
+  contents: read
+
 # A concurrency group only ever runs one run at a time, so the sha is part of the group on main/dev:
 # otherwise consecutive dev pushes queue behind each other (and GitHub cancels the older queued run),
 # so one slow or hung run silently skips CI for every commit after it. PRs and feature branches stay
@@ -60,6 +64,8 @@ jobs:
       NODE_ENV: test
       HEXCLAVE_ENABLE_HARDCODED_PASSKEY_CHALLENGE_FOR_TESTING: yes
       HEXCLAVE_DATABASE_CONNECTION_STRING: "postgres://postgres:PASSWORD-PLACEHOLDER--uqfEC1hmmv@localhost:8128/stackframe"
+      HEXCLAVE_EXTERNAL_DB_SYNC_MAX_DURATION_MS: "20000"
+      HEXCLAVE_EXTERNAL_DB_SYNC_DIRECT: "false"
 
     steps:
       # First, checkout the current branch to get its migrations
@@ -189,6 +195,19 @@ jobs:
         if: ${{ hashFiles('apps/bulldozer-js/package.json') != '' }}
         run: pnpm run db:backfill-bulldozer-from-prisma
 
+      # Marshal (the deployments runtime) talks to the fly-mock + s3mock
+      # containers; the deployments e2e tests drive it through the backend.
+      - name: Start marshal in background
+        if: ${{ hashFiles('apps/marshal/package.json') != '' }}
+        uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
+        with:
+          run: NODE_ENV=test pnpm run start:marshal &
+          wait-on: |
+            http://localhost:8147/health
+          tail: true
+          wait-for: 30s
+          log-output-if: true
+
       - name: Start stack-backend in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
         with:
@@ -305,6 +324,8 @@ jobs:
       NODE_ENV: test
       HEXCLAVE_ENABLE_HARDCODED_PASSKEY_CHALLENGE_FOR_TESTING: yes
       HEXCLAVE_DATABASE_CONNECTION_STRING: "postgres://postgres:PASSWORD-PLACEHOLDER--uqfEC1hmmv@localhost:8128/stackframe"
+      HEXCLAVE_EXTERNAL_DB_SYNC_MAX_DURATION_MS: "20000"
+      HEXCLAVE_EXTERNAL_DB_SYNC_DIRECT: "false"
 
     steps:
       # First, checkout the base branch to get its migrations
@@ -434,6 +455,18 @@ jobs:
       # fresh bulldozer-js store so the backend's payment reads aren't empty.
       - name: Backfill Bulldozer from Postgres
         run: pnpm run db:backfill-bulldozer-from-prisma
+
+      # Marshal (the deployments runtime) talks to the fly-mock + s3mock
+      # containers; the deployments e2e tests drive it through the backend.
+      - name: Start marshal in background
+        uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
+        with:
+          run: NODE_ENV=test pnpm run start:marshal &
+          wait-on: |
+            http://localhost:8147/health
+          tail: true
+          wait-for: 30s
+          log-output-if: true
 
       - name: Start stack-backend in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7

@@ -26,6 +26,7 @@ export const DocsAppsHomeGrid = () => {
     { name: "Data Vault", href: "/guides/apps/data-vault/overview", iconSrc: "/images/app-icons/data-vault.svg" },
     { name: "Webhooks", href: "/guides/apps/webhooks/overview", iconSrc: "/images/app-icons/webhooks.svg" },
     { name: "Launch Checklist", href: "/guides/apps/launch-checklist/overview", iconSrc: "/images/app-icons/launch-checklist.svg" },
+    { name: "Feature Flags", href: "/guides/apps/feature-flags/overview", iconSrc: "/images/app-icons/feature-flags.svg" },
   ];
 
   const getAppsFromSidebar = () => {

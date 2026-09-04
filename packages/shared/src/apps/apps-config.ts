@@ -193,6 +193,15 @@ export const ALL_APPS = {
     stage: "stable",
     softRequirements: [],
   },
+  "feature-flags": {
+    displayName: "Feature Flags",
+    subtitle: "Release features safely and run experiments",
+    tags: ["developers", "operations"],
+    stage: "alpha",
+    // Exposures and experiment results land in the Analytics pipeline; flags
+    // themselves still evaluate without it.
+    softRequirements: ["analytics"],
+  },
   "clickmaps": {
     displayName: "Clickmaps",
     subtitle: "Visualize where users click across your app",

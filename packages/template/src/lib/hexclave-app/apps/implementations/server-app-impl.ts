@@ -1,5 +1,7 @@
 import { HexclaveServerInterface, KnownErrors } from "@hexclave/shared";
 import type { AnalyticsQueryOptions, AnalyticsQueryResponse } from "@hexclave/shared/dist/interface/crud/analytics";
+import type { FeatureFlagEvaluateRequest, FeatureFlagEvaluateResponse } from "@hexclave/shared/dist/interface/crud/feature-flags";
+import { evaluateFeatureFlag } from "@hexclave/shared/dist/feature-flags/evaluator";
 import type { AdminGetSessionReplayChunkEventsResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
 import type { AdminSessionReplay, AdminSessionReplayChunk, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, SessionReplayAllEventsResult } from "../../session-replays";
 import { ContactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
@@ -17,11 +19,12 @@ import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
 import { InternalSession } from "@hexclave/shared/dist/sessions";
 import type { AsyncCache } from "@hexclave/shared/dist/utils/caches";
 import { HexclaveAssertionError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { ProviderType } from "@hexclave/shared/dist/utils/oauth";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { suspend } from "@hexclave/shared/dist/utils/react";
 import { Result } from "@hexclave/shared/dist/utils/results";
-import { isUuid } from "@hexclave/shared/dist/utils/uuids";
+import { generateUuid, isUuid } from "@hexclave/shared/dist/utils/uuids";
 import { WebAuthnError, startRegistration } from "@simplewebauthn/browser";
 import { useMemo } from "react"; // THIS_LINE_PLATFORM react-like
 import * as yup from "yup";
@@ -34,18 +37,144 @@ import { Customer, CustomerProductsList, CustomerProductsRequestOptions, InlineP
 import { DataVaultStore } from "../../data-vault";
 import { EmailDeliveryInfo, SendEmailOptions } from "../../email";
 import { NotificationCategory } from "../../notification-categories";
+import { FeatureFlagController } from "../../feature-flags";
 import { scopePasskeyRegistrationToHostname } from "../../passkey-rp-id";
 import { AdminProjectPermissionDefinition, AdminTeamPermission, AdminTeamPermissionDefinition } from "../../permissions";
 import { EditableTeamMemberProfile, ReceivedTeamInvitation, SentTeamInvitation, ServerListTeamsOptions, ServerListUsersOptions, ServerTeam, ServerTeamCreateOptions, ServerTeamUpdateOptions, ServerTeamUser, Team, serverTeamCreateOptionsToCrud, serverTeamUpdateOptionsToCrud } from "../../teams";
 import { ProjectCurrentServerUser, ServerOAuthProvider, ServerUser, ServerUserCreateOptions, ServerUserUpdateOptions, serverUserCreateOptionsToCrud, serverUserUpdateOptionsToCrud, withUserDestructureGuard } from "../../users";
 import { StackServerAppConstructorOptions } from "../interfaces/server-app";
 import { _HexclaveClientAppImplIncomplete } from "./client-app-impl";
+import { FeatureFlagBootstrapCache, FeatureFlagBootstrapUnavailableError, type FeatureFlagBootstrapSnapshot } from "./feature-flag-bootstrap-cache";
 import { clientVersion, createCache, createCacheBySession, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getDefaultSecretServerKey, resolveApiUrls, resolveConstructorOptions } from "./common";
 
 import { useAsyncCache } from "./common"; // THIS_LINE_PLATFORM react-like
 
 export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, ProjectId extends string> extends _HexclaveClientAppImplIncomplete<HasTokenStore, ProjectId> {
   declare protected _interface: HexclaveServerInterface;
+  private readonly _featureFlagBootstrapCache = new FeatureFlagBootstrapCache(
+    async (etag) => await this._interface.getFeatureFlagsBootstrap(etag),
+  );
+  protected override readonly _featureFlags = new FeatureFlagController<{
+    session: InternalSession,
+    userId: string,
+    user: Record<string, Json>,
+  }>({
+    evaluate: async (identity, request) => await this._evaluateFeatureFlagsLocally(identity, request),
+    sendExposures: async (identity, exposures) => await this._interface.sendFeatureFlagExposureBatch({ batch_id: generateUuid(), exposures }, identity.session),
+    cacheTtlMillis: 30_000,
+  });
+
+  private async _evaluateFeatureFlagsLocally(
+    identity: { session: InternalSession, userId: string, user: Record<string, Json> },
+    request: FeatureFlagEvaluateRequest,
+  ): Promise<FeatureFlagEvaluateResponse<Json>> {
+    let bootstrap: FeatureFlagBootstrapSnapshot;
+    try {
+      bootstrap = await this._featureFlagBootstrapCache.get();
+    } catch (error) {
+      if (!(error instanceof FeatureFlagBootstrapUnavailableError)) throw error;
+      captureError("feature-flags-bootstrap-unavailable", error);
+      const results: FeatureFlagEvaluateResponse<Json>["results"] = {};
+      for (const key of request.flag_keys) {
+        results[key] = {
+          flag_key: key,
+          value: request.fallbacks?.[key] ?? null,
+          variant_key: null,
+          reason: "error",
+          rule_id: null,
+          config_version: "unavailable",
+          experiment_id: null,
+          experiment_run_id: null,
+          exposure_token: null,
+          is_stale: false,
+        };
+      }
+      return { results };
+    }
+
+    const results: FeatureFlagEvaluateResponse<Json>["results"] = {};
+    for (const key of request.flag_keys) {
+      if (!Object.prototype.hasOwnProperty.call(bootstrap.flag_ids_by_key, key)) {
+        results[key] = {
+          flag_key: key,
+          value: request.fallbacks?.[key] ?? null,
+          variant_key: null,
+          reason: "missing",
+          rule_id: null,
+          config_version: bootstrap.config_version,
+          experiment_id: null,
+          experiment_run_id: null,
+          exposure_token: null,
+          is_stale: bootstrap.isStale,
+        };
+        continue;
+      }
+      const flagId = bootstrap.flag_ids_by_key[key];
+      const evaluated = evaluateFeatureFlag(
+        flagId,
+        bootstrap.config,
+        {
+          distinctId: identity.userId,
+          userId: identity.userId,
+          teamId: request.team_id,
+          user: identity.user,
+          team: request.team_id === undefined ? undefined : { id: request.team_id },
+          context: request.context,
+        },
+        // A stale snapshot can still contain overlay rules for a run that has
+        // since paused or completed, and those assignments cannot mint
+        // exposure tokens. Ignore experiment overlays so ordinary flags stay
+        // available during the five-minute stale window without shipping
+        // unauditable experiment traffic.
+        { ignoreExperimentAssignments: bootstrap.isStale },
+      );
+      const localResult: FeatureFlagEvaluateResponse<Json>["results"][string] = {
+        flag_key: evaluated.flagKey,
+        value: evaluated.value === undefined ? request.fallbacks?.[key] ?? null : evaluated.value,
+        variant_key: evaluated.variantKey ?? null,
+        reason: evaluated.reason,
+        rule_id: evaluated.ruleId ?? null,
+        config_version: bootstrap.config_version,
+        experiment_id: evaluated.experimentId ?? null,
+        experiment_run_id: evaluated.experimentRunId ?? null,
+        exposure_token: null,
+        is_stale: bootstrap.isStale,
+      };
+      // Server SDKs evaluate from the protected bootstrap. A signed exposure
+      // credential still has to be minted by the backend; only experiment
+      // assignments pay this extra request, while ordinary flags remain fully
+      // local. If the remote assignment no longer matches (run paused or
+      // config raced), keep the local result without a token rather than
+      // serving the remote value, which could disagree with the cached
+      // definitions the rest of this request already used.
+      if (evaluated.experimentRunId !== undefined) {
+        const remote = await this._interface.evaluateFeatureFlags<Json>({
+          flag_keys: [key],
+          fallbacks: { [key]: request.fallbacks?.[key] ?? null },
+          user_id: identity.userId,
+          team_id: request.team_id,
+          user: identity.user,
+          context: request.context,
+        }, identity.session);
+        const remoteResult = remote.results[key] ?? throwErr(`Remote feature flag token mint omitted ${JSON.stringify(key)}`);
+        const assignmentMatches = remoteResult.config_version === localResult.config_version
+          && remoteResult.variant_key === localResult.variant_key
+          && remoteResult.experiment_id === localResult.experiment_id
+          && remoteResult.experiment_run_id === localResult.experiment_run_id;
+        if (!assignmentMatches) {
+          captureError("feature-flags-exposure-token-assignment-mismatch", new HexclaveAssertionError(
+            `Remote exposure credential did not match protected bootstrap assignment for flag ${JSON.stringify(key)}`,
+          ));
+          results[key] = localResult;
+          continue;
+        }
+        results[key] = { ...localResult, exposure_token: remoteResult.exposure_token };
+        continue;
+      }
+      results[key] = localResult;
+    }
+    return { results };
+  }
 
   // TODO override the client user cache to use the server user cache, so we save some requests
   private readonly _currentServerUserCache = createCacheBySession(async (session) => {

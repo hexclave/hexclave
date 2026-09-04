@@ -12,6 +12,7 @@ import {
   HexclaveClientInterface
 } from "./client-interface";
 import type { AnalyticsQueryOptions, AnalyticsQueryResponse } from "./crud/analytics";
+import type { FeatureFlagBootstrapResponse } from "./crud/feature-flags";
 import type {
   AdminGetSessionReplayAllEventsResponse,
   AdminGetSessionReplayChunkEventsResponse,
@@ -67,6 +68,28 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
       session,
       requestType,
     );
+  }
+
+  async getFeatureFlagsBootstrap(etag?: string): Promise<
+    | { status: "not-modified" }
+    | { status: "ok", data: FeatureFlagBootstrapResponse, etag: string | null }
+  > {
+    const response = await this.sendServerRequest(
+      "/feature-flags/bootstrap",
+      {
+        method: "GET",
+        headers: etag == null ? {} : { "if-none-match": etag },
+      },
+      null,
+    );
+    if (response.status === 304) {
+      return { status: "not-modified" };
+    }
+    return {
+      status: "ok",
+      data: await response.json(),
+      etag: response.headers.get("etag"),
+    };
   }
 
   override async getCustomerBilling(

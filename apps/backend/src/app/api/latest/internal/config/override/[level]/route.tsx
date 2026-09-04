@@ -16,6 +16,7 @@ import { assertConfigOverrideWriteAllowed } from "@/lib/development-environment"
 import { enqueueExternalDbSync } from "@/lib/external-db-sync-queue";
 import { globalPrismaClient, rawQuery } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
+import { type Config, override as mergeConfig } from "@hexclave/shared/dist/config/format";
 import { branchConfigSchema, environmentConfigSchema, getConfigOverrideErrors, migrateConfigOverride, projectConfigSchema } from "@hexclave/shared/dist/config/schema";
 import { adaptSchema, branchConfigSourceSchema, serverOrHigherAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
@@ -41,6 +42,11 @@ function shouldEnqueueExternalDbSync(config: unknown): boolean {
     return Object.prototype.hasOwnProperty.call(dbSync as Record<string, unknown>, "externalDatabases");
   }
   return false;
+}
+
+function touchesFeatureFlags(config: unknown): boolean {
+  if (config === null || typeof config !== "object") return false;
+  return Object.keys(config).some((key) => key === "featureFlags" || key.startsWith("featureFlags."));
 }
 
 const levelConfigs = {
@@ -245,6 +251,20 @@ async function warnOnValidationFailure(
   }
 }
 
+async function assertFeatureFlagsWriteValid(
+  levelConfig: typeof levelConfigs[keyof typeof levelConfigs],
+  options: { projectId: string, branchId: string, config: Config, write: unknown },
+) {
+  if (!touchesFeatureFlags(options.write)) return;
+  if (!("validate" in levelConfig)) {
+    throw new HexclaveAssertionError("Feature flags reached a config level without whole-config validation", { options });
+  }
+  const validationResult = await levelConfig.validate(options);
+  if (validationResult.status === "error") {
+    throw new StatusError(StatusError.BadRequest, validationResult.error);
+  }
+}
+
 export const PUT = createSmartRouteHandler({
   metadata: {
     hidden: true,
@@ -278,6 +298,13 @@ export const PUT = createSmartRouteHandler({
     if (levelConfig.requiresSource && !req.body.source) {
       throw new StatusError(StatusError.BadRequest, 'source is required for branch level config');
     }
+
+    await assertFeatureFlagsWriteValid(levelConfig, {
+      projectId: req.auth.tenancy.project.id,
+      branchId: req.auth.tenancy.branchId,
+      config: parsedConfig,
+      write: parsedConfig,
+    });
 
     await levelConfig.set({
       projectId: req.auth.tenancy.project.id,
@@ -329,6 +356,19 @@ export const PATCH = createSmartRouteHandler({
 
     const levelConfig = levelConfigs[req.params.level];
     const parsedConfig = await parseAndValidateConfig(req.body.config_override_string, levelConfig);
+
+    if (touchesFeatureFlags(parsedConfig)) {
+      const currentConfig = await levelConfig.get({
+        projectId: req.auth.tenancy.project.id,
+        branchId: req.auth.tenancy.branchId,
+      });
+      await assertFeatureFlagsWriteValid(levelConfig, {
+        projectId: req.auth.tenancy.project.id,
+        branchId: req.auth.tenancy.branchId,
+        config: mergeConfig(currentConfig, parsedConfig),
+        write: parsedConfig,
+      });
+    }
 
     const newConfig = await levelConfig.override({
       projectId: req.auth.tenancy.project.id,

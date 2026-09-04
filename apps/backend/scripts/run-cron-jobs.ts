@@ -6,6 +6,7 @@ import { Result } from "@hexclave/shared/dist/utils/results";
 const endpoints: { path: string, intervalMs: number }[] = [
   { path: "/api/latest/internal/external-db-sync/sequencer", intervalMs: 1000 },
   { path: "/api/latest/internal/external-db-sync/poller", intervalMs: 1000 },
+  { path: "/api/latest/internal/feature-flags/experiment-schedule-processor", intervalMs: 1000 },
   { path: "/api/latest/internal/workflow-engine-step", intervalMs: 1000 },
 ];
 

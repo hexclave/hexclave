@@ -3197,6 +3197,95 @@
         }
       }
     },
+    "/feature-flags/evaluate": {
+      "post": {
+        "summary": "Evaluate feature flags",
+        "description": "Evaluates requested public feature flag keys without exposing targeting definitions.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "flag_keys": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "fallbacks": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                  },
+                  "distinct_id": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  },
+                  "team_id": {
+                    "type": "string"
+                  },
+                  "context": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                  },
+                  "user": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                  },
+                  "team": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                  },
+                  "segments": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                  }
+                },
+                "required": [
+                  "flag_keys"
+                ],
+                "example": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "Feature Flags"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/feature-flags/evaluate",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "object",
+                      "properties": {},
+                      "required": []
+                    }
+                  },
+                  "required": [
+                    "results"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/oauth/authorize/{provider_id}": {
       "get": {
         "summary": "OAuth authorize endpoint",

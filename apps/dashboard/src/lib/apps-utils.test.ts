@@ -10,7 +10,9 @@ describe("getAppIdsForListing", () => {
       .map(([appId]) => appId);
 
     expect(getAppIdsForListing()).not.toEqual(expect.arrayContaining(alphaAppIds));
+    expect(getAppIdsForListing()).not.toContain("feature-flags");
     expect(getAppIdsForListing(["support"])).toContain("support");
+    expect(getAppIdsForListing(["feature-flags"])).toContain("feature-flags");
   });
 });
 

@@ -8,6 +8,9 @@ import { Project } from "../../projects";
 import { ProjectCurrentUser, SyncedPartialUser, TokenPartialUser } from "../../users";
 import { _HexclaveClientAppImpl } from "../implementations";
 import { AnalyticsOptions } from "../implementations/session-replay";
+import type { Json } from "@hexclave/shared/dist/utils/json";
+import type { FeatureFlagDetails, FeatureFlagOptions, FeatureFlagRequest } from "../../feature-flags";
+import type { TrackEventOptions } from "../implementations/event-tracker";
 
 /** @deprecated Use `HexclaveClientAppConstructorOptions` from the `@hexclave/*` package instead — same symbol, new brand name. See https://docs.hexclave.com/migration. */
 export type StackClientAppConstructorOptions<HasTokenStore extends boolean, ProjectId extends string> = {
@@ -123,6 +126,17 @@ export type StackClientApp<HasTokenStore extends boolean = boolean, ProjectId ex
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'throw' }): Promise<ProjectCurrentUser<ProjectId>>,
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'anonymous' }): Promise<ProjectCurrentUser<ProjectId>>,
     getUser(options?: GetCurrentUserOptions<HasTokenStore>): Promise<ProjectCurrentUser<ProjectId> | null>,
+
+    getFeatureFlag<T extends Json>(key: string, fallback: T, options?: FeatureFlagOptions): Promise<T>,
+    getFeatureFlagDetails<T extends Json>(key: string, fallback: T, options?: FeatureFlagOptions): Promise<FeatureFlagDetails<T>>,
+    getFeatureFlags(requests: readonly FeatureFlagRequest[]): Promise<Map<string, FeatureFlagDetails<Json>>>,
+    trackFeatureFlagExposure(details: FeatureFlagDetails<Json>): Promise<void>,
+    trackEvent(name: string, options?: TrackEventOptions): Promise<void>,
+
+    // IF_PLATFORM react-like
+    useFeatureFlag<T extends Json>(key: string, fallback: T, options?: FeatureFlagOptions): T,
+    useFeatureFlagDetails<T extends Json>(key: string, fallback: T, options?: FeatureFlagOptions): FeatureFlagDetails<T>,
+    // END_PLATFORM
 
     cancelSubscription(options: { productId: string, subscriptionId?: string } | { productId: string, subscriptionId?: string, teamId: string }): Promise<void>,
 

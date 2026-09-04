@@ -1,0 +1,81 @@
+---
+title: "Quickstart"
+description: "Create your first feature flag and read it in your app in a few minutes."
+icon: "/images/app-icons/feature-flags.svg"
+---
+
+This guide takes you from zero to a working flag: enable the app, create a flag, read it in your code, and flip it from the dashboard.
+
+<Steps>
+  <Step title="Enable the Feature Flags app">
+    Feature Flags is currently in alpha, so it is not listed in **Explore Apps** yet. Enable it in your [Hexclave config](/guides/going-further/hexclave-config) instead:
+
+    ```ts title="hexclave.config.ts"
+    import type { HexclaveConfig } from "@hexclave/js"; // replace `js` with the correct framework SDK package
+
+    export const config: HexclaveConfig = {
+      apps: {
+        installed: {
+          "feature-flags": { enabled: true },
+          // Experiment results are computed from analytics events.
+          analytics: { enabled: true },
+        },
+      },
+    };
+    ```
+
+    Once enabled, the app appears in the dashboard sidebar and in Explore Apps like any other app.
+
+    <Note>
+      Alpha apps may change without notice. Expect rough edges and keep an eye on the changelog.
+    </Note>
+  </Step>
+
+  <Step title="Create a flag">
+    In the Feature Flags app, click **Create Flag** and configure:
+
+    - **Key**: `checkout-redesign` — this is what you reference in code
+    - **Type**: boolean (string, number, and json are also available)
+    - **Variants**: `true` and `false`
+    - **Default**: `false`, so nobody sees the redesign until you say so
+
+    You can add targeting rules and percentage rollouts now or later — the flag works immediately with just a default.
+  </Step>
+
+  <Step title="Read the flag in React">
+    ```tsx
+    import { useFeatureFlag } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+    function Checkout() {
+      const showRedesign = useFeatureFlag("checkout-redesign", false);
+      return showRedesign ? <NewCheckout /> : <ClassicCheckout />;
+    }
+    ```
+
+    `fallback` is required: it is served whenever the flag is missing or evaluation fails, so your UI never breaks when the backend is unreachable. A killed flag serves the fallback variant configured in its definition. The caller fallback also determines the return type. React Suspense handles the initial asynchronous evaluation.
+  </Step>
+
+  <Step title="Read the flag on the server">
+    ```ts
+    import { hexclaveServerApp } from "@/hexclave";
+
+    const showRedesign = await hexclaveServerApp.getFeatureFlag("checkout-redesign", false);
+    ```
+
+    Server-side reads evaluate against the same rules as the client, so a user sees consistent values everywhere.
+  </Step>
+
+  <Step title="Flip it in the dashboard">
+    Back in the dashboard, change the flag's default to `true` (or add a targeting rule for your own user) and reload your app — the new variant is served. If something goes wrong, hit the **kill switch**: every SDK serves the flag's configured fallback variant after the config change is published.
+  </Step>
+</Steps>
+
+<Info>
+  When an active experiment assigns a visitor through its linked flag, the SDK automatically records that experiment exposure. Ordinary feature-flag reads do not emit exposure telemetry, and there is no separate tracking call for experiment exposures.
+</Info>
+
+## Next steps
+
+- [Overview](/guides/apps/feature-flags/overview) — flag types, targeting rules, rollouts, prerequisites, and holdouts
+- [Experiments](/guides/apps/feature-flags/experiments) — turn a flag into an A/B test and measure the impact
+- [Config as code](/guides/apps/feature-flags/config-as-code) — define flags in your versioned config for review and audit

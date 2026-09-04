@@ -26,7 +26,7 @@ export { HexclaveHandler, StackHandler } from "./components-page/hexclave-handle
 export { useHexclaveApp, useStackApp } from "./lib/hooks";
 export { HexclaveProvider, StackProvider } from "./providers/hexclave-provider";
 export { HexclaveTheme, StackTheme } from './providers/theme-provider';
-export { useUser } from "./lib/hooks";
+export { useFeatureFlag, useFeatureFlagDetails, useUser } from "./lib/hooks";
 
 export { AccountSettings } from "./components-page/account-settings";
 export { AuthPage } from "./components-page/auth-page";

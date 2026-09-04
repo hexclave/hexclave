@@ -48,6 +48,8 @@ model Project {
   environmentConfigOverrides EnvironmentConfigOverride[]
   configAgentRuns            ConfigAgentRun[]
   aiConversations            AiConversation[]
+  experimentRuns             ExperimentRun[]
+  featureFlagExposureReceipts FeatureFlagExposureReceipt[]
   
   projectSecrets             ProjectSecret[]
 
@@ -1593,6 +1595,93 @@ model DeletedRow {
   // composite index for efficient querying of deleted rows by tenant and table, ordered by sequence
   @@index([tenancyId, tableName, sequenceId])
   @@index([shouldUpdateSequenceId, tenancyId], name: "DeletedRow_shouldUpdateSequenceId_idx")
+}
+
+enum ExperimentRunState {
+  DRAFT
+  RUNNING
+  PAUSED
+  COMPLETED
+}
+
+// One "run" of a feature-flag experiment. A run is an immutable record: its
+// configSnapshot (the full experiment definition frozen at start) and
+// configRevisionHash never change after creation. "Editing" an active
+// experiment instead completes the current run and creates a new one with an
+// incremented revisionNumber (in one transaction), so exposures and results
+// always reference exactly the configuration they were collected under.
+model ExperimentRun {
+  id String @id @default(uuid()) @db.Uuid
+
+  projectId String
+  branchId  String
+
+  // The user-specified id of the experiment in the featureFlags.experiments config record.
+  experimentId String
+  // Monotonically increasing per project+branch+experiment; bumped when an active run is edited.
+  revisionNumber Int @default(1)
+  // SHA-256 over the canonical (sorted-keys) JSON serialization of configSnapshot.
+  configRevisionHash String
+  // Full experiment definition provisionally captured at draft creation and
+  // re-frozen from branch config when the run starts.
+  configSnapshot Json
+
+  state ExperimentRunState @default(DRAFT)
+
+  scheduledStartAt DateTime?
+  scheduledEndAt   DateTime?
+  startedAt        DateTime?
+  pausedAt         DateTime?
+  completedAt      DateTime?
+
+  // Dashboard user who created the run; null when created by the schedule processor or other automation.
+  createdByUserId String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Partial unique indexes enforce at most one RUNNING or PAUSED run per
+  // project+branch+experiment and per frozen flag id. They are created in the
+  // custom migration because partial/expression indexes are not expressible in
+  // the Prisma schema.
+  @@index([projectId, branchId, experimentId, createdAt(sort: Desc)], name: "ExperimentRun_project_experiment_createdAt_idx")
+  // For the schedule processor: find DRAFT runs whose scheduledStartAt has passed
+  // and RUNNING runs whose scheduledEndAt has passed.
+  @@index([state, scheduledStartAt], name: "ExperimentRun_state_scheduledStartAt_idx")
+  @@index([state, scheduledEndAt], name: "ExperimentRun_state_scheduledEndAt_idx")
+  @@index([state, updatedAt, scheduledStartAt, id], name: "ExperimentRun_schedule_start_rotation_idx")
+  @@index([state, updatedAt, scheduledEndAt, id], name: "ExperimentRun_schedule_end_rotation_idx")
+}
+
+// Durable idempotency ledger for verified experiment exposure uploads. It is
+// intentionally narrow: high-volume event payloads stay in ClickHouse, while
+// Postgres owns the uniqueness guarantee used before quota debit.
+model FeatureFlagExposureReceipt {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String
+  branchId String
+  eventId String @db.Uuid
+  evaluationId String @db.Uuid
+  batchId String @db.Uuid
+  batchPayloadHash String
+  ingestionNonce String @db.Uuid
+  processingStartedAt DateTime?
+  billingNonce String? @db.Uuid
+  billingStartedAt DateTime?
+  billingCompletedAt DateTime?
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, eventId], map: "FeatureFlagExposureReceipt_project_event_key")
+  @@unique([projectId, evaluationId], map: "FeatureFlagExposureReceipt_project_evaluation_key")
+  @@index([ingestionNonce], name: "FeatureFlagExposureReceipt_ingestionNonce_idx")
+  @@index([processingStartedAt], name: "FeatureFlagExposureReceipt_processingStartedAt_idx")
+  @@index([createdAt], name: "FeatureFlagExposureReceipt_createdAt_idx")
+  @@index([projectId, branchId, createdAt(sort: Desc)], name: "FeatureFlagExposureReceipt_project_createdAt_idx")
 }
 
 // ================== Project secrets ==================

@@ -18,6 +18,19 @@ The secretServerKey enables server-only operations like listing all users,
 creating users, and accessing server metadata.
 
 
+## Local feature flag evaluation
+
+The server app exposes the client feature-flag methods, but evaluates locally from protected definitions instead of calling the client evaluate endpoint.
+
+Fetch `GET /api/v1/feature-flags/bootstrap` with the secret server key. The response contains `{ config, flag_ids_by_key, config_version }`; definitions must never be fetched with client authentication. Before caching, run whole-config reference validation, recompute the canonical SHA-256 config version, and require the public-key lookup to exactly match the definitions. Cache a validated response for 30 seconds, then revalidate with `If-None-Match`. A 304 refreshes its validation time. Coalesce concurrent refreshes.
+
+On a transient network, 408, 429, or 5xx failure, a previously validated snapshot may be used for at most five minutes and returned details set `isStale=true`. Never serve stale definitions for authorization/4xx failures. If no eligible snapshot exists during a transient failure, report the error through the SDK error reporter and return every caller-provided fallback with reason `error`. Other bootstrap or schema failures fail loudly.
+
+Use the shared deterministic evaluator from the feature-flags core package. Derive `distinctId`, `userId`, and trusted user attributes from `getUser({ or: "anonymous" })`. The trusted attributes are the canonical ID, verified primary email (or null), primary-email verification state, and sign-up timestamp; callers cannot override them through feature-flag context. Pass bounded non-security context and the selected team ID separately. When a team is selected, also pass `team: { id }` so `team.id` targeting matches the client evaluate endpoint. Attach the bootstrap config version to every result. Ordinary flags are fully local. When bootstrap is stale, ignore live experiment overlay rules and serve ordinary targeting or the published fallback so unauditable experiment traffic is not assigned. When bootstrap is fresh, an active experiment assignment may use the authenticated evaluation endpoint only to mint a signed exposure credential; the assignment returned to application code must remain the locally evaluated assignment. A token-mint failure must not change that assignment.
+
+Feature flags are not authorization controls even when evaluated by the server SDK.
+
+
 ## getUser(id)
 
 Arguments:

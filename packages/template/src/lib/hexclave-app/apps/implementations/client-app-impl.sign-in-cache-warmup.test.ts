@@ -29,7 +29,7 @@ function createTestSetup(getUser: () => Promise<unknown>) {
       refreshToken,
     }),
     getSessionFromTokenStore: privateMethod("_getSessionFromTokenStore"),
-    getTokenStore: async () => privateMethod("_getOrCreateTokenStore")(await privateMethod("_createCookieHelper")()),
+    getTokenStore: async () => await privateMethod("_getOrCreateTokenStore")(await privateMethod("_createCookieHelper")()),
   };
 }
 

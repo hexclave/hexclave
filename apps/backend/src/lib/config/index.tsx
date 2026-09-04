@@ -3,6 +3,7 @@ import type { ConfigAgentRun as ConfigAgentRunRow } from "@/generated/prisma/cli
 import { Config, getInvalidConfigReason, normalize, override, removeKeysFromConfig } from "@hexclave/shared/dist/config/format";
 import { BranchConfigOverride, BranchConfigOverrideOverride, BranchIncompleteConfig, BranchRenderedConfig, CompleteConfig, EnvironmentConfigOverride, EnvironmentConfigOverrideOverride, EnvironmentIncompleteConfig, EnvironmentRenderedConfig, OrganizationConfigOverride, OrganizationConfigOverrideOverride, OrganizationIncompleteConfig, ProjectConfigOverride, ProjectConfigOverrideOverride, ProjectIncompleteConfig, ProjectRenderedConfig, applyBranchDefaults, applyEnvironmentDefaults, applyOrganizationDefaults, applyProjectDefaults, branchConfigSchema, environmentConfigSchema, getConfigOverrideErrors, getIncompleteConfigWarnings, migrateConfigOverride, organizationConfigSchema, projectConfigSchema, sanitizeBranchConfig, sanitizeEnvironmentConfig, sanitizeOrganizationConfig, sanitizeProjectConfig } from "@hexclave/shared/dist/config/schema";
 import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
+import { getFeatureFlagsConfigErrors, parseFeatureFlagsConfig } from "@hexclave/shared/dist/feature-flags/schema";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type ConfigAgentSafeErrorMessage, yupBoolean, yupMixed, yupObject, yupRecord, yupString, yupUnion } from "@hexclave/shared/dist/schema-fields";
 import { isTruthy } from "@hexclave/shared/dist/utils/booleans";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
@@ -90,11 +91,14 @@ export async function validateProjectConfigOverride(options: { projectConfigOver
  * Validates a branch config override ([sanity-check valid](./README.md)), based on the given project's rendered project config.
  */
 export async function validateBranchConfigOverride(options: { branchConfigOverride: BranchConfigOverride } & ProjectOptions): Promise<Result<null, string>> {
-  return await validateConfigOverrideSchema(
+  const base = await rawQuery(globalPrismaClient, getIncompleteProjectConfigQuery(options));
+  const schemaResult = await validateConfigOverrideSchema(
     branchConfigSchema,
-    await rawQuery(globalPrismaClient, getIncompleteProjectConfigQuery(options)),
+    base,
     options.branchConfigOverride,
   );
+  if (schemaResult.status === "error") return schemaResult;
+  return validateFeatureFlagsCandidate(base, options.branchConfigOverride);
   // TODO add some more checks that depend on the base config; eg. an override config shouldn't set email server connection if isShared==true
   // (these are schematically valid, but make no sense, so we should be nice and reject them)
 }
@@ -103,11 +107,14 @@ export async function validateBranchConfigOverride(options: { branchConfigOverri
  * Validates an environment config override ([sanity-check valid](./README.md)), based on the given branch's rendered branch config.
  */
 export async function validateEnvironmentConfigOverride(options: { environmentConfigOverride: EnvironmentConfigOverride } & BranchOptions): Promise<Result<null, string>> {
-  return await validateConfigOverrideSchema(
+  const base = await rawQuery(globalPrismaClient, getIncompleteBranchConfigQuery(options));
+  const schemaResult = await validateConfigOverrideSchema(
     environmentConfigSchema,
-    await rawQuery(globalPrismaClient, getIncompleteBranchConfigQuery(options)),
+    base,
     options.environmentConfigOverride,
   );
+  if (schemaResult.status === "error") return schemaResult;
+  return validateFeatureFlagsCandidate(base, options.environmentConfigOverride);
   // TODO add some more checks that depend on the base config; eg. an override config shouldn't set email server connection if isShared==true
   // (these are schematically valid, but make no sense, so we should be nice and reject them)
 }
@@ -116,13 +123,22 @@ export async function validateEnvironmentConfigOverride(options: { environmentCo
  * Validates an organization config override ([sanity-check valid](./README.md)), based on the given environment's rendered environment config.
  */
 export async function validateOrganizationConfigOverride(options: { organizationConfigOverride: OrganizationConfigOverride } & EnvironmentOptions): Promise<Result<null, string>> {
-  return await validateConfigOverrideSchema(
+  const base = await rawQuery(globalPrismaClient, getIncompleteEnvironmentConfigQuery(options));
+  const schemaResult = await validateConfigOverrideSchema(
     organizationConfigSchema,
-    await rawQuery(globalPrismaClient, getIncompleteEnvironmentConfigQuery(options)),
+    base,
     options.organizationConfigOverride,
   );
+  if (schemaResult.status === "error") return schemaResult;
+  return validateFeatureFlagsCandidate(base, options.organizationConfigOverride);
   // TODO add some more checks that depend on the base config; eg. an override config shouldn't set email server connection if isShared==true
   // (these are schematically valid, but make no sense, so we should be nice and reject them)
+}
+
+function validateFeatureFlagsCandidate(base: Config, configOverride: Config): Result<null, string> {
+  const candidate = override(base, configOverride);
+  const errors = getFeatureFlagsConfigErrors(parseFeatureFlagsConfig(candidate.featureFlags ?? {}));
+  return errors.length === 0 ? Result.ok(null) : Result.error(errors.join("\n"));
 }
 
 

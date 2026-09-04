@@ -20,6 +20,7 @@ const projectSchemaFuzzerConfig = [{
 }] satisfies FuzzerConfig<ProjectConfigNormalizedOverride>;
 
 const branchSchemaFuzzerConfig = [{
+  featureFlags: [undefined],
   apiKeys: [{
     enabled: [{
       team: [true, false],

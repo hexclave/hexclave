@@ -1,6 +1,8 @@
 import { useContext } from "react";
 import { HexclaveContext } from "../providers/hexclave-context";
 import type { GetUserOptions as AppGetUserOptions, CurrentInternalUser, CurrentUser, StackClientApp } from "./hexclave-app";
+import type { FeatureFlagDetails, FeatureFlagOptions } from "./hexclave-app/feature-flags";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 
 type GetUserOptions = AppGetUserOptions<true> & {
   projectIdMustMatch?: string,
@@ -25,6 +27,14 @@ export function useUser(options: GetUserOptions = {}): CurrentUser | CurrentInte
   } else {
     return hexclaveApp.useUser(options) as CurrentUser;
   }
+}
+
+export function useFeatureFlag<T extends Json>(key: string, fallback: T, options?: FeatureFlagOptions): T {
+  return useHexclaveApp().useFeatureFlag(key, fallback, options);
+}
+
+export function useFeatureFlagDetails<T extends Json>(key: string, fallback: T, options?: FeatureFlagOptions): FeatureFlagDetails<T> {
+  return useHexclaveApp().useFeatureFlagDetails(key, fallback, options);
 }
 
 /**
