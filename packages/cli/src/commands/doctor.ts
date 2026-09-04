@@ -453,8 +453,8 @@ function configFileCheck(): CheckSpec {
       if (!foundPath || !foundRel) return null; // skip — config file is optional
 
       try {
-        const { createJiti } = await import("jiti");
-        const jiti = createJiti(import.meta.url);
+        const { createConfigFileJiti } = await import("../lib/config-jiti.js");
+        const jiti = createConfigFileJiti();
         const mod = await jiti.import<{ config?: unknown }>(foundPath);
         const config = mod.config;
         if (config === undefined) {

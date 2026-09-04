@@ -317,11 +317,12 @@ export function registerConfigCommand(program: Command) {
 
       const progress = startProgress("Loading config");
       try {
-        // The generated GitHub sync workflow installs the repo's dependencies
-        // before running the CLI, so jiti resolves the config's SDK import (e.g.
-        // `@hexclave/js`) from the project's own node_modules.
-        const { createJiti } = await import("jiti");
-        const jiti = createJiti(import.meta.url);
+        // The config's SDK imports (e.g. `@hexclave/js`) are aliased to the
+        // CLI's own bundled SDK copy, so config loading works even when the
+        // project hasn't installed the SDK (e.g. `config push` run in a bare
+        // checkout).
+        const { createConfigFileJiti } = await import("../lib/config-jiti.js");
+        const jiti = createConfigFileJiti();
         const configModule: { config?: unknown } = await jiti.import(filePath);
 
         const config = parseConfigOverride(configModule.config);

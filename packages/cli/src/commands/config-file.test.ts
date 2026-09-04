@@ -3,6 +3,38 @@ import * as os from "os";
 import * as path from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { assertConfigPullTarget, buildConfigPushSource, resolveConfigFilePathForPull } from "./config-file.js";
+import { createConfigFileJiti } from "../lib/config-jiti.js";
+
+describe("createConfigFileJiti", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hexclave-cli-config-jiti-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // The project has no node_modules, so every supported specifier — the
+  // canonical SDK root, the deprecated `<pkg>/config` subpath, and legacy
+  // `@stackframe/*` roots — must resolve to the CLI's bundled SDK copy.
+  it.each([
+    ["canonical root package", 'import { defineHexclaveConfig } from "@hexclave/js";', "defineHexclaveConfig"],
+    ["deprecated /config subpath", 'import { defineHexclaveConfig } from "@hexclave/js/config";', "defineHexclaveConfig"],
+    ["legacy @stackframe root", 'import { defineStackConfig } from "@stackframe/stack";', "defineStackConfig"],
+  ])("loads config authoring imports from the %s when the project has no SDK installed", async (_label, importLine, defineFn) => {
+    const configPath = path.join(tmpDir, "hexclave.config.ts");
+    fs.writeFileSync(
+      configPath,
+      `${importLine}\nexport const config = ${defineFn}({ auth: { allowSignUp: true } });\n`,
+    );
+
+    const configModule = await createConfigFileJiti().import<{ config: { auth: { allowSignUp: boolean } } }>(configPath);
+
+    expect(configModule.config).toEqual({ auth: { allowSignUp: true } });
+  });
+});
 
 describe("resolveConfigFilePathForPull", () => {
   let tmpDir: string;
