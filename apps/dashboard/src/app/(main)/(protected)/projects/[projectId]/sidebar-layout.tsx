@@ -824,7 +824,7 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
               <div className={cn(
               "relative flex min-w-0 flex-col overflow-visible has-[[data-full-bleed]]:h-full",
               // Light mode card styling (companion gutter is on <main>, not here — avoids empty card chrome behind Stack Companion)
-              "min-h-[calc(100vh-4.5rem)] bg-white/80 backdrop-blur-xl shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.04)] rounded-2xl border border-black/[0.06]",
+              "min-h-[calc(100vh-4.5rem)] dark:min-h-[calc(100vh-5.75rem)] bg-white/80 backdrop-blur-xl shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.04)] rounded-2xl border border-black/[0.06]",
               // Dark mode: remove card styling
               "dark:bg-transparent dark:backdrop-blur-none dark:shadow-none dark:rounded-none dark:border-0",
               // Contained pages own their internal scroll regions, so the shell must pass down a finite flex height instead of sizing to content.
