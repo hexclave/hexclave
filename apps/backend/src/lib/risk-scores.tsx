@@ -2,6 +2,7 @@ import { getPrismaClientForTenancy, getPrismaSchemaForTenancy, sqlQuoteIdent } f
 import { signUpRiskEngine } from "@/private";
 import type { SignUpRiskScoresCrud } from "@hexclave/shared/dist/interface/crud/users";
 import type { SignUpAuthMethod } from "@hexclave/shared/dist/utils/auth-methods";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { checkEmailWithEmailable } from "./emailable";
 import { type DerivedSignUpHeuristicFacts } from "./sign-up-heuristics";
 import type { Tenancy } from "./tenancies";
@@ -24,9 +25,24 @@ export type SignUpRiskScoreContext = {
   turnstileAssessment: SignUpTurnstileAssessment,
 };
 
+export const signUpRiskSignalIds = ["emailable", "same_ip", "same_email", "similar_email", "turnstile", "blacklist", "country", "public_email_provider", "connected_account_age"] as const;
+export type SignUpRiskSignalId = typeof signUpRiskSignalIds[number];
+export type SignUpRiskFactor = {
+  bot: number,
+  free_trial_abuse: number,
+};
+
+/** Per-signal probability before multiplicative combination, so the UI can attribute the final score. */
+export type SignUpRiskSignalBreakdown = {
+  signal: SignUpRiskSignalId,
+  factor: SignUpRiskFactor,
+  details: Record<string, Json>,
+};
+
 export type SignUpRiskAssessment = {
   scores: SignUpRiskScores,
   heuristicFacts: DerivedSignUpHeuristicFacts,
+  breakdown: SignUpRiskSignalBreakdown[],
 };
 
 export type SignUpRiskRecentStatsRequest = {
@@ -167,7 +183,10 @@ import.meta.vitest?.test("loaded private sign-up risk engine can calculate score
       loadRecentSignUpStats: async () => ({ sameIpCount: 0, sameEmailCount: 0, similarEmailCount: 0 }),
     });
 
-    expect(assessment).toMatchInlineSnapshot(`
+    expect({
+      scores: assessment.scores,
+      heuristicFacts: assessment.heuristicFacts,
+    }).toMatchInlineSnapshot(`
       {
         "heuristicFacts": {
           "emailBase": null,
@@ -184,6 +203,7 @@ import.meta.vitest?.test("loaded private sign-up risk engine can calculate score
         },
       }
     `);
+    expect(Array.isArray(assessment.breakdown)).toBe(true);
   } finally {
     vi.useRealTimers();
   }

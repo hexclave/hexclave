@@ -7,6 +7,7 @@ export const signUpRiskEngine: SignUpRiskEngine = {
     return {
       scores: { bot: 0, free_trial_abuse: 0 },
       heuristicFacts: createNeutralSignUpHeuristicFacts(new Date()),
+      breakdown: [],
     };
   },
 };
