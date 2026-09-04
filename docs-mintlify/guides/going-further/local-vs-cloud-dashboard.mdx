@@ -109,4 +109,20 @@ hexclave config push --cloud-project-id <project-id> --config-file ./hexclave.co
   `config pull` requires `hexclave login`. `config push` supports either `hexclave login` or `HEXCLAVE_SECRET_SERVER_KEY`.
 </Info>
 
+## Cloud dashboard welcome screen
+
+When you create a project in the [cloud dashboard](https://app.hexclave.com), the first screen asks what you want to do:
+
+| Choice | What it does |
+| --- | --- |
+| **Add Hexclave to a project** | Start a new Hexclave setup in an app that does not have Hexclave yet. |
+| **Deploy my existing Hexclave project to production** | You already have a local `hexclave.config.ts`. This flow pushes that config to this cloud project. |
+| **I just want to look around** | Opens the public preview at [preview.hexclave.com](https://preview.hexclave.com). It does not connect your cloud project. |
+
+None of those choices link an *already-created* cloud project into a local app. For that, use:
+
+```sh title="Terminal"
+hexclave init --mode link-cloud --select-project-id <project-id>
+```
+
 For the full setup flow by framework, see [Setup](/guides/getting-started/setup).
