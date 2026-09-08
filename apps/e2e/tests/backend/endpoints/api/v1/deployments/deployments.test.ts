@@ -1717,6 +1717,19 @@ describe("deploys against the Marshal runtime", () => {
 });
 
 describe("domains", () => {
+  it("reserves deployment platform hostnames without creating custom-domain claims", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("reserved-domain");
+    await syncServices({ [serviceId]: { type: "serverless", public: true, ports: { 3000: { protocol: "http" } }, env: {} } });
+    const response = await niceBackendFetch(`/api/v1/deployments/services/${encodeURIComponent(serviceId)}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname: "Deploy-example.built-with-hexclave.com", is_primary: true },
+    });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body)).toContain("managed automatically");
+  });
+
   it("adds a domain, reports its DNS records, and removes it", { timeout: 120_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
     const serviceId = uniqueServiceId("domained");

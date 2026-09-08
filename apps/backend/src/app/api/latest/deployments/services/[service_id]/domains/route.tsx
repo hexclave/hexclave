@@ -1,4 +1,4 @@
-import { HOSTNAME_REGEX, definitionFromServiceRow, domainPortForService, domainPortProblem, getServiceRowOrThrow, marshalNamespaceForTenancy } from "@/lib/deployments";
+import { HOSTNAME_REGEX, definitionFromServiceRow, domainPortForService, domainPortProblem, getServiceRowOrThrow, marshalNamespaceForTenancy, normalizeHostnameOrThrow } from "@/lib/deployments";
 import { MarshalApiError, getMarshalClientOrThrow, getMarshalDeploymentsConfigOrNull, sanitizeMarshalError } from "@/lib/deployments/marshal-client";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -37,6 +37,7 @@ export const POST = createSmartRouteHandler({
     }).defined(),
   }),
   handler: async ({ auth, params, body }) => {
+    normalizeHostnameOrThrow(body.hostname);
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const row = await getServiceRowOrThrow(prisma, auth.tenancy, params.service_id);
     // The service's ports must be able to hold a domain — see domainPortProblem for both

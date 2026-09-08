@@ -30,7 +30,7 @@ vi.mock("./config.js", () => ({
   UPLOAD_EXPIRY_SECONDS: 1,
 }));
 
-import { assignTenantProject, claimDomain, createDeployment, createPoolProject, readDeployment, readDomainClaimVersioned, readPoolCreationLedgerVersioned, readPoolProject, readSpec, readTenantProjectAssignment, readUpload, releaseDomainClaim, writePoolCreationLedgerConditionally, writeSpec } from "./store.js";
+import { assignTenantProject, claimDomain, createDeployment, createPoolProject, readDeployment, readDomainClaimVersioned, readPlatformDomain, readPoolCreationLedgerVersioned, readPoolProject, readSpec, readTenantProjectAssignment, readUpload, releaseDomainClaim, writePlatformDomain, writePoolCreationLedgerConditionally, writeSpec } from "./store.js";
 
 describe("domain claim release", () => {
   const claim = {
@@ -78,6 +78,20 @@ describe("domain claim release", () => {
 });
 
 describe("authoritative state authentication", () => {
+  it("authenticates platform domain readiness and binds it to the service identity", async () => {
+    const state = { ns: "tenant", key: "web", hostname: "deploy-test.built-with-hexclave.com", ready: true, nextAttemptAt: 123, error: null };
+    send.mockResolvedValueOnce({});
+    await writePlatformDomain(state);
+    const body: unknown = send.mock.calls[0][0].input.Body;
+    if (typeof body !== "string") throw new Error("expected serialized domain state");
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => body } });
+    await expect(readPlatformDomain("tenant", "web")).resolves.toEqual(state);
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => body } });
+    await expect(readPlatformDomain("other", "web")).rejects.toThrow("failed authentication");
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => JSON.stringify(state) } });
+    await expect(readPlatformDomain("tenant", "web")).rejects.toThrow("is unsigned");
+  });
+
   afterEach(() => {
     send.mockReset();
   });

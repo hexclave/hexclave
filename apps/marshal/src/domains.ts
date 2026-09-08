@@ -3,6 +3,7 @@
 // routed and certified. Both halves live with the provider (see fly/provider.ts and
 // gcp/provider.ts, `domains`); this module is the entry point that picks one.
 import { badRequest } from "./errors.js";
+import { isPlatformHostname } from "./platform-domain-names.js";
 import { providerForNamespace, type AttachDomainResult } from "./provider.js";
 
 export type { AttachDomainResult };
@@ -19,6 +20,7 @@ export function normalizeHostnameOrThrow(hostname: string): string {
 }
 
 export async function attachDomain(ns: string, hostname: string, serviceKey: string): Promise<AttachDomainResult> {
+  if (isPlatformHostname(hostname)) throw badRequest("Deployment platform domains are managed automatically and cannot be attached as custom domains.");
   return await (await providerForNamespace(ns)).domains.attach(ns, hostname, serviceKey);
 }
 
@@ -32,5 +34,6 @@ export async function readDomain(ns: string, hostname: string): Promise<AttachDo
 // another service in this namespace, removing it on behalf of the OLD service would tear down
 // the new owner's live certificate. Treated as already-detached (404) instead.
 export async function detachDomain(ns: string, hostname: string, expectedServiceKey?: string): Promise<void> {
+  if (isPlatformHostname(hostname)) throw badRequest("Deployment platform domains are managed automatically and cannot be detached as custom domains.");
   await (await providerForNamespace(ns)).domains.detach(ns, hostname, expectedServiceKey);
 }

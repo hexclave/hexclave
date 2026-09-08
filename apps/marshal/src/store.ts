@@ -1,5 +1,6 @@
 import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client, UploadPartCommand, type ListObjectsV2CommandOutput } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import type { PlatformDomainState } from "./platform-domain-state.js";
 import { getConfig, MAX_UPLOAD_BYTES, MULTIPART_UPLOAD_THRESHOLD_BYTES, UPLOAD_EXPIRY_SECONDS, UPLOAD_PART_SIZE_BYTES } from "./config.js";
 import { authenticateControlPlaneState, decryptString, encryptString, verifyControlPlaneStateAuthentication } from "./spec-crypto.js";
 import { POOL_PROJECT_STATES, type DomainClaim, type EnvValue, type PendingDomainClaim, type PoolProjectEntry, type PoolProjectState, type ReconciliationLease, type ServiceSpec, type StoredDeployment, type StoredSpec, type TenantRecord } from "./types.js";
@@ -655,6 +656,42 @@ export async function readDeploymentLog(ns: string, id: string): Promise<string 
 
 // ---------------------------------------------------------------------------
 // Domain registry
+
+function platformDomainKey(ns: string, key: string): string {
+  return `platform-domains/${encodeURIComponent(ns)}/${encodeURIComponent(key)}.json`;
+}
+
+export async function readPlatformDomain(ns: string, key: string): Promise<PlatformDomainState | null> {
+  const objectKey = platformDomainKey(ns, key);
+  const stored = await getJson<unknown>(objectKey);
+  if (stored === null) return null;
+  const value = readAuthenticatedControlPlaneState(objectKey, stored);
+  if (!isRecord(value) || value.ns !== ns || value.key !== key || typeof value.hostname !== "string"
+    || typeof value.ready !== "boolean" || typeof value.nextAttemptAt !== "number" || !Number.isSafeInteger(value.nextAttemptAt) || value.nextAttemptAt < 0) {
+    throw new Error("authenticated platform domain state is malformed");
+  }
+  const error = value.error;
+  if (error !== null && error !== "pending" && error !== "rate_limited" && error !== "provider_error") throw new Error("invalid platform domain error");
+  return { ns, key, hostname: value.hostname, ready: value.ready, nextAttemptAt: value.nextAttemptAt, error };
+}
+
+// Callers hold the service reconciliation lease for every state mutation.
+export async function writePlatformDomain(state: PlatformDomainState): Promise<void> {
+  const key = platformDomainKey(state.ns, state.key);
+  await putJson(key, authenticatedControlPlaneState(key, state));
+}
+
+export async function deletePlatformDomain(ns: string, key: string): Promise<void> {
+  await deleteObject(platformDomainKey(ns, key));
+}
+
+export async function listPlatformDomains(): Promise<{ ns: string, key: string }[]> {
+  return (await listKeys("platform-domains/")).map((key) => {
+    const match = /^platform-domains\/([^/]+)\/([^/]+)\.json$/.exec(key);
+    if (match === null) throw new Error("invalid platform domain object key");
+    return { ns: decodeURIComponent(match[1]), key: decodeURIComponent(match[2]) };
+  });
+}
 
 function domainClaimKey(hostname: string): string {
   return `domains/${hostname}.json`;

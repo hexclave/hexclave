@@ -105,6 +105,54 @@ The platform project and tenant projects must belong to the same organization. G
 
 Cloud Run has no equivalent of Fly's request-triggered VM suspend/resume for a persistent server. A `server` with `min_instances: 0` therefore remains eligible to run as its single GCE instance; it preserves availability and disk semantics but does not guarantee scale-to-zero billing.
 
+## Fly deployment platform domains
+
+Set `HEXCLAVE_VERCEL_DNS_TOKEN` on Marshal to enable automatic
+`deploy-<service-identity-hash>.built-with-hexclave.com` addresses for public Fly services.
+Set `HEXCLAVE_VERCEL_DNS_TEAM_ID` when the DNS zone belongs to a Vercel team. The token
+must be authorized to list/create/update/delete DNS records in that zone; an integration
+token with Domain Read/Write can be used. No integration installation UI is required by
+Marshal: configure the resulting token as a secret. Leave the token unset to retain the
+existing Fly-only behavior. Never pass this token to builders or tenant containers.
+
+The hostname includes the Marshal environment, namespace and complete service key in its
+hash. Service keys are already unique across deployment groups in a project. Redeploys
+reuse the address and certificate; this is a stable service URL, not an immutable URL for
+each historical build. Private services receive no generated public address.
+
+Successful runtime applies queue authenticated state in `platform-domains/` in the bucket.
+The authenticated `GET /v1/maintenance/platform-domains/step` cron runs every five minutes
+and reconciles up to ten due services per invocation, oldest first. Configure `CRON_SECRET`
+as for the other maintenance endpoints. Provisioning uses the service's reconciliation
+lease, so deletion and visibility changes cannot race certificate/DNS mutations. Existing
+services are enrolled on their next deployment. Ready entries are rechecked daily.
+
+The worker uses the [Fly Machines certificate API](https://fly.io/docs/machines/api/certificates-resource/)
+to request/check certificates and reads its returned routing and DNS challenge targets.
+It writes two explicit CNAMEs through the [Vercel DNS API](https://vercel.com/docs/rest-api/dns/create-a-dns-record):
+the service hostname and its `_acme-challenge` name. It never modifies the wildcard, apex,
+hosted-component project hostnames, or the wildcard certificate's validation record.
+DNS records carry an ownership comment; conflicting unowned records are reported rather
+than overwritten. The generated namespace cannot be attached as a customer custom domain.
+
+Until DNS reconciliation and certificate validation succeed, the service continues reporting
+its working `.fly.dev` URL. Expected Fly/Vercel API failures only update domain retry state,
+not deployment success. Fly's certificate-limit errors use `Retry-After` when present, or
+a seven-day cooldown when the response identifies an ACME certificate limit without a retry
+time. A successful Fly response with `rate_limited_until` is also respected. Other provider
+errors retry after fifteen minutes; pending certificates poll every five minutes. Redeploys
+do not reset cooldowns. Provider response bodies are not exposed in status messages.
+
+Service references already resolved to `.fly.dev` remain valid. The backend continues to
+prefer verified customer custom domains. On service deletion or a change to private, DNS
+and the generated certificate are removed before public ingress/app teardown; cleanup
+failures block that teardown so it can be retried safely. Keep the Vercel credentials
+configured until existing generated domains have been removed.
+
+Unit/contract tests use mocked provider responses. Real DNS propagation, certificate
+issuance/renewal, and integration-token permissions still need a live test with real keys.
+The maintenance endpoint refuses to provision real DNS against the local Fly simulator.
+
 ## Local GCP simulator
 
 Development and provider-dependent backend E2E tests use `docker/dependencies/gcp-mock`. It implements only the Google REST resources Marshal owns; tests that do not cross the provider boundary continue to use focused `GcpClient` fakes. Set `HEXCLAVE_MARSHAL_GCP_MOCK_URL=local` to derive the simulator address from `NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX`, or provide an explicit URL. Both forms require `MARSHAL_ALLOW_MOCKS=1`, and the introspection API also requires `HEXCLAVE_MARSHAL_GCP_MOCK_TOKEN` because it exposes resolved container environment values.

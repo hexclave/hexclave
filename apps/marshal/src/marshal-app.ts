@@ -17,6 +17,7 @@ import { FlyApiError } from "./fly/client.js";
 import { recordHostIdentityAssertion } from "./gcp/auth.js";
 import { GcpApiError } from "./gcp/client.js";
 import { reapProjectPool, stepProjectPool } from "./project-pool.js";
+import { stepPlatformDomains } from "./platform-domains.js";
 import { providerForNamespace, type RuntimeProvider } from "./provider.js";
 import { validateRequestedRuntime } from "./runtime.js";
 import {
@@ -247,6 +248,7 @@ export function createMarshalApp() {
     // matters: each is a single leased pass over durable state, safe to repeat and safe to
     // overlap (contention is reported as skipped, not as an error).
     .get(`${MAINTENANCE_PATH_PREFIX}project-pool/step`, () => handle(async () => await stepProjectPool()))
+    .get(`${MAINTENANCE_PATH_PREFIX}platform-domains/step`, () => handle(async () => await stepPlatformDomains()))
 
     .get(`${MAINTENANCE_PATH_PREFIX}project-pool/reap`, () => handle(async () => await reapProjectPool()))
 
