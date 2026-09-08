@@ -1,3 +1,4 @@
+import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/eve/sandbox";
 import { defineSandbox } from "eve/sandbox";
 import { growthSandboxBackend } from "#lib/sandbox-backend.ts";
 
@@ -33,4 +34,11 @@ export default defineSandbox({
       },
     },
   }),
+  // Chromium and its system libraries are template state. Installing them in
+  // bootstrap makes every child session start browser-ready without paying an
+  // install or separate-VM cost for each page.
+  revalidationKey: () => `website-research:${agentBrowserRevalidationKey()}`,
+  async bootstrap({ use }) {
+    await installAgentBrowser(await use());
+  },
 });

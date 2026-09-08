@@ -16,7 +16,6 @@ describe("getGrowthTimelineStepStates", () => {
       ["analysis", "upcoming"],
       ["interview", "upcoming"],
       ["report", "upcoming"],
-      ["ongoing", "upcoming"],
     ]);
   });
 
@@ -39,7 +38,6 @@ describe("getGrowthTimelineStepStates", () => {
       ["analysis", "upcoming"],
       ["interview", "upcoming"],
       ["report", "upcoming"],
-      ["ongoing", "upcoming"],
     ]);
   });
 
@@ -61,7 +59,6 @@ describe("getGrowthTimelineStepStates", () => {
       ["analysis", "upcoming"],
       ["interview", "upcoming"],
       ["report", "upcoming"],
-      ["ongoing", "upcoming"],
     ]);
   });
 
@@ -115,7 +112,6 @@ describe("getGrowthTimelineStepStates", () => {
       ["analysis", "failed"],
       ["interview", "upcoming"],
       ["report", "upcoming"],
-      ["ongoing", "upcoming"],
     ]);
   });
 
@@ -128,7 +124,6 @@ describe("getGrowthTimelineStepStates", () => {
       ["analysis", "current"],
       ["interview", "hidden"],
       ["report", "upcoming"],
-      ["ongoing", "upcoming"],
     ]);
   });
 
@@ -141,11 +136,10 @@ describe("getGrowthTimelineStepStates", () => {
       ["analysis", "current"],
       ["interview", "hidden"],
       ["report", "upcoming"],
-      ["ongoing", "upcoming"],
     ]);
   });
 
-  it("keeps the ongoing step current (never done) in steady state", () => {
+  it("makes report the final current step until the customer opens it", () => {
     const states = getGrowthTimelineStepStates(buildGrowthDemoStatus("steady-state", GROWTH_DEMO_NOW_MILLIS));
     expect([...states.entries()]).toEqual([
       ["set-up", "done"],
@@ -153,8 +147,21 @@ describe("getGrowthTimelineStepStates", () => {
       ["integrations", "done"],
       ["analysis", "done"],
       ["interview", "done"],
+      ["report", "current"],
+    ]);
+  });
+
+  it("marks the finite onboarding timeline complete after the report is opened", () => {
+    const status = buildGrowthDemoStatus("steady-state", GROWTH_DEMO_NOW_MILLIS);
+    if (status.latestReport == null) expect.fail("The steady-state fixture must include a report.");
+    status.latestReport.readAtMillis = GROWTH_DEMO_NOW_MILLIS;
+    expect([...getGrowthTimelineStepStates(status).entries()]).toEqual([
+      ["set-up", "done"],
+      ["compute-metrics", "done"],
+      ["integrations", "done"],
+      ["analysis", "done"],
+      ["interview", "done"],
       ["report", "done"],
-      ["ongoing", "current"],
     ]);
   });
 

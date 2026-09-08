@@ -1,4 +1,5 @@
 import { Auth, INTERNAL_PROJECT_OWNER_TEAM_ID, InternalProjectKeys, Project, Team, backendContext, niceBackendFetch } from "../../../../../backend-helpers";
+import { afterEach } from "vitest";
 
 // Shared helpers for the growth + growth-agent e2e suites. Growth is gated on the alpha-stage
 // `growth` app, so every test runs against its own freshly created project that installs it.
@@ -7,8 +8,19 @@ import { Auth, INTERNAL_PROJECT_OWNER_TEAM_ID, InternalProjectKeys, Project, Tea
 // env). This is the machine secret Eve uses; e2e tests "play the agent" with it.
 export const GROWTH_AGENT_AUTH = { "authorization": "Bearer mock_growth_agent_secret" };
 
+const growthProjectsToDelete: { projectId: string, adminAccessToken: string }[] = [];
+
+afterEach(async () => {
+  // A Growth test commonly changes the active context to the internal project for staff calls, so
+  // cleanup cannot rely on whichever project happens to be selected when the test ends. Delete all
+  // fixtures from their captured credentials, and start with an empty queue even if deletion fails.
+  const projects = growthProjectsToDelete.splice(0);
+  await Promise.all(projects.map(async (project) => await Project.deleteProject(project)));
+});
+
 export async function createGrowthProject() {
-  await Project.createAndSwitch();
+  const project = await Project.createAndSwitch();
+  growthProjectsToDelete.push({ projectId: project.projectId, adminAccessToken: project.adminAccessToken });
   await Project.updateConfig({ "apps.installed.gtm.enabled": true });
   return backendContext.value.projectKeys;
 }
@@ -69,8 +81,7 @@ export async function releaseGrowthInterviewAsStaff(projectId: string): Promise<
  * before they can read anything. Nothing about the report matters here except that it exists, so it
  * is deliberately the smallest one the agent API accepts.
  *
- * No publish step: a report is live the moment the agent writes it. The name keeps "AsStaff" because
- * writing one still needs the machine secret, which is not something a customer has.
+ * Writing and releasing are intentionally separate, matching production's staff review gate.
  */
 export async function unlockGrowthWorkspaceAsStaff(scope: { project_id: string, branch_id: string }): Promise<string> {
   const runId = await requireGrowthRunIdForScope();
@@ -89,7 +100,22 @@ export async function unlockGrowthWorkspaceAsStaff(scope: { project_id: string, 
   if (report.status !== 200) {
     throw new Error(`Seeding the unlock report failed with status ${report.status}: ${JSON.stringify(report.body)}`);
   }
-  return (report.body as { report_id: string }).report_id;
+  const reportId = (report.body as { report_id: string }).report_id;
+  await releaseGrowthReportAsStaff(scope.project_id, reportId);
+  return reportId;
+}
+
+export async function releaseGrowthReportAsStaff(projectId: string, reportId: string): Promise<void> {
+  await asGrowthStaff(async () => {
+    const released = await niceBackendFetch(`/api/latest/internal/growth/admin/reports/${reportId}`, {
+      accessType: "client",
+      method: "PATCH",
+      body: { target_project_id: projectId, action: "publish" },
+    });
+    if (released.status !== 200) {
+      throw new Error(`Releasing the growth report failed with status ${released.status}: ${JSON.stringify(released.body)}`);
+    }
+  });
 }
 
 /**

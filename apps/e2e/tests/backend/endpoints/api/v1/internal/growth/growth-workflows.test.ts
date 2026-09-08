@@ -2,7 +2,7 @@ import { describe, type ExpectStatic } from "vitest";
 import { it } from "../../../../../../helpers";
 import { niceBackendFetch } from "../../../../../backend-helpers";
 import { listRuns, pollWithTicks, sendCustomEvent } from "../workflows-helpers";
-import { GROWTH_AGENT_AUTH, createGrowthProject, releaseGrowthInterviewAsStaff, requireRunId, unlockGrowthWorkspaceAsStaff } from "./growth-helpers";
+import { GROWTH_AGENT_AUTH, createGrowthProject, releaseGrowthInterviewAsStaff, releaseGrowthReportAsStaff, requireRunId, unlockGrowthWorkspaceAsStaff } from "./growth-helpers";
 import { MockEve, MockEveDispatch, withMockEve } from "./mock-eve";
 
 const ADMIN_BASE = "/api/latest/internal/growth";
@@ -324,6 +324,7 @@ describe("growth workflow orchestration e2e (mock Eve)", { timeout: 90_000 }, ()
       });
       expect(report.status).toBe(200);
       expect((report.body as { action_item_ids: string[] }).action_item_ids).toHaveLength(1);
+      await releaseGrowthReportAsStaff(projectId, (report.body as { report_id: string }).report_id);
       const completeReport = await agentPhaseCall(runId, "report", "complete", scope, 1);
       expect(completeReport).toMatchObject({ status: 200, body: { status: "completed" } });
 
@@ -415,9 +416,9 @@ describe("growth workflow orchestration e2e (mock Eve)", { timeout: 90_000 }, ()
       const { projectId, branchId } = await setUpOnboardedProject();
       const scope: AgentScope = { project_id: projectId, branch_id: branchId };
 
-      // Exhaust every immediate phase's three-attempt dispatch budget. Direct bridge ticks keep
+      // Exhaust every immediate phase's two-attempt dispatch budget. Direct bridge ticks keep
       // this deterministic and fast instead of waiting for the workflow leg's long-poll windows.
-      mock.failNextDispatches(IMMEDIATE_PHASE_KEYS.length * 3, {
+      mock.failNextDispatches(IMMEDIATE_PHASE_KEYS.length * 2, {
         predicate: (dispatch) => dispatch.path === "/runs/analysis-phase" && dispatch.body.project_id === projectId,
       });
       const runId = await completeOnboarding();
@@ -433,7 +434,7 @@ describe("growth workflow orchestration e2e (mock Eve)", { timeout: 90_000 }, ()
       });
       expect(skipIntegrations.status).toBe(409);
       expect(getRunPhase(await getRun(runId), "integrations")).toMatchObject({ status: "skipped" });
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
         const tick = await bridgeCall("analysis/tick", { run_id: runId });
         expect(tick.status).toBe(200);
         for (const phaseKey of IMMEDIATE_PHASE_KEYS) {
@@ -441,17 +442,17 @@ describe("growth workflow orchestration e2e (mock Eve)", { timeout: 90_000 }, ()
           expect(dispatch.respondedWithStatus).toBe(500);
         }
       }
-      // One tick promotes PENDING-at-attempt-3 phases to FAILED; the next observes those failures
+      // One tick promotes PENDING-at-attempt-2 phases to FAILED; the next observes those failures
       // and fails the run.
       expect((await bridgeCall("analysis/tick", { run_id: runId })).status).toBe(200);
       expect((await bridgeCall("analysis/tick", { run_id: runId })).status).toBe(200);
       const failedRun = await getRun(runId);
       expect(failedRun.status).toBe("failed");
       for (const phaseKey of IMMEDIATE_PHASE_KEYS) {
-        expect(getRunPhase(failedRun, phaseKey)).toMatchObject({ status: "failed", attempt: 3 });
+        expect(getRunPhase(failedRun, phaseKey)).toMatchObject({ status: "failed", attempt: 2 });
       }
 
-      const oldDispatch = await mock.waitForDispatch((candidate) => isAnalysisPhaseDispatchFor(candidate, projectId, runId, "website-research", 3));
+      const oldDispatch = await mock.waitForDispatch((candidate) => isAnalysisPhaseDispatchFor(candidate, projectId, runId, "website-research", 2));
       const oldToken = oldDispatch.body.agent_token;
       if (typeof oldToken !== "string") throw new Error("Expected the failed dispatch to contain an agent token.");
       expect(oldToken).toMatch(/^grt_/);
@@ -469,7 +470,7 @@ describe("growth workflow orchestration e2e (mock Eve)", { timeout: 90_000 }, ()
       const staleStart = await niceBackendFetch(`${AGENT_BASE}/runs/${runId}/phases/website-research/start`, {
         method: "POST",
         headers: { "authorization": `Bearer ${oldToken}` },
-        body: { ...scope, attempt: 3, eve_session_id: "eve-session-before-manual-retry" },
+        body: { ...scope, attempt: 2, eve_session_id: "eve-session-before-manual-retry" },
       });
       expect(staleStart.status).toBe(401);
 

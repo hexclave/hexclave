@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe } from "vitest";
 import { it } from "../../../../../../helpers";
 import { Project, niceBackendFetch } from "../../../../../backend-helpers";
-import { GROWTH_AGENT_AUTH, createGrowthProject, requireRunId } from "./growth-helpers";
+import { GROWTH_AGENT_AUTH, createGrowthProject, releaseGrowthReportAsStaff, requireRunId } from "./growth-helpers";
 
 const ADMIN_BASE = "/api/latest/internal/growth";
 const AGENT_BASE = "/api/latest/internal/growth-agent";
@@ -146,10 +146,10 @@ async function seedCompletedRunWithReport(scope: { project_id: string, branch_id
   if (report.status !== 200) {
     throw new Error(`Saving the report failed with status ${report.status}.`);
   }
-  // No release step: writing the report IS releasing it (see lib/growth/report-release.ts), so the
-  // report route and the action surface below are readable from here on.
+  const reportId = (report.body as { report_id: string }).report_id;
+  await releaseGrowthReportAsStaff(scope.project_id, reportId);
   return {
-    reportId: (report.body as { report_id: string }).report_id,
+    reportId,
     actionItemIds: (report.body as { action_item_ids: string[] }).action_item_ids,
     artifactId,
   };

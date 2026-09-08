@@ -1,5 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { growthSandboxBackend } from "./sandbox-backend.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  SandboxBackend,
+  SandboxBackendHandle,
+  SandboxSession,
+  SandboxSessionUseFn,
+} from "eve/sandbox";
+import type {
+  VercelSandboxBootstrapUseOptions,
+  VercelSandboxSessionUseOptions,
+} from "eve/sandbox/vercel";
+import { growthSandboxBackend, withEphemeralVercelSessions } from "./sandbox-backend.ts";
 
 /**
  * These tests pin the decision that used to be implicit. The whole point of sandbox-backend.ts is
@@ -17,6 +27,39 @@ const OPTIONS = {
 } as const;
 
 const ENV_VAR = "HEXCLAVE_GROWTH_SANDBOX_BACKEND";
+
+function makeSession(): SandboxSession {
+  return {
+    id: "session",
+    resolvePath: (path) => path,
+    run: vi.fn<Parameters<SandboxSession["run"]>, ReturnType<SandboxSession["run"]>>(),
+    spawn: vi.fn<Parameters<SandboxSession["spawn"]>, ReturnType<SandboxSession["spawn"]>>(),
+    readFile: vi.fn<Parameters<SandboxSession["readFile"]>, ReturnType<SandboxSession["readFile"]>>(),
+    readBinaryFile: vi.fn<Parameters<SandboxSession["readBinaryFile"]>, ReturnType<SandboxSession["readBinaryFile"]>>(),
+    readTextFile: vi.fn<Parameters<SandboxSession["readTextFile"]>, ReturnType<SandboxSession["readTextFile"]>>(),
+    writeFile: vi.fn<Parameters<SandboxSession["writeFile"]>, ReturnType<SandboxSession["writeFile"]>>(),
+    writeBinaryFile: vi.fn<Parameters<SandboxSession["writeBinaryFile"]>, ReturnType<SandboxSession["writeBinaryFile"]>>(),
+    writeTextFile: vi.fn<Parameters<SandboxSession["writeTextFile"]>, ReturnType<SandboxSession["writeTextFile"]>>(),
+    setNetworkPolicy: vi.fn<Parameters<SandboxSession["setNetworkPolicy"]>, ReturnType<SandboxSession["setNetworkPolicy"]>>(),
+    removePath: vi.fn<Parameters<SandboxSession["removePath"]>, ReturnType<SandboxSession["removePath"]>>(),
+  };
+}
+
+function makeHandle(
+  useSessionFn: SandboxSessionUseFn<VercelSandboxSessionUseOptions>,
+): SandboxBackendHandle<VercelSandboxSessionUseOptions> {
+  return {
+    useSessionFn,
+    session: makeSession(),
+    captureState: vi.fn(async () => ({
+      backendName: "vercel",
+      metadata: {},
+      sessionKey: "session",
+    })),
+    stop: vi.fn(async () => {}),
+    shutdown: vi.fn(async () => {}),
+  };
+}
 
 describe("growthSandboxBackend", () => {
   let savedOverride: string | undefined;
@@ -76,5 +119,68 @@ describe("growthSandboxBackend", () => {
     expect(growthSandboxBackend(OPTIONS).name).toBe("docker");
     process.env[ENV_VAR] = "vercel";
     expect(growthSandboxBackend(OPTIONS).name).toBe("vercel");
+  });
+});
+
+describe("withEphemeralVercelSessions", () => {
+  it("disables persistence for live sessions without changing template prewarming", async () => {
+    const session = makeSession();
+    const useSessionFn = vi.fn<
+      Parameters<SandboxSessionUseFn<VercelSandboxSessionUseOptions>>,
+      ReturnType<SandboxSessionUseFn<VercelSandboxSessionUseOptions>>
+    >(async () => session);
+    const handle = makeHandle(useSessionFn);
+    const create = vi.fn(async () => handle);
+    const prewarm = vi.fn(async () => ({ reused: true }));
+    const backend: SandboxBackend<VercelSandboxBootstrapUseOptions, VercelSandboxSessionUseOptions> = {
+      name: "vercel",
+      create,
+      prewarm,
+    };
+    const wrapped = withEphemeralVercelSessions(backend);
+    const createInput = {
+      templateKey: "template",
+      sessionKey: "session",
+      runtimeContext: { appRoot: "/app" },
+    };
+    const prewarmInput = {
+      templateKey: "template",
+      runtimeContext: { appRoot: "/app" },
+      seedFiles: [],
+    };
+
+    await expect(wrapped.create(createInput)).resolves.toBe(handle);
+    await expect(wrapped.prewarm(prewarmInput)).resolves.toEqual({ reused: true });
+
+    expect(useSessionFn).toHaveBeenCalledOnce();
+    expect(useSessionFn).toHaveBeenCalledWith({ persistent: false });
+    expect(prewarm).toHaveBeenCalledOnce();
+    expect(prewarm).toHaveBeenCalledWith(prewarmInput);
+    expect(handle.shutdown).not.toHaveBeenCalled();
+  });
+
+  it("shuts down a session when disabling persistence fails", async () => {
+    const updateError = new Error("persistence update failed");
+    const useSessionFn = vi.fn<
+      Parameters<SandboxSessionUseFn<VercelSandboxSessionUseOptions>>,
+      ReturnType<SandboxSessionUseFn<VercelSandboxSessionUseOptions>>
+    >(async () => {
+      throw updateError;
+    });
+    const handle = makeHandle(useSessionFn);
+    const backend = {
+      name: "vercel",
+      create: vi.fn(async () => handle),
+      prewarm: vi.fn(async () => ({ reused: true })),
+    } satisfies SandboxBackend<VercelSandboxBootstrapUseOptions, VercelSandboxSessionUseOptions>;
+    const wrapped = withEphemeralVercelSessions(backend);
+
+    await expect(wrapped.create({
+      templateKey: null,
+      sessionKey: "session",
+      runtimeContext: { appRoot: "/app" },
+    })).rejects.toBe(updateError);
+
+    expect(handle.shutdown).toHaveBeenCalledOnce();
   });
 });

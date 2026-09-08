@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildGrowthCategoryPagePrompt, buildGrowthItemPagePrompt } from "./growth-page-prompt";
+import { buildGrowthActionPagePrompt, buildGrowthCategoryPagePrompt, buildGrowthFindingPagePrompt, buildGrowthItemPagePrompt } from "./growth-page-prompt";
 import type { GrowthActionItem, GrowthOverviewFinding } from "./growth-types";
 
 const finding: GrowthOverviewFinding = {
@@ -52,6 +52,8 @@ describe("growth stage page prompts", () => {
     expect(prompt).toContain(finding.title);
     expect(prompt).toContain(finding.body);
     expect(prompt).toContain("Recorded: 2026-08-01");
+    expect(prompt).toContain('Only <Hypothesis> may take confidence="low|medium|high"');
+    expect(prompt).not.toContain("<Hypothesis> and <Experiment> may take confidence");
   });
 
   it("labels a note as a note rather than a finding", () => {
@@ -65,6 +67,24 @@ describe("growth stage page prompts", () => {
     expect(prompt).toContain(`<ActionButton action="action-1" />`);
     expect(prompt).toContain("Watched metrics: new_signups over 14 days");
     expect(prompt).toContain("Automation: Emails new users a checklist link on their first day.");
+  });
+
+  it("does not ask an action-detail page to render a duplicate action button", () => {
+    const prompt = buildGrowthActionPagePrompt(action);
+    expect(prompt).toContain("Material — the action this page explains:");
+    expect(prompt).toContain("<Finding>...</Finding>");
+    expect(prompt).toContain('<Evidence data="id">...</Evidence>');
+    expect(prompt).toContain("<Recommendation>...</Recommendation>");
+    expect(prompt).toContain("<MeasurementPlan />");
+    expect(prompt).toContain("Keep each sentence under 18 words");
+    expect(prompt).not.toContain(`<ActionButton action="action-1" />`);
+  });
+
+  it("builds an individual evidence-page prompt without action controls", () => {
+    const prompt = buildGrowthFindingPagePrompt(finding);
+    expect(prompt).toContain("Material — the observation this page explains:");
+    expect(prompt).toContain(finding.title);
+    expect(prompt).toContain("Do not use <ActionButton>");
   });
 
   it("never leaks an action payload or workflow source", () => {
@@ -85,6 +105,7 @@ describe("growth stage page prompts", () => {
       finding: { ...finding, document: { format: "growth-mdx-v1", sourceMdx: "## Already written\n\ntext", blocks: [], data: [] } },
     });
     expect(prompt).toContain("## Already written");
+    expect(prompt).toContain("Existing evidence data JSON");
   });
 
   it("composes a stage prompt from every lane and states the score", () => {

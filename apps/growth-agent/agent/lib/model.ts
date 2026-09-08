@@ -1,8 +1,14 @@
-import type { AgentModelOptionsDefinition, AgentReasoningDefinition } from "eve";
+import type { AgentLimitsDefinition, AgentModelOptionsDefinition, AgentReasoningDefinition } from "eve";
 const GROWTH_MODEL = "zai/glm-5.2";
 
 const GROWTH_PROVIDER_ORDER = ["wafer", "zai"] as const;
 const GROWTH_REASONING: AgentReasoningDefinition = "none";
+const GROWTH_LIMITS: AgentLimitsDefinition = {
+  // This is a session-wide backstop, not a per-call cap: Eve checks exact provider usage between
+  // model calls. The stream-byte guard in agent-session.ts covers a single runaway streaming call.
+  maxOutputTokensPerSession: 80_000,
+  sessionTimeoutMs: 45 * 60 * 1000,
+};
 
 /**
  * Z.AI's NATIVE thinking switch, which is what actually turns glm-5.2's reasoning off.
@@ -38,8 +44,9 @@ const GROWTH_THINKING_PROVIDER_OPTIONS = {
  * site so that anything added here later (reasoning effort, context window) reaches all four agents
  * without four more edits.
  */
-export function getGrowthModelConfig(): { model: string, modelOptions: AgentModelOptionsDefinition, reasoning: AgentReasoningDefinition } {
+export function getGrowthModelConfig(): { limits: AgentLimitsDefinition, model: string, modelOptions: AgentModelOptionsDefinition, reasoning: AgentReasoningDefinition } {
   return {
+    limits: GROWTH_LIMITS,
     model: GROWTH_MODEL,
     reasoning: GROWTH_REASONING,
     modelOptions: {

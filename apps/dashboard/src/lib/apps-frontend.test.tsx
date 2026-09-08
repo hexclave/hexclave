@@ -23,10 +23,11 @@ describe("growth navigation matching", () => {
   // Mirrors the real growth navigationItems in apps-frontend.tsx. Lifecycle and detail pages are
   // deliberately not nav items; the Overview entry claims them.
   const overview = { displayName: "Overview", href: "." };
+  const experiments = { displayName: "Experiments", href: "experiments" };
   const chat = { displayName: "Chat", href: "chat" };
   // const adAccounts = { displayName: "Ad accounts", href: "ad-accounts" };
   const settings = { displayName: "Settings", href: "settings" };
-  const growth = appWith([overview, chat, /* adAccounts, */ settings], "gtm");
+  const growth = appWith([overview, experiments, chat, /* adAccounts, */ settings], "gtm");
 
   it("highlights Overview on lifecycle and detail pages", () => {
     for (const page of ["interview", "report", "actions/some-action-id", "briefs/some-brief-id", "ad-accounts"]) {
@@ -35,7 +36,7 @@ describe("growth navigation matching", () => {
   });
 
   it("highlights each top-level page's own item, deselecting Overview", () => {
-    for (const item of [chat, settings]) {
+    for (const item of [experiments, chat, settings]) {
       expect(testItemPath(PROJECT_ID, growth, item, urlFor(`/projects/demo-project/gtm/${item.href}`))).toBe(true);
       expect(testItemPath(PROJECT_ID, growth, overview, urlFor(`/projects/demo-project/gtm/${item.href}`))).toBe(false);
     }

@@ -10,6 +10,7 @@ export type QuizAuthoringRequest = {
   readonly product: {
     readonly website_url: string | null,
     readonly company_summary: string | null,
+    readonly additional_notes: string | null,
   },
   readonly facts: readonly {
     readonly fact_id: string,
@@ -62,6 +63,7 @@ function buildQuizPrompt(input: QuizAuthoringRequest): string {
     input.product.company_summary != null
       ? `The product: ${input.product.company_summary}${input.product.website_url != null ? ` (${input.product.website_url})` : ""}`
       : "The product summary was not recorded; keep the wording generic rather than guessing what they build.",
+    input.product.additional_notes != null ? `Additional context from the team: ${input.product.additional_notes}` : "",
     "",
     "Questions to write:",
     "",

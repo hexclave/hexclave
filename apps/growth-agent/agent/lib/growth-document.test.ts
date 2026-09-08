@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { growthActionDocumentInputSchema, growthDocumentInputSchema } from "./growth-document.ts";
+import { GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE, growthActionDocumentInputSchema, growthDocumentInputSchema } from "./growth-document.ts";
 
 const metricData = {
   id: "activation",
@@ -86,14 +86,24 @@ const example = { value: 1 };
 });
 
 describe("growthActionDocumentInputSchema", () => {
-  it("accepts the fixed hypothesis, evidence, experiment sequence", () => {
+  it("tells the model to write a short, grounded decision page", () => {
+    expect(GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE).toContain("population or sample");
+    expect(GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE).toContain("time window");
+    expect(GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE).toContain("comparison or baseline");
+    expect(GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE).toContain("material limitation");
+    expect(GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE).toContain("simple English");
+    expect(GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE).toContain("under 18 words");
+    expect(GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE).toContain("live watched metrics");
+  });
+
+  it("accepts the semantic finding, evidence, recommendation, measurement sequence", () => {
     const result = growthActionDocumentInputSchema.safeParse({
       format: "growth-mdx-v1",
-      source_mdx: `<Hypothesis confidence="medium">
+      source_mdx: `<Finding>
 
-The signup prompt is too vague for first-time visitors.
+Search visitors activate more often than the site average.
 
-</Hypothesis>
+</Finding>
 
 <Evidence data="activation">
 
@@ -101,11 +111,13 @@ Only 12% of new signups activated in the measured window.
 
 </Evidence>
 
-<Experiment>
+<Recommendation>
 
-Test a specific signup prompt for 14 days. Success means activation exceeds 15%.
+Test a clearer signup prompt for 14 days.
 
-</Experiment>`,
+</Recommendation>
+
+<MeasurementPlan />`,
       data: [metricData],
     });
 
@@ -115,8 +127,18 @@ Test a specific signup prompt for 14 days. Success means activation exceeds 15%.
   it("rejects model-authored headings and extra action sections", () => {
     const result = growthActionDocumentInputSchema.safeParse({
       format: "growth-mdx-v1",
-      source_mdx: "## Hypothesis\n\n<Hypothesis confidence=\"medium\">Test</Hypothesis>\n\n<Evidence>Proof</Evidence>\n\n<Experiment>Run it</Experiment>\n\n## Action\n\nDeploy it",
-      data: [],
+      source_mdx: "## Finding\n\n<Finding>Search converts better.</Finding>\n\n<Evidence data=\"activation\">Proof</Evidence>\n\n<Recommendation>Run it.</Recommendation>\n\n<MeasurementPlan />",
+      data: [metricData],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects action evidence without a data reference", () => {
+    const result = growthActionDocumentInputSchema.safeParse({
+      format: "growth-mdx-v1",
+      source_mdx: "<Finding>Search converts better.</Finding>\n\n<Evidence>Proof</Evidence>\n\n<Recommendation>Run it.</Recommendation>\n\n<MeasurementPlan />",
+      data: [metricData],
     });
 
     expect(result.success).toBe(false);

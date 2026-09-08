@@ -67,7 +67,11 @@ export const GET = createSmartRouteHandler({
     const projectId = tenancy.project.id;
     const branchId = tenancy.branchId;
 
-    const [findingRows, latestReport, latestInterview, activeActions, briefRows, dailyMetricRows, artifactRows] = await Promise.all([
+    const [onboarding, findingRows, latestReport, latestInterview, activeActions, briefRows, dailyMetricRows, artifactRows] = await Promise.all([
+      globalPrismaClient.growthOnboarding.findUnique({
+        where: { projectId_branchId: { projectId, branchId } },
+        select: { websiteUrl: true, companySummary: true, additionalNotes: true },
+      }),
       // Fetch one more than the cap so we can tell "exactly at the cap" apart from "trimmed".
       globalPrismaClient.growthFinding.findMany({
         where: { projectId, branchId, ...(query.run_id != null ? { runId: query.run_id } : {}) },
@@ -151,6 +155,11 @@ export const GET = createSmartRouteHandler({
     // findings. Per-field body truncation is signaled inline by the ellipsis instead.
     let truncated = overCap || artifactsOverCap;
     const buildBody = () => ({
+      onboarding: onboarding == null ? null : {
+        website_url: onboarding.websiteUrl,
+        company_summary: onboarding.companySummary,
+        additional_notes: onboarding.additionalNotes,
+      },
       findings,
       report_summary: latestReport == null ? null : latestReport.summary,
       interview_answers: (latestInterview?.questions ?? []).map((question) => ({

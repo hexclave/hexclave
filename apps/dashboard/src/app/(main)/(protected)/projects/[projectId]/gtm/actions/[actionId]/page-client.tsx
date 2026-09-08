@@ -4,7 +4,6 @@ import {
   DesignAlert,
   DesignBadge,
   DesignButton,
-  DesignCard,
 } from "@/components/design-components";
 import { Link } from "@/components/link";
 import { useRouter } from "@/components/router";
@@ -13,10 +12,11 @@ import { getGrowthActionNarrativeSections } from "@/lib/growth/growth-action-doc
 import { type GrowthLoadable, useGrowthStatus } from "@/lib/growth/growth-data";
 import { GROWTH_DEMO_NOW_MILLIS, buildGrowthDemoActions, buildGrowthDemoAdsBodyForAction } from "@/lib/growth/growth-demo-data";
 import type { GrowthDocument, GrowthDocumentBlock } from "@/lib/growth/growth-document";
+import { getGrowthMetricLabel } from "@/lib/growth/growth-format";
 import type { GrowthActionItem, GrowthActionWorkflow } from "@/lib/growth/growth-types";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
-import { ArrowLeftIcon, ArrowSquareOutIcon, ArticleIcon, LightningIcon, TreeStructureIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, ArrowSquareOutIcon, LightningIcon, TreeStructureIcon } from "@phosphor-icons/react";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { z } from "zod";
@@ -34,7 +34,7 @@ import { RunAdsPayloadSection } from "./ads-panel";
 export default function PageClient() {
   return (
     <GrowthAppFrame>
-      <PageLayout title="Growth Action" description="Hypothesis, evidence, and experiment" allowContentOverflow>
+      <PageLayout title="Growth Action" description="Finding, evidence, recommendation, and tracking" allowContentOverflow>
         <ActionDetailBody />
       </PageLayout>
     </GrowthAppFrame>
@@ -186,14 +186,59 @@ function ActionHeading(props: { action: GrowthActionItem }) {
 }
 
 
-function ActionNarrativeSection(props: { title: "Hypothesis" | "Evidence" | "Experiment", document: GrowthDocument | null, blocks: GrowthDocumentBlock[], children?: React.ReactNode }) {
+function ActionNarrativeBlock(props: { document: GrowthDocument, block: GrowthDocumentBlock, evidence: boolean }) {
+  const { block, document } = props;
+  if (block.type !== "component") return null;
+  const isEditableSection = block.name === "Finding"
+    || block.name === "Hypothesis"
+    || block.name === "Evidence"
+    || block.name === "Recommendation"
+    || block.name === "Experiment";
+  if (!isEditableSection) {
+    return <GrowthDocumentFragment document={document} blocks={[block]} className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0" />;
+  }
+  const datum = block.dataId == null ? null : document.data.find((candidate) => candidate.id === block.dataId) ?? null;
+  const content = <GrowthDocumentFragment document={document} blocks={block.children} className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0" />;
+  if (!props.evidence) return content;
   return (
-    <section aria-labelledby={`action-${props.title.toLocaleLowerCase()}`}>
-      <h2 id={`action-${props.title.toLocaleLowerCase()}`} className="mb-4 text-xl font-semibold tracking-tight">{props.title}</h2>
-      {props.document != null && props.blocks.length > 0
-        ? <GrowthDocumentFragment document={props.document} blocks={props.blocks} className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0" />
+    <div className="border-b border-foreground/[0.08] py-4 first:pt-0 last:border-0 last:pb-0">
+      {content}
+      {datum != null && <p className="mt-2 text-xs text-muted-foreground">Source: {datum.source}</p>}
+    </div>
+  );
+}
+
+function ActionNarrativeSection(props: { title: "What we found" | "Evidence" | "What we suggest", document: GrowthDocument | null, blocks: GrowthDocumentBlock[], children?: React.ReactNode }) {
+  const document = props.document;
+  const sectionId = props.title === "What we found" ? "action-finding" : props.title === "Evidence" ? "action-evidence" : "action-recommendation";
+  return (
+    <section aria-labelledby={sectionId}>
+      <h2 id={sectionId} className="mb-4 text-lg font-semibold tracking-tight">{props.title}</h2>
+      {document != null && props.blocks.length > 0
+        ? <div>{props.blocks.map((block, index) => <ActionNarrativeBlock key={`${block.type}-${index}`} document={document} block={block} evidence={props.title === "Evidence"} />)}</div>
         : <DesignAlert variant="warning">This suggestion does not include {props.title.toLocaleLowerCase()} content.</DesignAlert>}
       {props.children}
+    </section>
+  );
+}
+
+export function ActionMeasurementPlan(props: { watchedMetrics: GrowthActionItem["watchedMetrics"] }) {
+  return (
+    <section aria-labelledby="action-measurement-plan" className="border-t border-foreground/[0.08] pt-8">
+      <h2 id="action-measurement-plan" className="text-lg font-semibold tracking-tight">What we&apos;ll track</h2>
+      {props.watchedMetrics.length === 0
+        ? <p className="mt-3 text-sm text-muted-foreground">No metrics are selected for this action.</p>
+        : (
+          <div className="mt-4 divide-y divide-foreground/[0.08] border-y border-foreground/[0.08]">
+            {props.watchedMetrics.map((metric) => (
+              <div key={metric.metricId} className="flex flex-wrap items-baseline justify-between gap-2 py-3">
+                <span className="text-sm font-medium text-foreground">{getGrowthMetricLabel(metric.metricId)}</span>
+                <span className="text-sm text-muted-foreground">Track for {metric.windowDays} days</span>
+              </div>
+            ))}
+          </div>
+        )}
+      <p className="mt-3 text-xs text-muted-foreground">Tracking starts when you activate this action.</p>
     </section>
   );
 }
@@ -202,19 +247,20 @@ function ActionNarrative(props: { action: GrowthActionItem, demo: boolean, onCha
   const { action } = props;
   const document = action.document ?? null;
   const sections = document == null
-    ? { hypothesis: [], evidence: [], experiment: [] }
+    ? { finding: [], evidence: [], recommendation: [] }
     : getGrowthActionNarrativeSections(document);
   return (
     <section className="border-y border-foreground/[0.08] py-7">
       <article className="mx-auto w-full max-w-4xl">
         <ActionHeading action={action} />
         <div className="flex flex-col gap-10">
-          <ActionNarrativeSection title="Hypothesis" document={document} blocks={sections.hypothesis} />
+          <ActionNarrativeSection title="What we found" document={document} blocks={sections.finding} />
           <ActionNarrativeSection title="Evidence" document={document} blocks={sections.evidence} />
-          <ActionNarrativeSection title="Experiment" document={document} blocks={sections.experiment}>
+          <ActionNarrativeSection title="What we suggest" document={document} blocks={sections.recommendation}>
             {action.workflow != null && <div className="mt-5"><ActionAutomationPreview action={action} workflow={action.workflow} /></div>}
             <div className="mt-5"><GrowthActionMutationControls action={action} onChanged={props.onChanged} demo={props.demo} /></div>
           </ActionNarrativeSection>
+          <ActionMeasurementPlan watchedMetrics={action.watchedMetrics} />
         </div>
       </article>
     </section>
@@ -357,6 +403,18 @@ function BlogIdeaRow(props: { label: string, value: string | null | undefined })
   );
 }
 
+function BlogPayloadLayout(props: { title: string, description: string, children: React.ReactNode }) {
+  return (
+    <section className="border-b border-foreground/[0.08] py-7">
+      <div className="mx-auto w-full max-w-4xl">
+        <h2 className="text-lg font-semibold tracking-tight">{props.title}</h2>
+        <p className="mt-1 text-sm text-muted-foreground">{props.description}</p>
+        <div className="mt-5">{props.children}</div>
+      </div>
+    </section>
+  );
+}
+
 /**
  * The `publish_blog` payload panel. Two states, driven purely by whether a draft exists yet:
  * the proposed idea with a "Write the draft" button, or the finished post. The generated draft is
@@ -373,33 +431,36 @@ function BlogPayloadSection(props: { action: GrowthActionItem, demo: boolean }) 
   const draftMarkdown = generatedDraft ?? (storedDraft.success ? storedDraft.data.draft_markdown : null);
   if (draftMarkdown != null) {
     return (
-      <DesignCard title="Blog draft" subtitle="The post this action would publish" icon={ArticleIcon} gradient="purple">
+      <BlogPayloadLayout title="Blog draft" description="The post this action would publish">
         <GrowthMarkdown content={draftMarkdown} />
-      </DesignCard>
+      </BlogPayloadLayout>
     );
   }
 
   const idea = blogIdeaPayloadSchema.safeParse(action.payload);
   if (!idea.success) {
     return (
-      <DesignCard title="Blog draft" subtitle="The post this action would publish" icon={ArticleIcon} gradient="purple">
+      <BlogPayloadLayout title="Blog draft" description="The post this action would publish">
         <DesignAlert variant="warning">
           This action has no readable draft or idea attached yet — it will appear here once the analysis prepares one.
         </DesignAlert>
-      </DesignCard>
+      </BlogPayloadLayout>
     );
   }
 
   const { blog_idea: blogIdea } = idea.data;
   return (
-    <DesignCard title="Proposed post" subtitle="The analysis picked this piece — the draft is written when you ask for it" icon={ArticleIcon} gradient="purple">
+    <BlogPayloadLayout title="Article plan" description="Review the outline, then write the draft when you are ready.">
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-3">
-          <BlogIdeaRow label="Working title" value={blogIdea.title} />
-          <BlogIdeaRow label="Target search intent" value={blogIdea.target_intent} />
-          <BlogIdeaRow label="Answer-engine angle" value={blogIdea.aeo_angle} />
-          <BlogIdeaRow label="What it should cover" value={blogIdea.outline_summary} />
-        </div>
+        <details className="border-y border-foreground/[0.08] py-3">
+          <summary className="cursor-pointer text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2">View article plan</summary>
+          <div className="mt-4 flex flex-col gap-3 pb-1">
+            <BlogIdeaRow label="Working title" value={blogIdea.title} />
+            <BlogIdeaRow label="Target search intent" value={blogIdea.target_intent} />
+            <BlogIdeaRow label="Answer-engine angle" value={blogIdea.aeo_angle} />
+            <BlogIdeaRow label="What it should cover" value={blogIdea.outline_summary} />
+          </div>
+        </details>
         {generateError != null && <DesignAlert variant="error">{generateError}</DesignAlert>}
         <div className="flex flex-wrap items-center gap-3">
           {/* DesignButton's async onClick drives its own loading state — generation takes a while,
@@ -421,7 +482,7 @@ function BlogPayloadSection(props: { action: GrowthActionItem, demo: boolean }) 
           {demo && <span className="text-sm text-muted-foreground">Demo mode — generating is disabled on fixture data.</span>}
         </div>
       </div>
-    </DesignCard>
+    </BlogPayloadLayout>
   );
 }
 

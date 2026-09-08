@@ -5,12 +5,15 @@ import { CopyPromptButton } from "@/components/ui";
 import {
   discardGrowthAdminCategoryPageDraft,
   listGrowthAdminCategoryPages,
+  publishAllGrowthAdminCategoryPageDrafts,
   publishGrowthAdminCategoryPage,
   saveGrowthAdminCategoryPageDraft,
   unpublishGrowthAdminCategoryPage,
 } from "@/lib/growth/growth-api";
 import { buildGrowthCategoryPagePrompt } from "@/lib/growth/growth-page-prompt";
-import type { GrowthAdminCategoryPage, GrowthCategory, GrowthCategoryPageVersion, GrowthOverview } from "@/lib/growth/growth-types";
+import { parseGrowthPageResponse } from "@/lib/growth/growth-page-response";
+import { publishGrowthAdminReport } from "@/lib/growth/reports/growth-reports-admin-api";
+import { GROWTH_CATEGORIES, type GrowthAdminCategoryPage, type GrowthCategory, type GrowthCategoryPageVersion, type GrowthOverview } from "@/lib/growth/growth-types";
 import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
@@ -56,6 +59,64 @@ export function GrowthAdminCategoryPagesProvider(props: { app: object, projectId
     runAsynchronously(refresh());
   }, [refresh]);
   return <GrowthAdminCategoryPagesContext.Provider value={{ state, refresh }}>{props.children}</GrowthAdminCategoryPagesContext.Provider>;
+}
+
+export function GrowthAdminPublishAllCategoryPages(props: { app: object, projectId: string, pendingReportId: string | null, onPublishedChanged: () => Promise<void> }) {
+  const context = useContext(GrowthAdminCategoryPagesContext)
+    ?? throwErr("GrowthAdminPublishAllCategoryPages must be rendered inside GrowthAdminCategoryPagesProvider.");
+  const [error, setError] = useState<string | null>(null);
+
+  const drafts: { category: GrowthCategory, version: number }[] = [];
+  let liveCount = 0;
+  if (context.state.status === "loaded") {
+    for (const category of GROWTH_CATEGORIES) {
+      const page = context.state.pages.find((candidate) => candidate.category === category) ?? null;
+      const draft = page?.draft ?? null;
+      if (draft != null) drafts.push({ category, version: draft.version });
+      if (page?.published != null) liveCount += 1;
+    }
+  }
+  const draftsReady = drafts.length === GROWTH_CATEGORIES.length;
+  const releaseOnly = liveCount === GROWTH_CATEGORIES.length && drafts.length === 0 && props.pendingReportId != null;
+  const enabled = draftsReady || releaseOnly;
+  const buttonLabel = releaseOnly
+    ? "Release report to customer"
+    : props.pendingReportId == null ? "Publish all stage pages" : "Publish all and release report";
+
+  return (
+    <div className="mt-6 flex flex-col items-end gap-2">
+      {error != null && <DesignAlert variant="error">{error}</DesignAlert>}
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <span className="text-xs text-muted-foreground">
+          {liveCount} live · {drafts.length} {drafts.length === 1 ? "draft" : "drafts"}
+          {props.pendingReportId != null && <> · report awaiting release</>}
+        </span>
+        <DesignButton
+          size="sm"
+          disabled={!enabled}
+          onClick={async () => {
+            setError(null);
+            const result = await Result.fromThrowingAsync(async () => {
+              if (releaseOnly) {
+                const reportId = props.pendingReportId;
+                if (reportId == null) throw new Error("The report awaiting release disappeared before it could be published.");
+                await publishGrowthAdminReport(props.app, props.projectId, reportId);
+              } else {
+                await publishAllGrowthAdminCategoryPageDrafts(props.app, props.projectId, drafts, props.pendingReportId);
+              }
+              await Promise.all([context.refresh(), props.onPublishedChanged()]);
+            });
+            if (result.status === "error") {
+              captureError("growth-admin-category-pages-publish-all", result.error);
+              setError(result.error instanceof Error ? result.error.message : String(result.error));
+            }
+          }}
+        >
+          {buttonLabel}
+        </DesignButton>
+      </div>
+    </div>
+  );
 }
 
 const EMPTY_DATA_JSON = "[]";
@@ -286,6 +347,10 @@ export function GrowthAdminCategoryPageCard(props: {
             </span>
           </div>
 
+          <p className="text-xs text-muted-foreground">
+            Paste the complete model response into Page source. Its fenced MDX and JSON blocks will be separated automatically.
+          </p>
+
           <label className="block text-xs font-medium">
             Page source (growth-mdx-v1)
             <textarea
@@ -293,6 +358,20 @@ export function GrowthAdminCategoryPageCard(props: {
               placeholder="## What we found&#10;&#10;<ActionButton action=&quot;…&quot; />"
               value={mdx}
               onChange={(event) => setMdx(event.target.value)}
+              onPaste={(event) => {
+                const pasted = event.clipboardData.getData("text");
+                try {
+                  const parsed = parseGrowthPageResponse(pasted);
+                  if (parsed == null) return;
+                  event.preventDefault();
+                  setMdx(parsed.sourceMdx);
+                  setDataJson(parsed.evidenceDataJson);
+                  setError(null);
+                } catch (parseError) {
+                  event.preventDefault();
+                  setError(parseError instanceof Error ? parseError.message : String(parseError));
+                }
+              }}
             />
           </label>
           <label className="block text-xs font-medium">
@@ -309,12 +388,17 @@ export function GrowthAdminCategoryPageCard(props: {
               size="sm"
               disabled={mdx.trim().length === 0}
               onClick={async () => await run("growth-admin-category-page-save", async () => {
+                // Older editor builds allowed the model's complete fenced response to be saved as
+                // one Markdown code block. Normalize it on the next save as well as on paste, so an
+                // affected draft can be repaired without asking its author to reconstruct the two
+                // fields manually.
+                const parsed = parseGrowthPageResponse(mdx);
+                const savedMdx = parsed?.sourceMdx ?? mdx;
+                const savedDataJson = parsed?.evidenceDataJson ?? dataJson;
                 // The data field is hand-pasted JSON, so a bad paste and a rejected compile are the
                 // same class of problem to the author and belong in the same alert.
-                const data = JSON.parse(dataJson);
+                const data = JSON.parse(savedDataJson);
                 if (!Array.isArray(data)) throw new Error("Evidence data must be a JSON array.");
-                const savedMdx = mdx;
-                const savedDataJson = dataJson;
                 const saved = await saveGrowthAdminCategoryPageDraft(app, projectId, {
                   category,
                   sourceMdx: savedMdx,
@@ -326,6 +410,8 @@ export function GrowthAdminCategoryPageCard(props: {
                   // since, instead of overwriting their work.
                   expectedDraftUpdatedAtMillis: expectedDraftUpdatedAtMillis(seeded, page?.draft ?? null),
                 });
+                setMdx(savedMdx);
+                setDataJson(savedDataJson);
                 // This save wrote the editor's text, so anything typed while it was in flight is a
                 // delta on top of the version now stored: adopt it as the seed, or the refresh that
                 // follows would look like a colleague's edit and warn about a conflict that isn't one.
@@ -339,19 +425,6 @@ export function GrowthAdminCategoryPageCard(props: {
               })}
             >
               Save draft
-            </DesignButton>
-            <DesignButton
-              size="sm"
-              variant="outline"
-              disabled={page?.draft == null}
-              onClick={async () => await run("growth-admin-category-page-publish", async () => {
-                const version = page?.draft?.version;
-                if (version == null) throw new Error("Save a draft before publishing.");
-                await publishGrowthAdminCategoryPage(app, projectId, category, version);
-                await props.onPublishedChanged();
-              })}
-            >
-              Publish draft
             </DesignButton>
             <DesignButton
               size="sm"

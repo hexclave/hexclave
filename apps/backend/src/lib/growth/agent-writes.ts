@@ -11,7 +11,7 @@ import { GROWTH_ANALYSIS_TOPICS } from "./analysis-topics";
 import { getGrowthActionEventSlug, validateGrowthWorkflowSpec } from "./workflow-authoring";
 import { GROWTH_EVENT_TYPES } from "./workflows";
 import { assertGrowthCategory, assertGrowthCategoryScore, GROWTH_CATEGORIES, GROWTH_NOTE_KIND, LEGACY_GROWTH_CATEGORIES, normalizeGrowthTags, type GrowthCategory } from "./categories";
-import { compileGrowthDocument } from "./content-document";
+import { compileGrowthActionDocument, compileGrowthDocument } from "./content-document";
 import { withGrowthInterviewOtherOption } from "./interview-question-options";
 
 /**
@@ -588,16 +588,10 @@ export async function upsertGrowthReport(options: {
   const compiledDocument = options.document === undefined ? undefined : compileGrowthDocument(options.document);
   const resolvedItems = options.actionItems.map((item) => ({
     ...item,
-    compiledDocument: item.document === undefined ? undefined : compileGrowthDocument(item.document),
+    compiledDocument: item.document === undefined ? undefined : compileGrowthActionDocument(item.document),
     resolvedWatchedMetrics: resolveGrowthWatchedMetrics(item.typeId, item.watchedMetrics),
   }));
   const workflowManifestsByIndex = await validateActionItemWorkflowSpecs(options.tenancy, options.actionItems);
-  // `run_ads` pre-validation applies here too, not just to the standalone create path. This is in
-  // fact the PRIMARY way ad campaigns reach the database: the agent's save-report tool is documented
-  // as the preferred way to attach action items to a report, so validating only
-  // createGrowthAgentActionItem would leave the main route unchecked and let a malformed
-  // `ad_campaign` persist until a human hit "activate" and got an opaque failure. Sequential rather
-  // than concurrent because each call may hit Meta for account facts, and a report carries few items.
   for (const item of options.actionItems) {
     validateRunAdsActionItemPayload(item);
   }
@@ -614,12 +608,6 @@ export async function upsertGrowthReport(options: {
         contentMd: options.contentMd,
         sections: options.sections === undefined ? undefined : toJsonInput(options.sections),
         document: compiledDocument === undefined ? undefined : toJsonInput(compiledDocument),
-        // A report is the customer's the moment it is written. There is no staff review of reports:
-        // the human step happens earlier, on the interview questions (lib/growth/interview-release.ts),
-        // because that is the last point at which a person can still change what the report is built
-        // from. Deliberately NOT mirrored in `update` below — re-composing a run whose report staff
-        // had explicitly unpublished (their error-recovery escape hatch) must not silently re-publish it.
-        publishedAt: new Date(),
       },
       update: {
         title: options.title,
@@ -635,9 +623,6 @@ export async function upsertGrowthReport(options: {
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       select: { id: true, status: true },
     });
-    // Re-composing a report may replace its recommendations, but only while they are all still
-    // untouched proposals — once the user activated/dismissed anything, their decisions win and a
-    // re-POST only refreshes the report prose.
     if (existingItems.some((item) => item.status !== "proposed")) {
       return { reportId: report.id, actionItemIds: existingItems.map((item) => item.id) };
     }
@@ -717,21 +702,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * `run_ads` pre-validation for an agent-authored action item, run BEFORE any transaction touches the
- * DB — mirroring how `validateActionItemWorkflowSpecs` dry-compiles workflow source ahead of the
- * write, so a half-invalid `ad_campaign` never lands in the database.
- *
- * Shape-only for now. The full pre-validation — AdCampaignSpec shape, the "an agent may only propose
- * a generated/unbound image, never one a human bound" rule, and the live account-facts checks
- * (currency, budget floor/ceiling, granted scopes) — needs an ad platform connector, and lands with
- * the ad platform integration. Until then an agent-proposed `ad_campaign` is inert: nothing reads it
- * to create anything, so the only invariant worth enforcing is that it is a JSON object at all.
- *
- * Whatever replaces this must NOT import from `lib/ad-platforms/write/**`: this file backs the
- * growth-agent's machine-secret-authenticated routes (internal/growth-agent/**), and that directory
- * has to stay unreachable from them so a leaked shared secret can never reach a spend-capable path.
- */
 function validateRunAdsActionItemPayload(item: GrowthAgentActionItemInput): void {
   if (item.typeId !== "run_ads" || !isPlainObject(item.payload) || item.payload.ad_campaign === undefined) {
     return;
@@ -747,7 +717,7 @@ export async function createGrowthAgentActionItem(options: {
   briefId: string | undefined,
   item: GrowthAgentActionItemInput,
 }): Promise<{ actionItemId: string }> {
-  const compiledDocument = options.item.document === undefined ? undefined : compileGrowthDocument(options.item.document);
+  const compiledDocument = options.item.document === undefined ? undefined : compileGrowthActionDocument(options.item.document);
   const watchedMetrics = resolveGrowthWatchedMetrics(options.item.typeId, options.item.watchedMetrics);
   const workflowManifestsByIndex = await validateActionItemWorkflowSpecs(options.tenancy, [options.item]);
   const workflowManifest = workflowManifestsByIndex.get(0);
@@ -761,9 +731,6 @@ export async function createGrowthAgentActionItem(options: {
       if (brief == null) {
         throw new StatusError(404, "Brief not found.");
       }
-      // Skip-if-exists mirrors the findings dedup: the brief generator retrying its request must not
-      // stack duplicate recommendations onto the same brief. Standalone (brief-less) items have no
-      // natural idempotency key, so they are always created.
       const existing = await tx.growthActionItem.findFirst({
         where: { briefId: options.briefId, typeId: options.item.typeId, title: options.item.title },
         select: { id: true },
@@ -811,11 +778,6 @@ export async function completeGrowthInterviewAsAgent(options: { tenancy: Tenancy
     if (interview.status !== "pending" && interview.status !== "active") {
       throw new StatusError(409, `Interview is ${interview.status} and cannot be completed.`);
     }
-    // Deliberately does NOT touch the run status: flipping AWAITING_INTERVIEW -> COMPOSING_REPORT and
-    // dispatching the report phase is the orchestration tick's transition, and doing it here would
-    // race it. The boundary event below starts the workflow leg that drives that tick; it rides in
-    // the status-flip transaction (and only in the actual flip path — the idempotent
-    // already-completed return above cannot double-fire it).
     await tx.growthInterview.update({
       where: { id: interview.id },
       data: { status: "completed", completedAt: new Date() },

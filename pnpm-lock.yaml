@@ -726,12 +726,9 @@ importers:
 
   apps/growth-agent:
     dependencies:
-      '@agent-browser/sandbox':
+      '@agent-browser/eve':
         specifier: 0.32.4
-        version: 0.32.4(@vercel/sandbox@2.8.0)
-      '@vercel/sandbox':
-        specifier: 2.8.0
-        version: 2.8.0
+        version: 0.32.4(@vercel/sandbox@1.2.0)(eve@0.38.3(@electric-sql/pglite@0.3.2)(@opentelemetry/api@1.9.1)(@vercel/functions@3.9.0(@aws-sdk/credential-provider-web-identity@3.972.65)(ws@8.18.3))(ai@7.0.66(zod@4.4.3))(chokidar@4.0.3)(dotenv@17.4.2)(giget@2.0.0)(jiti@2.6.1)(mysql2@3.15.3)(vite@7.3.1(@types/node@24.13.3)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.44.0)(tsx@4.21.0)(yaml@2.9.0))(xml2js@0.6.2))
       ai:
         specifier: 7.0.66
         version: 7.0.66(zod@4.4.3)
@@ -2740,6 +2737,12 @@ importers:
   sdks/spec: {}
 
 packages:
+
+  '@agent-browser/eve@0.32.4':
+    resolution: {integrity: sha512-5SlD4icplGC86hsoReaIfUDN3ZQuL1un2LW/bA1cRy24Pv9SNj8cRukdKERRVxPaD3NSjZmi/84ytT8k2G+WzQ==}
+    engines: {node: '>=24.0.0'}
+    peerDependencies:
+      eve: '>=0.25.1'
 
   '@agent-browser/sandbox@0.32.4':
     resolution: {integrity: sha512-Fo1gTKrl7ueFh2+vZz49cPZ4gwYzrqQmD6+fA3bXmYmLpE/5JZQXDPOc83k5ydwLGRN3kxDVCh6GKF+OgUuf2w==}
@@ -10259,9 +10262,6 @@ packages:
   '@vercel/sandbox@1.2.0':
     resolution: {integrity: sha512-oq0d2xQuiDq8LyoZOZW+i+QmNkMQ0/ddEGHMukBsF+cxX7ohBEXOV/a0+SopBwEsKCjq9j55QFP56G3MU/iEjA==}
 
-  '@vercel/sandbox@2.8.0':
-    resolution: {integrity: sha512-1gmIXWgueeBBwBitVl1xqOsYmVv7xr7qX1qXeqwLGZTKGG1SkkpYkDzpWZ8LIDN0PmPGCqE6lvYao3zP8iz5uw==}
-
   '@vercel/speed-insights@1.0.12':
     resolution: {integrity: sha512-ZGQ+a7bcfWJD2VYEp2R1LHvRAMyyaFBYytZXsfnbOMkeOvzGNVxUL7aVUvisIrTZjXTSsxG45DKX7yiw6nq2Jw==}
     peerDependencies:
@@ -10368,9 +10368,6 @@ packages:
 
   '@workflow/serde@4.1.0':
     resolution: {integrity: sha512-pav4F2BoirECWR7Nf1TKt+2eETcBj7jj4cBefQ8VXQCA6NPkaKeLfj/zMgi+3zYV5ZIBT4GuUiphsj0/b9hPQQ==}
-
-  '@workflow/serde@4.1.0-beta.2':
-    resolution: {integrity: sha512-8kkeoQKLDaKXefjV5dbhBj2aErfKp1Mc4pb6tj8144cF+Em5SPbyMbyLCHp+BVrFfFVCBluCtMx+jjvaFVZGww==}
 
   '@xstate/fsm@1.6.5':
     resolution: {integrity: sha512-b5o1I6aLNeYlU/3CPlj/Z91ybk1gUsKT+5NAJI+2W4UjvS5KLG28K9v5UvNoFVjHV8PajVZ00RH3vnjyQO7ZAw==}
@@ -18802,9 +18799,17 @@ packages:
 
 snapshots:
 
-  '@agent-browser/sandbox@0.32.4(@vercel/sandbox@2.8.0)':
+  '@agent-browser/eve@0.32.4(@vercel/sandbox@1.2.0)(eve@0.38.3(@electric-sql/pglite@0.3.2)(@opentelemetry/api@1.9.1)(@vercel/functions@3.9.0(@aws-sdk/credential-provider-web-identity@3.972.65)(ws@8.18.3))(ai@7.0.66(zod@4.4.3))(chokidar@4.0.3)(dotenv@17.4.2)(giget@2.0.0)(jiti@2.6.1)(mysql2@3.15.3)(vite@7.3.1(@types/node@24.13.3)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.44.0)(tsx@4.21.0)(yaml@2.9.0))(xml2js@0.6.2))':
+    dependencies:
+      '@agent-browser/sandbox': 0.32.4(@vercel/sandbox@1.2.0)
+      eve: 0.38.3(@electric-sql/pglite@0.3.2)(@opentelemetry/api@1.9.1)(@vercel/functions@3.9.0(@aws-sdk/credential-provider-web-identity@3.972.65)(ws@8.18.3))(ai@7.0.66(zod@4.4.3))(chokidar@4.0.3)(dotenv@17.4.2)(giget@2.0.0)(jiti@2.6.1)(mysql2@3.15.3)(vite@7.3.1(@types/node@24.13.3)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.44.0)(tsx@4.21.0)(yaml@2.9.0))(xml2js@0.6.2)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - '@vercel/sandbox'
+
+  '@agent-browser/sandbox@0.32.4(@vercel/sandbox@1.2.0)':
     optionalDependencies:
-      '@vercel/sandbox': 2.8.0
+      '@vercel/sandbox': 1.2.0
 
   '@ai-sdk/gateway@3.0.41(zod@3.25.76)':
     dependencies:
@@ -29491,22 +29496,6 @@ snapshots:
     transitivePeerDependencies:
       - bare-abort-controller
 
-  '@vercel/sandbox@2.8.0':
-    dependencies:
-      '@vercel/oidc': 3.2.0
-      '@workflow/serde': 4.1.0-beta.2
-      async-retry: 1.3.3
-      jose: 6.2.3
-      jsonlines: 0.1.1
-      ms: 2.1.3
-      picocolors: 1.1.1
-      tar-stream: 3.1.7
-      undici: 7.29.0
-      xdg-app-paths: 5.1.0
-      zod: 4.4.3
-    transitivePeerDependencies:
-      - bare-abort-controller
-
   '@vercel/speed-insights@1.0.12(next@16.3.1(@babel/core@7.29.0)(@opentelemetry/api@1.9.1)(@types/node@20.17.6)(react-dom@19.2.3(react@19.2.3))(react@19.2.3))(react@19.2.3)':
     optionalDependencies:
       next: 16.3.1(@babel/core@7.29.0)(@opentelemetry/api@1.9.1)(@types/node@20.17.6)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
@@ -29677,8 +29666,6 @@ snapshots:
   '@webgpu/types@0.1.66': {}
 
   '@workflow/serde@4.1.0': {}
-
-  '@workflow/serde@4.1.0-beta.2': {}
 
   '@xstate/fsm@1.6.5': {}
 

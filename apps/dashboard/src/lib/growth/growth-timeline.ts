@@ -4,8 +4,8 @@ import type { GrowthStatus } from "./growth-types";
 
 // The overview's vertical lifecycle timeline, top to bottom. The steps are a UI-level regrouping of
 // the six lifecycle phases — "analyzing" and "analysis-failed" are both the analysis step (one
-// current, one failed), and everything from the first daily brief onwards lives in the final
-// "ongoing" step, which stays current forever (steady state has no "done").
+// current, one failed). Report is deliberately the final customer-facing onboarding step: ongoing
+// work belongs in the unlocked workspace, not in a setup timeline that claims it never finishes.
 //
 // "compute-metrics" and "integrations" are first-class timeline points (user decision 2026-08-06:
 // they must be their own steps before deep analysis, not blocks nested inside it). They are backed
@@ -13,7 +13,7 @@ import type { GrowthStatus } from "./growth-types";
 // rather than the positional phase index — with two fallbacks: before onboarding they render as
 // upcoming previews (the wire blocks don't exist yet), and for runs predating the phases (null
 // blocks on an onboarded workspace) they are "hidden" so old runs keep their original timeline.
-export const GROWTH_TIMELINE_STEP_IDS = ["set-up", "compute-metrics", "integrations", "analysis", "interview", "report", "ongoing"] as const;
+export const GROWTH_TIMELINE_STEP_IDS = ["set-up", "compute-metrics", "integrations", "analysis", "interview", "report"] as const;
 export type GrowthTimelineStepId = typeof GROWTH_TIMELINE_STEP_IDS[number];
 
 export type GrowthTimelineStepState = "done" | "current" | "failed" | "upcoming" | "hidden";
@@ -25,7 +25,7 @@ const PHASE_STEP_INDEX = new Map<GrowthPhase, number>([
   ["analysis-failed", 3],
   ["interview", 4],
   ["report-ready", 5],
-  ["steady-state", 6],
+  ["steady-state", 5],
 ]);
 
 const COMPUTE_METRICS_STEP_STATES = new Map<NonNullable<GrowthStatus["analysis"]["computeMetrics"]>["state"], GrowthTimelineStepState>([
@@ -94,7 +94,11 @@ export function getGrowthTimelineStepStates(status: GrowthStatus): Map<GrowthTim
     states.set("analysis", "current");
     states.set("interview", "hidden");
     states.set("report", "upcoming");
-    states.set("ongoing", "upcoming");
   }
+
+  // Opening the released report is the handoff from onboarding into the workspace. Until then the
+  // report remains the current step with its explicit call to action; afterwards settings can show
+  // the finite onboarding timeline as fully complete without inventing an endless seventh step.
+  if (status.latestReport?.readAtMillis != null) states.set("report", "done");
   return states;
 }

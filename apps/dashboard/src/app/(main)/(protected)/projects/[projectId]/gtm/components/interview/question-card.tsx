@@ -2,8 +2,7 @@
 
 import { DesignBadge, DesignChoiceChip } from "@/components/design-components";
 import { getPlanAnswer, type InterviewQuestionCard } from "@/lib/growth/growth-interview-chat";
-import type { GrowthInterviewQuestion } from "@/lib/growth/growth-types";
-import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { GROWTH_INTERVIEW_OTHER_OPTION_ID, type GrowthInterviewQuestion } from "@/lib/growth/growth-types";
 import { useState } from "react";
 import { InterviewComposer } from "./composer";
 
@@ -13,17 +12,18 @@ export type InterviewAnswerDraft = {
   skipped: boolean,
 };
 
-export const INTERVIEW_OTHER_OPTION_ID = "other";
 const LEGACY_OTHER_OPTION_ID = "__growth_other__";
 
 function isInterviewOtherOptionId(optionId: string): boolean {
-  return optionId === LEGACY_OTHER_OPTION_ID || optionId.toLowerCase() === INTERVIEW_OTHER_OPTION_ID;
+  return optionId === LEGACY_OTHER_OPTION_ID || optionId.toLowerCase() === GROWTH_INTERVIEW_OTHER_OPTION_ID;
 }
 
-export function interviewOptionsWithOther(options: InterviewQuestionCard["options"]): InterviewQuestionCard["options"] {
-  const existing = options.find((option) => option.id.toLowerCase() === INTERVIEW_OTHER_OPTION_ID);
+export function interviewOptionsWithOther(options: InterviewQuestionCard["options"], allowOther = true): InterviewQuestionCard["options"] {
+  const existing = options.find((option) => option.id.toLowerCase() === GROWTH_INTERVIEW_OTHER_OPTION_ID);
+  const ordinaryOptions = options.filter((option) => option.id.toLowerCase() !== GROWTH_INTERVIEW_OTHER_OPTION_ID);
+  if (!allowOther) return ordinaryOptions;
   return [
-    ...options.filter((option) => option.id.toLowerCase() !== INTERVIEW_OTHER_OPTION_ID),
+    ...ordinaryOptions,
     {
       id: existing?.id ?? LEGACY_OTHER_OPTION_ID,
       label: "Other",
@@ -58,21 +58,26 @@ export function InterviewQuestionCardView(props: {
 }) {
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [freeText, setFreeText] = useState("");
-  const options = interviewOptionsWithOther(props.card.options);
+  // The stored plan is authoritative for whether staff enabled the free-text escape hatch. When a
+  // legacy transcript cannot be matched to a plan row, retain the old always-Other render fallback.
+  const allowOther = props.planQuestion == null
+    ? true
+    : props.planQuestion.options.some((option) => isInterviewOtherOptionId(option.id));
+  const options = interviewOptionsWithOther(props.card.options, allowOther);
   const otherOptionId = options.find((option) => isInterviewOtherOptionId(option.id))?.id
-    ?? throwErr("Interview options must include Other after normalization.");
+    ?? null;
 
   const planAnswer = props.planQuestion == null ? null : getPlanAnswer(props.planQuestion);
   const answeredOptionIds = props.planQuestion?.answerOptionIds ?? [];
   const shownSelectedIds = props.interactive
     ? selectedOptionIds
-    : planAnswer?.freeText != null && !answeredOptionIds.some(isInterviewOtherOptionId)
+    : otherOptionId != null && planAnswer?.freeText != null && !answeredOptionIds.some(isInterviewOtherOptionId)
       ? [...answeredOptionIds, otherOptionId]
       : answeredOptionIds;
 
   const toggleOption = (optionId: string) => {
-    const deselectingOther = optionId === otherOptionId && selectedOptionIds.includes(otherOptionId);
-    const replacingOtherInSingleChoice = props.card.kind === "single" && optionId !== otherOptionId;
+    const deselectingOther = otherOptionId != null && optionId === otherOptionId && selectedOptionIds.includes(otherOptionId);
+    const replacingOtherInSingleChoice = props.card.kind === "single" && (otherOptionId == null || optionId !== otherOptionId);
     if (deselectingOther || replacingOtherInSingleChoice) setFreeText("");
     setSelectedOptionIds((previous) => {
       return props.card.kind === "single"
@@ -82,7 +87,7 @@ export function InterviewQuestionCardView(props: {
   };
 
   const trimmedFreeText = freeText.trim();
-  const otherSelected = selectedOptionIds.includes(otherOptionId);
+  const otherSelected = otherOptionId != null && selectedOptionIds.includes(otherOptionId);
   const canConfirm = otherSelected ? trimmedFreeText.length > 0 : selectedOptionIds.length > 0;
 
   return (

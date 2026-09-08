@@ -24,6 +24,8 @@ export class SessionTimeoutError extends Error {}
 
 export class SessionStreamLostError extends Error {}
 
+export class SessionStreamLimitError extends Error {}
+
 
 function isStreamDisconnectError(error: unknown): boolean {
   if (error instanceof DOMException) return error.name === "AbortError";
@@ -61,6 +63,13 @@ export type FollowSessionOptions = {
   readonly reconnect?: SessionStreamReconnectPolicy,
   readonly cancelWaitMs?: number,
   readonly isAlreadyStopped?: () => boolean,
+  /**
+   * Maximum serialized bytes this follower will accept before cancelling the session. This is a
+   * logical stream budget rather than an allocated-disk measurement, but it is enforced while the
+   * stream is live and therefore stops cumulative snapshot events before they can grow without
+   * bound in either the local or hosted workflow store.
+   */
+  readonly maxStreamBytes?: number,
 };
 
 
@@ -80,6 +89,7 @@ export async function* followSessionEvents(options: FollowSessionOptions): Async
   let openAttempts = 0;
   let delayMs = policy.baseDelayMs;
   let sessionSettled = false;
+  let streamBytes = 0;
 
   try {
     while (true) {
@@ -114,6 +124,14 @@ export async function* followSessionEvents(options: FollowSessionOptions): Async
           if (readResult.done) break;
           consumed += 1;
           deliveredThisConnection = true;
+          if (options.maxStreamBytes !== undefined) {
+            streamBytes += Buffer.byteLength(JSON.stringify(readResult.value), "utf8");
+            if (streamBytes > options.maxStreamBytes) {
+              throw new SessionStreamLimitError(
+                `${label} exceeded its ${options.maxStreamBytes}-byte event-stream budget: session=${session.id} consumed=${streamBytes}`,
+              );
+            }
+          }
           if (readResult.value.type === "session.completed" || readResult.value.type === "session.failed") {
             sessionSettled = true;
           }

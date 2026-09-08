@@ -4,6 +4,7 @@ import {
   computeGrowthAnalysisFingerprint,
   getComputeMetricsDates,
   GROWTH_PHASE_DAG,
+  GROWTH_PHASE_MAX_ATTEMPTS,
   GROWTH_PHASE_STUCK_TIMEOUT_MS,
   isGrowthAnalysisResting,
   isGrowthRollupDateWithinWindow,
@@ -27,6 +28,12 @@ describe("GROWTH_PHASE_DAG", () => {
     expect(GROWTH_PHASE_DAG.immediatePhaseKeyPrefix).toBe("analysis:");
     expect(GROWTH_PHASE_DAG.afterImmediatePhaseKey).toBe("interview-questions");
     expect(GROWTH_PHASE_DAG.interviewGatedPhaseKey).toBe("report");
+  });
+});
+
+describe("GROWTH_PHASE_MAX_ATTEMPTS", () => {
+  it("allows one automatic retry before requiring a manual retry", () => {
+    expect(GROWTH_PHASE_MAX_ATTEMPTS).toBe(2);
   });
 });
 

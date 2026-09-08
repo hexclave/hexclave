@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { withGrowthInterviewOtherOption } from "./interview-question-options";
+import { normalizeGrowthInterviewOptionalOther, withGrowthInterviewOtherOption } from "./interview-question-options";
 
-/**
- * Both writers of an interview question's options apply this, and answer validation depends on the
- * result — a question without an "other" option is one the customer cannot answer in their own
- * words. Worth pinning directly because the failure is silent: the plan still saves, still renders,
- * and only the escape hatch quietly disappears.
- */
 describe("withGrowthInterviewOtherOption", () => {
   it("appends the escape hatch when the writer left it out", () => {
     expect(withGrowthInterviewOtherOption([{ id: "signups", label: "More signups" }])).toEqual([
@@ -39,5 +33,23 @@ describe("withGrowthInterviewOtherOption", () => {
     ]);
     expect(normalized.filter((option) => option.id === "other")).toHaveLength(1);
     expect(normalized).toHaveLength(1);
+  });
+});
+
+describe("normalizeGrowthInterviewOptionalOther", () => {
+  it("preserves an explicit staff choice to omit Other", () => {
+    expect(normalizeGrowthInterviewOptionalOther([{ id: "signups", label: "More signups" }])).toEqual([
+      { id: "signups", label: "More signups", description: undefined },
+    ]);
+  });
+
+  it("normalizes Other when staff keep it enabled", () => {
+    expect(normalizeGrowthInterviewOptionalOther([
+      { id: "Other", label: "Custom", description: "Explain" },
+      { id: "signups", label: "More signups" },
+    ])).toEqual([
+      { id: "signups", label: "More signups", description: undefined },
+      { id: "other", label: "Other", description: "Explain" },
+    ]);
   });
 });

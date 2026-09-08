@@ -11,7 +11,7 @@ import {
 } from "@/lib/growth/growth-interview-chat";
 import { getGrowthDemoPhase } from "@/lib/growth/growth-mode";
 import type { GrowthInterviewQuestion } from "@/lib/growth/growth-types";
-import { ArrowRightIcon, ArrowsClockwiseIcon, ChatCircleDotsIcon, CheckCircleIcon, HourglassIcon, SkipForwardIcon } from "@phosphor-icons/react";
+import { ArrowRightIcon, ChatCircleDotsIcon, CheckCircleIcon, HourglassIcon, SkipForwardIcon } from "@phosphor-icons/react";
 import { useSearchParams } from "next/navigation";
 import { PageLayout } from "../../page-layout";
 import { useAdminApp, useProjectId } from "../../use-admin-app";
@@ -29,10 +29,10 @@ export default function PageClient() {
 }
 
 /**
- * Owns the interview chat state so the page HEADER can host the skip/retake actions. They used to
+ * Owns the interview chat state so the page header can host the skip action. It used to
  * sit in a row below the transcript, but the transcript grows by a question-and-answer pair every
- * turn, which pushed them further off-screen the longer the interview ran — by the last question
- * they were several screens down. The header keeps them at a fixed, findable place.
+ * turn, which pushed it further off-screen the longer the interview ran. The header keeps it at a
+ * fixed, findable place.
  *
  * The "start/continue the interview" button deliberately stays at the bottom: it is the primary
  * flow action and belongs where the reader's eye already is, at the end of the transcript.
@@ -44,8 +44,8 @@ function InterviewPage() {
   const { demo } = useGrowthStatus();
   const demoPhase = getGrowthDemoPhase(projectId, searchParams.get("demoPhase"));
   const chat = useGrowthInterviewChat({ app, demo, demoPhase });
-  // Only offer them once there is an interview in progress: while loading, erroring, not-ready, or
-  // already finished, neither action has anything to act on.
+  // Only offer skipping once there is an interview in progress: while loading, erroring, not-ready,
+  // or already finished, it has nothing to act on.
   const actionable = chat.base.status === "loaded" && chat.view != null && !chat.view.completed;
 
   return (
@@ -53,12 +53,7 @@ function InterviewPage() {
       title="Growth Interview"
       description="A short interview so your report fits your business"
       actions={actionable
-        ? (
-          <>
-            <SkipInterviewDialog onConfirm={async () => await chat.skipAll()} disabled={chat.turn.status === "streaming"} />
-            <RetakeInterviewDialog onConfirm={async () => await chat.retake()} disabled={chat.turn.status === "streaming"} />
-          </>
-        )
+        ? <SkipInterviewDialog onConfirm={async () => await chat.skipAll()} disabled={chat.turn.status === "streaming"} />
         : undefined}
     >
       <InterviewPageBody chat={chat} />
@@ -187,41 +182,6 @@ function SkipInterviewDialog(props: { onConfirm: () => Promise<void>, disabled: 
   );
 }
 
-function RetakeInterviewDialog(props: { onConfirm: () => Promise<void>, disabled: boolean }) {
-  return (
-    <DesignDialog
-      trigger={
-        <DesignButton variant="ghost" size="sm" disabled={props.disabled}>
-          <ArrowsClockwiseIcon className="mr-1.5 h-4 w-4" />
-          Start over with new questions
-        </DesignButton>
-      }
-      size="md"
-      icon={ArrowsClockwiseIcon}
-      title="Generate a new set of questions?"
-      description="The analysis writes a fresh question plan from the research it already did."
-      footer={
-        <>
-          <DesignDialogClose asChild>
-            <DesignButton variant="secondary" size="sm">Keep these questions</DesignButton>
-          </DesignDialogClose>
-          <DesignDialogClose asChild>
-            <DesignButton variant="destructive" size="sm" onClick={async () => await props.onConfirm()}>
-              Generate new questions
-            </DesignButton>
-          </DesignDialogClose>
-        </>
-      }
-    >
-      <p className="text-sm text-muted-foreground">
-        Your current questions and answers are discarded and cannot be recovered. Everything the analysis
-        found about your website and data is kept, so this only re-runs the question-writing step — it takes
-        a moment, and the interview will show as not ready until the new questions arrive.
-      </p>
-    </DesignDialog>
-  );
-}
-
 function InterviewPageBody(props: { chat: UseGrowthInterviewChatResult }) {
   const { chat } = props;
   const demo = chat.demo;
@@ -290,7 +250,7 @@ function InterviewPageBody(props: { chat: UseGrowthInterviewChatResult }) {
         <CompletionPanel skipped={skipped} answeredCount={countAnsweredQuestions(questions)} totalCount={questions.length} />
       )}
       {/*
-        Skip/retake now live in the page header (see InterviewPage); only the primary flow action
+        Skip now lives in the page header (see InterviewPage); only the primary flow action
         stays here, at the end of the transcript the reader just finished. Rendered as its own
         conditional rather than a wrapper that can come out empty — an empty child would still eat
         one of the parent's gap-5 rows and leave a phantom gap under the transcript.

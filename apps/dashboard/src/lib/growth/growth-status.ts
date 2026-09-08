@@ -28,6 +28,11 @@ export function getGrowthPhase(status: GrowthStatus): GrowthPhase {
   return "steady-state";
 }
 
+/** The customer unlocks the workspace by opening the first released report. */
+export function growthWorkspaceIsUnlocked(status: GrowthStatus): boolean {
+  return status.release.state === "released" && status.latestReport?.readAtMillis != null;
+}
+
 /**
  * Poll quickly while backend analysis phases advance, then slowly through the two waits the customer
  * cannot end themselves: their question plan being finalized before the interview opens (the

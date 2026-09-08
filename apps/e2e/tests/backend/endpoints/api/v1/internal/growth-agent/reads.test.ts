@@ -21,7 +21,11 @@ async function createOnboardedGrowthProject() {
   const onboardingResponse = await niceBackendFetch("/api/latest/internal/growth/onboarding", {
     method: "POST",
     accessType: "admin",
-    body: { website_url: "https://example.com", company_summary: "An example company." },
+    body: {
+      website_url: "https://example.com",
+      company_summary: "An example company.",
+      additional_notes: "Focus on self-serve adoption and avoid paid acquisition recommendations.",
+    },
   });
   if (onboardingResponse.status !== 200) {
     throw new Error(`Growth onboarding failed: ${JSON.stringify(onboardingResponse.body)}`);
@@ -88,6 +92,7 @@ describe("growth-agent project-context", { timeout: 90_000 }, () => {
       onboarding: {
         website_url: "https://example.com/",
         company_summary: "An example company.",
+        additional_notes: "Focus on self-serve adoption and avoid paid acquisition recommendations.",
       },
       domains: [],
       enabled_apps: expect.arrayContaining(["gtm"]),
@@ -120,6 +125,11 @@ describe("growth-agent context-bundle", { timeout: 90_000 }, () => {
           "daily_metrics": [],
           "findings": [],
           "interview_answers": [],
+          "onboarding": {
+            "additional_notes": "Focus on self-serve adoption and avoid paid acquisition recommendations.",
+            "company_summary": "An example company.",
+            "website_url": "https://example.com/",
+          },
           "recent_briefs": [],
           "report_summary": null,
           "truncated": false,

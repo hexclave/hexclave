@@ -73,6 +73,12 @@ describe("growth-analysis source", () => {
   test("uses per-iteration step ids for the advance loop", () => {
     expect(GROWTH_ANALYSIS_WORKFLOW_SOURCE).toContain('step.run("advance-" + round');
   });
+
+  test("keeps each checkpoint to one four-minute long-poll", () => {
+    expect(GROWTH_ANALYSIS_WORKFLOW_SOURCE.match(/analysis\/wait/g)).toHaveLength(1);
+    expect(GROWTH_ANALYSIS_WORKFLOW_SOURCE).toContain("timeout_ms: 240000");
+    expect(GROWTH_ANALYSIS_WORKFLOW_SOURCE).not.toContain("for (let poll = 0; poll < 2; poll++)");
+  });
 });
 
 describe("growth-daily-brief source", () => {

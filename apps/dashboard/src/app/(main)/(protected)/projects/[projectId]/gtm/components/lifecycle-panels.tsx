@@ -1,13 +1,13 @@
 "use client";
 
-import { DesignAlert, DesignBadge, DesignButton, DesignCard, DesignInput, DesignMetricDelta } from "@/components/design-components";
+import { DesignAlert, DesignBadge, DesignButton, DesignCard, DesignInput } from "@/components/design-components";
 import { Link } from "@/components/link";
 import { useRouter } from "@/components/router";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui";
 import { ActionDialog } from "@/components/ui/action-dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { TooltipPortal } from "@radix-ui/react-tooltip";
 import { useGrowthStatus } from "@/lib/growth/growth-data";
-import { formatGrowthBriefDateHeadline } from "@/lib/growth/growth-format";
 import { completeGrowthOnboarding, resolveGrowthIntegrations, restartGrowthOnboarding, retryGrowthAnalysis } from "@/lib/growth/growth-api";
 import { getGrowthComputeMetricsTickerFrame, GROWTH_COMPUTE_METRICS_TICK_MILLIS } from "@/lib/growth/growth-compute-metrics-ticker";
 import { getGrowthTimelineStepStates, type GrowthTimelineStepState } from "@/lib/growth/growth-timeline";
@@ -15,12 +15,10 @@ import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import type { GrowthAnalysisStep, GrowthComputeMetrics, GrowthIntegrations, GrowthStatus } from "@/lib/growth/growth-types";
 import {
   ArrowRightIcon,
-  ArticleIcon,
   CheckCircleIcon,
   CircleIcon,
   CircleNotchIcon,
   HourglassMediumIcon,
-  NewspaperIcon,
   PlugsConnectedIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
@@ -63,7 +61,6 @@ export function GrowthLifecycleTimeline(props: { status: GrowthStatus }) {
         <AnalysisStep status={props.status} state={stepState("analysis")} />
         <InterviewStep status={props.status} state={stepState("interview")} />
         <ReportStep status={props.status} state={stepState("report")} />
-        <OngoingStep status={props.status} state={stepState("ongoing")} />
       </GrowthTimeline>
     </div>
   );
@@ -107,6 +104,7 @@ function OnboardingForm() {
   const { demo, refresh } = useGrowthStatus();
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [companySummary, setCompanySummary] = useState("");
+  const [additionalNotes, setAdditionalNotes] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -136,6 +134,17 @@ function OnboardingForm() {
             onChange={(event) => setCompanySummary(event.target.value)}
           />
         </div>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-medium" htmlFor="growth-onboarding-additional-notes">Additional notes <span className="font-normal text-muted-foreground">(optional)</span></label>
+          <Textarea
+            id="growth-onboarding-additional-notes"
+            maxLength={10_000}
+            placeholder="Share goals, constraints, competitors, or anything else the analysis should consider"
+            value={additionalNotes}
+            onChange={(event) => setAdditionalNotes(event.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">These notes are provided to the AI as context for its analysis.</p>
+        </div>
         {submitError != null && <DesignAlert variant="error">{submitError}</DesignAlert>}
         <div className="flex items-center gap-3">
           {/* In demo mode the underlying project (the internal project) doesn't actually have the
@@ -153,6 +162,7 @@ function OnboardingForm() {
                 await completeGrowthOnboarding(app, {
                   websiteUrl,
                   companySummary: companySummary.trim().length === 0 ? null : companySummary.trim(),
+                  additionalNotes: additionalNotes.trim().length === 0 ? null : additionalNotes.trim(),
                 });
               } catch (error) {
                 setSubmitError(error instanceof Error ? error.message : String(error));
@@ -169,12 +179,15 @@ function OnboardingForm() {
     </DesignCard>
   );
 }
-function RestartOnboardingButton() {
+export function RestartOnboardingButton() {
   const app = useAdminApp();
-  const { demo, refresh } = useGrowthStatus();
+  const { data, demo, refresh } = useGrowthStatus();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  if (demo) return null;
+  // This is a page-level escape hatch, not part of the setup step itself. Keep it hidden in the same
+  // states where the lifecycle previously omitted it: while status is unavailable, before onboarding
+  // completes, after the workspace is released, and for immutable demo fixtures.
+  if (demo || data.status !== "loaded" || !data.value.onboarding.completed || data.value.latestReport != null) return null;
 
   return (
     <>
@@ -205,7 +218,6 @@ function SetUpStep(props: { status: GrowthStatus, state: GrowthTimelineStepState
         state="done"
         title="Set up"
         summary={props.status.onboarding.websiteUrl ?? undefined}
-        trailing={<RestartOnboardingButton />}
       />
     );
   }
@@ -778,6 +790,7 @@ function ReportStep(props: { status: GrowthStatus, state: GrowthTimelineStepStat
         <GrowthTimelineStep
           state="done"
           title="Report"
+          isLast
           summary={
             <>
               {report != null ? `Created ${new Date(report.createdAtMillis).toLocaleDateString()}` : null}
@@ -800,7 +813,7 @@ function ReportStep(props: { status: GrowthStatus, state: GrowthTimelineStepStat
       // spinner sets the expectation that something resolves while you watch, and this does not.
       if (report == null) {
         return (
-          <GrowthTimelineStep state="current" title="Report" subtitle="Writing your report from the analysis and your interview answers. Takes ~4 mins.">
+          <GrowthTimelineStep state="current" title="Report" isLast subtitle="Writing your report from the analysis and your interview answers. Takes ~4 mins.">
             <DesignCard>
               <div className="flex items-start gap-3">
                 <HourglassMediumIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground/70" />
@@ -815,6 +828,7 @@ function ReportStep(props: { status: GrowthStatus, state: GrowthTimelineStepStat
         <GrowthTimelineStep
           state="current"
           title="Report"
+          isLast
           subtitle={`Created ${new Date(report.createdAtMillis).toLocaleDateString()}`}
           badge={triggerLabel != null ? <DesignBadge label={triggerLabel} color="blue" size="sm" /> : undefined}
         >
@@ -827,7 +841,7 @@ function ReportStep(props: { status: GrowthStatus, state: GrowthTimelineStepStat
                   <> It came with {status.counts.suggestedActions} suggested {status.counts.suggestedActions === 1 ? "action" : "actions"}.</>
                 )}
               </p>
-              <div><GoToButton href={withQuery(`/projects/${projectId}/gtm/report`)}>Read the report</GoToButton></div>
+              <div><GoToButton href={withQuery(`/projects/${projectId}/gtm/report`)}>View report</GoToButton></div>
             </div>
           </DesignCard>
         </GrowthTimelineStep>
@@ -839,6 +853,7 @@ function ReportStep(props: { status: GrowthStatus, state: GrowthTimelineStepStat
         <GrowthTimelineStep
           state="upcoming"
           title="Report"
+          isLast
           subtitle="A full growth report with what we found and what to do about it."
         />
       );
@@ -848,68 +863,6 @@ function ReportStep(props: { status: GrowthStatus, state: GrowthTimelineStepStat
       return throwErr("The report timeline step is never hidden");
     }
   }
-}
-
-function OngoingStep(props: { status: GrowthStatus, state: GrowthTimelineStepState }) {
-  const { status, state } = props;
-  const projectId = useProjectId();
-  const withQuery = useGrowthHref();
-  if (state !== "current") {
-    // The report exists exactly from the report-ready phase onwards, so its presence means the first
-    // daily brief is what's being waited on — worth saying explicitly.
-    return (
-      <GrowthTimelineStep
-        state="upcoming"
-        title="Ongoing growth"
-        isLast
-        subtitle={status.latestReport != null
-          ? "Daily briefs, one-click actions, and automations. Your first brief arrives tomorrow morning — it compares signups, returning users, transactions, and emails against the day before."
-          : "Daily briefs, one-click actions, and automations — this step never ends."}
-      />
-    );
-  }
-  const brief = status.latestBrief;
-  const counts = status.counts;
-  return (
-    <GrowthTimelineStep
-      state="current"
-      title="Ongoing growth"
-      subtitle="Growth keeps running in the background — this step never ends"
-      isLast
-    >
-      {brief != null && (
-        <DesignCard
-          title="Latest brief"
-          subtitle={formatGrowthBriefDateHeadline(brief.date)}
-          icon={NewspaperIcon}
-          gradient="cyan"
-          actions={<ArticleIcon className="size-4 text-muted-foreground" />}
-        >
-          <div className="flex flex-col gap-4">
-            <p className="text-sm text-muted-foreground">
-              Your daily comparison of signups, returning users, transactions, and emails is ready — everything
-              measured against the day before (UTC).
-            </p>
-            <div>
-              <GoToButton href={withQuery(`/projects/${projectId}/gtm/briefs/${brief.id}`)}>Read the brief</GoToButton>
-            </div>
-          </div>
-        </DesignCard>
-      )}
-      {/*
-        The status payload carries no per-metric brief values (those live in the brief's own content),
-        so this strip shows the workspace counts — the only real numbers in the snapshot — in the shared
-        metric-tile component. `delta: null` renders the honest "no comparison" chip: counts have no
-        previous-window baseline in the snapshot, and faking one here would contradict the brief.
-        Deliberately just the two action counts: an automations count would need a second fetch (the
-        workflows listing) on every overview load.
-      */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <DesignMetricDelta label="Suggested actions" value={counts.suggestedActions} delta={null} />
-        <DesignMetricDelta label="Active actions" value={counts.activeActions} delta={null} />
-      </div>
-    </GrowthTimelineStep>
-  );
 }
 
 /**

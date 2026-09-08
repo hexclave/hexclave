@@ -40,4 +40,15 @@ describe("getGrowthOverviewRefreshVersion", () => {
 
     expect(getGrowthOverviewRefreshVersion(status)).toBe(getGrowthOverviewRefreshVersion(polled));
   });
+
+  it("changes when staff releases the scored workspace", () => {
+    const preparing = buildGrowthDemoStatus("report-ready", GROWTH_DEMO_NOW_MILLIS);
+    const released = {
+      ...preparing,
+      release: { state: "released" },
+    } satisfies GrowthStatus;
+
+    expect(preparing.release.state).toBe("preparing");
+    expect(getGrowthOverviewRefreshVersion(preparing)).not.toBe(getGrowthOverviewRefreshVersion(released));
+  });
 });

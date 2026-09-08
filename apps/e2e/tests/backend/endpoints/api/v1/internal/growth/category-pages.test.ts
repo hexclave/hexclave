@@ -6,6 +6,7 @@ import { GROWTH_AGENT_AUTH, asGrowthStaff, createGrowthProject, unlockGrowthWork
 const ADMIN_BASE = "/api/latest/internal/growth/admin";
 const GROWTH_BASE = "/api/latest/internal/growth";
 const AGENT_BASE = "/api/latest/internal/growth-agent";
+const CATEGORIES = ["product", "reach", "conversion", "retention", "revenue"] as const;
 
 // Growth fixtures seed sandbox-backed workflows during onboarding and can land around 60s under
 // full-suite load, so default-timeout tests need 90s of headroom.
@@ -119,6 +120,66 @@ describe("internal Growth stage pages", { timeout: 90_000 }, () => {
 
     const afterTakedown = await niceBackendFetch(`${GROWTH_BASE}/overview`, { accessType: "admin" });
     expect(customerCategoryPages(afterTakedown.body)).toEqual([]);
+  });
+
+  it("publishes all five stage drafts atomically", { timeout: 180_000 }, async ({ expect }) => {
+    const { projectId } = await createFixture();
+    const reportList = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports?project_id=${projectId}`, { accessType: "client" }));
+    const reports = typeof reportList.body === "object" && reportList.body != null && "reports" in reportList.body && Array.isArray(reportList.body.reports)
+      ? reportList.body.reports
+      : [];
+    const reportId = reports.find((report): report is { id: string } => typeof report === "object" && report != null && "id" in report && typeof report.id === "string")?.id;
+    if (reportId == null) throw new Error("The atomic stage-page fixture created no report to release.");
+    const unpublished = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}`, {
+      accessType: "client",
+      method: "PATCH",
+      body: { target_project_id: projectId, action: "unpublish" },
+    }));
+    expect(unpublished.status).toBe(200);
+
+    const drafts: { category: typeof CATEGORIES[number], version: number }[] = [];
+    for (const category of CATEGORIES) {
+      const saved = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/category-pages`, {
+        accessType: "client",
+        method: "PUT",
+        body: {
+          target_project_id: projectId,
+          category,
+          document: { format: "growth-mdx-v1", source_mdx: `## ${category} plan`, data: [] },
+          expected_draft_updated_at_millis: null,
+        },
+      }));
+      expect(saved).toMatchObject({ status: 200, body: { category, status: "draft" } });
+      const version = typeof saved.body === "object" && saved.body != null && "version" in saved.body ? saved.body.version : null;
+      if (typeof version !== "number") throw new Error(`Saving the ${category} draft returned no version.`);
+      drafts.push({ category, version });
+    }
+
+    const staleRequest = drafts.map((draft) => draft.category === "conversion" ? { ...draft, version: draft.version + 100 } : draft);
+    const rejected = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/category-pages/publish`, {
+      accessType: "client",
+      method: "PUT",
+      body: { target_project_id: projectId, drafts: staleRequest, report_id: reportId },
+    }));
+    expect(rejected.status).toBe(409);
+    const afterRejectedRelease = await niceBackendFetch(`${GROWTH_BASE}/overview`, { accessType: "admin" });
+    // The failed transaction leaves the first report behind the release gate, so the customer still
+    // cannot open the workspace at all; this is stronger than merely returning no stage pages.
+    expect(afterRejectedRelease.status).toBe(409);
+
+    const published = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/category-pages/publish`, {
+      accessType: "client",
+      method: "PUT",
+      body: { target_project_id: projectId, drafts, report_id: reportId },
+    }));
+    expect(published).toMatchObject({
+      status: 200,
+      body: { pages: CATEGORIES.map((category) => expect.objectContaining({ category, status: "published" })) },
+    });
+    const afterRelease = await niceBackendFetch(`${GROWTH_BASE}/overview`, { accessType: "admin" });
+    expect(afterRelease.status).toBe(200);
+    expect(customerCategoryPages(afterRelease.body).map((page) => page.category).sort()).toEqual([...CATEGORIES].sort());
+    expect(afterRelease.body).toMatchObject({ latest_report: { id: reportId } });
   });
 
   it("carries a draft's referenced actions so staff can preview its buttons", async ({ expect }) => {

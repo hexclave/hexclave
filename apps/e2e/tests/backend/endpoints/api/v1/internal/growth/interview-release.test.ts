@@ -10,7 +10,7 @@ const AGENT_BASE = "/api/latest/internal/growth-agent";
 /**
  * The release gate: an interview's question plan is written by the analysis but withheld from the
  * customer until a Hexclave staff member has read it. This is the ONLY human gate left in the growth
- * lifecycle — reports publish on write (report-release.test.ts).
+ * lifecycle; report review and release are covered separately in report-release.test.ts.
  *
  * Seeding "plays the agent" with the shared machine secret: question plans have no customer-facing
  * write API, so that is the only way one comes into existence. The run is deliberately left RUNNING
@@ -30,6 +30,9 @@ type AdminInterviewQuestion = {
   prompt: string,
   allow_skip: boolean,
   options: { id: string, label: string, description: string | null }[],
+  answer_option_ids: string[] | null,
+  answer_free_text: string | null,
+  answered_at_millis: number | null,
 };
 
 type AdminInterviewBody = {
@@ -161,6 +164,11 @@ describe("internal Growth interview release", () => {
       });
       expect((held.body as AdminInterviewBody).interview.questions.map((question) => question.question_key))
         .toEqual(["primary-goal", "team-size"]);
+      expect((held.body as AdminInterviewBody).interview.questions[0]).toMatchObject({
+        answer_option_ids: null,
+        answer_free_text: null,
+        answered_at_millis: null,
+      });
 
       const released = await staffCalls.release(projectId);
       expect(released.status).toBe(200);
@@ -210,8 +218,8 @@ describe("internal Growth interview release", () => {
       prompt: "Which outcome matters most for the next quarter?",
       allow_skip: true,
     });
-    // The customer's copy always gains the "Other" escape hatch, edited or not.
-    expect(customer.body.questions[0].options.map((option) => option.id)).toEqual(["signups", "revenue", "other"]);
+    // Staff omitted Other in the edit, so the released customer copy preserves that choice.
+    expect(customer.body.questions[0].options.map((option) => option.id)).toEqual(["signups", "revenue"]);
   });
 
   it("refuses every edit once the plan is the customer's", { timeout: 300_000 }, async ({ expect }) => {

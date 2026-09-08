@@ -28,7 +28,7 @@ export type GrowthDocumentInline =
   | { type: "break" }
   | { type: "link", url: string, children: GrowthDocumentInline[] };
 
-export type GrowthDocumentComponentName = "Metric" | "TrendChart" | "ComparisonChart" | "BreakdownChart" | "Evidence" | "Hypothesis" | "Experiment" | "DataGap" | "ActionButton";
+export type GrowthDocumentComponentName = "Metric" | "TrendChart" | "ComparisonChart" | "BreakdownChart" | "Evidence" | "Hypothesis" | "Experiment" | "DataGap" | "ActionButton" | "Finding" | "Recommendation" | "MeasurementPlan";
 
 export type GrowthDocumentBlock =
   | { type: "heading", level: 2 | 3, children: GrowthDocumentInline[] }
@@ -233,7 +233,8 @@ function assertOnlyAttributes(name: string, attributes: Map<string, string | nul
 function convertComponent(node: MdxJsxFlowElement): GrowthDocumentBlock {
   const name = node.name;
   if (name !== "Metric" && name !== "TrendChart" && name !== "ComparisonChart" && name !== "BreakdownChart"
-    && name !== "Evidence" && name !== "Hypothesis" && name !== "Experiment" && name !== "DataGap" && name !== "ActionButton") {
+    && name !== "Evidence" && name !== "Hypothesis" && name !== "Experiment" && name !== "DataGap" && name !== "ActionButton"
+    && name !== "Finding" && name !== "Recommendation" && name !== "MeasurementPlan") {
     invalidDocument(`component ${name ?? "fragment"} is not allowed.`);
   }
   const attributes = readAttributes(node);
@@ -253,6 +254,11 @@ function convertComponent(node: MdxJsxFlowElement): GrowthDocumentBlock {
     // references, so customer-facing copy cannot drift from what the action does.
     if (node.children.length > 0) invalidDocument("ActionButton must be self-closing.");
     return { type: "component", name, dataId: null, confidence: null, actionId, children: [] };
+  }
+  if (name === "MeasurementPlan") {
+    assertOnlyAttributes(name, attributes, []);
+    if (node.children.length > 0) invalidDocument("MeasurementPlan must be self-closing.");
+    return { type: "component", name, dataId: null, confidence: null, actionId: null, children: [] };
   }
   if (name === "Evidence") {
     assertOnlyAttributes(name, attributes, ["data"]);
@@ -398,4 +404,50 @@ export function compileGrowthDocument(value: unknown): GrowthDocument {
   if (blocks.length === 0) invalidDocument("document must contain content.");
   validateDataReferences(blocks, data);
   return { format: GROWTH_DOCUMENT_FORMAT, sourceMdx, blocks, data };
+}
+
+function containsGrowthComponent(blocks: GrowthDocumentBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.type === "component") return true;
+    if (block.type === "list" && block.items.some((item) => containsGrowthComponent(item))) return true;
+  }
+  return false;
+}
+
+/**
+ * Action pages use the shared editable MDX format, but their information architecture is fixed.
+ * Keeping this validation beside the general compiler means both agent writes and staff-edited
+ * drafts enforce the same contract instead of relying on the dashboard to hide malformed content.
+ */
+export function compileGrowthActionDocument(value: unknown): GrowthDocument {
+  const document = compileGrowthDocument(value);
+  if (document.blocks.some((block) => block.type !== "component")) {
+    invalidDocument("action pages may only contain Finding, Evidence, Recommendation, and MeasurementPlan sections.");
+  }
+  const components = document.blocks.flatMap((block) => block.type === "component" ? [block] : []);
+  const names = components.map((component) => component.name);
+  const evidence = components.filter((component) => component.name === "Evidence");
+  const hasSemanticOrder = names.length >= 4
+    && names[0] === "Finding"
+    && names.at(-2) === "Recommendation"
+    && names.at(-1) === "MeasurementPlan"
+    && names.slice(1, -2).every((name) => name === "Evidence");
+  // Existing action pages used Hypothesis/Evidence/Experiment. Keep that exact grammar editable
+  // while every current model-facing schema and prompt emits the semantic structure above.
+  const hasLegacyOrder = names.length >= 3
+    && names[0] === "Hypothesis"
+    && names.at(-1) === "Experiment"
+    && names.slice(1, -1).every((name) => name === "Evidence");
+  if ((!hasSemanticOrder && !hasLegacyOrder) || evidence.length > 4) {
+    invalidDocument("action pages must contain one Finding, one to four Evidence sections, one Recommendation, and one MeasurementPlan, in that order.");
+  }
+  if (hasSemanticOrder && evidence.some((component) => component.dataId == null)) {
+    invalidDocument("every action-page Evidence section must reference a data id.");
+  }
+  for (const component of components) {
+    if (containsGrowthComponent(component.children)) {
+      invalidDocument(`${component.name} cannot contain nested Growth components on an action page.`);
+    }
+  }
+  return document;
 }

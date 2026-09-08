@@ -1,7 +1,7 @@
 import { describe, type ExpectStatic } from "vitest";
 import { it } from "../../../../../../helpers";
 import { Project, niceBackendFetch } from "../../../../../backend-helpers";
-import { GROWTH_AGENT_AUTH, createGrowthProject, releaseGrowthInterviewAsStaff, requireRunId } from "./growth-helpers";
+import { GROWTH_AGENT_AUTH, asGrowthStaff, createGrowthProject, releaseGrowthInterviewAsStaff, requireRunId } from "./growth-helpers";
 
 const ADMIN_BASE = "/api/latest/internal/growth";
 const AGENT_BASE = "/api/latest/internal/growth-agent";
@@ -323,6 +323,15 @@ describe("internal growth interview (no mock Eve)", { timeout: 90_000 }, () => {
       answer_free_text: "Mostly self-serve signups.",
     });
     expect(typeof afterAnswer.body.questions[0].answered_at_millis).toBe("number");
+    const adminAnswer = await asGrowthStaff(async () => await niceBackendFetch(
+      `/api/latest/internal/growth/admin/interview?project_id=${scope.project_id}`,
+      { accessType: "client" },
+    ));
+    expect(adminAnswer.status).toBe(200);
+    expect((adminAnswer.body as { interview: { questions: InterviewBody["questions"] } }).interview.questions[0]).toMatchObject({
+      answer_option_ids: ["signups"],
+      answer_free_text: "Mostly self-serve signups.",
+    });
     // The failed turn must not have written a transcript (the assistant never replied).
     expect(afterAnswer.body.messages).toEqual([]);
 

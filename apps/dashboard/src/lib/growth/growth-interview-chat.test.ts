@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildGrowthDemoInterview, GROWTH_DEMO_NOW_MILLIS } from "./growth-demo-data";
 import {
   applyAnswerToQuestions,
+  baseStateFromGrowthInterview,
   buildAnswerTranscriptText,
   buildDemoTranscriptEntries,
   countAnsweredQuestions,
@@ -17,7 +18,7 @@ import {
   type InterviewQuestionCard,
   type InterviewTranscriptEntry,
 } from "./growth-interview-chat";
-import type { GrowthInterviewQuestion } from "./growth-types";
+import type { GrowthInterview, GrowthInterviewQuestion } from "./growth-types";
 
 function makeQuestion(overrides: Partial<GrowthInterviewQuestion> = {}): GrowthInterviewQuestion {
   return {
@@ -274,6 +275,61 @@ describe("deriveInterviewChatView", () => {
     const view = deriveInterviewChatView({ status: "active", questions: plan }, entries);
     expect(view.activeQuestion).toBeNull();
     expect(view.needsAssistantTurn).toBe(true);
+  });
+});
+
+describe("baseStateFromGrowthInterview", () => {
+  it("reconciles an adaptive question persisted during the turn with its streamed card", () => {
+    const adaptiveQuestion = makeQuestion({
+      questionKey: "rec_room_lever",
+      orderIndex: 1,
+      prompt: "Which recommendation-room lever matters most?",
+      origin: "adaptive",
+    });
+    const adaptiveToolInput = {
+      ...validToolInput,
+      question_id: "adaptive-question-id",
+      question_key: adaptiveQuestion.questionKey,
+      text: adaptiveQuestion.prompt,
+      options: adaptiveQuestion.options,
+    };
+    const interview: GrowthInterview = {
+      status: "active",
+      questions: [makeQuestion({ answerOptionIds: ["signups"], answeredAtMillis: 1 }), adaptiveQuestion],
+      messages: [{
+        id: "adaptive-turn",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-record-adaptive-question",
+            toolCallId: "record-call",
+            state: "output-available",
+            input: { question_key: adaptiveQuestion.questionKey },
+            output: { order_index: adaptiveQuestion.orderIndex },
+          },
+          {
+            type: INTERVIEW_QUESTION_TOOL_PART_TYPE,
+            toolCallId: "present-call",
+            state: "output-available",
+            input: adaptiveToolInput,
+            output: { presented: true },
+          },
+        ],
+      }],
+    };
+
+    const base = baseStateFromGrowthInterview(interview);
+    expect(base.status).toBe("loaded");
+    if (base.status !== "loaded") throw new Error("The interview has questions, so it must load.");
+    const view = deriveInterviewChatView(
+      { status: base.interviewStatus, questions: base.questions },
+      base.loadedEntries,
+    );
+    expect(view.activeQuestion).toMatchObject({
+      entryId: "adaptive-turn:1",
+      planQuestion: { questionKey: "rec_room_lever", orderIndex: 1, origin: "adaptive" },
+    });
+    expect(view.needsAssistantTurn).toBe(false);
   });
 });
 

@@ -2,6 +2,7 @@ import { sendInternalUserRequest } from "@/lib/hexclave-app-internals";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { GrowthApiError, growthRequestHeaders, readGrowthErrorMessage, requestJson, toGrowthApiError } from "./growth-api-client";
 import { growthDocumentSchema } from "./growth-document";
+import { GROWTH_TIMELINE_STEP_IDS, type GrowthTimelineStepId } from "./growth-timeline";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { z } from "zod";
 import {
@@ -34,6 +35,8 @@ import {
   GROWTH_RELEASE_STATES,
   GROWTH_RUN_TRIGGERS,
   type GrowthActionItem,
+  type GrowthAdminActionPage,
+  type GrowthAdminFindingPage,
   type GrowthActionMetricSeries,
   type GrowthActionStatus,
   type GrowthAdminCategoryPage,
@@ -249,10 +252,10 @@ export async function getGrowthStatus(app: object): Promise<GrowthStatus> {
   return mapGrowthStatus(statusSchema.parse(await requestJson(app, "/status")));
 }
 
-export async function completeGrowthOnboarding(app: object, input: { websiteUrl: string, companySummary: string | null }): Promise<{ runId: string }> {
+export async function completeGrowthOnboarding(app: object, input: { websiteUrl: string, companySummary: string | null, additionalNotes: string | null }): Promise<{ runId: string }> {
   const response = runIdResponseSchema.parse(await requestJson(app, "/onboarding", {
     method: "POST",
-    body: JSON.stringify({ website_url: input.websiteUrl, company_summary: input.companySummary }),
+    body: JSON.stringify({ website_url: input.websiteUrl, company_summary: input.companySummary, additional_notes: input.additionalNotes }),
   }));
   return { runId: response.run_id };
 }
@@ -687,6 +690,32 @@ function mapOverviewFinding(value: z.infer<typeof overviewFindingSchema>) {
   };
 }
 
+const adminFindingPageDraftSchema = z.object({
+  source_json: z.unknown().nullable(),
+  document: z.unknown().nullable(),
+  updated_at_millis: z.number(),
+});
+
+const adminFindingPageSchema = z.object({
+  finding: overviewFindingSchema,
+  draft: adminFindingPageDraftSchema.nullable(),
+  published_at_millis: z.number().nullable(),
+});
+
+function mapGrowthAdminFindingPage(value: z.infer<typeof adminFindingPageSchema>): GrowthAdminFindingPage {
+  const draftSource = value.draft == null ? null : categoryPageSourceSchema.safeParse(value.draft.source_json);
+  const draftDocument = value.draft == null ? null : growthDocumentSchema.safeParse(value.draft.document);
+  return {
+    finding: mapOverviewFinding(value.finding),
+    draft: value.draft == null ? null : {
+      source: draftSource?.success === true ? { sourceMdx: draftSource.data.source_mdx, data: draftSource.data.data } : null,
+      document: draftDocument?.success === true ? draftDocument.data : null,
+      updatedAtMillis: value.draft.updated_at_millis,
+    },
+    publishedAtMillis: value.published_at_millis,
+  };
+}
+
 export async function getGrowthOverview(app: object): Promise<GrowthOverview> {
   const value = overviewSchema.parse(await requestJson(app, "/overview"));
   return {
@@ -735,11 +764,11 @@ export async function requestGrowthAdminJson(app: object, path: string, init: Re
   return responseText.length === 0 ? {} : JSON.parse(responseText);
 }
 
-export type GrowthAdminProject = { id: string, displayName: string, websiteUrl: string, completedAtMillis: number };
+export type GrowthAdminProject = { id: string, displayName: string, websiteUrl: string, companySummary: string | null, completedAtMillis: number };
 
 export async function listGrowthAdminProjects(app: object): Promise<GrowthAdminProject[]> {
-  const rows = z.array(z.object({ id: z.string(), display_name: z.string(), website_url: z.string(), completed_at_millis: z.number() })).parse(await requestGrowthAdminJson(app, "/projects"));
-  return rows.map((row) => ({ id: row.id, displayName: row.display_name, websiteUrl: row.website_url, completedAtMillis: row.completed_at_millis }));
+  const rows = z.array(z.object({ id: z.string(), display_name: z.string(), website_url: z.string(), company_summary: z.string().nullable(), completed_at_millis: z.number() })).parse(await requestGrowthAdminJson(app, "/projects"));
+  return rows.map((row) => ({ id: row.id, displayName: row.display_name, websiteUrl: row.website_url, companySummary: row.company_summary, completedAtMillis: row.completed_at_millis }));
 }
 
 /**
@@ -873,12 +902,147 @@ export async function publishGrowthAdminCategoryPage(app: object, projectId: str
   await requestGrowthAdminJson(app, "/category-pages/publish", { method: "POST", body: JSON.stringify({ target_project_id: projectId, category, version }) });
 }
 
+export async function publishAllGrowthAdminCategoryPageDrafts(app: object, projectId: string, drafts: { category: GrowthCategory, version: number }[], reportId: string | null): Promise<void> {
+  await requestGrowthAdminJson(app, "/category-pages/publish", { method: "PUT", body: JSON.stringify({ target_project_id: projectId, drafts, report_id: reportId }) });
+}
+
 export async function unpublishGrowthAdminCategoryPage(app: object, projectId: string, category: GrowthCategory): Promise<void> {
   await requestGrowthAdminJson(app, "/category-pages/publish", { method: "DELETE", body: JSON.stringify({ target_project_id: projectId, category }) });
 }
 
+const adminActionPageDraftSchema = z.object({
+  source_json: z.unknown().nullable(),
+  document: z.unknown().nullable(),
+  updated_at_millis: z.number(),
+});
+
+const adminActionPageSchema = z.object({
+  action: actionItemSchema,
+  draft: adminActionPageDraftSchema.nullable(),
+  published_at_millis: z.number().nullable(),
+});
+
+function mapGrowthAdminActionPage(value: z.infer<typeof adminActionPageSchema>): GrowthAdminActionPage {
+  const draftSource = value.draft == null ? null : categoryPageSourceSchema.safeParse(value.draft.source_json);
+  const draftDocument = value.draft == null ? null : growthDocumentSchema.safeParse(value.draft.document);
+  return {
+    action: mapGrowthActionItem(value.action),
+    draft: value.draft == null ? null : {
+      source: draftSource?.success === true ? { sourceMdx: draftSource.data.source_mdx, data: draftSource.data.data } : null,
+      document: draftDocument?.success === true ? draftDocument.data : null,
+      updatedAtMillis: value.draft.updated_at_millis,
+    },
+    publishedAtMillis: value.published_at_millis,
+  };
+}
+
+export async function getGrowthAdminActionPage(app: object, projectId: string, actionId: string): Promise<GrowthAdminActionPage> {
+  return mapGrowthAdminActionPage(adminActionPageSchema.parse(await requestGrowthAdminJson(
+    app,
+    `/actions/${encodeURIComponent(actionId)}?project_id=${encodeURIComponent(projectId)}`,
+  )));
+}
+
+export async function saveGrowthAdminActionPageDraft(app: object, projectId: string, actionId: string, input: {
+  sourceMdx: string,
+  data: unknown[],
+  expectedDraftUpdatedAtMillis: number | null,
+}): Promise<GrowthAdminActionPage["draft"]> {
+  const draft = adminActionPageDraftSchema.parse(await requestGrowthAdminJson(app, `/actions/${encodeURIComponent(actionId)}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      target_project_id: projectId,
+      document: { format: "growth-mdx-v1", source_mdx: input.sourceMdx, data: input.data },
+      expected_draft_updated_at_millis: input.expectedDraftUpdatedAtMillis,
+    }),
+  }));
+  const source = categoryPageSourceSchema.safeParse(draft.source_json);
+  const document = growthDocumentSchema.safeParse(draft.document);
+  return {
+    source: source.success ? { sourceMdx: source.data.source_mdx, data: source.data.data } : null,
+    document: document.success ? document.data : null,
+    updatedAtMillis: draft.updated_at_millis,
+  };
+}
+
+export async function publishGrowthAdminActionPageDraft(app: object, projectId: string, actionId: string, expectedDraftUpdatedAtMillis: number): Promise<void> {
+  await requestGrowthAdminJson(app, `/actions/${encodeURIComponent(actionId)}`, {
+    method: "POST",
+    body: JSON.stringify({ target_project_id: projectId, expected_draft_updated_at_millis: expectedDraftUpdatedAtMillis }),
+  });
+}
+
+export async function discardGrowthAdminActionPageDraft(app: object, projectId: string, actionId: string): Promise<void> {
+  await requestGrowthAdminJson(app, `/actions/${encodeURIComponent(actionId)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ target_project_id: projectId }),
+  });
+}
+
+export async function getGrowthAdminFindingPage(app: object, projectId: string, findingId: string): Promise<GrowthAdminFindingPage> {
+  return mapGrowthAdminFindingPage(adminFindingPageSchema.parse(await requestGrowthAdminJson(
+    app,
+    `/findings/${encodeURIComponent(findingId)}/document?project_id=${encodeURIComponent(projectId)}`,
+  )));
+}
+
+export async function saveGrowthAdminFindingPageDraft(app: object, projectId: string, findingId: string, input: {
+  sourceMdx: string,
+  data: unknown[],
+  expectedDraftUpdatedAtMillis: number | null,
+}): Promise<GrowthAdminFindingPage["draft"]> {
+  const draft = adminFindingPageDraftSchema.parse(await requestGrowthAdminJson(app, `/findings/${encodeURIComponent(findingId)}/document`, {
+    method: "PUT",
+    body: JSON.stringify({
+      target_project_id: projectId,
+      document: { format: "growth-mdx-v1", source_mdx: input.sourceMdx, data: input.data },
+      expected_draft_updated_at_millis: input.expectedDraftUpdatedAtMillis,
+    }),
+  }));
+  const source = categoryPageSourceSchema.safeParse(draft.source_json);
+  const document = growthDocumentSchema.safeParse(draft.document);
+  return {
+    source: source.success ? { sourceMdx: source.data.source_mdx, data: source.data.data } : null,
+    document: document.success ? document.data : null,
+    updatedAtMillis: draft.updated_at_millis,
+  };
+}
+
+export async function publishGrowthAdminFindingPageDraft(app: object, projectId: string, findingId: string, expectedDraftUpdatedAtMillis: number): Promise<void> {
+  await requestGrowthAdminJson(app, `/findings/${encodeURIComponent(findingId)}/document`, {
+    method: "POST",
+    body: JSON.stringify({ target_project_id: projectId, expected_draft_updated_at_millis: expectedDraftUpdatedAtMillis }),
+  });
+}
+
+export async function discardGrowthAdminFindingPageDraft(app: object, projectId: string, findingId: string): Promise<void> {
+  await requestGrowthAdminJson(app, `/findings/${encodeURIComponent(findingId)}/document`, {
+    method: "DELETE",
+    body: JSON.stringify({ target_project_id: projectId }),
+  });
+}
+
+async function createGrowthAdminFinding(app: object, projectId: string, input: { category: string, tags: string[], title: string, body: string, kind: "note" | "suggestion" }): Promise<void> {
+  await requestGrowthAdminJson(app, "/findings", {
+    method: "POST",
+    body: JSON.stringify({
+      target_project_id: projectId,
+      kind: input.kind,
+      note: input.kind === "note",
+      category: input.category,
+      tags: input.tags,
+      title: input.title,
+      body: input.body,
+    }),
+  });
+}
+
 export async function createGrowthAdminNote(app: object, projectId: string, input: { category: string, tags: string[], title: string, body: string }): Promise<void> {
-  await requestGrowthAdminJson(app, "/findings", { method: "POST", body: JSON.stringify({ target_project_id: projectId, kind: "note", note: true, category: input.category, tags: input.tags, title: input.title, body: input.body }) });
+  await createGrowthAdminFinding(app, projectId, { ...input, kind: "note" });
+}
+
+export async function createGrowthAdminSuggestion(app: object, projectId: string, input: { category: string, tags: string[], title: string, body: string }): Promise<void> {
+  await createGrowthAdminFinding(app, projectId, { ...input, kind: "suggestion" });
 }
 
 export async function updateGrowthAdminFinding(app: object, projectId: string, findingId: string, input: { kind: string, category: string, tags: string[], title: string, body: string }): Promise<void> {
@@ -904,6 +1068,51 @@ export async function runGrowthAdminSchedulerStep(app: object, projectId: string
     body: JSON.stringify({ step: "project_recovery", target_project_id: projectId }),
   }));
   return { didWork: response.did_work, legStarted: response.leg_started };
+}
+
+export const GROWTH_ADMIN_STAGE_RUN_STATES = ["ready", "running", "complete", "blocked", "failed"] as const;
+export type GrowthAdminStageRunStateName = typeof GROWTH_ADMIN_STAGE_RUN_STATES[number];
+
+export type GrowthAdminStageRunState = {
+  readonly stage: GrowthTimelineStepId,
+  readonly state: GrowthAdminStageRunStateName,
+  readonly canRun: boolean,
+  readonly message: string,
+};
+
+export type GrowthAdminStageRunResult = GrowthAdminStageRunState & {
+  readonly didWork: boolean,
+  readonly legStarted: boolean | null,
+};
+
+const growthAdminStageRunStateSchema = z.object({
+  stage: z.enum(GROWTH_TIMELINE_STEP_IDS),
+  state: z.enum(GROWTH_ADMIN_STAGE_RUN_STATES),
+  can_run: z.boolean(),
+  message: z.string(),
+});
+
+function mapGrowthAdminStageRunState(value: z.infer<typeof growthAdminStageRunStateSchema>): GrowthAdminStageRunState {
+  return { stage: value.stage, state: value.state, canRun: value.can_run, message: value.message };
+}
+
+export async function getGrowthAdminStageRunState(app: object, projectId: string, stage: GrowthTimelineStepId): Promise<GrowthAdminStageRunState> {
+  const value = growthAdminStageRunStateSchema.parse(await requestGrowthAdminJson(app, "/run-now", {
+    method: "POST",
+    body: JSON.stringify({ step: "lifecycle_stage_state", target_project_id: projectId, stage }),
+  }));
+  return mapGrowthAdminStageRunState(value);
+}
+
+export async function runGrowthAdminStage(app: object, projectId: string, stage: GrowthTimelineStepId): Promise<GrowthAdminStageRunResult> {
+  const value = growthAdminStageRunStateSchema.extend({
+    did_work: z.boolean(),
+    leg_started: z.boolean().nullable(),
+  }).parse(await requestGrowthAdminJson(app, "/run-now", {
+    method: "POST",
+    body: JSON.stringify({ step: "lifecycle_stage", target_project_id: projectId, stage }),
+  }));
+  return { ...mapGrowthAdminStageRunState(value), didWork: value.did_work, legStarted: value.leg_started };
 }
 
 export type GrowthAdminFunctionalActionFields = {

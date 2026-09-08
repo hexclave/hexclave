@@ -47,7 +47,9 @@ import { postToEve } from "./eve-dispatch";
  */
 
 export const GROWTH_PHASE_STUCK_TIMEOUT_MS = 15 * 60_000;
-export const GROWTH_PHASE_MAX_ATTEMPTS = 3;
+// One automatic retry recovers transient provider/dispatch failures without allowing an expensive
+// phase to run three full times. Manual retry still creates fresh phase rows with a fresh budget.
+export const GROWTH_PHASE_MAX_ATTEMPTS = 2;
 export const GROWTH_MILESTONE_EVALUATION_INTERVAL_MS = 60 * 60_000;
 
 // User-visible copy (never internals — those go to captureError).

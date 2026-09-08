@@ -1514,6 +1514,31 @@ export namespace Project {
     return createResult;
   }
 
+  /**
+   * Deletes a project through the same public admin path used by the dashboard. The explicit
+   * project context makes this safe to call from teardown even when the test switched to another
+   * project after creating it.
+   */
+  export async function deleteProject(project: { projectId: string, adminAccessToken: string }): Promise<void> {
+    const response = await backendContext.with({
+      projectKeys: {
+        projectId: project.projectId,
+        adminAccessToken: project.adminAccessToken,
+      },
+      userAuth: null,
+    }, async () => await niceBackendFetch("/api/v1/internal/projects/current", {
+      accessType: "admin",
+      method: "DELETE",
+    }));
+    if (response.status !== 200) {
+      throw new HexclaveAssertionError("Failed to delete an E2E project during cleanup", {
+        projectId: project.projectId,
+        status: response.status,
+        responseBody: response.body,
+      });
+    }
+  }
+
   export async function updateConfig(config: any) {
     const response = await niceBackendFetch(`/api/latest/internal/config/override/environment`, {
       accessType: "admin",

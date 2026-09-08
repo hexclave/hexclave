@@ -210,6 +210,7 @@ model GrowthOnboarding {
 
   websiteUrl     String  @db.VarChar(2048)
   companySummary String? @db.Text
+  additionalNotes String? @db.Text
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -311,6 +312,11 @@ model GrowthFinding {
   // Versioned, validated Growth MDX document. `body` remains the compact plain-text summary used
   // by legacy readers and list rows; the dashboard renders this richer document when present.
   document Json?
+  documentDraftSourceJson   Json?
+  documentDraft             Json?
+  documentDraftUpdatedAt    DateTime?
+  documentPublishedAt       DateTime?
+  documentPublishedByUserId String?
 
   createdAt DateTime @default(now())
 
@@ -484,6 +490,11 @@ model GrowthActionItem {
   payload     Json?
   // Rich evidence, hypothesis, and experiment detail. `description` remains the short list summary.
   document    Json?
+  documentDraftSourceJson Json?
+  documentDraft           Json?
+  documentDraftUpdatedAt  DateTime?
+  documentPublishedAt     DateTime?
+  documentPublishedByUserId String?
   status      String @default("proposed") // "proposed" | "active" | "completed" | "dismissed"
   // [{ metricId, windowDays }] — declared at creation from the type registry.
   watchedMetrics Json

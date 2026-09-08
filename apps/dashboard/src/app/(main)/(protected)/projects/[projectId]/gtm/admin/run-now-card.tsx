@@ -1,20 +1,37 @@
 "use client";
 
 import { DesignAlert, DesignButton, DesignCard } from "@/components/design-components";
-import { runGrowthAdminSchedulerStep, type GrowthAdminSchedulerResult } from "@/lib/growth/growth-api";
+import { SimpleTooltip } from "@/components/ui";
+import { runGrowthAdminStage, type GrowthAdminStageRunResult, type GrowthAdminStageRunState } from "@/lib/growth/growth-api";
+import type { GrowthTimelineStepId } from "@/lib/growth/growth-timeline";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
-import { GearSixIcon } from "@phosphor-icons/react";
+import { PlayIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 
-type RunState = { status: "idle" } | { status: "running" } | { status: "success", result: GrowthAdminSchedulerResult } | { status: "error", message: string };
+type RunState = { status: "idle" } | { status: "running" } | { status: "success", result: GrowthAdminStageRunResult } | { status: "error", message: string };
 
-export function GrowthAdminRunNowCard(props: { app: object, projectId: string, projectName: string, onCompleted: () => Promise<void> }) {
+const STATE_LABELS = new Map<GrowthAdminStageRunState["state"], string>([
+  ["ready", "Ready"],
+  ["running", "Running"],
+  ["complete", "Complete"],
+  ["blocked", "Prerequisite required"],
+  ["failed", "Failed"],
+]);
+
+export function GrowthAdminRunNowCard(props: {
+  app: object,
+  projectId: string,
+  stage: GrowthTimelineStepId,
+  operation: GrowthAdminStageRunState,
+  onCompleted: () => Promise<void>,
+}) {
   const [state, setState] = useState<RunState>({ status: "idle" });
 
-  const runScheduler = () => {
+  const runStage = () => {
     setState({ status: "running" });
     runAsynchronouslyWithAlert(async () => {
-      const result = await runGrowthAdminSchedulerStep(props.app, props.projectId);
+      const result = await runGrowthAdminStage(props.app, props.projectId, props.stage);
       await props.onCompleted();
       setState({ status: "success", result });
     }, {
@@ -23,23 +40,29 @@ export function GrowthAdminRunNowCard(props: { app: object, projectId: string, p
   };
 
   return (
-    <DesignCard title={`Manual scheduler · ${props.projectName}`} subtitle="Run one scheduler pass for this project when no Cron invocation is driving the engine" icon={GearSixIcon} gradient="cyan">
+    <DesignCard title="Manual run" icon={PlayIcon}>
       <div className="space-y-3">
         {state.status === "error" && <DesignAlert variant="error">{state.message}</DesignAlert>}
-        {/* Three outcomes, not two. `legStarted === false` is the one that used to be reported as
-          * success: the boundary event is durably queued but its workflow leg did not come up inside
-          * the request's budget, so the run has NOT started and pressing again is the right move. */}
         {state.status === "success" && (
           state.result.legStarted === false
-            ? <DesignAlert variant="warning">Work is queued, but the analysis leg did not start within the time limit. Nothing is lost — run it again.</DesignAlert>
-            : <DesignAlert variant="info">Scheduler pass completed{state.result.didWork ? " and moved this project forward." : ", but found no work to process."}</DesignAlert>
+            ? <DesignAlert variant="warning">Work was queued, but this step did not start before the request timed out. Run it again to continue recovery.</DesignAlert>
+            : <DesignAlert variant="info">{state.result.message}</DesignAlert>
         )}
-        <div className="flex flex-wrap gap-2">
-          <DesignButton variant="outline" size="sm" loading={state.status === "running"} onClick={runScheduler}>
-            Run scheduler for this project
-          </DesignButton>
+        {props.operation.state === "blocked" && <DesignAlert variant="warning">{props.operation.message}</DesignAlert>}
+        {props.operation.state === "failed" && <DesignAlert variant="error">{props.operation.message}</DesignAlert>}
+        {props.operation.state !== "blocked" && props.operation.state !== "failed" && (
+          <p className="max-w-2xl text-sm text-muted-foreground">{props.operation.message}</p>
+        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <SimpleTooltip tooltip={props.operation.canRun ? null : props.operation.message}>
+            <DesignButton disabled={!props.operation.canRun} size="sm" loading={state.status === "running"} onClick={runStage}>
+              {props.operation.state === "failed" ? "Retry this step now" : "Run this step now"}
+            </DesignButton>
+          </SimpleTooltip>
+          <span className="text-xs text-muted-foreground">
+            {STATE_LABELS.get(props.operation.state) ?? throwErr(`Missing manual Growth stage state label for ${props.operation.state}`)}
+          </span>
         </div>
-        <p className="text-xs text-muted-foreground">Runs a global engine tick and waits for this project&apos;s analysis leg; other projects&apos; due work may advance too. The internal admin session is used; the cron secret is not exposed.</p>
       </div>
     </DesignCard>
   );

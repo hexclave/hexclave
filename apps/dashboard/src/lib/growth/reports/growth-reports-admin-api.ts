@@ -5,9 +5,8 @@ import { GROWTH_RUN_TRIGGERS, type GrowthReport, type GrowthRunTrigger } from ".
 
 /**
  * Staff fetchers for the Growth admin Reports card — reading what the analysis wrote for a customer,
- * and pulling a report back if something went badly wrong. Reports are not review-gated (they
- * publish on write; the human step is on the interview questions instead), so there is no publish
- * call here — only the recovery one. Mirrors games/growth-games-admin-api.ts: zod-parse the
+ * releasing the reviewed report or pulling it back if something went badly wrong. Mirrors
+ * games/growth-games-admin-api.ts: zod-parse the
  * snake_case wire, map to camel, and let every mutation return the whole list so the card replaces
  * its state from one authoritative snapshot rather than patching a row it guessed at.
  *
@@ -39,7 +38,7 @@ export type GrowthAdminReportSummary = {
   trigger: GrowthRunTrigger,
   actionItemCount: number,
   createdAtMillis: number,
-  /** null means pulled: staff unpublished it, so the customer can no longer read it. */
+  /** null means the report is awaiting release or staff unpublished it. */
   publishedAtMillis: number | null,
   publishedByUserId: string | null,
 };
@@ -76,9 +75,32 @@ export async function getGrowthAdminReport(app: object, projectId: string, repor
   return { ...mapGrowthReport(parsed), publishedAtMillis: parsed.published_at_millis };
 }
 
+export async function saveGrowthAdminReportDocument(
+  app: object,
+  projectId: string,
+  reportId: string,
+  input: { sourceMdx: string, data: unknown[] },
+): Promise<GrowthAdminReportDetail> {
+  const parsed = detailSchema.parse(await requestGrowthAdminJson(app, urlString`/reports/${reportId}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      target_project_id: projectId,
+      document: { format: "growth-mdx-v1", source_mdx: input.sourceMdx, data: input.data },
+    }),
+  }));
+  return { ...mapGrowthReport(parsed), publishedAtMillis: parsed.published_at_millis };
+}
+
 export async function unpublishGrowthAdminReport(app: object, projectId: string, reportId: string): Promise<GrowthAdminReportsBody> {
   return await listBody(requestGrowthAdminJson(app, urlString`/reports/${reportId}`, {
     method: "PATCH",
     body: JSON.stringify({ target_project_id: projectId, action: "unpublish" }),
+  }));
+}
+
+export async function publishGrowthAdminReport(app: object, projectId: string, reportId: string): Promise<GrowthAdminReportsBody> {
+  return await listBody(requestGrowthAdminJson(app, urlString`/reports/${reportId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ target_project_id: projectId, action: "publish" }),
   }));
 }

@@ -14,6 +14,11 @@ export type AgentSessionOutcome = {
   readonly structuredResult: unknown,
 };
 
+// Normal phase streams are tiny compared with this. The pathological report run crossed it only
+// because every reasoning token carried the full cumulative reasoning snapshot, so 64 MiB leaves
+// ample room for real reports and tool results while stopping that amplification early.
+export const MAX_AGENT_SESSION_STREAM_BYTES = 64 * 1024 * 1024;
+
 export async function runAgentSession(options: {
   readonly from: ChannelFrom,
   readonly message: string,
@@ -37,7 +42,12 @@ export async function runAgentSession(options: {
   );
   let structuredResult: unknown = null;
   try {
-    for await (const event of followSessionEvents({ session, label: "Agent session", maxSessionMs: options.maxSessionMs })) {
+    for await (const event of followSessionEvents({
+      session,
+      label: "Agent session",
+      maxSessionMs: options.maxSessionMs,
+      maxStreamBytes: MAX_AGENT_SESSION_STREAM_BYTES,
+    })) {
       switch (event.type) {
         case "result.completed": {
           structuredResult = event.data.result;

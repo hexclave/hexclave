@@ -1,6 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { browsePage, isBrowserSandboxCredentialError, isBrowseSandboxAvailable } from "#lib/browse.ts";
+import { isBrowserRuntimeUnavailableError } from "#lib/browser-session.ts";
+import { browsePage } from "#lib/browse.ts";
 import { saveArtifact } from "#lib/hexclave-client.ts";
 
 /**
@@ -21,21 +22,15 @@ export default defineTool({
     run_id: z.string().min(1).optional(),
     url: z.string().url().describe("Absolute http(s) URL of the page to screenshot — usually the homepage."),
   }),
-  async execute(input) {
-    if (!isBrowseSandboxAvailable()) {
-      return {
-        skipped: true,
-        reason: "Chromium sandbox credentials are unavailable; continue the website analysis using browse-page's automatic curl fallback.",
-      };
-    }
+  async execute(input, ctx) {
     let page: Awaited<ReturnType<typeof browsePage>>;
     try {
-      page = await browsePage({ url: input.url, screenshot: true });
+      page = await browsePage({ context: ctx, url: input.url, screenshot: true });
     } catch (error) {
-      if (!isBrowserSandboxCredentialError(error)) throw error;
+      if (!isBrowserRuntimeUnavailableError(error)) throw error;
       return {
         skipped: true,
-        reason: "Chromium sandbox credentials could not be resolved; continue the website analysis using browse-page's automatic curl fallback.",
+        reason: "Chromium is unavailable in the website-research sandbox; continue the website analysis using browse-page's automatic curl fallback.",
       };
     }
     if (page.screenshotBase64 == null) {

@@ -1,29 +1,29 @@
 "use client";
 
 import { DesignAlert, DesignButton, DesignSelectorDropdown } from "@/components/design-components";
+import { Link } from "@/components/link";
 import { getGrowthAdminEditGate } from "@/lib/growth/growth-admin-lifecycle";
-import { createGrowthAdminNote, getGrowthAdminOverview, getGrowthAdminStatus, listGrowthAdminProjects, setGrowthAdminCategoryScore, updateGrowthAdminAction, updateGrowthAdminFinding, type GrowthAdminFunctionalActionFields, type GrowthAdminProject } from "@/lib/growth/growth-api";
+import { createGrowthAdminNote, createGrowthAdminSuggestion, getGrowthAdminOverview, getGrowthAdminStatus, listGrowthAdminProjects, setGrowthAdminCategoryScore, updateGrowthAdminAction, updateGrowthAdminFinding, type GrowthAdminFunctionalActionFields, type GrowthAdminProject } from "@/lib/growth/growth-api";
+import { getGrowthAdminReports, type GrowthAdminReportsBody } from "@/lib/growth/reports/growth-reports-admin-api";
 import type { GrowthActionItem, GrowthOverview, GrowthStatus } from "@/lib/growth/growth-types";
 import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { useStackApp, useUser } from "@hexclave/next";
+import { GearSixIcon } from "@phosphor-icons/react";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageLayout } from "../../page-layout";
 import { useProjectId } from "../../use-admin-app";
 import { GrowthWorkspaceEditProvider, type GrowthWorkspaceEditors } from "../components/workspace-edit";
 import { GrowthWorkspaceContent } from "../components/workspace-overview";
-import { GrowthAdminActionInternalsCard } from "./action-internals-card";
-import { GrowthAdminCategoryPageCard, GrowthAdminCategoryPagesProvider } from "./category-page-card";
-import { GrowthAdminGamesCard } from "./games-card";
-import { GrowthAdminInterviewCard } from "./interview-card";
+import { GrowthAdminCategoryPageCard, GrowthAdminCategoryPagesProvider, GrowthAdminPublishAllCategoryPages } from "./category-page-card";
 import { GrowthAdminLifecycleCard } from "./lifecycle-card";
-import { GrowthAdminReportsCard } from "./reports-card";
-import { GrowthAdminRunNowCard } from "./run-now-card";
 
 type Loadable =
   | { status: "loading" }
   | { status: "error", message: string }
-  | { status: "loaded", projects: GrowthAdminProject[], selected: GrowthAdminProject | null, overview: GrowthOverview | null, lifecycle: GrowthStatus | null };
+  | { status: "loaded", projects: GrowthAdminProject[], selected: GrowthAdminProject | null, overview: GrowthOverview | null, lifecycle: GrowthStatus | null, reports: GrowthAdminReportsBody | null };
 
 /**
  * Functional fields are immutable once an action leaves the proposal stage — the backend rejects them —
@@ -45,7 +45,7 @@ function functionalFieldsOf(action: GrowthActionItem): GrowthAdminFunctionalActi
  * customer gets — rather than an admin-shaped mirror of it — is the point: an admin sees precisely
  * what the customer sees, and edits it where it sits.
  */
-function GrowthAdminWorkspace(props: { app: object, project: GrowthAdminProject, overview: GrowthOverview, lifecycle: GrowthStatus, refresh: () => Promise<void> }) {
+function GrowthAdminWorkspace(props: { app: object, project: GrowthAdminProject, overview: GrowthOverview, lifecycle: GrowthStatus, reports: GrowthAdminReportsBody, refresh: () => Promise<void> }) {
   const { app, refresh } = props;
   const [nowMillis] = useState(() => Date.now());
   const projectId = props.project.id;
@@ -89,14 +89,18 @@ function GrowthAdminWorkspace(props: { app: object, project: GrowthAdminProject,
       await createGrowthAdminNote(app, projectId, { category: input.category, tags: [], title: input.title, body: input.body });
       await refresh();
     },
+    createSuggestion: async (input) => {
+      await createGrowthAdminSuggestion(app, projectId, { category: input.category, tags: [], title: input.title, body: input.body });
+      await refresh();
+    },
   }), [app, projectId, refresh]);
 
-  // Until the interview is answered, the customer-facing content either doesn't exist yet (deep
-  // research hasn't produced it) or is still being reshaped by the run, so the workspace renders
-  // WITHOUT the edit provider — which is precisely what makes every field read-only, exactly as the
-  // customer sees it. The interview review below stays live either way: it is the human gate that
-  // unblocks everything downstream, and therefore the one thing staff should be acting on first.
+  // This is a mirror of the customer's workspace, so it appears only after staff have actually
+  // released the first report. Reaching or publishing the interview does not make the workspace
+  // customer-visible; lifecycle-specific review and release controls remain available above.
   const gate = getGrowthAdminEditGate(props.lifecycle);
+  const pendingReportId = props.reports.reports.find((report) => report.publishedAtMillis == null)?.id ?? null;
+  const hasUnpublishedReport = pendingReportId != null;
 
   const workspace = (
     <GrowthAdminCategoryPagesProvider app={app} projectId={projectId}>
@@ -108,6 +112,7 @@ function GrowthAdminWorkspace(props: { app: object, project: GrowthAdminProject,
         // The admin page always edits a real project's records; there is no demo fixture mode here.
         demo={false}
         onRefresh={refresh}
+        journeyActions={<GrowthAdminPublishAllCategoryPages app={app} projectId={projectId} pendingReportId={pendingReportId} onPublishedChanged={refresh} />}
         // Authoring a stage page out of research that doesn't exist yet would be writing fiction, so
         // the composer appears with the rest of the editing affordances.
         categoryPageEditor={gate.contentEditable
@@ -125,36 +130,10 @@ function GrowthAdminWorkspace(props: { app: object, project: GrowthAdminProject,
     </GrowthAdminCategoryPagesProvider>
   );
 
-  // Lifecycle operations, which have no customer-facing surface to edit in place. A held interview
-  // comes first: until it is released the customer cannot answer, and nothing downstream (report,
-  // actions, briefs) can happen — it is the last human gate in the lifecycle.
-  const operations = (
-    <div className="space-y-4">
-      <h2 className="font-mono text-[10px] uppercase tracking-[0.24em] text-muted-foreground">Lifecycle operations</h2>
-      <GrowthAdminInterviewCard app={app} projectId={projectId} />
-      <GrowthAdminReportsCard app={app} projectId={projectId} />
-      <GrowthAdminGamesCard app={app} projectId={projectId} />
-      <GrowthAdminActionInternalsCard app={app} projectId={projectId} actions={[...props.overview.actions, ...props.overview.archive]} onSaved={refresh} />
-      <GrowthAdminRunNowCard app={app} projectId={projectId} projectName={props.project.displayName} onCompleted={refresh} />
-    </div>
-  );
-
   return (
     <div className="space-y-8">
-      <GrowthAdminLifecycleCard status={props.lifecycle} gate={gate} nowMillis={nowMillis} />
-      {/* While the content is read-only, the operations are the only thing worth acting on, so they
-        * come first rather than below a workspace nobody can edit yet. */}
-      {gate.contentEditable ? (
-        <>
-          <GrowthWorkspaceEditProvider editors={editors}>{workspace}</GrowthWorkspaceEditProvider>
-          {operations}
-        </>
-      ) : (
-        <>
-          {operations}
-          {workspace}
-        </>
-      )}
+      <GrowthAdminLifecycleCard projectId={projectId} status={props.lifecycle} gate={gate} nowMillis={nowMillis} hasUnpublishedReport={hasUnpublishedReport} />
+      {gate.contentEditable && <GrowthWorkspaceEditProvider editors={editors}>{workspace}</GrowthWorkspaceEditProvider>}
     </div>
   );
 }
@@ -164,21 +143,30 @@ export default function PageClient() {
   const projectId = useProjectId();
   if (projectId !== "internal") throwErr("Growth Admin must be opened from the internal project.");
   const app = useStackApp();
+  const searchParams = useSearchParams();
+  const initialTargetProjectId = searchParams.get("targetProjectId") ?? undefined;
   const [data, setData] = useState<Loadable>({ status: "loading" });
   const load = useCallback(async (selectedId?: string) => {
     try {
       const projects = await listGrowthAdminProjects(app);
       const selected = projects.find((project) => project.id === selectedId) ?? projects.at(0) ?? null;
-      const [overview, lifecycle] = selected == null
-        ? [null, null]
-        : await Promise.all([getGrowthAdminOverview(app, selected.id), getGrowthAdminStatus(app, selected.id)]);
-      setData({ status: "loaded", projects, selected, overview, lifecycle });
+      const [overview, lifecycle, reports] = selected == null
+        ? [null, null, null]
+        : await Promise.all([getGrowthAdminOverview(app, selected.id), getGrowthAdminStatus(app, selected.id), getGrowthAdminReports(app, selected.id)]);
+      setData({
+        status: "loaded",
+        projects,
+        selected,
+        overview,
+        lifecycle,
+        reports,
+      });
     } catch (error) {
       captureError("growth-admin-load", error);
       setData({ status: "error", message: error instanceof Error ? error.message : String(error) });
     }
   }, [app]);
-  useEffect(() => runAsynchronously(load()), [load]);
+  useEffect(() => runAsynchronously(load(initialTargetProjectId)), [initialTargetProjectId, load]);
   const loadedSelectedId = data.status === "loaded" ? data.selected?.id : undefined;
   const refresh = useCallback(async () => await load(loadedSelectedId), [load, loadedSelectedId]);
   return (
@@ -190,18 +178,28 @@ export default function PageClient() {
     >
       {data.status === "loading" ? <div className="h-72 animate-pulse rounded-2xl border bg-foreground/[0.03]" />
         : data.status === "error" ? <DesignAlert variant="error"><div className="flex justify-between gap-3"><span>{data.message}</span><DesignButton onClick={() => load()}>Retry</DesignButton></div></DesignAlert>
-          : data.selected == null || data.overview == null || data.lifecycle == null ? <DesignAlert>No completed Growth onboarding records were found.</DesignAlert>
+          : data.selected == null || data.overview == null || data.lifecycle == null || data.reports == null ? <DesignAlert>No completed Growth onboarding records were found.</DesignAlert>
             : (
               <div className="space-y-8">
-                <DesignSelectorDropdown
-                  value={data.selected.id}
-                  onValueChange={(value) => {
-                    setData({ status: "loading" });
-                    runAsynchronously(load(value));
-                  }}
-                  options={data.projects.map((project) => ({ value: project.id, label: project.displayName }))}
-                />
-                <GrowthAdminWorkspace app={app} project={data.selected} overview={data.overview} lifecycle={data.lifecycle} refresh={refresh} />
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <div className="min-w-0 flex-1">
+                    <DesignSelectorDropdown
+                      value={data.selected.id}
+                      onValueChange={(value) => {
+                        setData({ status: "loading" });
+                        runAsynchronously(load(value));
+                      }}
+                      options={data.projects.map((project) => ({ value: project.id, label: project.displayName }))}
+                    />
+                  </div>
+                  <DesignButton asChild variant="outline" className="shrink-0 gap-2">
+                    <Link href={urlString`/projects/${data.selected.id}/project-settings`}>
+                      <GearSixIcon className="size-4" />
+                      Project settings
+                    </Link>
+                  </DesignButton>
+                </div>
+                <GrowthAdminWorkspace app={app} project={data.selected} overview={data.overview} lifecycle={data.lifecycle} reports={data.reports} refresh={refresh} />
               </div>
             )}
     </PageLayout>

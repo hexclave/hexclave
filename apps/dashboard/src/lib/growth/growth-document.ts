@@ -10,7 +10,7 @@ export type GrowthDocumentInline =
   | { type: "break" }
   | { type: "link", url: string, children: GrowthDocumentInline[] };
 
-export type GrowthDocumentComponentName = "Metric" | "TrendChart" | "ComparisonChart" | "BreakdownChart" | "Evidence" | "Hypothesis" | "Experiment" | "DataGap" | "ActionButton";
+export type GrowthDocumentComponentName = "Metric" | "TrendChart" | "ComparisonChart" | "BreakdownChart" | "Evidence" | "Hypothesis" | "Experiment" | "DataGap" | "ActionButton" | "Finding" | "Recommendation" | "MeasurementPlan";
 
 export type GrowthDocumentBlock =
   | { type: "heading", level: 2 | 3, children: GrowthDocumentInline[] }
@@ -65,7 +65,7 @@ const inlineSchema: z.ZodType<GrowthDocumentInline> = z.lazy(() => z.discriminat
   z.object({ type: z.literal("link"), url: z.string(), children: z.array(inlineSchema) }),
 ]));
 
-const componentNameSchema = z.enum(["Metric", "TrendChart", "ComparisonChart", "BreakdownChart", "Evidence", "Hypothesis", "Experiment", "DataGap", "ActionButton"]);
+const componentNameSchema = z.enum(["Metric", "TrendChart", "ComparisonChart", "BreakdownChart", "Evidence", "Hypothesis", "Experiment", "DataGap", "ActionButton", "Finding", "Recommendation", "MeasurementPlan"]);
 const blockSchema: z.ZodType<GrowthDocumentBlock> = z.lazy(() => z.discriminatedUnion("type", [
   z.object({ type: z.literal("heading"), level: z.union([z.literal(2), z.literal(3)]), children: z.array(inlineSchema) }),
   z.object({ type: z.literal("paragraph"), children: z.array(inlineSchema) }),

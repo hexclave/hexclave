@@ -16,7 +16,16 @@ describe("getGrowthModelConfig", () => {
   it("reaches every agent, since all four spread the whole config", () => {
     // The reasoning field is a SIBLING of modelOptions in eve's agent definition, so it only takes
     // effect because the call sites spread getGrowthModelConfig() rather than picking fields off it.
-    expect(Object.keys(getGrowthModelConfig()).sort()).toEqual(["model", "modelOptions", "reasoning"]);
+    expect(Object.keys(getGrowthModelConfig()).sort()).toEqual(["limits", "model", "modelOptions", "reasoning"]);
+  });
+
+  it("bounds total output and lifetime for every root and delegated session", () => {
+    // Eve charges delegated subagent usage against the parent quota, so this one limit covers the
+    // report-composer and the root report phase together instead of granting each an extra budget.
+    expect(getGrowthModelConfig().limits).toEqual({
+      maxOutputTokensPerSession: 80_000,
+      sessionTimeoutMs: 45 * 60 * 1000,
+    });
   });
 
   it("sends Z.AI's native thinking switch, which is what actually disables glm-5.2's reasoning", () => {

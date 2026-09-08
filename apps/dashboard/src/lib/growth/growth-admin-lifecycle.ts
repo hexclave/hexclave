@@ -1,4 +1,5 @@
 import { getGrowthPhase, type GrowthPhase } from "./growth-status";
+import { getGrowthTimelineStepStates, type GrowthTimelineStepId, type GrowthTimelineStepState } from "./growth-timeline";
 import type { GrowthStatus } from "./growth-types";
 
 /**
@@ -6,11 +7,9 @@ import type { GrowthStatus } from "./growth-types";
  * project is still waiting on.
  *
  * The admin page renders the customer's workspace with every field editable, which only makes sense
- * once the pipeline has produced something to edit: before the interview is answered the findings,
- * notes and actions either don't exist yet (deep research still running) or are still being reshaped
- * by the interview answers, so editing them is at best pointless and at worst overwritten by the
- * run. Until then the workspace is read-only and the interview — the one human gate that unblocks
- * everything downstream — is the only thing staff can act on.
+ * once the customer has actually received their first report. Reaching the report step is not enough:
+ * while that report is held for staff review, the customer still has no workspace, so showing its
+ * editable mirror here makes the admin page claim a release that has not happened yet.
  */
 export type GrowthAdminEditGate = {
   phase: GrowthPhase,
@@ -21,18 +20,61 @@ export type GrowthAdminEditGate = {
 };
 
 /**
- * Keyed by the phases that precede a published report — i.e. this map's key set IS the definition of
- * "too early to edit". `report-ready` and `steady-state` are deliberately absent.
+ * Reasons for lifecycle phases that can occur before the first report release. `report-ready` needs
+ * an explicit reason because it spans both sides of the release boundary: composing/reviewing the
+ * held report and, after publication, waiting for the first daily brief.
  */
 const BLOCKED_REASONS = new Map<GrowthPhase, string>([
   ["not-onboarded", "This project hasn't onboarded yet, so there is no research, no metrics and nothing to edit."],
   ["analyzing", "Deep research is still running. The findings, notes and actions it produces don't exist yet."],
   ["analysis-failed", "Deep research failed, so it produced no findings, notes or actions. Re-run it under lifecycle operations."],
   ["interview", "Deep research is done, but the customer hasn't finished the interview — the findings and actions it feeds are not final yet. Review and release the interview first."],
+  ["report-ready", "The report is ready for staff review but hasn't been released to the customer yet. Review and publish the report first."],
 ]);
 
 export function getGrowthAdminEditGate(status: GrowthStatus): GrowthAdminEditGate {
   const phase = getGrowthPhase(status);
-  const blockedReason = BLOCKED_REASONS.get(phase) ?? null;
-  return { phase, contentEditable: blockedReason == null, blockedReason };
+  // Release is the durable boundary, unlike the current phase: after a first report is published, a
+  // later analysis can put the lifecycle back in the interview/report phases without taking the
+  // already-visible customer workspace away from staff.
+  if (status.release.state === "released") return { phase, contentEditable: true, blockedReason: null };
+  const blockedReason = BLOCKED_REASONS.get(phase)
+    ?? "The first report hasn't been released to the customer yet.";
+  return { phase, contentEditable: false, blockedReason };
+}
+
+/**
+ * The customer timeline presents first-run analysis, interview, and report preparation as one
+ * continuous operation. Admin pages expose those as separate destinations, so their navigation
+ * must unfold that customer-facing state once each staff-visible task has actually finished.
+ */
+export function getGrowthAdminTimelineStepStates(status: GrowthStatus): Map<GrowthTimelineStepId, GrowthTimelineStepState> {
+  const phase = getGrowthPhase(status);
+  const states = getGrowthTimelineStepStates(status);
+
+  if (phase === "interview" || phase === "report-ready") {
+    states.set("analysis", "done");
+    states.set("interview", phase === "interview" ? "current" : "done");
+  }
+  if (phase === "report-ready") {
+    states.set("report", "current");
+  }
+
+  for (const [stepId, state] of states) {
+    if (state === "hidden") states.set(stepId, "upcoming");
+  }
+  return states;
+}
+
+/** A prepared interview is paused on staff, rather than still being generated. */
+export function growthAdminInterviewIsAwaitingApproval(status: GrowthStatus): boolean {
+  return status.interview.state === "preparing"
+    && getGrowthAdminTimelineStepStates(status).get("interview") === "current";
+}
+
+/** A held report is a human wait only once the pipeline has actually reached the report step. */
+export function growthAdminReportIsAwaitingRelease(status: GrowthStatus, hasUnpublishedReport: boolean): boolean {
+  return status.release.state === "preparing"
+    && hasUnpublishedReport
+    && getGrowthAdminTimelineStepStates(status).get("report") === "current";
 }

@@ -54,6 +54,7 @@ const blogDraftRequestSchema = projectRefSchema.extend({
   product: z.object({
     website_url: z.string().nullable(),
     company_summary: z.string().nullable(),
+    additional_notes: z.string().nullable(),
   }),
 });
 
@@ -76,6 +77,7 @@ const quizAuthoringRequestSchema = projectRefSchema.extend({
   product: z.object({
     website_url: z.string().nullable(),
     company_summary: z.string().nullable(),
+    additional_notes: z.string().nullable(),
   }),
   facts: z.array(z.object({
     fact_id: z.string().min(1),
@@ -117,7 +119,7 @@ function createRunRoute<TInput>(path: string, label: (input: TInput) => string, 
   });
 }
 
-const SESSION_FAILED_PHASE_MESSAGE = "The analysis step failed unexpectedly. It will be retried automatically if attempts remain.";
+const SESSION_FAILED_PHASE_MESSAGE = "The analysis step failed unexpectedly.";
 
 export default defineChannel({
   events: {

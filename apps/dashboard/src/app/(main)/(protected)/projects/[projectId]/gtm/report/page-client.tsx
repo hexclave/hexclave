@@ -2,12 +2,14 @@
 
 import { DesignAlert, DesignButton } from "@/components/design-components";
 import { Link } from "@/components/link";
+import { useRouter } from "@/components/router";
 import { GrowthApiError, getGrowthReport, markGrowthReportRead } from "@/lib/growth/growth-api";
 import { type GrowthLoadable, useGrowthStatus } from "@/lib/growth/growth-data";
 import { GROWTH_DEMO_NOW_MILLIS, buildGrowthDemoReport } from "@/lib/growth/growth-demo-data";
 import type { GrowthReport, GrowthStatus } from "@/lib/growth/growth-types";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
+import { ArrowRightIcon } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PageLayout } from "../../page-layout";
 import { useAdminApp, useProjectId } from "../../use-admin-app";
@@ -69,9 +71,13 @@ function ReportEmptyState(props: { held: boolean }) {
 // backend deliberately 404s them identically (see getGrowthReportBody's publishedOnly option).
 function ReportBody(props: { latestReport: GrowthStatus["latestReport"], held: boolean }) {
   const app = useAdminApp();
+  const router = useRouter();
+  const projectId = useProjectId();
+  const withQuery = useGrowthHref();
   const { demo, refresh: refreshStatus } = useGrowthStatus();
   const [data, setData] = useState<GrowthLoadable<GrowthReport | null>>({ status: "loading" });
-  const markedReadReportIdRef = useRef<string | null>(null);
+  const [readReceiptError, setReadReceiptError] = useState<string | null>(null);
+  const markReadPromiseRef = useRef<{ reportId: string, promise: Promise<void> } | null>(null);
   const hasReport = props.latestReport != null;
 
   const load = useCallback(async () => {
@@ -101,22 +107,37 @@ function ReportBody(props: { latestReport: GrowthStatus["latestReport"], held: b
   const shouldMarkRead = !demo
     && reportId != null
     && props.latestReport?.id === reportId
-    && props.latestReport.readAtMillis == null
-    && markedReadReportIdRef.current !== reportId;
+    && props.latestReport.readAtMillis == null;
+  const ensureReportRead = useCallback(async (targetReportId: string) => {
+    if (demo || props.latestReport?.readAtMillis != null) return;
+    const existing = markReadPromiseRef.current;
+    if (existing?.reportId === targetReportId) {
+      await existing.promise;
+      return;
+    }
+    const promise = (async () => {
+      await markGrowthReportRead(app, targetReportId);
+      await refreshStatus();
+    })();
+    markReadPromiseRef.current = { reportId: targetReportId, promise };
+    try {
+      await promise;
+    } finally {
+      markReadPromiseRef.current = null;
+    }
+  }, [app, demo, props.latestReport?.readAtMillis, refreshStatus]);
   useEffect(() => {
     if (!shouldMarkRead) return;
-    markedReadReportIdRef.current = reportId;
     // The receipt only controls a reminder on the overview. Never delay the report itself for this
     // cosmetic write; capture a failure so it is diagnosable, and leave the reminder visible.
     runAsynchronously(async () => {
       try {
-        await markGrowthReportRead(app, reportId);
-        await refreshStatus();
+        await ensureReportRead(reportId);
       } catch (error) {
         captureError("growth-report-mark-read", error);
       }
     });
-  }, [app, refreshStatus, reportId, shouldMarkRead]);
+  }, [ensureReportRead, reportId, shouldMarkRead]);
 
   if (data.status === "loading") {
     return (
@@ -145,20 +166,37 @@ function ReportBody(props: { latestReport: GrowthStatus["latestReport"], held: b
   if (data.value == null) {
     return <ReportEmptyState held={props.held} />;
   }
-  return <ReportContent report={data.value} />;
+  const report = data.value;
+  return (
+    <ReportContent
+      report={report}
+      readReceiptError={readReceiptError}
+      onViewDashboard={async () => {
+        setReadReceiptError(null);
+        try {
+          await ensureReportRead(report.id);
+        } catch (error) {
+          captureError("growth-report-mark-read", error);
+          setReadReceiptError("We couldn't open your dashboard yet. Please try again.");
+          return;
+        }
+        router.push(withQuery(`/projects/${projectId}/gtm`));
+      }}
+    />
+  );
 }
 
-function ReportContent(props: { report: GrowthReport }) {
+function ReportContent(props: { report: GrowthReport, readReceiptError: string | null, onViewDashboard: () => Promise<void> }) {
   const { report } = props;
   return (
-    <div className="flex flex-col gap-8">
+    <div className="mx-auto flex w-full max-w-4xl flex-col gap-8">
       <header className="border-b border-foreground/[0.08] pb-7">
         <p className="text-xs text-muted-foreground">Created {new Date(report.createdAtMillis).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</p>
         <h1 className="mt-2 max-w-4xl text-balance text-2xl font-semibold tracking-tight sm:text-3xl">{report.title}</h1>
         <p className="mt-3 max-w-3xl text-pretty text-sm leading-6 text-muted-foreground sm:text-base">{report.summary}</p>
       </header>
 
-      {report.document == null ? <GrowthReportSections report={report} /> : <GrowthDocumentRenderer document={report.document} />}
+      {report.document == null ? <GrowthReportSections report={report} /> : <GrowthDocumentRenderer document={report.document} className="mx-0 max-w-none" />}
 
       {report.actionItems.length > 0 && (
         <section className="border-t border-foreground/[0.08] pt-8">
@@ -169,6 +207,17 @@ function ReportContent(props: { report: GrowthReport }) {
           </div>
         </section>
       )}
+
+      <section className="flex flex-col gap-4 border-t border-foreground/[0.08] pt-8 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold">Continue to your Growth dashboard</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">Explore each growth stage and manage the actions from this report.</p>
+          {props.readReceiptError != null && <p className="mt-2 text-sm text-destructive">{props.readReceiptError}</p>}
+        </div>
+        <DesignButton onClick={props.onViewDashboard}>
+          <span className="flex items-center gap-2">View dashboard<ArrowRightIcon className="size-4" /></span>
+        </DesignButton>
+      </section>
     </div>
   );
 }

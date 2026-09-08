@@ -33,6 +33,7 @@ export type AuthoredQuizQuestion = {
 export type QuizAuthoringProduct = {
   websiteUrl: string | null,
   companySummary: string | null,
+  additionalNotes: string | null,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -113,6 +114,7 @@ export async function authorQuizQuestions(input: {
       product: {
         website_url: input.product.websiteUrl,
         company_summary: input.product.companySummary,
+        additional_notes: input.product.additionalNotes,
       },
       facts: input.facts.map((fact) => ({
         fact_id: fact.factId,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectGrowthDocumentActionIds, collectStoredGrowthDocumentActionIds, compileGrowthDocument } from "./content-document";
+import { collectGrowthDocumentActionIds, collectStoredGrowthDocumentActionIds, compileGrowthActionDocument, compileGrowthDocument } from "./content-document";
 
 const trendData = {
   id: "signup-trend",
@@ -176,5 +176,81 @@ describe("compileGrowthDocument", () => {
       source_mdx: "<Metric data=\"spend\" />",
       data: [{ id: "spend", kind: "metric", title: "Spend", unit: "minor_units", source: "Ad account", takeaway: "Spend stayed within the cap.", value: 1250 }],
     })).toThrow(/three-letter ISO currency/);
+  });
+});
+
+describe("compileGrowthActionDocument", () => {
+  const source_mdx = `<Finding>
+
+Search visitors activate more often than direct visitors.
+
+</Finding>
+
+<Evidence data="activation">
+
+Search visitors activated at 31%. Direct visitors activated at 23%.
+
+</Evidence>
+
+<Recommendation>
+
+Publish the comparison page.
+
+- Link it from the home page.
+- Review results after 14 days.
+
+</Recommendation>
+
+<MeasurementPlan />`;
+
+  const data = [{
+    id: "activation",
+    kind: "metric",
+    title: "Search activation",
+    unit: "percent",
+    source: "Acquisition events, last 30 days",
+    takeaway: "Search activation is eight points above direct activation.",
+    value: 31,
+    comparison_label: "direct activation",
+    comparison_value: 23,
+  }];
+
+  it("compiles the editable semantic action-page structure", () => {
+    expect(compileGrowthActionDocument({ format: "growth-mdx-v1", source_mdx, data }).blocks.map((block) => block.type === "component" ? block.name : block.type)).toEqual([
+      "Finding",
+      "Evidence",
+      "Recommendation",
+      "MeasurementPlan",
+    ]);
+  });
+
+  it("keeps legacy action-page MDX editable", () => {
+    const legacySource = `<Hypothesis confidence="medium">
+
+Search visitors may be a strong audience.
+
+</Hypothesis>
+
+<Evidence data="activation">
+
+Search visitors activated at 31%. Direct visitors activated at 23%.
+
+</Evidence>
+
+<Experiment>
+
+Publish the comparison page.
+
+</Experiment>`;
+
+    expect(compileGrowthActionDocument({ format: "growth-mdx-v1", source_mdx: legacySource, data }).blocks).toHaveLength(3);
+  });
+
+  it.each([
+    ["missing evidence data", source_mdx.replace(' data="activation"', "")],
+    ["free-standing prose", `${source_mdx}\n\nExtra copy`],
+    ["missing measurement plan", source_mdx.replace("\n\n<MeasurementPlan />", "")],
+  ])("rejects %s in newly authored action pages", (_label, invalidSource) => {
+    expect(() => compileGrowthActionDocument({ format: "growth-mdx-v1", source_mdx: invalidSource, data })).toThrow(/Invalid Growth document/);
   });
 });

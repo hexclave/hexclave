@@ -18,6 +18,7 @@ export type BlogDraftRequest = {
   readonly product: {
     readonly website_url: string | null,
     readonly company_summary: string | null,
+    readonly additional_notes: string | null,
   },
 };
 
@@ -33,6 +34,7 @@ function buildBlogDraftPrompt(input: BlogDraftRequest): string {
     `Write one complete, publishable blog post for the product at ${input.product.website_url ?? "(website not recorded)"}.`,
     "",
     input.product.company_summary != null ? `What the product does: ${input.product.company_summary}` : "The product summary was not recorded; infer what you can from the idea below and stay generic where you cannot.",
+    input.product.additional_notes != null ? `Additional context from the team: ${input.product.additional_notes}` : "",
     "",
     "The growth analysis proposed this piece:",
     `- Working title: ${idea.title}`,

@@ -63,7 +63,7 @@ export function GrowthWatchedMetricChips(props: { action: GrowthActionItem }) {
  * Clickable summary card for one action item in the report's recommended-actions grid. The whole card
  * is one link to the action detail page so the grid stays scannable.
  */
-export function GrowthActionCard(props: { action: GrowthActionItem }) {
+export function GrowthActionCard(props: { action: GrowthActionItem, href?: string, linkLabel?: string }) {
   const { action } = props;
   const projectId = useProjectId();
   const withQuery = useGrowthHref();
@@ -71,7 +71,7 @@ export function GrowthActionCard(props: { action: GrowthActionItem }) {
   const TypeIcon = typeMeta.icon;
   return (
     <Link
-      href={withQuery(`/projects/${projectId}/gtm/actions/${action.id}`)}
+      href={props.href ?? withQuery(`/projects/${projectId}/gtm/actions/${action.id}`)}
       className="group block h-full rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       <DesignCard className="h-full transition-shadow duration-150 hover:shadow-md hover:transition-none">
@@ -89,7 +89,7 @@ export function GrowthActionCard(props: { action: GrowthActionItem }) {
           </div>
           <div className="mt-auto flex flex-wrap items-end justify-between gap-3">
             <GrowthWatchedMetricChips action={action} />
-            <span className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-foreground sm:mt-5">Review action <ArrowRightIcon className="size-3.5 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:transition-none" /></span>
+            <span className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-foreground sm:mt-5">{props.linkLabel ?? "Review action"} <ArrowRightIcon className="size-3.5 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:transition-none" /></span>
           </div>
         </div>
       </DesignCard>

@@ -11,6 +11,7 @@ import { buildGrowthDemoInterview, GROWTH_DEMO_NOW_MILLIS } from "./growth-demo-
 import type { GrowthPhase } from "./growth-status";
 import {
   GROWTH_INTERVIEW_QUESTION_KINDS,
+  type GrowthInterview,
   type GrowthInterviewQuestion,
   type GrowthInterviewQuestionKind,
   type GrowthInterviewQuestionOption,
@@ -452,6 +453,25 @@ function parseLoadedTranscript(messages: unknown[]): InterviewTranscriptEntry[] 
 }
 
 /**
+ * Builds the authoritative client state from GET /interview. This is shared by the initial load and
+ * the post-turn reconciliation: an interview turn may append an adaptive question while it runs,
+ * so applying only the submitted answer to the old in-memory plan would leave the streamed card
+ * without its newly-persisted plan row until the founder manually reloaded the page.
+ */
+export function baseStateFromGrowthInterview(interview: GrowthInterview): GrowthInterviewBaseState {
+  if (interview.questions.length === 0 && (interview.status === "pending" || interview.status === "active")) {
+    return { status: "not-ready" };
+  }
+  return {
+    status: "loaded",
+    interviewStatus: interview.status,
+    questions: interview.questions,
+    loadedEntries: parseLoadedTranscript(interview.messages),
+    localEntries: [],
+  };
+}
+
+/**
  * Loads and drives the interview chat. `app` must be the project's own admin app (same authorization
  * story as growth-api.ts). In demo mode nothing ever touches the network: the plan comes from the
  * phase fixture and answering advances a purely-local simulation (see buildDemoTranscriptEntries).
@@ -483,18 +503,7 @@ export function useGrowthInterviewChat(options: { app: object, demo: boolean, de
     try {
       const interview = await getGrowthInterview(app);
       if (loadNonceRef.current !== nonce) return;
-      if (interview.questions.length === 0 && (interview.status === "pending" || interview.status === "active")) {
-        // The interview resource exists but the analysis hasn't saved a question plan yet.
-        setBase({ status: "not-ready" });
-        return;
-      }
-      setBase({
-        status: "loaded",
-        interviewStatus: interview.status,
-        questions: interview.questions,
-        loadedEntries: parseLoadedTranscript(interview.messages),
-        localEntries: [],
-      });
+      setBase(baseStateFromGrowthInterview(interview));
     } catch (error) {
       if (loadNonceRef.current !== nonce) return;
       if (error instanceof GrowthApiError && error.statusCode === 404) {
@@ -588,13 +597,12 @@ export function useGrowthInterviewChat(options: { app: object, demo: boolean, de
         captureError("growth-interview-turn-parse", { message: "Streamed growth interview turn contained unrenderable parts", malformed });
       }
       if (loadNonceRef.current !== nonce) return;
-      setBase((previous) => previous.status !== "loaded" ? previous : {
-        ...previous,
-        // The backend flips a pending interview to active on the first persisted answer.
-        interviewStatus: previous.interviewStatus === "pending" && answer != null ? "active" : previous.interviewStatus,
-        questions: answer == null ? previous.questions : applyAnswerToQuestions(previous.questions, answer, Date.now()),
-        localEntries: [...previous.localEntries, ...userEntry == null ? [] : [userEntry], ...assistantEntries],
-      });
+      // The agent may have persisted an adaptive question during this turn. Reconcile the plan and
+      // transcript together from the backend before committing the streamed card; otherwise the
+      // card arrives in localEntries while its answerable plan row is absent from `questions`.
+      const refreshedInterview = await getGrowthInterview(app);
+      if (loadNonceRef.current !== nonce) return;
+      setBase(baseStateFromGrowthInterview(refreshedInterview));
       setTurn({ status: "idle" });
     } catch (error) {
       if (loadNonceRef.current !== nonce) return;

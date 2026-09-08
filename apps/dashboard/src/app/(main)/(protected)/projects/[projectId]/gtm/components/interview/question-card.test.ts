@@ -18,6 +18,15 @@ describe("interviewOptionsWithOther", () => {
       { id: "other", label: "Other", description: "Write your own answer" },
     ]);
   });
+
+  it("omits Other when staff disabled it for the question", () => {
+    expect(interviewOptionsWithOther([
+      { id: "signups", label: "More signups", description: null },
+      { id: "other", label: "Other", description: "Write your own answer" },
+    ], false)).toEqual([
+      { id: "signups", label: "More signups", description: null },
+    ]);
+  });
 });
 
 describe("buildInterviewAnswerDraft", () => {

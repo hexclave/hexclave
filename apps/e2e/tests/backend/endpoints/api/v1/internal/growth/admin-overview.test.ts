@@ -2,8 +2,8 @@ import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { describe } from "vitest";
 import { it } from "../../../../../../helpers";
-import { Auth, INTERNAL_PROJECT_OWNER_TEAM_ID, InternalProjectKeys, Team, backendContext, niceBackendFetch } from "../../../../../backend-helpers";
-import { GROWTH_AGENT_AUTH, createGrowthProject } from "./growth-helpers";
+import { Auth, INTERNAL_PROJECT_OWNER_TEAM_ID, InternalProjectKeys, Project, Team, backendContext, niceBackendFetch } from "../../../../../backend-helpers";
+import { GROWTH_AGENT_AUTH, asGrowthStaff, createGrowthProject } from "./growth-helpers";
 import { withInternalDatabase } from "../../external-db-sync-utils";
 
 const ADMIN_BASE = "/api/latest/internal/growth/admin";
@@ -85,6 +85,45 @@ describe("internal Growth admin", { timeout: 90_000 }, () => {
     expect(response.status).toBe(400);
   });
 
+  it("reports stage prerequisites and performs no work for a blocked future stage", async ({ expect }) => {
+    const project = await Project.createAndSwitch();
+    try {
+      await Project.updateConfig({ "apps.installed.gtm.enabled": true });
+      // This endpoint test only needs the durable prerequisite row. Inserting that row directly keeps
+      // the test focused and avoids spending up to a minute compiling the sandbox-backed workflows
+      // that the onboarding endpoint seeds (that behavior is covered by lifecycle.test.ts).
+      await withInternalDatabase(async (client) => {
+        await client.query(`
+          INSERT INTO "GrowthOnboarding" ("projectId", "branchId", "websiteUrl", "companySummary", "createdAt", "updatedAt", "completedAt")
+          VALUES ($1, 'main', 'https://admin-stage-run.example.com/', 'Growth admin stage-run fixture', NOW(), NOW(), NOW())
+        `, [project.projectId]);
+      });
+      await asGrowthStaff(async () => {
+        const setup = await niceBackendFetch(`${ADMIN_BASE}/run-now`, {
+          accessType: "client",
+          method: "POST",
+          body: { step: "lifecycle_stage_state", target_project_id: project.projectId, stage: "set-up" },
+        });
+        expect(setup).toMatchObject({
+          status: 200,
+          body: { stage: "set-up", state: "complete", can_run: false },
+        });
+
+        const report = await niceBackendFetch(`${ADMIN_BASE}/run-now`, {
+          accessType: "client",
+          method: "POST",
+          body: { step: "lifecycle_stage", target_project_id: project.projectId, stage: "report" },
+        });
+        expect(report).toMatchObject({
+          status: 200,
+          body: { stage: "report", state: "blocked", can_run: false, did_work: false, leg_started: null },
+        });
+      });
+    } finally {
+      await Project.deleteProject({ projectId: project.projectId, adminAccessToken: project.adminAccessToken });
+    }
+  });
+
   it("deduplicates concurrent repairs for the same growth run", { timeout: 180_000 }, async ({ expect }) => {
     const keys = await createGrowthProject();
     if (keys === "no-project") throw new Error("Growth admin test requires a fresh project.");
@@ -153,7 +192,11 @@ describe("internal Growth admin", { timeout: 90_000 }, () => {
 
     const projects = await niceBackendFetch(`${ADMIN_BASE}/projects`, { accessType: "client" });
     expect(projects.status).toBe(200);
-    expect(projects.body).toEqual(expect.arrayContaining([expect.objectContaining({ id: projectId })]));
+    expect(projects.body).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: projectId,
+      website_url: "https://admin-overview.example.com/",
+      company_summary: "Growth admin fixture",
+    })]));
 
     const note = await niceBackendFetch(`${ADMIN_BASE}/findings`, {
       accessType: "client",
@@ -216,5 +259,137 @@ describe("internal Growth admin", { timeout: 90_000 }, () => {
       body: actionUpdateBody(projectId, { status: "active", payload: { experiment: "changed-after-activation" } }),
     });
     expect(invalidFunctionalEdit.status).toBe(400);
+  });
+
+  it("keeps action-page edits private until an admin publishes the compiled draft", async ({ expect }) => {
+    const { projectId, actionId } = await createOnboardedProjectWithAction();
+    await signInAsInternalAdmin();
+
+    const initial = await niceBackendFetch(`${ADMIN_BASE}/actions/${actionId}?project_id=${projectId}`, { accessType: "client" });
+    expect(initial).toMatchObject({ status: 200, body: { action: { id: actionId, document: null }, draft: null, published_at_millis: null } });
+
+    const sourceMdx = "## Why this matters\n\n<Hypothesis confidence=\"high\">\n\nA shorter first run will increase activation.\n\n</Hypothesis>";
+    const saved = await niceBackendFetch(`${ADMIN_BASE}/actions/${actionId}`, {
+      accessType: "client",
+      method: "PUT",
+      body: {
+        target_project_id: projectId,
+        document: { format: "growth-mdx-v1", source_mdx: sourceMdx, data: [] },
+        expected_draft_updated_at_millis: null,
+      },
+    });
+    expect(saved.status).toBe(200);
+    expect(saved.body).toMatchObject({ document: { format: "growth-mdx-v1", sourceMdx }, source_json: { source_mdx: sourceMdx } });
+    const draftUpdatedAtMillis = (saved.body as { updated_at_millis: number }).updated_at_millis;
+
+    // Saving a draft must not mutate the live action document.
+    const beforePublish = await niceBackendFetch(`${ADMIN_BASE}/actions/${actionId}?project_id=${projectId}`, { accessType: "client" });
+    expect(beforePublish.body).toMatchObject({ action: { document: null }, draft: { updated_at_millis: draftUpdatedAtMillis } });
+
+    const staleSave = await niceBackendFetch(`${ADMIN_BASE}/actions/${actionId}`, {
+      accessType: "client",
+      method: "PUT",
+      body: {
+        target_project_id: projectId,
+        document: { format: "growth-mdx-v1", source_mdx: "## Stale overwrite", data: [] },
+        expected_draft_updated_at_millis: null,
+      },
+    });
+    expect(staleSave.status).toBe(409);
+
+    const published = await niceBackendFetch(`${ADMIN_BASE}/actions/${actionId}`, {
+      accessType: "client",
+      method: "POST",
+      body: { target_project_id: projectId, expected_draft_updated_at_millis: draftUpdatedAtMillis },
+    });
+    expect(published).toMatchObject({ status: 200, body: { status: "published", published_at_millis: expect.any(Number) } });
+
+    const afterPublish = await niceBackendFetch(`${ADMIN_BASE}/actions/${actionId}?project_id=${projectId}`, { accessType: "client" });
+    expect(afterPublish.body).toMatchObject({ action: { document: { format: "growth-mdx-v1", sourceMdx } }, draft: null, published_at_millis: expect.any(Number) });
+  });
+
+  it("keeps evidence and note page edits private until an admin publishes the compiled draft", async ({ expect }) => {
+    const { projectId } = await createOnboardedProjectWithAction();
+    const created = await niceBackendFetch(`${AGENT_BASE}/findings`, {
+      method: "POST",
+      headers: GROWTH_AGENT_AUTH,
+      body: {
+        project_id: projectId,
+        branch_id: "main",
+        source: "data-analysis",
+        findings: [{
+          kind: "data-insight",
+          category: "retention",
+          tags: ["sessions"],
+          title: "Returning use is concentrated",
+          body: "A small returning cohort accounts for most sessions.",
+          document: {
+            format: "growth-mdx-v1",
+            source_mdx: "## Generated evidence\n\nThe returning cohort is small.",
+            data: [],
+          },
+        }],
+      },
+    });
+    expect(created.status).toBe(200);
+    const findingId = await withInternalDatabase(async (client) => {
+      const result = await client.query<{ id: string }>(`
+        SELECT "id" FROM "GrowthFinding"
+        WHERE "projectId" = $1 AND "branchId" = 'main' AND "title" = 'Returning use is concentrated'
+        LIMIT 1
+      `, [projectId]);
+      return result.rows.at(0)?.id ?? throwErr("Growth evidence fixture was not created.");
+    });
+    await signInAsInternalAdmin();
+
+    const initial = await niceBackendFetch(`${ADMIN_BASE}/findings/${findingId}/document?project_id=${projectId}`, { accessType: "client" });
+    expect(initial).toMatchObject({
+      status: 200,
+      body: {
+        finding: { id: findingId, document: { sourceMdx: "## Generated evidence\n\nThe returning cohort is small." } },
+        draft: null,
+        published_at_millis: null,
+      },
+    });
+
+    const sourceMdx = "## Reviewed evidence\n\n<Evidence>\n\nReturning users account for most sessions.\n\n</Evidence>";
+    const saved = await niceBackendFetch(`${ADMIN_BASE}/findings/${findingId}/document`, {
+      accessType: "client",
+      method: "PUT",
+      body: {
+        target_project_id: projectId,
+        document: { format: "growth-mdx-v1", source_mdx: sourceMdx, data: [] },
+        expected_draft_updated_at_millis: null,
+      },
+    });
+    expect(saved).toMatchObject({ status: 200, body: { source_json: { source_mdx: sourceMdx }, document: { sourceMdx } } });
+    const draftUpdatedAtMillis = (saved.body as { updated_at_millis: number }).updated_at_millis;
+
+    const beforePublish = await niceBackendFetch(`${ADMIN_BASE}/findings/${findingId}/document?project_id=${projectId}`, { accessType: "client" });
+    expect(beforePublish.body).toMatchObject({
+      finding: { document: { sourceMdx: "## Generated evidence\n\nThe returning cohort is small." } },
+      draft: { document: { sourceMdx }, updated_at_millis: draftUpdatedAtMillis },
+    });
+
+    const staleSave = await niceBackendFetch(`${ADMIN_BASE}/findings/${findingId}/document`, {
+      accessType: "client",
+      method: "PUT",
+      body: {
+        target_project_id: projectId,
+        document: { format: "growth-mdx-v1", source_mdx: "## Stale overwrite", data: [] },
+        expected_draft_updated_at_millis: null,
+      },
+    });
+    expect(staleSave.status).toBe(409);
+
+    const published = await niceBackendFetch(`${ADMIN_BASE}/findings/${findingId}/document`, {
+      accessType: "client",
+      method: "POST",
+      body: { target_project_id: projectId, expected_draft_updated_at_millis: draftUpdatedAtMillis },
+    });
+    expect(published).toMatchObject({ status: 200, body: { status: "published", published_at_millis: expect.any(Number) } });
+
+    const afterPublish = await niceBackendFetch(`${ADMIN_BASE}/findings/${findingId}/document?project_id=${projectId}`, { accessType: "client" });
+    expect(afterPublish.body).toMatchObject({ finding: { document: { sourceMdx } }, draft: null, published_at_millis: expect.any(Number) });
   });
 });

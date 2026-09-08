@@ -1,14 +1,17 @@
 "use client";
 
-import { DesignAlert, DesignBadge, DesignCard } from "@/components/design-components";
+import { DesignBadge, DesignCard } from "@/components/design-components";
+import { Link } from "@/components/link";
 import { cn } from "@/components/ui";
 import { formatGrowthRelativeTime } from "@/lib/growth/growth-format";
-import type { GrowthAdminEditGate } from "@/lib/growth/growth-admin-lifecycle";
+import { getGrowthAdminTimelineStepStates, growthAdminInterviewIsAwaitingApproval, growthAdminReportIsAwaitingRelease, type GrowthAdminEditGate } from "@/lib/growth/growth-admin-lifecycle";
 import type { GrowthPhase } from "@/lib/growth/growth-status";
-import { getGrowthTimelineStepStates, GROWTH_TIMELINE_STEP_IDS, type GrowthTimelineStepId, type GrowthTimelineStepState } from "@/lib/growth/growth-timeline";
+import type { GrowthTimelineStepId, GrowthTimelineStepState } from "@/lib/growth/growth-timeline";
 import type { GrowthStatus } from "@/lib/growth/growth-types";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
-import { CheckCircleIcon, CircleIcon, CircleNotchIcon, PulseIcon, WarningCircleIcon } from "@phosphor-icons/react";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
+import { ArrowRightIcon, CheckCircleIcon, CircleIcon, CircleNotchIcon, HourglassMediumIcon, PulseIcon, WarningCircleIcon } from "@phosphor-icons/react";
+import { GROWTH_ADMIN_LIFECYCLE_STEPS } from "./lifecycle-routes";
 
 /**
  * Where the selected customer is in their Growth lifecycle, at the top of the admin workspace.
@@ -29,7 +32,7 @@ const PHASE_LABELS = new Map<GrowthPhase, string>([
   ["analysis-failed", "Deep research failed"],
   ["interview", "Waiting on interview"],
   ["report-ready", "Report ready"],
-  ["steady-state", "Ongoing"],
+  ["steady-state", "Onboarding complete"],
 ]);
 
 const PHASE_COLORS = new Map<GrowthPhase, "orange" | "cyan" | "red" | "green">([
@@ -41,16 +44,6 @@ const PHASE_COLORS = new Map<GrowthPhase, "orange" | "cyan" | "red" | "green">([
   ["steady-state", "green"],
 ]);
 
-const STEP_LABELS = new Map<GrowthTimelineStepId, string>([
-  ["set-up", "Set up"],
-  ["compute-metrics", "Metrics"],
-  ["integrations", "Integrations"],
-  ["analysis", "Deep research"],
-  ["interview", "Interview"],
-  ["report", "Report"],
-  ["ongoing", "Ongoing"],
-]);
-
 /** Named from staff's point of view: what the interview's wire state means for whoever is looking at it. */
 const INTERVIEW_LABELS = new Map<GrowthStatus["interview"]["state"], string>([
   ["not_ready", "not generated yet"],
@@ -60,23 +53,35 @@ const INTERVIEW_LABELS = new Map<GrowthStatus["interview"]["state"], string>([
   ["completed", "completed"],
 ]);
 
-function StepChip(props: { label: string, state: GrowthTimelineStepState }) {
-  const icon = new Map<GrowthTimelineStepState, React.ReactNode>([
+function StepLink(props: { projectId: string, stepId: GrowthTimelineStepId, label: string, state: GrowthTimelineStepState, waitingLabel?: string }) {
+  const stateIcon = new Map<GrowthTimelineStepState, React.ReactNode>([
     ["done", <CheckCircleIcon key="done" weight="fill" className="size-3.5 text-emerald-600 dark:text-emerald-400" />],
     ["current", <CircleNotchIcon key="current" className="size-3.5 animate-spin text-cyan-600 dark:text-cyan-400" />],
     ["failed", <WarningCircleIcon key="failed" weight="fill" className="size-3.5 text-destructive" />],
     ["upcoming", <CircleIcon key="upcoming" className="size-3.5 text-muted-foreground/40" />],
   ]).get(props.state);
+  const icon = props.waitingLabel != null
+    ? <HourglassMediumIcon className="size-3.5 text-orange-600 dark:text-orange-400" />
+    : stateIcon;
   return (
-    <span className={cn("flex items-center gap-1.5 text-xs", props.state === "upcoming" && "text-muted-foreground/60")}>
-      {icon}
-      {props.label}
-    </span>
+    <Link
+      href={urlString`/projects/internal/gtm/admin/${props.stepId}?targetProjectId=${props.projectId}`}
+      className={cn(
+        "group/step flex min-h-11 items-center gap-3 rounded-xl px-3 py-2 text-sm no-underline transition-colors duration-150 hover:bg-foreground/[0.04] hover:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        props.state === "current" && "bg-foreground/[0.04] font-medium",
+        props.state === "upcoming" && "text-muted-foreground/60",
+      )}
+    >
+      <span className="flex size-5 shrink-0 items-center justify-center">{icon}</span>
+      <span className="min-w-0 flex-1">{props.label}</span>
+      {props.waitingLabel != null && <DesignBadge label={props.waitingLabel} color="orange" size="sm" />}
+      <ArrowRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-150 group-hover/step:translate-x-0.5 group-hover/step:transition-none" />
+    </Link>
   );
 }
 
 /** The one or two facts that explain the phase, so staff don't have to open the ops cards to learn them. */
-function detailLines(status: GrowthStatus, nowMillis: number): string[] {
+function detailLines(status: GrowthStatus, nowMillis: number, waitingForAdminRelease: boolean): string[] {
   const lines: string[] = [];
   if (status.onboarding.completed && status.onboarding.completedAtMillis != null) {
     lines.push(`Onboarded ${formatGrowthRelativeTime(status.onboarding.completedAtMillis, nowMillis)}`);
@@ -88,14 +93,18 @@ function detailLines(status: GrowthStatus, nowMillis: number): string[] {
     const label = INTERVIEW_LABELS.get(status.interview.state) ?? throwErr(`INTERVIEW_LABELS is missing an entry for interview state ${status.interview.state}`);
     lines.push(`Interview ${label} — ${status.interview.answeredCount}/${status.interview.estimatedTotal} answered`);
   }
-  lines.push(status.latestReport == null ? "No report published yet" : `Report published ${formatGrowthRelativeTime(status.latestReport.createdAtMillis, nowMillis)}`);
+  lines.push(waitingForAdminRelease
+    ? "Report waiting for admin release"
+    : status.latestReport == null ? "No report published yet" : `Report published ${formatGrowthRelativeTime(status.latestReport.createdAtMillis, nowMillis)}`);
   return lines;
 }
 
-export function GrowthAdminLifecycleCard(props: { status: GrowthStatus, gate: GrowthAdminEditGate, nowMillis: number }) {
-  const steps = getGrowthTimelineStepStates(props.status);
+export function GrowthAdminLifecycleCard(props: { projectId: string, status: GrowthStatus, gate: GrowthAdminEditGate, nowMillis: number, hasUnpublishedReport: boolean }) {
+  const steps = getGrowthAdminTimelineStepStates(props.status);
+  const waitingForInterviewApproval = growthAdminInterviewIsAwaitingApproval(props.status);
+  const waitingForAdminRelease = growthAdminReportIsAwaitingRelease(props.status, props.hasUnpublishedReport);
   return (
-    <DesignCard title="Customer lifecycle" icon={PulseIcon}>
+    <DesignCard title="Onboarding progress" icon={PulseIcon}>
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <DesignBadge
@@ -103,27 +112,24 @@ export function GrowthAdminLifecycleCard(props: { status: GrowthStatus, gate: Gr
             color={PHASE_COLORS.get(props.gate.phase) ?? throwErr(`PHASE_COLORS is missing an entry for growth phase ${props.gate.phase}`)}
             size="sm"
           />
-          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{props.gate.phase}</span>
         </div>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-          {GROWTH_TIMELINE_STEP_IDS.map((stepId) => {
-            const state = steps.get(stepId) ?? throwErr(`getGrowthTimelineStepStates returned no state for step ${stepId}`);
-            // "hidden" is how the derivation says a run predates a phase; the customer's timeline
-            // omits those rows, and so does this one.
-            if (state === "hidden") return null;
-            return <StepChip key={stepId} label={STEP_LABELS.get(stepId) ?? throwErr(`STEP_LABELS is missing an entry for timeline step ${stepId}`)} state={state} />;
+        <div className="flex max-w-md flex-col gap-1">
+          {GROWTH_ADMIN_LIFECYCLE_STEPS.map((step) => {
+            const state = steps.get(step.id) ?? throwErr(`getGrowthAdminTimelineStepStates returned no state for step ${step.id}`);
+            const waitingLabel = step.id === "interview" && waitingForInterviewApproval
+              ? "Waiting for admin approval"
+              : step.id === "report" && waitingForAdminRelease ? "Waiting for admin release" : undefined;
+            return <StepLink key={step.id} projectId={props.projectId} stepId={step.id} label={step.label} state={state} waitingLabel={waitingLabel} />;
           })}
         </div>
-        <div className="space-y-0.5">
-          {detailLines(props.status, props.nowMillis).map((line) => (
-            <p key={line} className="text-xs text-muted-foreground">{line}</p>
-          ))}
+        <div className="space-y-1.5">
+          <h3 className="text-xs font-semibold text-foreground">Logs</h3>
+          <div className="space-y-0.5">
+            {detailLines(props.status, props.nowMillis, waitingForAdminRelease).map((line) => (
+              <p key={line} className="text-xs text-muted-foreground">{line}</p>
+            ))}
+          </div>
         </div>
-        {props.gate.blockedReason != null && (
-          <DesignAlert variant="warning" title="The workspace below is read-only">
-            {props.gate.blockedReason}
-          </DesignAlert>
-        )}
       </div>
     </DesignCard>
   );

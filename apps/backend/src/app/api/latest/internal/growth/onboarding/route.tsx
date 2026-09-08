@@ -27,6 +27,7 @@ export const POST = createSmartRouteHandler({
     body: yupObject({
       website_url: yupString().max(2048).defined(),
       company_summary: yupString().max(10_000).nullable().optional(),
+      additional_notes: yupString().max(10_000).nullable().optional(),
     }).defined(),
   }),
   response: yupObject({
@@ -42,6 +43,7 @@ export const POST = createSmartRouteHandler({
       tenancy: auth.tenancy,
       websiteUrl: parseWebsiteUrl(body.website_url),
       companySummary: body.company_summary ?? null,
+      additionalNotes: body.additional_notes ?? null,
     });
     return { statusCode: 200, bodyType: "json", body: { run_id: result.runId } };
   },

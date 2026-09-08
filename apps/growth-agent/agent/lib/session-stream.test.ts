@@ -4,6 +4,7 @@ import {
   DEFAULT_SESSION_STREAM_RECONNECT_POLICY,
   followSessionEvents,
   SessionStreamLostError,
+  SessionStreamLimitError,
   SessionTimeoutError,
   type SessionStreamEvent,
   type SessionStreamReconnectPolicy,
@@ -126,6 +127,7 @@ async function collect(session: Session, options?: {
   readonly isAlreadyStopped?: () => boolean,
   /** Runs on every event, so a test can mimic a consumer that stops the session mid-iteration. */
   readonly onEvent?: (event: SessionStreamEvent) => void,
+  readonly maxStreamBytes?: number,
 }): Promise<SessionStreamEvent[]> {
   const seen: SessionStreamEvent[] = [];
   for await (const event of followSessionEvents({
@@ -135,6 +137,7 @@ async function collect(session: Session, options?: {
     reconnect: options?.reconnect ?? INSTANT_RETRIES,
     cancelWaitMs: options?.cancelWaitMs ?? 50,
     isAlreadyStopped: options?.isAlreadyStopped,
+    maxStreamBytes: options?.maxStreamBytes,
   })) {
     seen.push(event);
     options?.onEvent?.(event);
@@ -242,6 +245,17 @@ describe("followSessionEvents", () => {
     };
 
     await expect(collect(stalled, { maxSessionMs: 20 })).rejects.toThrow(SessionTimeoutError);
+    expect(fake.cancelCalls()).toBe(1);
+  });
+
+  it("cancels a session before its serialized event stream can grow without bound", async () => {
+    const log = [startedEvent(0), startedEvent(1), completedEvent(2)];
+    const fake = createFakeSession({
+      log,
+      connections: [{ deliver: 3, end: { kind: "close" } }],
+    });
+
+    await expect(collect(fake.session, { maxStreamBytes: 100 })).rejects.toThrow(SessionStreamLimitError);
     expect(fake.cancelCalls()).toBe(1);
   });
 

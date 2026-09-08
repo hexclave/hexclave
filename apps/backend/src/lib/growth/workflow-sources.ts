@@ -123,14 +123,13 @@ export default workflow<GrowthAnalysisEventData>("growth-analysis", {
 }, async (event, step) => {
   const growthRunId = event.data.growth_run_id;
   for (let round = 0; round < 200; round++) {
-    // One round = one tick (which actually advances the run) plus up to two
-    // long-polls inside the same step, so quiet stretches don't burn a step
-    // checkpoint every 4 minutes. The step id must be unique per iteration:
-    // a repeated id would replay round 0's memoized snapshot forever.
+    // One round = one tick (which actually advances the run) plus one long-poll. Keeping a
+    // checkpoint below the platform invocation ceiling matters more than saving a checkpoint every
+    // 4 minutes: if this handler is killed before step.run returns, orchestration never gets another
+    // tick in which to reap or retry a stuck phase. The step id must be unique per iteration.
     const snapshot = await step.run("advance-" + round, async () => {
       let latest = await growthApi<GrowthAnalysisSnapshot>("analysis/tick", { run_id: growthRunId });
-      for (let poll = 0; poll < 2; poll++) {
-        if (latest == null || latest.resting) break;
+      if (latest != null && !latest.resting) {
         latest = await growthApi<GrowthAnalysisSnapshot>("analysis/wait", {
           run_id: growthRunId,
           fingerprint: latest.fingerprint,
@@ -141,7 +140,7 @@ export default workflow<GrowthAnalysisEventData>("growth-analysis", {
     }, { timeout: "10m", retries: 3 });
     if (snapshot == null || snapshot.resting) return;
   }
-  // 200 rounds of ~8-minute polling is >24h of a run that never rests: the
+  // 200 rounds of ~4-minute polling is >13h of a run that never rests: the
   // orchestration's own attempt budgets should have failed it long before,
   // so give up loudly instead of looping forever.
   throw new NonRetriableError("Growth analysis run " + growthRunId + " did not reach a resting state within 200 rounds");

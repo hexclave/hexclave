@@ -11,13 +11,8 @@ const AGENT_BASE = "/api/latest/internal/growth-agent";
 // full-suite load, so default-timeout tests need 90s of headroom.
 
 /**
- * What a customer may read, and when. A report is theirs the moment the analysis writes it — there
- * is no staff review of reports; the human gate moved onto the interview questions
- * (interview-release.test.ts), because that is the last point at which a person can still change
- * what the customer is asked.
- *
- * So the subject here is narrower than it used to be: the workspace is dark until a report EXISTS,
- * and `unpublish` — staff error recovery, with no publish counterpart — puts it back in the dark.
+ * What a customer may read, and when. Writing a report creates a staff-only draft. The workspace
+ * remains dark until staff explicitly release that report; unpublishing closes it again.
  *
  * Seeding "plays the agent" with the shared machine secret, the way report-actions.test.ts does:
  * reports have no customer-facing write API, so that is the only way one comes into existence.
@@ -46,7 +41,7 @@ async function seedReport() {
       run_id: runId,
       title: "Growth analysis for the fixture",
       summary: "Everything the customer may now see.",
-      content_md: "# Live\n\nPublished on write.",
+      content_md: "# Review\n\nHeld until staff release.",
       action_items: [
         { type_id: "custom", category: "conversion", tags: [], title: "A suggestion", description: "Also live." },
       ],
@@ -54,6 +49,14 @@ async function seedReport() {
   });
   if (report.status !== 200) throw new Error(`Saving the report failed with ${report.status}.`);
   return { projectId, scope, reportId: (report.body as { report_id: string }).report_id };
+}
+
+async function publishReport(projectId: string, reportId: string) {
+  return await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { target_project_id: projectId, action: "publish" },
+  }));
 }
 
 describe("internal Growth report release", { timeout: 90_000 }, () => {
@@ -92,8 +95,17 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
     expect(status.body).toMatchObject({ latest_report: null, latest_brief: null, release: { state: "not_ready" } });
   });
 
-  it("releases everything the moment the analysis writes the report — no staff step", { timeout: 300_000 }, async ({ expect }) => {
-    const { reportId } = await seedReport();
+  it("keeps a generated report private until staff release it", { timeout: 300_000 }, async ({ expect }) => {
+    const { projectId, reportId } = await seedReport();
+
+    const heldStatus = await niceBackendFetch(`${GROWTH_BASE}/status`, { accessType: "admin" });
+    expect(heldStatus.body).toMatchObject({ latest_report: null });
+    expect((await niceBackendFetch(`${GROWTH_BASE}/overview`, { accessType: "admin" })).status).toBe(409);
+    expect((await niceBackendFetch(`${GROWTH_BASE}/reports/latest`, { accessType: "admin" })).status).toBe(404);
+
+    const published = await publishReport(projectId, reportId);
+    expect(published.status).toBe(200);
+    expect(published.body).toMatchObject({ reports: [{ id: reportId, published_at_millis: expect.any(Number), published_by_user_id: expect.any(String) }] });
 
     const status = await niceBackendFetch(`${GROWTH_BASE}/status`, { accessType: "admin" });
     expect(status.body).toMatchObject({ release: { state: "released" }, latest_report: { id: reportId, read_at_millis: null } });
@@ -108,7 +120,8 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
   });
 
   it("marks a report read once and exposes the receipt on status", { timeout: 300_000 }, async ({ expect }) => {
-    const { reportId } = await seedReport();
+    const { projectId, reportId } = await seedReport();
+    expect((await publishReport(projectId, reportId)).status).toBe(200);
 
     // A malformed id is a clean 404 from the receipt endpoint too, never a Postgres cast error.
     const malformed = await niceBackendFetch(`${GROWTH_BASE}/reports/not-a-uuid/read`, { accessType: "admin", method: "POST" });
@@ -129,6 +142,7 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
 
   it("takes a report back out of the customer's hands when staff unpublish", async ({ expect }) => {
     const { projectId, reportId } = await seedReport();
+    expect((await publishReport(projectId, reportId)).status).toBe(200);
 
     const unpublished = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}`, {
       accessType: "client",
@@ -138,8 +152,7 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
     expect(unpublished.status).toBe(200);
     expect(unpublished.body).toMatchObject({ reports: [{ id: reportId, published_at_millis: null }] });
 
-    // The whole point of keeping the publishedAt filter now that writes auto-publish: an unpublished
-    // report really is gone for the customer, not merely missing from one response.
+    // An unpublished report is gone for the customer, not merely missing from one response.
     const gone = await niceBackendFetch(`${GROWTH_BASE}/reports/${reportId}`, { accessType: "admin" });
     expect(gone.status).toBe(404);
     const overview = await niceBackendFetch(`${GROWTH_BASE}/overview`, { accessType: "admin" });
@@ -154,17 +167,82 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
     expect(again.status).toBe(409);
   });
 
-  it("has no publish action left to call", { timeout: 300_000 }, async ({ expect }) => {
+  it("rejects releasing the same report twice", { timeout: 300_000 }, async ({ expect }) => {
     const { projectId, reportId } = await seedReport();
-    // Guards the decision rather than the code: re-adding "publish" would mean re-adding a review
-    // queue for reports, which is exactly what this build moved onto the interview instead. Rejected
-    // by the route schema, so it is a 400 rather than a 404 or a silent no-op.
-    const published = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}`, {
+    expect((await publishReport(projectId, reportId)).status).toBe(200);
+    expect((await publishReport(projectId, reportId)).status).toBe(409);
+  });
+
+  it("lets staff edit a held report as growth MDX and serves the compiled result after release", { timeout: 300_000 }, async ({ expect }) => {
+    const { projectId, reportId } = await seedReport();
+    const detailBefore = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}?project_id=${projectId}`, { accessType: "client" }));
+    const actionId = (detailBefore.body as { action_items: { id: string }[] }).action_items[0]?.id;
+    if (actionId == null) throw new Error("The report editor fixture requires its seeded action.");
+
+    const saved = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}`, {
       accessType: "client",
-      method: "PATCH",
-      body: { target_project_id: projectId, action: "publish" },
+      method: "PUT",
+      body: {
+        target_project_id: projectId,
+        document: {
+          format: "growth-mdx-v1",
+          source_mdx: `## Staff-edited analysis\n\nThe reviewed conclusion.\n\n<ActionButton action="${actionId}" />`,
+          data: [],
+        },
+      },
     }));
-    expect(published.status).toBe(400);
+    expect(saved).toMatchObject({
+      status: 200,
+      body: {
+        id: reportId,
+        document: {
+          format: "growth-mdx-v1",
+          sourceMdx: expect.stringContaining("Staff-edited analysis"),
+        },
+      },
+    });
+
+    const foreignAction = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}`, {
+      accessType: "client",
+      method: "PUT",
+      body: {
+        target_project_id: projectId,
+        document: {
+          format: "growth-mdx-v1",
+          source_mdx: "<ActionButton action=\"00000000-0000-4000-8000-000000000000\" />",
+          data: [],
+        },
+      },
+    }));
+    expect(foreignAction.status).toBe(400);
+
+    expect((await publishReport(projectId, reportId)).status).toBe(200);
+    const customerReport = await niceBackendFetch(`${GROWTH_BASE}/reports/latest`, { accessType: "admin" });
+    expect(customerReport).toMatchObject({
+      status: 200,
+      body: { document: { sourceMdx: expect.stringContaining("Staff-edited analysis") } },
+    });
+
+    const editWhileLive = await asGrowthStaff(async () => await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}`, {
+      accessType: "client",
+      method: "PUT",
+      body: {
+        target_project_id: projectId,
+        document: { format: "growth-mdx-v1", source_mdx: "## Updated while live", data: [] },
+      },
+    }));
+    expect(editWhileLive).toMatchObject({
+      status: 200,
+      body: {
+        published_at_millis: expect.any(Number),
+        document: { sourceMdx: "## Updated while live" },
+      },
+    });
+    const updatedCustomerReport = await niceBackendFetch(`${GROWTH_BASE}/reports/latest`, { accessType: "admin" });
+    expect(updatedCustomerReport).toMatchObject({
+      status: 200,
+      body: { document: { sourceMdx: "## Updated while live" } },
+    });
   });
 
   it("shows staff every report, and refuses non-platform-admins entirely", { timeout: 300_000 }, async ({ expect }) => {
@@ -177,7 +255,9 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
     for (const [path, init] of [
       [`${ADMIN_BASE}/reports?project_id=${projectId}`, {}],
       [`${ADMIN_BASE}/reports/${reportId}?project_id=${projectId}`, {}],
+      [`${ADMIN_BASE}/reports/${reportId}`, { method: "PATCH", body: { target_project_id: projectId, action: "publish" } }],
       [`${ADMIN_BASE}/reports/${reportId}`, { method: "PATCH", body: { target_project_id: projectId, action: "unpublish" } }],
+      [`${ADMIN_BASE}/reports/${reportId}`, { method: "PUT", body: { target_project_id: projectId, document: { format: "growth-mdx-v1", source_mdx: "## Nope", data: [] } } }],
     ] as const) {
       const response = await niceBackendFetch(path, { accessType: "client", ...init });
       expect([path, response.status]).toEqual([path, 403]);
@@ -187,10 +267,9 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
       const list = await niceBackendFetch(`${ADMIN_BASE}/reports?project_id=${projectId}`, { accessType: "client" });
       expect(list.status).toBe(200);
       expect(list.body).toMatchObject({
-        // Published with no publisher: the policy released it, not a person.
         reports: [{ id: reportId, trigger: "initial", action_item_count: 1, published_by_user_id: null }],
       });
-      expect((list.body as { reports: { published_at_millis: number | null }[] }).reports[0].published_at_millis).toEqual(expect.any(Number));
+      expect((list.body as { reports: { published_at_millis: number | null }[] }).reports[0].published_at_millis).toBeNull();
 
       const detail = await niceBackendFetch(`${ADMIN_BASE}/reports/${reportId}?project_id=${projectId}`, { accessType: "client" });
       expect(detail).toMatchObject({
@@ -198,7 +277,7 @@ describe("internal Growth report release", { timeout: 90_000 }, () => {
         body: {
           id: reportId,
           title: "Growth analysis for the fixture",
-          content_md: "# Live\n\nPublished on write.",
+          content_md: "# Review\n\nHeld until staff release.",
           action_items: [{ title: "A suggestion" }],
         },
       });

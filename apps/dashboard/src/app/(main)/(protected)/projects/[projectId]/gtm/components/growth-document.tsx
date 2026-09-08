@@ -3,7 +3,7 @@
 import { DesignAnalyticsCard, DesignAnalyticsCardHeader, DesignBadge } from "@/components/design-components";
 import { Link } from "@/components/link";
 import { cn } from "@/lib/utils";
-import type { GrowthDocument, GrowthDocumentBlock, GrowthDocumentInline, GrowthEvidenceDatum, GrowthEvidencePoint } from "@/lib/growth/growth-document";
+import type { GrowthDocument, GrowthDocumentBlock, GrowthDocumentComponentName, GrowthDocumentInline, GrowthEvidenceDatum, GrowthEvidencePoint } from "@/lib/growth/growth-document";
 import { formatGrowthAdSpend, formatGrowthMetricValue } from "@/lib/growth/growth-format";
 import type { GrowthActionItem } from "@/lib/growth/growth-types";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
@@ -130,7 +130,7 @@ function BarChartBlock(props: { datum: Extract<GrowthEvidenceDatum, { kind: "com
   );
 }
 
-const CALLOUT_META = new Map<"Evidence" | "Hypothesis" | "Experiment" | "DataGap", { label: string, icon: typeof DatabaseIcon, className: string }>([
+const CALLOUT_META = new Map<GrowthDocumentComponentName, { label: string, icon: typeof DatabaseIcon, className: string }>([
   ["Evidence", { label: "Evidence", icon: DatabaseIcon, className: "bg-cyan-500/[0.06] ring-cyan-500/15" }],
   ["Hypothesis", { label: "Hypothesis", icon: LightbulbIcon, className: "bg-purple-500/[0.06] ring-purple-500/15" }],
   ["Experiment", { label: "Experiment", icon: FlaskIcon, className: "bg-emerald-500/[0.06] ring-emerald-500/15" }],
@@ -228,6 +228,24 @@ function ComponentBlock(props: { block: Extract<GrowthDocumentBlock, { type: "co
   if (props.block.name === "TrendChart" && datum?.kind === "time_series") return <TrendChartBlock datum={datum} />;
   if ((props.block.name === "ComparisonChart" && datum?.kind === "comparison") || (props.block.name === "BreakdownChart" && datum?.kind === "breakdown")) return <BarChartBlock datum={datum} />;
   if (props.block.name === "Metric" || props.block.name === "TrendChart" || props.block.name === "ComparisonChart" || props.block.name === "BreakdownChart") return null;
+  if (props.block.name === "Finding" || props.block.name === "Recommendation") {
+    return (
+      <section className="my-6 border-t border-foreground/[0.08] pt-5">
+        <h2 className="mb-3 text-base font-semibold tracking-tight">
+          {props.block.name === "Finding" ? "What we found" : "What we suggest"}
+        </h2>
+        <Blocks blocks={props.block.children} data={props.data} />
+      </section>
+    );
+  }
+  if (props.block.name === "MeasurementPlan") {
+    return (
+      <section className="my-6 border-t border-foreground/[0.08] pt-5">
+        <h2 className="text-base font-semibold tracking-tight">What we&apos;ll track</h2>
+        <p className="mt-2 text-sm text-muted-foreground">This section uses the action&apos;s live tracked metrics.</p>
+      </section>
+    );
+  }
   const meta = CALLOUT_META.get(props.block.name);
   if (meta == null) return null;
   const Icon = meta.icon;

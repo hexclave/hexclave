@@ -26,10 +26,16 @@ export async function listGrowthAdminProjects(authProjectId: string, user: Growt
   await ensureGrowthAdmin(authProjectId, user);
   const rows = await globalPrismaClient.growthOnboarding.findMany({
     where: { branchId: DEFAULT_BRANCH_ID, projectId: { not: INTERNAL_PROJECT_ID } },
-    select: { websiteUrl: true, completedAt: true, project: { select: { id: true, displayName: true } } },
+    select: { websiteUrl: true, companySummary: true, completedAt: true, project: { select: { id: true, displayName: true } } },
     orderBy: [{ project: { displayName: "asc" } }, { projectId: "asc" }],
   });
-  return rows.map((row) => ({ id: row.project.id, display_name: row.project.displayName, website_url: row.websiteUrl, completed_at_millis: row.completedAt.getTime() }));
+  return rows.map((row) => ({
+    id: row.project.id,
+    display_name: row.project.displayName,
+    website_url: row.websiteUrl,
+    company_summary: row.companySummary,
+    completed_at_millis: row.completedAt.getTime(),
+  }));
 }
 
 export async function requireGrowthAdminTenancy(authProjectId: string, user: GrowthAdminUser | null | undefined, targetProjectId: string): Promise<Tenancy> {

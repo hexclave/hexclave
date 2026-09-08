@@ -1,59 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { extractCurlFallbackPage, fetchPageWithCurl, isBrowserSandboxCredentialError, isBrowseSandboxAvailable } from "./browse.ts";
-
-afterEach(() => {
-  vi.unstubAllEnvs();
-});
-
-describe("isBrowseSandboxAvailable", () => {
-  it("allows local development to use hosted Vercel sandboxes when explicitly pinned", () => {
-    vi.stubEnv("VERCEL", "");
-    vi.stubEnv("HEXCLAVE_GROWTH_SANDBOX_BACKEND", "vercel");
-    vi.stubEnv("VERCEL_TOKEN", "token");
-    vi.stubEnv("VERCEL_TEAM_ID", "team");
-    vi.stubEnv("VERCEL_PROJECT_ID", "project");
-
-    expect(isBrowseSandboxAvailable()).toBe(true);
-  });
-
-  it("keeps the browser unavailable when local development is pinned to Docker", () => {
-    vi.stubEnv("VERCEL", "");
-    vi.stubEnv("HEXCLAVE_GROWTH_SANDBOX_BACKEND", "docker");
-    vi.stubEnv("VERCEL_TOKEN", "token");
-    vi.stubEnv("VERCEL_TEAM_ID", "team");
-    vi.stubEnv("VERCEL_PROJECT_ID", "project");
-
-    expect(isBrowseSandboxAvailable()).toBe(false);
-  });
-
-  it("accepts automatic OIDC credentials in a Vercel deployment", () => {
-    vi.stubEnv("VERCEL", "1");
-    vi.stubEnv("VERCEL_OIDC_TOKEN", "oidc-token");
-
-    expect(isBrowseSandboxAvailable()).toBe(true);
-  });
-
-  it("allows a Vercel deployment to use runtime OIDC credentials", () => {
-    vi.stubEnv("VERCEL", "1");
-    vi.stubEnv("VERCEL_OIDC_TOKEN", "");
-    vi.stubEnv("VERCEL_TOKEN", "token");
-    vi.stubEnv("VERCEL_TEAM_ID", "team");
-    vi.stubEnv("VERCEL_PROJECT_ID", "");
-
-    expect(isBrowseSandboxAvailable()).toBe(true);
-  });
-});
+import { describe, expect, it, vi } from "vitest";
+import { extractCurlFallbackPage, fetchPageWithCurl } from "./browse.ts";
 
 describe("curl browser fallback", () => {
-  it("only classifies sandbox credential failures as fallback-safe", () => {
-    const credentialError = new Error("Could not get credentials from OIDC context.");
-    credentialError.name = "VercelOidcContextError";
-
-    expect(isBrowserSandboxCredentialError(credentialError)).toBe(true);
-    expect(isBrowserSandboxCredentialError(new Error("Navigation timed out"))).toBe(false);
-    expect(isBrowserSandboxCredentialError("not an error object")).toBe(false);
-  });
-
   it("extracts readable static content without scripts or styles", () => {
     const result = extractCurlFallbackPage(`<!doctype html>
       <html><head><title>Acme &amp; Co</title><style>.hidden{display:none}</style></head>

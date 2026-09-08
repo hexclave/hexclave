@@ -36,7 +36,7 @@ export const GET = createSmartRouteHandler({
     const [onboarding, userCount, latestRun] = await Promise.all([
       globalPrismaClient.growthOnboarding.findUnique({
         where: { projectId_branchId: { projectId, branchId } },
-        select: { websiteUrl: true, companySummary: true },
+        select: { websiteUrl: true, companySummary: true, additionalNotes: true },
       }),
       // Non-anonymous only, matching the growth metrics' INCLUDE_ANONYMOUS = false convention (the
       // agent reasons about real humans, not anonymous sessions).
@@ -73,6 +73,7 @@ export const GET = createSmartRouteHandler({
         onboarding: onboarding == null ? null : {
           website_url: onboarding.websiteUrl,
           company_summary: onboarding.companySummary,
+          additional_notes: onboarding.additionalNotes,
         },
         domains,
         enabled_apps: enabledApps,

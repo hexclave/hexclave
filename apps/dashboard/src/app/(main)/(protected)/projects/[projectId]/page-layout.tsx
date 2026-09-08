@@ -5,6 +5,7 @@ export function PageLayout(props: {
   children?: React.ReactNode,
   title?: string,
   description?: string | React.ReactNode,
+  backLink?: React.ReactNode,
   actions?: React.ReactNode,
   fillWidth?: boolean,
   noPadding?: boolean,
@@ -35,7 +36,7 @@ export function PageLayout(props: {
           width: "100%",
         }}
       >
-        {(props.title || props.description || props.actions) && (
+        {(props.title || props.description || props.backLink || props.actions) && (
           <div
             className={cn(
               "mb-6",
@@ -43,6 +44,11 @@ export function PageLayout(props: {
               props.wrapHeaderInCard && "rounded-2xl border border-black/[0.06] bg-white/90 p-4 shadow-[0_2px_12px_rgba(0,0,0,0.04)] backdrop-blur-xl sm:p-5 dark:border-0 dark:bg-transparent dark:shadow-none dark:backdrop-blur-none dark:rounded-none dark:p-0 dark:sm:p-0"
             )}
           >
+            {props.backLink != null && (
+              <div className="mb-3">
+                {props.backLink}
+              </div>
+            )}
             <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
               <div className="space-y-1">
                 {props.title && (

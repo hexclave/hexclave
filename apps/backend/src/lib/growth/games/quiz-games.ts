@@ -100,14 +100,18 @@ export async function generateQuizGame(tenancy: Tenancy, options: {
 
   const onboarding = await globalPrismaClient.growthOnboarding.findFirst({
     where: { projectId, branchId },
-    select: { websiteUrl: true, companySummary: true },
+    select: { websiteUrl: true, companySummary: true, additionalNotes: true },
   });
   const authored = await authorQuizQuestions({
     projectId,
     branchId,
     roundId: game.id,
     facts: built.facts,
-    product: { websiteUrl: onboarding?.websiteUrl ?? null, companySummary: onboarding?.companySummary ?? null },
+    product: {
+      websiteUrl: onboarding?.websiteUrl ?? null,
+      companySummary: onboarding?.companySummary ?? null,
+      additionalNotes: onboarding == null ? null : onboarding.additionalNotes,
+    },
   });
 
   await globalPrismaClient.growthQuizQuestion.createMany({

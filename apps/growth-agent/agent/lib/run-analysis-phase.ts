@@ -1,8 +1,8 @@
 import type { ChannelFrom } from "eve/channels";
 import { runAgentSession, SafeRunError, safeMessageFromError } from "#lib/agent-session.ts";
 import { getProjectContext, phaseFail, phaseStart } from "#lib/hexclave-client.ts";
+import { startPhaseHeartbeat } from "#lib/heartbeat.ts";
 import { buildPhaseContinuationToken } from "#lib/phase-continuation.ts";
-import { buildGrowthSessionAuth } from "#lib/run-context.ts";
 import { GROWTH_ANALYSIS_TOPICS } from "#lib/analysis-topics.ts";
 import type { AnalysisPhaseRunRequest, DailyBriefRunRequest } from "#lib/types.ts";
 import { WRITING_STYLE_RULES } from "#lib/writing-style.ts";
@@ -14,7 +14,7 @@ const MAX_AGENT_SESSION_MS = 45 * 60 * 1000;
 const ANALYSIS_TIMEOUT_MESSAGE = "The analysis agent did not finish within the allowed time.";
 
 function genericPhaseFailureMessage(phaseKey: string): string {
-  return `The "${phaseKey}" analysis step failed unexpectedly. It will be retried automatically if attempts remain.`;
+  return `The "${phaseKey}" analysis step failed unexpectedly.`;
 }
 
 function formatContextForPrompt(context: unknown): string {
@@ -133,25 +133,34 @@ function buildPhasePrompt(input: AnalysisPhaseRunRequest, projectContextJson: st
 
 export async function executeAnalysisPhase(input: AnalysisPhaseRunRequest, helpers: { readonly from: ChannelFrom }): Promise<void> {
   await phaseStart(input);
+  const stopHeartbeat = startPhaseHeartbeat(input);
   try {
     const projectContext = await getProjectContext({ project_id: input.project_id, branch_id: input.branch_id });
-    await helpers.from(buildPhaseContinuationToken(input)).send(buildPhasePrompt(input, formatContextForPrompt(projectContext)), {
-      auth: buildGrowthSessionAuth({
+    // Keep the waitUntil task attached to the durable Eve session. Merely sending the task and
+    // returning leaves no process lifetime in which to heartbeat, so the backend can reap a healthy
+    // phase while the report composer is still working. Terminal channel hooks remain the single
+    // source of phase completion; this follower owns liveness, timeouts, and failure reporting.
+    await runAgentSession({
+      from: helpers.from,
+      maxSessionMs: MAX_AGENT_SESSION_MS,
+      timeoutMessage: ANALYSIS_TIMEOUT_MESSAGE,
+      message: buildPhasePrompt(input, formatContextForPrompt(projectContext)),
+      context: {
         project_id: input.project_id,
         branch_id: input.branch_id,
         run_id: input.run_id,
         phase_key: input.phase_key,
         finding_source: input.phase_key,
         agent_token: input.agent_token,
-      }),
-      mode: "task",
+      },
+      continuationToken: buildPhaseContinuationToken(input),
       title: `Growth analysis: ${input.phase_key} (run ${input.run_id})`,
-      // Retries must queue behind an in-flight run instead of steering it away.
-      turnPolicy: "queue",
     });
   } catch (error) {
-    console.error(`[growth-agent] analysis phase failed to start: run=${input.run_id} phase=${input.phase_key} attempt=${input.attempt}`, error);
+    console.error(`[growth-agent] analysis phase failed: run=${input.run_id} phase=${input.phase_key} attempt=${input.attempt}`, error);
     await phaseFail({ ...input, error_message: safeMessageFromError(error, genericPhaseFailureMessage(input.phase_key)) });
+  } finally {
+    stopHeartbeat();
   }
 }
 

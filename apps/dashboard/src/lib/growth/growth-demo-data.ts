@@ -561,17 +561,41 @@ function demoReportDocument(): GrowthDocument {
 function demoActionDocument(): GrowthDocument {
   return {
     format: "growth-mdx-v1",
-    sourceMdx: "## Why this test\n\n<Evidence data=\"search-intent\">\n\nPeople arriving from high-intent freelancer searches activate more often than the average visitor.\n\n</Evidence>\n\n<Experiment>\n\nRun a two-week, capped search campaign. Review the ads and budget before activation.\n\n</Experiment>\n\n### Success metric\n\n- New signups over 14 days\n- Cost per activated workspace\n- Stop if spend reaches the approved cap",
+    sourceMdx: `<Finding>
+
+Freelancers from high-intent search activate more often than the average visitor.
+
+</Finding>
+
+<Evidence data="search-intent">
+
+High-intent search visitors activated at 31% over 30 days. The site average was 23%.
+
+</Evidence>
+
+<Recommendation>
+
+Run a capped search campaign for freelancers.
+
+- Send visitors to the freelancer page.
+- Run the campaign for 14 days.
+- Stop when spend reaches the approved cap.
+
+</Recommendation>
+
+<MeasurementPlan />`,
     blocks: [
-      { type: "heading", level: 2, children: [{ type: "text", value: "Why this test" }] },
-      { type: "component", name: "Evidence", dataId: "search-intent", confidence: null, actionId: null, children: [{ type: "paragraph", children: [{ type: "text", value: "People arriving from high-intent freelancer searches activate more often than the average visitor." }] }] },
-      { type: "component", name: "Experiment", dataId: null, confidence: null, actionId: null, children: [{ type: "paragraph", children: [{ type: "text", value: "Run a two-week, capped search campaign. Review the ads and budget before activation." }] }] },
-      { type: "heading", level: 3, children: [{ type: "text", value: "Success metric" }] },
-      { type: "list", ordered: false, items: [
-        [{ type: "paragraph", children: [{ type: "text", value: "New signups over 14 days" }] }],
-        [{ type: "paragraph", children: [{ type: "text", value: "Cost per activated workspace" }] }],
-        [{ type: "paragraph", children: [{ type: "text", value: "Stop if spend reaches the approved cap" }] }],
+      { type: "component", name: "Finding", dataId: null, confidence: null, actionId: null, children: [{ type: "paragraph", children: [{ type: "text", value: "Freelancers from high-intent search activate more often than the average visitor." }] }] },
+      { type: "component", name: "Evidence", dataId: "search-intent", confidence: null, actionId: null, children: [{ type: "paragraph", children: [{ type: "text", value: "High-intent search visitors activated at 31% over 30 days. The site average was 23%." }] }] },
+      { type: "component", name: "Recommendation", dataId: null, confidence: null, actionId: null, children: [
+        { type: "paragraph", children: [{ type: "text", value: "Run a capped search campaign for freelancers." }] },
+        { type: "list", ordered: false, items: [
+          [{ type: "paragraph", children: [{ type: "text", value: "Send visitors to the freelancer page." }] }],
+          [{ type: "paragraph", children: [{ type: "text", value: "Run the campaign for 14 days." }] }],
+          [{ type: "paragraph", children: [{ type: "text", value: "Stop when spend reaches the approved cap." }] }],
+        ] },
       ] },
+      { type: "component", name: "MeasurementPlan", dataId: null, confidence: null, actionId: null, children: [] },
     ],
     data: [{
       id: "search-intent",

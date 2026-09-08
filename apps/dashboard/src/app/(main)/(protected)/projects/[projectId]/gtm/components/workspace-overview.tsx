@@ -13,13 +13,13 @@ import { GROWTH_CATEGORIES, type GrowthActionItem, type GrowthCategory, type Gro
 import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { ArrowRightIcon, /* CaretDownIcon, */ CoinsIcon, CubeIcon, CursorClickIcon, FileTextIcon, FlagBannerIcon, UsersThreeIcon } from "@phosphor-icons/react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useAdminApp, useProjectId } from "../../use-admin-app";
 import { useGrowthHref } from "./action-card";
 import { GrowthDocumentActionsProvider, GrowthDocumentRenderer } from "./growth-document";
 import { QuizBanner } from "./games/quiz-banner";
 import { QuizDialog } from "./games/quiz-dialog";
-import { GrowthActionStatusPicker, GrowthAddNoteRow, GrowthCategoryBadge, GrowthCategoryScoreBadge, GrowthEditableText, GrowthTagBadges, useGrowthWorkspaceEditors, type GrowthWorkspaceItem, type GrowthWorkspaceItemPatch } from "./workspace-edit";
+import { GrowthActionStatusPicker, GrowthAddNoteRow, GrowthAddSuggestionRow, GrowthCategoryBadge, GrowthCategoryScoreBadge, GrowthEditableText, GrowthTagBadges, useGrowthWorkspaceEditors, type GrowthWorkspaceItem, type GrowthWorkspaceItemPatch } from "./workspace-edit";
 
 const CATEGORY_PRESENTATION = new Map<GrowthCategory, { label: string, icon: typeof UsersThreeIcon }>([
   ["product", { label: "Product", icon: CubeIcon }],
@@ -29,10 +29,17 @@ const CATEGORY_PRESENTATION = new Map<GrowthCategory, { label: string, icon: typ
   ["revenue", { label: "Revenue", icon: CoinsIcon }],
 ]);
 
-type Loadable = { status: "loading" } | { status: "error", message: string } | { status: "loaded", value: GrowthOverview };
+type Loadable =
+  | { status: "loading", sourceKey: string }
+  | { status: "error", sourceKey: string, message: string }
+  | { status: "loaded", sourceKey: string, value: GrowthOverview };
 
 export function getGrowthOverviewRefreshVersion(status: GrowthStatus): string {
-  return `${status.latestReport?.id ?? "no-report"}:${status.analysis.completedAtMillis ?? "not-complete"}`;
+  // Staff scores the categories before releasing the report. A customer tab can therefore have a
+  // pre-release overview cached with null scores while the status poll advances to `released`.
+  // Treat the release boundary as a new overview version so we never reveal that stale snapshot and
+  // require a manual reload before the scored journey appears.
+  return `${status.release.state}:${status.latestReport?.id ?? "no-report"}:${status.analysis.completedAtMillis ?? "not-complete"}`;
 }
 
 function formatDate(millis: number): string {
@@ -128,8 +135,12 @@ function SuggestionRow(props: { item: GrowthWorkspaceItem, projectId: string }) 
   const editors = useGrowthWorkspaceEditors();
   const value = props.item.value;
   const href = props.item.kind === "action"
-    ? `/projects/${props.projectId}/gtm/actions/${value.id}`
-    : `/projects/${props.projectId}/gtm/findings/${value.id}`;
+    ? editors == null
+      ? `/projects/${props.projectId}/gtm/actions/${value.id}`
+      : `/projects/internal/gtm/admin/actions/${value.id}`
+    : editors == null
+      ? `/projects/${props.projectId}/gtm/findings/${value.id}`
+      : `/projects/internal/gtm/admin/findings/${value.id}`;
   const body = props.item.kind === "action" ? props.item.value.description : props.item.value.body;
   const item = props.item;
   // Reached only from the row's edit affordances, which do not exist without the provider — so a
@@ -143,7 +154,7 @@ function SuggestionRow(props: { item: GrowthWorkspaceItem, projectId: string }) 
   const prompt = value.category == null ? null : item.kind === "action"
     ? buildGrowthItemPagePrompt({ kind: "action", category: value.category, action: item.value })
     : buildGrowthItemPagePrompt({ kind: item.value.kind === "note" ? "note" : "finding", category: value.category, finding: item.value });
-  const callToAction = <span className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground">{props.item.kind === "action" ? "Review action" : "Read evidence"}<ArrowRightIcon className="size-3.5" /></span>;
+  const callToAction = <span className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground">{props.item.kind === "action" ? "Review action" : editors == null ? "Read evidence" : "Edit page"}<ArrowRightIcon className="size-3.5" /></span>;
   const content = (
     <article className="grid gap-3 border-b border-foreground/[0.08] px-1 py-5 text-left last:border-0 sm:grid-cols-[7rem_minmax(0,1fr)_auto] sm:items-start">
       <time className="text-xs text-muted-foreground">{formatDate(value.createdAtMillis)}</time>
@@ -230,6 +241,8 @@ export function GrowthWorkspaceContent(props: {
    * nothing.
    */
   quizBanner?: ReactNode,
+  /** Admin-only actions for the full five-stage journey, rendered above the hexagon. */
+  journeyActions?: ReactNode,
   /** Re-reads the overview after an action inside an authored stage page was activated or dismissed. */
   onRefresh?: () => Promise<void>,
   /**
@@ -311,6 +324,7 @@ export function GrowthWorkspaceContent(props: {
       <section className="rounded-2xl border border-foreground/[0.08] bg-background px-5 pb-8 pt-10 sm:px-8 lg:px-12">
         {props.quizBanner}
         <header className="mx-auto max-w-2xl text-center"><p className="font-mono text-[10px] uppercase tracking-[0.24em] text-muted-foreground">{props.projectName} growth journey</p><h2 className="mt-3 text-balance font-serif text-4xl leading-none tracking-tight sm:text-5xl">From product to revenue.</h2><p className="mx-auto mt-4 text-sm text-muted-foreground">Choose a stage to focus the workspace.</p></header>
+        {props.journeyActions}
         <GrowthJourney categories={props.overview.categories} selected={selected} projectName={props.projectName} onSelect={setSelected} />
         {props.overview.needsCategoryCount > 0 && <p className="mt-5 text-center text-xs text-muted-foreground">{props.overview.needsCategoryCount} items are awaiting a stage.</p>}
         {awaitingStage.length > 0 && (
@@ -344,9 +358,12 @@ export function GrowthWorkspaceContent(props: {
               glassmorphic={false}
             />
             <div className="mt-5 border-y border-foreground/[0.08]">
-              {lane === "suggestions" && (suggestions.length === 0
-                ? <p className="py-8 text-sm text-muted-foreground">No suggestions in this category yet.</p>
-                : suggestions.slice(0, 6).map((item) => <SuggestionRow key={`${item.kind}-${item.value.id}`} item={item} projectId={props.projectId} />))}
+              {lane === "suggestions" && <>
+                <GrowthAddSuggestionRow category={selected} />
+                {suggestions.length === 0
+                  ? <p className="py-8 text-sm text-muted-foreground">No suggestions in this category yet.</p>
+                  : suggestions.slice(0, 6).map((item) => <SuggestionRow key={`${item.kind}-${item.value.id}`} item={item} projectId={props.projectId} />)}
+              </>}
               {lane === "notes" && <>
                 <GrowthAddNoteRow category={selected} />
                 {notes.length === 0
@@ -366,25 +383,35 @@ export function GrowthWorkspaceOverview(props: { status: GrowthStatus }) {
   const project = app.useProject();
   const projectId = useProjectId();
   const { demo } = useGrowthStatus();
-  const [data, setData] = useState<Loadable>(() => demo ? { status: "loaded", value: buildGrowthDemoOverview(GROWTH_DEMO_NOW_MILLIS) } : { status: "loading" });
   const overviewRefreshVersion = getGrowthOverviewRefreshVersion(props.status);
+  const sourceKey = `${projectId}:${demo ? "demo" : "live"}:${overviewRefreshVersion}`;
+  const [data, setData] = useState<Loadable>(() => demo
+    ? { status: "loaded", sourceKey, value: buildGrowthDemoOverview(GROWTH_DEMO_NOW_MILLIS) }
+    : { status: "loading", sourceKey });
+  const latestRequestId = useRef(0);
   const refresh = useCallback(async () => {
+    const requestId = ++latestRequestId.current;
     if (demo) {
-      setData({ status: "loaded", value: buildGrowthDemoOverview(GROWTH_DEMO_NOW_MILLIS) });
+      setData({ status: "loaded", sourceKey, value: buildGrowthDemoOverview(GROWTH_DEMO_NOW_MILLIS) });
       return;
     }
     try {
-      setData({ status: "loaded", value: await getGrowthOverview(app) });
+      const value = await getGrowthOverview(app);
+      if (requestId !== latestRequestId.current) return;
+      setData({ status: "loaded", sourceKey, value });
     } catch (error) {
+      if (requestId !== latestRequestId.current) return;
       captureError("growth-overview-load", error);
-      setData({ status: "error", message: error instanceof Error ? error.message : String(error) });
+      setData({ status: "error", sourceKey, message: error instanceof Error ? error.message : String(error) });
     }
-  }, [app, demo]);
+  }, [app, demo, sourceKey]);
   useEffect(() => {
-    if (!demo) setData({ status: "loading" });
+    if (!demo) setData({ status: "loading", sourceKey });
     runAsynchronously(refresh());
-  }, [demo, refresh, overviewRefreshVersion]);
-  if (data.status === "loading") return <div className="space-y-8" aria-busy="true"><div className="h-72 animate-pulse rounded-2xl border bg-foreground/[0.03]" /><div className="h-[42rem] animate-pulse rounded-2xl border bg-foreground/[0.03]" /></div>;
+  }, [demo, refresh, sourceKey]);
+  // Effects run after paint. Comparing the source in render prevents one frame of the previous
+  // project's overview from leaking through while the effect starts its replacement request.
+  if (data.sourceKey !== sourceKey || data.status === "loading") return <div className="space-y-8" aria-busy="true"><div className="h-72 animate-pulse rounded-2xl border bg-foreground/[0.03]" /><div className="h-[42rem] animate-pulse rounded-2xl border bg-foreground/[0.03]" /></div>;
   if (data.status === "error") return <DesignAlert variant="error"><div className="flex flex-wrap items-center justify-between gap-3"><span>Could not load the Growth overview: {data.message}</span><DesignButton size="sm" variant="outline" onClick={refresh}>Retry</DesignButton></div></DesignAlert>;
   return (
     <GrowthWorkspaceContent

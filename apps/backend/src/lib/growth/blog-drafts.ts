@@ -114,7 +114,7 @@ export async function generateGrowthBlogDraft(tenancy: Tenancy, actionItemId: st
 
   const onboarding = await globalPrismaClient.growthOnboarding.findFirst({
     where: { projectId: tenancy.project.id, branchId: tenancy.branchId },
-    select: { websiteUrl: true, companySummary: true },
+    select: { websiteUrl: true, companySummary: true, additionalNotes: true },
   });
 
   const response = await postToEveForResult("/blog-draft", {
@@ -132,6 +132,7 @@ export async function generateGrowthBlogDraft(tenancy: Tenancy, actionItemId: st
     product: {
       website_url: onboarding?.websiteUrl ?? null,
       company_summary: onboarding?.companySummary ?? null,
+      additional_notes: onboarding == null ? null : onboarding.additionalNotes,
     },
   }, { timeoutMs: BLOG_DRAFT_GENERATION_TIMEOUT_MS });
 

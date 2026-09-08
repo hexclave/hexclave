@@ -16,6 +16,7 @@ export const GROWTH_PHASE_STATUSES = ["pending", "dispatched", "running", "compl
 export const GROWTH_INTERVIEW_STATUSES = ["pending", "active", "completed", "skipped"] as const;
 export const GROWTH_INTERVIEW_QUESTION_KINDS = ["single", "multi"] as const;
 export const GROWTH_INTERVIEW_QUESTION_ORIGINS = ["planned", "adaptive"] as const;
+export const GROWTH_INTERVIEW_OTHER_OPTION_ID = "other";
 export const GROWTH_BRIEF_STATUSES = ["generating", "ready", "failed", "skipped"] as const;
 export const GROWTH_MILESTONE_COMPARATORS = ["gte"] as const;
 export const GROWTH_MILESTONE_SOURCES = ["default", "user", "agent"] as const;
@@ -90,9 +91,9 @@ export type GrowthIntegrations = {
 /**
  * Whether the customer's workspace has been released to them.
  *
- * `preparing` is the initial hold from the moment deep analysis starts until the first report is
- * published. The generated interview is presented inside that loading state when it becomes ready;
- * after the customer answers, the same state continues through report composition and release.
+ * `preparing` is the initial hold from the moment deep analysis starts until an admin releases the
+ * first report. The generated interview is presented inside that loading state when it becomes
+ * ready; after the customer answers, the same state continues through report composition and review.
  *
  * `not_ready` is everything earlier (no onboarding, no run, or pre-analysis setup) plus failed runs.
  */
@@ -262,6 +263,20 @@ export type GrowthActionItem = {
   completedAtMillis: number | null,
 };
 
+export type GrowthAdminDocumentDraft = {
+  source: { sourceMdx: string, data: unknown[] } | null,
+  document: GrowthDocument | null,
+  updatedAtMillis: number,
+};
+
+export type GrowthAdminActionPageDraft = GrowthAdminDocumentDraft;
+
+export type GrowthAdminActionPage = {
+  action: GrowthActionItem,
+  draft: GrowthAdminActionPageDraft | null,
+  publishedAtMillis: number | null,
+};
+
 export type GrowthOverviewFinding = {
   id: string,
   source: string,
@@ -273,6 +288,12 @@ export type GrowthOverviewFinding = {
   data: unknown | null,
   document?: GrowthDocument | null,
   createdAtMillis: number,
+};
+
+export type GrowthAdminFindingPage = {
+  finding: GrowthOverviewFinding,
+  draft: GrowthAdminDocumentDraft | null,
+  publishedAtMillis: number | null,
 };
 
 /**

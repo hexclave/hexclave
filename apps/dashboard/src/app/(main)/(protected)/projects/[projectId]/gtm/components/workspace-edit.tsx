@@ -3,7 +3,7 @@
 import { DesignAlert, DesignBadge, DesignButton, DesignInput } from "@/components/design-components";
 import { cn, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
 import { GROWTH_ACTION_STATUSES, GROWTH_CATEGORIES, type GrowthActionItem, type GrowthActionStatus, type GrowthCategory, type GrowthOverviewFinding } from "@/lib/growth/growth-types";
-import { captureError } from "@hexclave/shared/dist/utils/errors";
+import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { CheckIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
@@ -35,6 +35,7 @@ export type GrowthWorkspaceEditors = {
   saveItem: (item: GrowthWorkspaceItem, patch: GrowthWorkspaceItemPatch) => Promise<void>,
   saveActionStatus: (action: GrowthActionItem, status: GrowthActionStatus) => Promise<void>,
   createNote: (input: { category: GrowthCategory, title: string, body: string }) => Promise<void>,
+  createSuggestion: (input: { category: GrowthCategory, title: string, body: string }) => Promise<void>,
 };
 
 /**
@@ -82,6 +83,7 @@ export function GrowthWorkspaceEditProvider(props: { editors: GrowthWorkspaceEdi
       saveItem: guard("growth-admin-item", editors.saveItem),
       saveActionStatus: guard("growth-admin-action-status", editors.saveActionStatus),
       createNote: guard("growth-admin-note", editors.createNote),
+      createSuggestion: guard("growth-admin-suggestion", editors.createSuggestion),
     };
   }, [editors]);
   return (
@@ -367,20 +369,28 @@ export function GrowthCategoryScoreBadge(props: { category: GrowthCategory, scor
   );
 }
 
-/** Creates a note in the category the workspace is currently focused on. Admin surfaces only. */
-export function GrowthAddNoteRow(props: { category: GrowthCategory }) {
+type GrowthAddFindingVariant = "note" | "suggestion";
+
+const ADD_FINDING_COPY = new Map<GrowthAddFindingVariant, { label: string, titlePlaceholder: string, bodyPlaceholder: string, button: string }>([
+  ["note", { label: "New note", titlePlaceholder: "Note title", bodyPlaceholder: "What should the customer know?", button: "Add note" }],
+  ["suggestion", { label: "New suggestion", titlePlaceholder: "Suggestion title", bodyPlaceholder: "What should the customer consider doing?", button: "Add suggestion" }],
+]);
+
+/** Creates a finding in the category the workspace is currently focused on. Admin surfaces only. */
+function GrowthAddFindingRow(props: { category: GrowthCategory, variant: GrowthAddFindingVariant }) {
   const editors = useGrowthWorkspaceEditors();
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   if (editors == null) return null;
+  const copy = ADD_FINDING_COPY.get(props.variant) ?? throwErr(`Missing composer copy for Growth ${props.variant}.`);
   return (
     <div className="grid gap-3 border-b border-foreground/[0.08] px-1 py-5 sm:grid-cols-[7rem_minmax(0,1fr)_auto] sm:items-start">
-      <span className="text-xs text-muted-foreground">New note</span>
+      <span className="text-xs text-muted-foreground">{copy.label}</span>
       <div className="min-w-0 space-y-2">
-        <DesignInput placeholder="Note title" value={title} onChange={(event) => setTitle(event.target.value)} />
+        <DesignInput placeholder={copy.titlePlaceholder} value={title} onChange={(event) => setTitle(event.target.value)} />
         <textarea
           className="min-h-20 w-full rounded-xl border bg-background p-3 text-sm"
-          placeholder="What should the customer know?"
+          placeholder={copy.bodyPlaceholder}
           value={body}
           onChange={(event) => setBody(event.target.value)}
         />
@@ -390,15 +400,24 @@ export function GrowthAddNoteRow(props: { category: GrowthCategory }) {
         variant="outline"
         disabled={title.trim().length === 0 || body.trim().length === 0}
         onClick={async () => {
-          const saved = await editors.createNote({ category: props.category, title: title.trim(), body: body.trim() });
+          const create = props.variant === "note" ? editors.createNote : editors.createSuggestion;
+          const saved = await create({ category: props.category, title: title.trim(), body: body.trim() });
           if (!saved) return;
           setTitle("");
           setBody("");
         }}
       >
         <PlusIcon className="size-3.5" />
-        Add note
+        {copy.button}
       </DesignButton>
     </div>
   );
+}
+
+export function GrowthAddNoteRow(props: { category: GrowthCategory }) {
+  return <GrowthAddFindingRow category={props.category} variant="note" />;
+}
+
+export function GrowthAddSuggestionRow(props: { category: GrowthCategory }) {
+  return <GrowthAddFindingRow category={props.category} variant="suggestion" />;
 }

@@ -1,7 +1,8 @@
 import { requireGrowthAdminTenancy } from "@/lib/growth/admin";
-import { getGrowthAdminReport, unpublishGrowthReport } from "@/lib/growth/report-release";
+import { getGrowthAdminReport, publishGrowthReport, saveGrowthAdminReportDocument, unpublishGrowthReport } from "@/lib/growth/report-release";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, clientOrHigherAuthTypeSchema, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 
 /**
  * One report as the customer reads it, and the pull-it-back control.
@@ -33,12 +34,37 @@ export const GET = createSmartRouteHandler({
   }),
 });
 
+/** Saves the authored growth-mdx-v1 source after compiling it into the customer renderer's AST. */
+export const PUT = createSmartRouteHandler({
+  metadata: { hidden: true },
+  request: yupObject({
+    auth: yupObject({ type: clientOrHigherAuthTypeSchema.defined(), project: adaptSchema.defined(), user: adaptSchema }).defined(),
+    method: yupString().oneOf(["PUT"]).defined(),
+    params: yupObject({ report_id: yupString().defined() }).defined(),
+    body: yupObject({
+      target_project_id: yupString().defined(),
+      document: yupMixed().defined(),
+    }).defined(),
+  }),
+  response: yupObject({
+    statusCode: yupNumber().oneOf([200]).defined(),
+    bodyType: yupString().oneOf(["json"]).defined(),
+    body: yupMixed().defined(),
+  }),
+  handler: async ({ auth, params, body }) => ({
+    statusCode: 200,
+    bodyType: "json",
+    body: await saveGrowthAdminReportDocument(
+      await requireGrowthAdminTenancy(auth.project.id, auth.user, body.target_project_id),
+      params.report_id,
+      body.document,
+    ),
+  }),
+});
+
 /**
- * Unpublishing is staff error recovery, not part of any lifecycle — see unpublishGrowthReport. It
- * stays one explicit named action rather than a general PATCH over a status field, so that nothing
- * can arrive here as a side effect of editing something else.
- *
- * There is no "publish" counterpart: reports publish the moment the report phase writes them.
+ * Publishing is the explicit staff gate that opens the customer workspace. Unpublishing remains
+ * the matching recovery action; neither can happen as a side effect of editing report content.
  */
 export const PATCH = createSmartRouteHandler({
   metadata: { hidden: true },
@@ -48,7 +74,7 @@ export const PATCH = createSmartRouteHandler({
     params: yupObject({ report_id: yupString().defined() }).defined(),
     body: yupObject({
       target_project_id: yupString().defined(),
-      action: yupString().oneOf(["unpublish"]).defined(),
+      action: yupString().oneOf(["publish", "unpublish"]).defined(),
     }).defined(),
   }),
   response: yupObject({
@@ -58,6 +84,12 @@ export const PATCH = createSmartRouteHandler({
   }),
   handler: async ({ auth, params, body }) => {
     const tenancy = await requireGrowthAdminTenancy(auth.project.id, auth.user, body.target_project_id);
-    return { statusCode: 200, bodyType: "json", body: await unpublishGrowthReport(tenancy, params.report_id) };
+    const result = body.action === "publish"
+      ? await publishGrowthReport(tenancy, params.report_id, {
+        publishedByUserId: auth.user?.id ?? throwErr("Growth admin report publication requires the authenticated user validated by requireGrowthAdminTenancy."),
+        now: new Date(),
+      })
+      : await unpublishGrowthReport(tenancy, params.report_id);
+    return { statusCode: 200, bodyType: "json", body: result };
   },
 });

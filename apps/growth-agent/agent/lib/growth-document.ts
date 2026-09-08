@@ -1,10 +1,10 @@
 import { z } from "zod";
 
-export const GROWTH_DOCUMENT_AUTHORING_GUIDE = `Use constrained Growth MDX. Put every Growth component and its opening/closing tags on their own lines, with blank lines around the content. Use data="id", never data-id. Keep paragraphs under 360 characters and lists under 8 items. Allowed headings are ## and ###. Allowed components are <Metric data="id" />, <TrendChart data="id" />, <ComparisonChart data="id" />, <BreakdownChart data="id" />, <Evidence data="id">...</Evidence>, <Hypothesis confidence="low|medium|high">...</Hypothesis>, <Experiment>...</Experiment>, and <DataGap>...</DataGap>. Every chart or metric must reference a matching data item with a source and one-sentence takeaway. Evidence with unit minor_units must include its three-letter currency; other units must omit currency. No HTML, imports, exports, JavaScript expressions, images, or arbitrary components. Prefer a scan-friendly sequence: evidence, hypothesis, experiment, success metric, and action.`;
+export const GROWTH_DOCUMENT_AUTHORING_GUIDE = `Use constrained Growth MDX. Put every Growth component and its opening/closing tags on their own lines, with blank lines around the content. Use data="id", never data-id. Keep paragraphs under 360 characters and lists under 8 items. Allowed headings are ## and ###. Allowed components are <Metric data="id" />, <TrendChart data="id" />, <ComparisonChart data="id" />, <BreakdownChart data="id" />, <Evidence data="id">...</Evidence>, <Hypothesis confidence="low|medium|high">...</Hypothesis>, <Experiment>...</Experiment>, <DataGap>...</DataGap>, <Finding>...</Finding>, <Recommendation>...</Recommendation>, and <MeasurementPlan />. Every chart or metric must reference a matching data item with a source and one-sentence takeaway. Evidence with unit minor_units must include its three-letter currency; other units must omit currency. No HTML, imports, exports, JavaScript expressions, images, or arbitrary components. Prefer a scan-friendly sequence: evidence, hypothesis, experiment, success metric, and action.`;
 
-export const GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE = `Use exactly this Growth MDX structure, in this order, with every opening and closing tag on its own line: <Hypothesis confidence="low|medium|high">...</Hypothesis>, one or more <Evidence data="id">...</Evidence> blocks, then <Experiment>...</Experiment>. Use data="id", never data-id. Do not add headings, success-metric sections, action sections, charts, standalone paragraphs, or any other components. Keep each paragraph under 360 characters. Put the proposed change, test duration, and measurable success criteria inside Experiment. Every Evidence block must reference a matching data item with a named source and one-sentence takeaway. The dashboard owns every label and all layout; you write only the text inside these three component types.`;
+export const GROWTH_ACTION_DOCUMENT_AUTHORING_GUIDE = `Write a short decision page in simple English. Use exactly this Growth MDX structure, in this order, with every tag on its own line: one <Finding>...</Finding>, one to four <Evidence data="id">...</Evidence> blocks, one <Recommendation>...</Recommendation>, then one self-closing <MeasurementPlan />. Finding is one sentence describing only what the evidence shows. Each Evidence gives one decision-relevant fact with its population or sample, time window, comparison or baseline, named source, and material limitation. Recommendation starts with one short action and may add at most four short steps. MeasurementPlan has no text or attributes because the dashboard fills it from the action's live watched metrics. Use one idea per sentence and keep each sentence under 18 words. Never invent a number, date, target, source, or cause. Never use hypothesis, cohort, attributed, incumbent, compounding, directional, or guardrail in customer copy. Use data="id", never data-id. Do not add headings, charts, standalone paragraphs, or other components. Every Evidence block must reference matching data. The dashboard owns labels, layout, metrics, status, and controls; you write only editable decision copy.`;
 
-type GrowthComponentName = "Metric" | "TrendChart" | "ComparisonChart" | "BreakdownChart" | "Evidence" | "Hypothesis" | "Experiment" | "DataGap";
+type GrowthComponentName = "Metric" | "TrendChart" | "ComparisonChart" | "BreakdownChart" | "Evidence" | "Hypothesis" | "Experiment" | "DataGap" | "Finding" | "Recommendation" | "MeasurementPlan";
 
 const GROWTH_COMPONENT_NAMES: readonly GrowthComponentName[] = [
   "Metric",
@@ -15,9 +15,12 @@ const GROWTH_COMPONENT_NAMES: readonly GrowthComponentName[] = [
   "Hypothesis",
   "Experiment",
   "DataGap",
+  "Finding",
+  "Recommendation",
+  "MeasurementPlan",
 ];
 
-const SELF_CLOSING_COMPONENTS: readonly GrowthComponentName[] = ["Metric", "TrendChart", "ComparisonChart", "BreakdownChart"];
+const SELF_CLOSING_COMPONENTS: readonly GrowthComponentName[] = ["Metric", "TrendChart", "ComparisonChart", "BreakdownChart", "MeasurementPlan"];
 const COMPONENT_TAG_PATTERN = /<\/?([A-Z][A-Za-z0-9]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*\/?>/g;
 const ATTRIBUTE_PATTERN = /\s+([A-Za-z][A-Za-z0-9-]*)(?:=(?:"([^"]*)"|'([^']*)'))?/g;
 
@@ -162,13 +165,13 @@ function validateGrowthMdx(sourceMdx: string, ctx: z.RefinementCtx): void {
     const unparsedAttributes = attributeSource.replace(ATTRIBUTE_PATTERN, "").trim();
     if (unparsedAttributes.length > 0) addMdxIssue(ctx, `${name} contains malformed attributes.`);
 
-    const allowedAttributes = name === "Hypothesis" ? ["confidence"] : name === "Evidence" || isSelfClosingComponent(name) ? ["data"] : [];
+    const allowedAttributes = name === "Hypothesis" ? ["confidence"] : name === "Evidence" || (isSelfClosingComponent(name) && name !== "MeasurementPlan") ? ["data"] : [];
     for (const attributeName of attributes.keys()) {
       if (!allowedAttributes.includes(attributeName)) addMdxIssue(ctx, `${name} does not support the ${attributeName} attribute.`);
     }
     if (isSelfClosingComponent(name)) {
       const dataId = attributes.get("data");
-      if (dataId == null || dataId.length === 0) addMdxIssue(ctx, `${name} requires a non-empty data attribute.`);
+      if (name !== "MeasurementPlan" && (dataId == null || dataId.length === 0)) addMdxIssue(ctx, `${name} requires a non-empty data attribute.`);
       if (!isSelfClosing) addMdxIssue(ctx, `${name} must be self-closing.`);
     }
     if (name === "Hypothesis") {
@@ -283,26 +286,34 @@ export const growthDocumentInputSchema = z.object({
 
 export type GrowthDocumentInput = z.infer<typeof growthDocumentInputSchema>;
 
-const ACTION_COMPONENT_PATTERN = /<(Hypothesis|Evidence|Experiment)\b[^>]*>[\s\S]*?<\/\1>/g;
+const ACTION_COMPONENT_PATTERN = /<(Finding|Evidence|Recommendation)\b[^>]*>[\s\S]*?<\/\1>|<MeasurementPlan\s*\/\s*>/g;
 
 /**
  * Action suggestions intentionally have a smaller grammar than reports and findings. The product
- * owns their three-section layout, so the model may only provide the text inside these components.
+ * owns their four-section layout, so the model may only provide semantic editable copy and the
+ * marker where live watched metrics belong.
  * This validation complements the dashboard renderer, which independently ignores arbitrary
  * headings and prose in action documents saved before this contract existed.
  */
 export const growthActionDocumentInputSchema = growthDocumentInputSchema.superRefine((document, ctx) => {
   const components = [...document.source_mdx.matchAll(ACTION_COMPONENT_PATTERN)];
-  const names = components.map((match) => match[1]);
+  const names = components.map((match) => {
+    const pairedComponentName = firstDefinedCapture(match[1], undefined);
+    return pairedComponentName === undefined ? "MeasurementPlan" : pairedComponentName;
+  });
   const remainingSource = document.source_mdx.replace(ACTION_COMPONENT_PATTERN, "").trim();
-  const hasExactSequence = names.length >= 3
-    && names[0] === "Hypothesis"
-    && names.at(-1) === "Experiment"
-    && names.slice(1, -1).every((name) => name === "Evidence");
-  if (!hasExactSequence || remainingSource.length > 0) {
+  const evidenceComponents = components.filter((match) => match[1] === "Evidence");
+  const hasExactSequence = names.length >= 4
+    && names[0] === "Finding"
+    && names.at(-2) === "Recommendation"
+    && names.at(-1) === "MeasurementPlan"
+    && names.slice(1, -2).every((name) => name === "Evidence")
+    && evidenceComponents.length <= 4;
+  const everyEvidenceHasData = evidenceComponents.every((match) => /\bdata=(?:"[^"]+"|'[^']+')/.test(match[0]));
+  if (!hasExactSequence || !everyEvidenceHasData || remainingSource.length > 0) {
     ctx.addIssue({
       code: "custom",
-      message: "Action documents must contain exactly one Hypothesis, one or more Evidence blocks, and exactly one Experiment, in that order, with no headings or free-standing prose.",
+      message: "Action documents must contain one Finding, one to four data-backed Evidence blocks, one Recommendation, and one MeasurementPlan, in that order, with no headings or free-standing prose.",
     });
   }
 });

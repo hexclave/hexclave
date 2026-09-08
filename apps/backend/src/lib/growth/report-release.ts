@@ -2,21 +2,18 @@ import type { Tenancy } from "@/lib/tenancies";
 import { globalPrismaClient } from "@/prisma-client";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
 import { isUuid } from "@hexclave/shared/dist/utils/uuids";
+import { toJsonInput } from "./agent-writes";
 import { getGrowthReportBody } from "./actions";
+import { collectGrowthDocumentActionIds, compileGrowthDocument } from "./content-document";
 import { assertTriggerIsValid } from "./phases";
+import { RELEASED_GROWTH_REPORT_FILTER } from "./report-visibility";
 
-export const PUBLISHED_GROWTH_REPORT_FILTER = { publishedAt: { not: null } };
+export { RELEASED_GROWTH_REPORT_FILTER } from "./report-visibility";
 
-/**
- * Whether this branch has ever had a report published, i.e. whether the workspace is unlocked.
- *
- * Deliberately "ever", not "its newest report is published": once a customer has been given a
- * report, a later analysis run that is still awaiting review must not take their workspace away
- * again. They keep the last published report and their insights while the new one is reviewed.
- */
+
 export async function isGrowthWorkspaceReleased(tenancy: Tenancy): Promise<boolean> {
   const published = await globalPrismaClient.growthReport.findFirst({
-    where: { projectId: tenancy.project.id, branchId: tenancy.branchId, ...PUBLISHED_GROWTH_REPORT_FILTER },
+    where: { projectId: tenancy.project.id, branchId: tenancy.branchId, ...RELEASED_GROWTH_REPORT_FILTER },
     select: { id: true },
   });
   return published != null;
@@ -41,22 +38,17 @@ export function getGrowthReleaseState(options: {
   return "preparing";
 }
 
-// ─── Staff ───────────────────────────────────────────────────────────────────
 
 async function requireReportInTenancy(tenancy: Tenancy, reportId: string) {
   if (!isUuid(reportId)) throw new StatusError(404, "Report not found.");
   const report = await globalPrismaClient.growthReport.findFirst({
     where: { id: reportId, projectId: tenancy.project.id, branchId: tenancy.branchId },
-    select: { id: true, publishedAt: true },
+    select: { id: true, publishedAt: true, publishedByUserId: true },
   });
   if (report == null) throw new StatusError(404, "Report not found.");
   return report;
 }
 
-/**
- * Every report this project has, newest first, with just enough to pick one to review. The report
- * bodies themselves are large and staff read one at a time, so they come from getGrowthAdminReport.
- */
 export async function listGrowthAdminReports(tenancy: Tenancy) {
   const reports = await globalPrismaClient.growthReport.findMany({
     where: { projectId: tenancy.project.id, branchId: tenancy.branchId },
@@ -71,9 +63,6 @@ export async function listGrowthAdminReports(tenancy: Tenancy) {
       run: { select: { trigger: true } },
     },
   });
-  // GrowthActionItem.reportId is a plain column, not a Prisma relation (an item outlives the report
-  // that proposed it), so the count cannot ride along as a `_count` include — hence one grouped
-  // query rather than one per report.
   const actionItemCounts = await globalPrismaClient.growthActionItem.groupBy({
     by: ["reportId"],
     where: { projectId: tenancy.project.id, branchId: tenancy.branchId, reportId: { in: reports.map((report) => report.id) } },
@@ -88,26 +77,74 @@ export async function listGrowthAdminReports(tenancy: Tenancy) {
       trigger: assertTriggerIsValid(report.run.trigger),
       action_item_count: actionItemCountByReportId.get(report.id) ?? 0,
       created_at_millis: report.createdAt.getTime(),
-      published_at_millis: report.publishedAt == null ? null : report.publishedAt.getTime(),
-      published_by_user_id: report.publishedByUserId,
+      published_at_millis: report.publishedAt == null || report.publishedByUserId == null ? null : report.publishedAt.getTime(),
+      published_by_user_id: report.publishedAt == null ? null : report.publishedByUserId,
     })),
   };
 }
 
-/**
- * One report in full, exactly as the customer would receive it — same function, same wire shape,
- * only with the published-only filter lifted. A reviewer has to be looking at the real artefact; a
- * staff-only rendering of it would be a different thing than the one being approved.
- */
+
 export async function getGrowthAdminReport(tenancy: Tenancy, reportId: string) {
   const report = await requireReportInTenancy(tenancy, reportId);
   const body = await getGrowthReportBody(tenancy, report.id, { publishedOnly: false });
-  return { ...body, published_at_millis: report.publishedAt == null ? null : report.publishedAt.getTime() };
+  return { ...body, published_at_millis: report.publishedAt == null || report.publishedByUserId == null ? null : report.publishedAt.getTime() };
+}
+
+
+export async function saveGrowthAdminReportDocument(tenancy: Tenancy, reportId: string, documentInput: unknown) {
+  const document = compileGrowthDocument(documentInput);
+  const referencedActionIds = collectGrowthDocumentActionIds(document.blocks);
+  const report = await requireReportInTenancy(tenancy, reportId);
+
+  if (referencedActionIds.length > 0) {
+    const actions = await globalPrismaClient.growthActionItem.findMany({
+      where: {
+        id: { in: referencedActionIds },
+        reportId: report.id,
+        projectId: tenancy.project.id,
+        branchId: tenancy.branchId,
+      },
+      select: { id: true },
+    });
+    const foundIds = new Set(actions.map((action) => action.id));
+    const missingId = referencedActionIds.find((id) => !foundIds.has(id));
+    if (missingId != null) {
+      throw new StatusError(400, `This report references an action that does not belong to it: ${missingId}`);
+    }
+  }
+
+  // Updating customer-visible copy is deliberately independent from its release receipt. The
+  // report remains live with the same publishedAt/publishedByUserId; unpublish is only for taking it
+  // away from the customer, not a prerequisite for correcting its content.
+  await globalPrismaClient.growthReport.update({
+    where: { id: report.id },
+    data: { document: toJsonInput(document) },
+  });
+  return await getGrowthAdminReport(tenancy, report.id);
+}
+
+export async function publishGrowthReport(tenancy: Tenancy, reportId: string, input: { publishedByUserId: string, now: Date }) {
+  if (!isUuid(reportId)) throw new StatusError(404, "Report not found.");
+  const result = await globalPrismaClient.growthReport.updateMany({
+    where: {
+      id: reportId,
+      projectId: tenancy.project.id,
+      branchId: tenancy.branchId,
+      OR: [{ publishedAt: null }, { publishedByUserId: null }],
+    },
+    data: { publishedAt: input.now, publishedByUserId: input.publishedByUserId },
+  });
+  if (result.count === 0) {
+    const report = await requireReportInTenancy(tenancy, reportId);
+    if (report.publishedAt != null && report.publishedByUserId != null) throw new StatusError(409, "This report is already published.");
+    throw new StatusError(404, "Report not found.");
+  }
+  return await listGrowthAdminReports(tenancy);
 }
 
 export async function unpublishGrowthReport(tenancy: Tenancy, reportId: string) {
   const report = await requireReportInTenancy(tenancy, reportId);
-  if (report.publishedAt == null) throw new StatusError(409, "This report is not published.");
+  if (report.publishedAt == null || report.publishedByUserId == null) throw new StatusError(409, "This report is not published.");
   await globalPrismaClient.growthReport.update({
     where: { id: report.id },
     data: { publishedAt: null, publishedByUserId: null },

@@ -17,11 +17,8 @@ import { GrowthMetricId, GrowthWatchedMetric } from "./action-item-types";
 import { normalizeStoredGrowthCategory } from "./categories";
 import { computeGrowthMetrics } from "./metrics";
 import { scanWorkflowSourceWarnings } from "./workflow-authoring";
+import { RELEASED_GROWTH_REPORT_FILTER } from "./report-visibility";
 
-// Re-exported for existing consumers (dashboard read routes, actions.test.ts) that import these wire
-// helpers from "./actions" — the actual definitions live in action-item-wire.ts now. See that file's
-// module comment for why: it must stay reachable from action-workflow-sync.ts (and therefore from the
-// growth-server routes) WITHOUT dragging in the rest of this file.
 export {
   getGrowthActionActivationEventType,
   growthManifestTriggersIncludeActivationEvent,
@@ -30,12 +27,6 @@ export {
   parseWatchedMetrics,
 } from "./action-item-wire";
 
-/**
- * Read/ack logic behind the internal/growth/reports/* and internal/growth/actions/* admin routes,
- * kept out of the route files the same way lib/growth/dashboard.ts backs the run/status routes.
- * Wire shapes here must match the frozen zod schemas in the dashboard's growth-api.ts exactly
- * (snake_case fields, *_at_millis timestamps, sections passed through with body_markdown).
- */
 
 export const GROWTH_ACTION_STATUSES = ["proposed", "active", "completed", "dismissed"] as const;
 export type GrowthActionStatus = typeof GROWTH_ACTION_STATUSES[number];
@@ -48,8 +39,6 @@ function assertActionStatus(value: string): GrowthActionStatus {
     ?? throwErr(new HexclaveAssertionError(`GrowthActionItem.status contained an unknown value "${value}" — statuses are only ever written from the fixed set, so this should be impossible.`, { value }));
 }
 
-// Structural row type instead of the generated Prisma model type: it keeps this module decoupled
-// from Prisma's generated namespace and documents exactly which columns the wire mapping reads.
 type GrowthActionItemRow = {
   id: string,
   typeId: string,
@@ -74,23 +63,14 @@ type GrowthActionItemRow = {
   completedAt: Date | null,
 };
 
-/**
- * Live workflow-engine state for one action item's deployed workflow, loaded separately from the
- * item row (batched — see loadGrowthActionWorkflowRuntimeInfo). Only meaningful for items with
- * workflowDeployedAt != null; undeployed items derive their wire status without it.
- */
+
 export type GrowthActionWorkflowRuntimeInfo = {
   definitionExists: boolean,
   /** Lowercased latest WorkflowRun state, null when the workflow never ran. */
   lastRunState: string | null,
 };
 
-/**
- * Batch-loads workflow runtime info for a page of action items, keyed by item id. Deliberately two
- * fixed queries regardless of page size (a definitions findMany + one DISTINCT ON latest-run scan)
- * instead of per-item lookups: list pages are up to 100 items and this runs on every dashboard
- * poll. Items without a workflow get no entry.
- */
+
 export async function loadGrowthActionWorkflowRuntimeInfo(tenancy: Tenancy, items: { id: string, workflowId: string | null }[]): Promise<Map<string, GrowthActionWorkflowRuntimeInfo>> {
   const workflowIds = [...new Set(items.flatMap((item) => item.workflowId == null ? [] : [item.workflowId]))];
   if (workflowIds.length === 0) return new Map();
@@ -99,8 +79,6 @@ export async function loadGrowthActionWorkflowRuntimeInfo(tenancy: Tenancy, item
     select: { workflowId: true },
   });
   const existingWorkflowIds = new Set(definitions.map((definition) => definition.workflowId));
-  // DISTINCT ON picks the newest run per workflow in one indexed scan ((tenancyId, workflowId,
-  // createdAt) ordering matches listWorkflowRuns' access pattern).
   const latestRuns = await globalPrismaClient.$replica().$queryRaw<{ workflowId: string, state: string }[]>(Prisma.sql`
     SELECT DISTINCT ON ("workflowId") "workflowId", "state"::text AS "state"
     FROM "WorkflowRun"
@@ -121,15 +99,11 @@ export async function loadGrowthActionWorkflowRuntimeInfo(tenancy: Tenancy, item
 
 function growthActionWorkflowToWire(item: GrowthActionItemRow, runtime: GrowthActionWorkflowRuntimeInfo | null) {
   if (item.workflowId == null) return null;
-  // The five workflow columns are all-or-nothing (enforced at agent-write time by the input type),
-  // so a workflow-bearing item missing any of them means the row was corrupted.
   const allOrNothing = (field: string) => new HexclaveAssertionError(`GrowthActionItem ${item.id} has workflowId but no ${field} — the workflow columns are all-or-nothing at write time, so this should be impossible.`, { itemId: item.id });
   const source = item.workflowSource ?? throwErr(allOrNothing("workflowSource"));
   const explanation = item.workflowExplanation ?? throwErr(allOrNothing("workflowExplanation"));
   const rollbackNote = item.workflowRollbackNote ?? throwErr(allOrNothing("workflowRollbackNote"));
   const triggers = parseStoredGrowthWorkflowManifestTriggers(item.workflowManifest ?? throwErr(allOrNothing("workflowManifest")));
-  // Runtime info is only required once deployed: before deployment there is nothing to look up, so
-  // callers assembling proposed-only views may skip the load.
   const runtimeInfo = item.workflowDeployedAt == null ? null : runtime ?? throwErr(new HexclaveAssertionError(
     `growthActionItemToWire called for deployed workflow-bearing item ${item.id} without runtime info — callers must batch-load it via loadGrowthActionWorkflowRuntimeInfo.`,
     { itemId: item.id },
@@ -178,16 +152,7 @@ function growthDocumentFromRow(row: { id: string, document?: unknown }): unknown
   return row.document ?? null;
 }
 
-// ---------------------------------------------------------------------------
-// Reports
-// ---------------------------------------------------------------------------
 
-/**
- * `options.publishedOnly` has no default on purpose. A report is invisible to its customer until
- * staff publish it (see lib/growth/report-release.ts), and the difference between the two callers of
- * this function is exactly which side of that gate they are on — so each one has to say so out loud
- * rather than inherit a default that would silently be wrong for one of them.
- */
 export async function getGrowthReportBody(tenancy: Tenancy, reportId: string | "latest", options: { publishedOnly: boolean }) {
   const projectId = tenancy.project.id;
   const branchId = tenancy.branchId;
@@ -202,9 +167,7 @@ export async function getGrowthReportBody(tenancy: Tenancy, reportId: string | "
       projectId,
       branchId,
       ...reportId === "latest" ? {} : { id: reportId },
-      // For a customer an unpublished report does not exist at all — including for "latest", which
-      // must resolve to their newest PUBLISHED report and not to one still under review.
-      ...options.publishedOnly ? { publishedAt: { not: null } } : {},
+      ...options.publishedOnly ? RELEASED_GROWTH_REPORT_FILTER : {},
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
@@ -223,19 +186,12 @@ export async function getGrowthReportBody(tenancy: Tenancy, reportId: string | "
     summary: report.summary,
     content_md: report.contentMd,
     document: growthDocumentFromRow(report),
-    // Stored Json passes through unchanged: the column shape ([{ id?, kind, title, body_markdown }])
-    // is exactly the wire shape, by design (see the comment on the dashboard's reportSchema).
     sections: report.sections ?? null,
     created_at_millis: report.createdAt.getTime(),
     action_items: actionItems.map((item) => growthActionItemToWire(item, workflowRuntimeByItemId.get(item.id) ?? null)),
   };
 }
 
-/**
- * Marks a published report read once. The published-only lookup preserves the release gate: a
- * customer cannot acknowledge (or probe for) a held report id. The CAS keeps the first-read time
- * stable when the report page is opened in more than one tab.
- */
 export async function markGrowthReportReadBody(tenancy: Tenancy, reportId: string): Promise<{ id: string }> {
   if (!isUuid(reportId)) throw new StatusError(404, "Report not found.");
   const report = await globalPrismaClient.growthReport.findFirst({
@@ -243,7 +199,7 @@ export async function markGrowthReportReadBody(tenancy: Tenancy, reportId: strin
       id: reportId,
       projectId: tenancy.project.id,
       branchId: tenancy.branchId,
-      publishedAt: { not: null },
+      ...RELEASED_GROWTH_REPORT_FILTER,
     },
     select: { id: true, readAt: true },
   });
@@ -257,10 +213,6 @@ export async function markGrowthReportReadBody(tenancy: Tenancy, reportId: strin
   return { id: report.id };
 }
 
-// ---------------------------------------------------------------------------
-// Actions list
-// ---------------------------------------------------------------------------
-
 export async function listGrowthActionsBody(tenancy: Tenancy, options: {
   status: string | undefined,
   cursor: string | undefined,
@@ -272,9 +224,6 @@ export async function listGrowthActionsBody(tenancy: Tenancy, options: {
   const statusFilter = options.status == null ? undefined : GROWTH_ACTION_STATUSES.find((candidate) => candidate === options.status)
     ?? throwErr(new StatusError(400, `Unknown action status filter: ${options.status}`));
 
-  // The cursor is the last item's id (same convention as the session-replays internal route). The
-  // pivot row is looked up fresh so pagination stays anchored on (createdAt, id) even though the
-  // cursor itself is opaque to the client.
   let cursorPivot: { createdAt: Date, id: string } | null = null;
   if (options.cursor != null) {
     if (!isUuid(options.cursor)) {
@@ -330,17 +279,6 @@ async function requireActionItemInTenancy(tenancy: Tenancy, actionItemId: string
   return item;
 }
 
-/**
- * Deploys (or heals) an action item's attached workflow as an ordinary customer workflow. Exported
- * as the seam between activation's control flow and the workflows app.
- *
- * Returns whether THIS call created the definition (drives the CAS-loss cleanup in
- * activateGrowthActionItem). The heal path exists because activation is not atomic across the two
- * stores: a prior activation attempt may have deployed the workflow and then crashed before the
- * status flip. Retrying must succeed, but ONLY when the existing definition's latest source is
- * byte-identical to the item's — anything else means the id genuinely belongs to some other
- * (customer- or growth-) workflow and silently re-syncing would overwrite it.
- */
 export async function deployGrowthActionWorkflow(tenancy: Tenancy, item: { id: string, title: string, workflowId: string, workflowSource: string, workflowManifest: unknown }): Promise<{ createdNew: boolean }> {
   const expectedTriggers = parseStoredGrowthWorkflowManifestTriggers(item.workflowManifest);
   let createdNew: boolean;
@@ -370,10 +308,6 @@ export async function deployGrowthActionWorkflow(tenancy: Tenancy, item: { id: s
     await syncWorkflowSource(tenancy, { workflowId: item.workflowId, source: item.workflowSource, displayName: item.title, mustBeNew: false });
     createdNew = false;
   }
-  // Defensive drift check: the trigger set the customer reviewed (stored at proposal time from the
-  // dry-compile) must be what actually got deployed. The source is byte-identical between the two
-  // compiles, so a mismatch is impossible unless our own storage was corrupted — hence assertion,
-  // not StatusError.
   const deployedDefinition = await globalPrismaClient.workflowDefinition.findUnique({
     where: { tenancyId_workflowId: { tenancyId: tenancy.id, workflowId: item.workflowId } },
     select: { latestVersion: true },

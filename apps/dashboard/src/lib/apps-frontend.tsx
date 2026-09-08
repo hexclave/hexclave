@@ -458,6 +458,7 @@ export const ALL_APPS_FRONTEND = {
       // Lifecycle and detail pages are deliberately not nav items. They are reached from the
       // overview, and the most-specific-wins matching below highlights "Overview" for them.
       { displayName: "Overview", href: "." },
+      { displayName: "Experiments", href: "experiments" },
       { displayName: "Chat", href: "chat" },
       // { displayName: "Ad accounts", href: "ad-accounts" },
       { displayName: "Settings", href: "settings" },

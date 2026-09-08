@@ -18,6 +18,8 @@ const questionSchema = z.object({
   options: z.array(optionSchema),
   allow_skip: z.boolean(),
   origin: z.enum(GROWTH_INTERVIEW_QUESTION_ORIGINS),
+  answer_option_ids: z.array(z.string()).nullable(),
+  answer_free_text: z.string().nullable(),
   answered_at_millis: z.number().nullable(),
 });
 
@@ -45,6 +47,8 @@ export type GrowthAdminInterviewQuestion = {
   options: GrowthAdminInterviewOption[],
   allowSkip: boolean,
   origin: GrowthInterviewQuestionOrigin,
+  answerOptionIds: string[] | null,
+  answerFreeText: string | null,
   answeredAtMillis: number | null,
 };
 
@@ -79,6 +83,8 @@ function mapBody(value: z.infer<typeof bodySchema>): GrowthAdminInterview {
       options: question.options.map((option) => ({ id: option.id, label: option.label, description: option.description ?? null })),
       allowSkip: question.allow_skip,
       origin: question.origin,
+      answerOptionIds: question.answer_option_ids,
+      answerFreeText: question.answer_free_text,
       answeredAtMillis: question.answered_at_millis,
     })),
   };

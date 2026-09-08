@@ -18,7 +18,7 @@ function assertStoredCategory(value: string | null): GrowthCategory | null {
     ?? throwErr(new HexclaveAssertionError(`Growth overview encountered an invalid stored category \"${value}\".`, { value }));
 }
 
-function findingToWire(finding: {
+export function growthFindingToWire(finding: {
   id: string,
   source: string,
   kind: string,
@@ -156,8 +156,8 @@ export async function getGrowthOverviewBody(tenancy: Tenancy, requestedLimit?: n
       content_md: latestBrief.contentMd,
       created_at_millis: latestBrief.createdAt.getTime(),
     },
-    findings: findings.map(findingToWire),
-    notes: notes.map(findingToWire),
+    findings: findings.map(growthFindingToWire),
+    notes: notes.map(growthFindingToWire),
     actions: activeActions.map((item) => growthActionItemToWire(item, workflowRuntimeByItemId.get(item.id) ?? null)),
     archive: archivedActions.map((item) => growthActionItemToWire(item, workflowRuntimeByItemId.get(item.id) ?? null)),
     categories: GROWTH_CATEGORIES.map((category) => ({
@@ -165,16 +165,11 @@ export async function getGrowthOverviewBody(tenancy: Tenancy, requestedLimit?: n
       count: counts.get(category) ?? 0,
       score: scoreByCategory.get(category) ?? null,
     })),
-    // Where a stage has a live page, the workspace renders it instead of that
-    // stage's raw suggestion/note lanes; stages without one keep the lanes, which is
-    // what makes this a stage-by-stage rollout rather than a switch.
     category_pages: categoryPages.map((page) => ({
       category: page.category,
       version: page.version,
       document: page.document,
       published_at_millis: page.published_at_millis,
-      // The page carries its own referenced actions, so the renderer resolves a button from the page
-      // it belongs to rather than from whatever happened to fit in the capped lanes.
       actions: page.referenced_action_ids.flatMap((id) => {
         const item = actionById.get(id);
         return item == null ? [] : [growthActionItemToWire(item, workflowRuntimeByItemId.get(item.id) ?? null)];

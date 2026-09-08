@@ -3,17 +3,17 @@
 import { DesignAlert, DesignBadge, DesignButton, DesignCard } from "@/components/design-components";
 import { formatGrowthRelativeTime } from "@/lib/growth/growth-format";
 import { GrowthApiError } from "@/lib/growth/growth-api";
+import { GROWTH_INTERVIEW_OTHER_OPTION_ID } from "@/lib/growth/growth-types";
 import {
   deleteGrowthAdminInterviewQuestion,
   getGrowthAdminInterview,
-  regenerateGrowthAdminInterview,
   releaseGrowthAdminInterview,
   updateGrowthAdminInterviewQuestion,
   type GrowthAdminInterview,
   type GrowthAdminInterviewOption,
   type GrowthAdminInterviewQuestion,
 } from "@/lib/growth/growth-interview-admin-api";
-import { captureError } from "@hexclave/shared/dist/utils/errors";
+import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { ChatsCircleIcon } from "@phosphor-icons/react";
 import { useCallback, useEffect, useState } from "react";
@@ -72,16 +72,22 @@ function DraftQuestion(props: {
     || allowSkip !== props.question.allowSkip
     || optionsKey(options) !== optionsKey(props.question.options);
 
-  const setOptionLabel = (index: number, label: string) => {
-    setOptions((current) => current.map((option, position) => position === index ? { ...option, label } : option));
+  const setOptionLabel = (optionId: string, label: string) => {
+    setOptions((current) => current.map((option) => option.id === optionId ? { ...option, label } : option));
+  };
+
+  const allowOther = options.some((option) => option.id.toLowerCase() === GROWTH_INTERVIEW_OTHER_OPTION_ID);
+  const editableOptions = options.filter((option) => option.id.toLowerCase() !== GROWTH_INTERVIEW_OTHER_OPTION_ID);
+  const setAllowOther = (enabled: boolean) => {
+    setOptions((current) => enabled
+      ? [...current, { id: GROWTH_INTERVIEW_OTHER_OPTION_ID, label: "Other", description: "Write your own answer" }]
+      : current.filter((option) => option.id.toLowerCase() !== GROWTH_INTERVIEW_OTHER_OPTION_ID));
   };
 
   return (
     <div className="rounded-xl border border-foreground/[0.08] p-3">
       <div className="flex items-start justify-between gap-3">
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          {props.question.orderIndex + 1} · {props.question.questionKey} · {props.question.kind} · {props.question.origin}
-        </span>
+        <span className="text-sm font-medium">Question {props.question.orderIndex + 1}</span>
         <DesignButton variant="outline" size="sm" disabled={!props.canRemove || props.busy} onClick={props.onRemove}>
           Remove
         </DesignButton>
@@ -96,25 +102,22 @@ function DraftQuestion(props: {
       />
 
       <div className="mt-2 space-y-1.5">
-        {options.map((option, index) => (
+        {editableOptions.map((option, index) => (
           <div key={option.id} className="flex items-center gap-2">
-            {/* The option id is the answer's identity — it is what a stored answer points at, and
-                what the report phase reads back — so it is shown, never edited. */}
-            <span className="w-24 shrink-0 truncate font-mono text-[10px] text-muted-foreground" title={option.id}>{option.id}</span>
             <input
               className="min-w-0 flex-1 rounded-lg border bg-background px-2 py-1 text-sm"
               value={option.label}
               disabled={props.busy}
-              onChange={(event) => setOptionLabel(index, event.target.value)}
-              aria-label={`Question ${props.question.orderIndex + 1} option ${option.id}`}
+              onChange={(event) => setOptionLabel(option.id, event.target.value)}
+              aria-label={`Question ${props.question.orderIndex + 1} option ${index + 1}`}
             />
             <DesignButton
               variant="outline"
               size="sm"
               // One option left means the question has no choice to make; cutting the last one is a
               // question removal, which is the button above.
-              disabled={props.busy || options.length <= 1}
-              onClick={() => setOptions((current) => current.filter((_, position) => position !== index))}
+              disabled={props.busy || editableOptions.length <= 1}
+              onClick={() => setOptions((current) => current.filter((candidate) => candidate.id !== option.id))}
             >
               ×
             </DesignButton>
@@ -131,15 +134,26 @@ function DraftQuestion(props: {
         </DesignButton>
       </div>
 
-      <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-        <input
-          type="checkbox"
-          checked={allowSkip}
-          disabled={props.busy}
-          onChange={(event) => setAllowSkip(event.target.checked)}
-        />
-        skippable
-      </label>
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={allowOther}
+            disabled={props.busy || (!allowOther && options.length >= 9)}
+            onChange={(event) => setAllowOther(event.target.checked)}
+          />
+          allow other answer
+        </label>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={allowSkip}
+            disabled={props.busy}
+            onChange={(event) => setAllowSkip(event.target.checked)}
+          />
+          skippable
+        </label>
+      </div>
 
       {dirty && (
         <div className="mt-2 flex justify-end">
@@ -157,21 +171,31 @@ function DraftQuestion(props: {
 }
 
 /** A released plan is read-only: the customer may already be answering it. */
+export function formatGrowthAdminInterviewAnswer(question: GrowthAdminInterviewQuestion): string | null {
+  if (question.answeredAtMillis == null) return null;
+  const optionIds = question.answerOptionIds ?? [];
+  if (optionIds.length === 0 && question.answerFreeText == null) return "Skipped";
+  const selectedLabels = optionIds.map((optionId) => question.options.find((option) => option.id === optionId)?.label
+    ?? throwErr(`Interview answer references unknown option ${optionId} for question ${question.id}.`));
+  const answer = [selectedLabels.join(", "), question.answerFreeText].filter((part) => part != null && part.length > 0).join(" — ");
+  return `Answered: ${answer}`;
+}
+
 function ReleasedQuestions(props: { interview: GrowthAdminInterview }) {
   return (
     <div className="space-y-1.5">
-      {props.interview.questions.map((question) => (
-        <div key={question.id} className="rounded-xl border border-foreground/[0.08] p-3">
-          <p className="text-sm">{question.orderIndex + 1}. {question.prompt}</p>
-          <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-            {question.options.map((option) => option.label).join(" · ")}
-          </p>
-          <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-            {question.questionKey} · {question.origin}
-            {question.answeredAtMillis != null && " · answered"}
-          </p>
-        </div>
-      ))}
+      {props.interview.questions.map((question) => {
+        const answer = formatGrowthAdminInterviewAnswer(question);
+        return (
+          <div key={question.id} className="rounded-xl border border-foreground/[0.08] p-3">
+            <p className="text-sm">{question.orderIndex + 1}. {question.prompt}</p>
+            <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+              {question.options.map((option) => option.label).join(" · ")}
+            </p>
+            {answer != null && <p className="mt-1 text-xs font-medium text-foreground">{answer}</p>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -239,9 +263,18 @@ export function GrowthAdminInterviewCard(props: { app: object, projectId: string
 
   const { interview } = state;
   const held = interview.releasedAtMillis == null;
+  const actions = held ? (
+    <DesignButton
+      size="sm"
+      disabled={busy || interview.questions.length === 0}
+      onClick={async () => await mutate("growth-admin-interview-release", () => releaseGrowthAdminInterview(props.app, props.projectId))}
+    >
+      Release to customer
+    </DesignButton>
+  ) : undefined;
 
   return (
-    <DesignCard title="Interview" subtitle={subtitle} icon={ChatsCircleIcon} gradient="purple">
+    <DesignCard title="Interview" subtitle={subtitle} icon={ChatsCircleIcon} actions={actions} gradient="purple">
       <div className="space-y-4">
         {actionError != null && <DesignAlert variant="error">{actionError}</DesignAlert>}
 
@@ -252,41 +285,6 @@ export function GrowthAdminInterviewCard(props: { app: object, projectId: string
             {interview.releasedAtMillis != null && ` · released ${formatGrowthRelativeTime(interview.releasedAtMillis, nowMillis)}`}
           </span>
         </div>
-
-        {held && (
-          <div className="flex flex-wrap items-center gap-2">
-            <DesignButton
-              size="sm"
-              disabled={busy || interview.questions.length === 0}
-              onClick={async () => await mutate("growth-admin-interview-release", () => releaseGrowthAdminInterview(props.app, props.projectId))}
-            >
-              Release to customer
-            </DesignButton>
-            <DesignButton
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={async () => {
-                setActionError(null);
-                setBusy(true);
-                try {
-                  await regenerateGrowthAdminInterview(props.app, props.projectId);
-                  // Regenerating returns no plan — the phase writes the replacement asynchronously —
-                  // so reload rather than swapping in a body we do not have. The reload will 404
-                  // until the new questions land, which the info alert above reads correctly.
-                  await load();
-                } catch (error) {
-                  captureError("growth-admin-interview-regenerate", error);
-                  setActionError(error instanceof Error ? error.message : String(error));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              Regenerate plan
-            </DesignButton>
-          </div>
-        )}
 
         {held ? (
           <div className="space-y-2">

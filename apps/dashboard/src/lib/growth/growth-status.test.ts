@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildGrowthDemoStatus, GROWTH_DEMO_NOW_MILLIS } from "./growth-demo-data";
-import { getGrowthPhase, getGrowthStatusPollIntervalMillis } from "./growth-status";
+import { getGrowthPhase, getGrowthStatusPollIntervalMillis, growthWorkspaceIsUnlocked } from "./growth-status";
 import type { GrowthStatus } from "./growth-types";
 
 function baseStatus(): GrowthStatus {
@@ -95,5 +95,21 @@ describe("getGrowthStatusPollIntervalMillis", () => {
     const interviewing = baseStatus();
     interviewing.interview = { state: "ready", answeredCount: 0, estimatedTotal: 8 };
     expect(getGrowthStatusPollIntervalMillis(interviewing)).toBe(null);
+  });
+});
+
+describe("growthWorkspaceIsUnlocked", () => {
+  it("keeps the lifecycle visible after release until the customer opens the report", () => {
+    const status = baseStatus();
+    expect(status.release.state).toBe("released");
+    expect(status.latestReport?.readAtMillis).toBeNull();
+    expect(growthWorkspaceIsUnlocked(status)).toBe(false);
+  });
+
+  it("unlocks the workspace after the released report is opened", () => {
+    const status = baseStatus();
+    if (status.latestReport == null) expect.fail("The steady-state fixture must include a report.");
+    status.latestReport.readAtMillis = GROWTH_DEMO_NOW_MILLIS;
+    expect(growthWorkspaceIsUnlocked(status)).toBe(true);
   });
 });

@@ -16,7 +16,10 @@ Built on the [eve](https://eve.dev) agent framework.
 | `HEXCLAVE_GROWTH_BACKEND_URL` | Base URL of the Hexclave backend. The client appends `/api/latest/internal/growth-agent`. |
 | `HEXCLAVE_GROWTH_AGENT_API_SECRET` | Shared service secret. Used both to verify inbound bearer tokens from the backend and as the outbound bearer token to the backend. |
 | `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID` | Explicit Vercel Sandbox credentials for local development when the backend is pinned to `vercel`. Vercel deployments normally authenticate automatically through `VERCEL_OIDC_TOKEN` (OIDC must be enabled for the project). |
-| `AGENT_BROWSER_SNAPSHOT_ID` | Optional but strongly recommended in production: a pre-built Vercel sandbox snapshot with Chromium + agent-browser installed, for sub-second browser-VM startup (create once via `createAgentBrowserSnapshot()` from `@agent-browser/sandbox/vercel`). Without it, each `browse-page` call cold-installs Chromium (~30s). |
+
+The website-research subagent installs Chromium and `agent-browser` in its Eve
+sandbox template, then reuses one browser process for the full child session.
+Individual `browse-page` and screenshot calls do not create additional VMs.
 
 ## Environment files
 

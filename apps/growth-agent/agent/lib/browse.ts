@@ -1,90 +1,19 @@
-import { runAgentBrowserCommand, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
-import type { NetworkPolicy } from "@vercel/sandbox";
 import type { SandboxSession } from "eve/sandbox";
+import {
+  isBrowserRuntimeUnavailableError,
+  renderPageInBrowser,
+  type BrowserPageResult,
+  type BrowserSessionContext,
+} from "#lib/browser-session.ts";
 
 /**
- * Renders a page in a real (headless Chromium) browser inside an ephemeral,
- * credential-free Vercel Sandbox microVM and returns the page's accessibility
- * snapshot, so the model can research JS-heavy sites that raw `curl` cannot.
- *
- * This deliberately runs as an app-side tool (in the growth-agent runtime, via
- * `@agent-browser/sandbox`) rather than inside eve's own managed subagent
- * sandbox: the eve sandbox only exposes bash/curl, and provisioning Chromium
- * there would couple the browsing stack to eve's sandbox lifecycle. The
- * microVM created here is separate, holds no secrets (we never pass env into
- * it; the Vercel credentials below only authenticate the *creation* API call
- * from the app runtime and are not injected into the VM), and is stopped in
- * the helper's `finally` plus server-side auto-terminated via `timeout`.
+ * Renders a page with the browser installed in the website-research
+ * subagent's own Eve sandbox. Every page in one research phase therefore
+ * shares one isolated browser process, while different phases still receive
+ * different durable child sessions and sandboxes.
  */
-
-export type BrowsePageResult = {
-  readonly finalUrl: string,
-  readonly title: string,
-  /** Interactive-compact accessibility snapshot, capped at {@link SNAPSHOT_CHAR_CAP} chars. */
-  readonly snapshotText: string,
-  readonly screenshotBase64?: string,
-};
-
-const SNAPSHOT_CHAR_CAP = 20_000;
 const CURL_FALLBACK_BODY_BYTE_CAP = 2_000_000;
-
-// Wall-time caps, enforced server-side by the sandbox `timeout` option (the VM
-// auto-terminates even if this process dies mid-call). With a pre-built
-// AGENT_BROWSER_SNAPSHOT_ID the sandbox boots in under a second, so 60s is
-// plenty for open + snapshot; without one the helper cold-installs Chromium
-// (~30s) first, so we allow extra headroom rather than making every cold call
-// fail. Configure a snapshot id in production to get the tight cap.
-const SANDBOX_TIMEOUT_WITH_SNAPSHOT_MS = 60_000;
-const SANDBOX_TIMEOUT_COLD_BOOT_MS = 120_000;
-
-// Same IPv4 denylist as agent/subagents/website-research/sandbox.ts (see the
-// rationale there): the browser fetches arbitrary customer-supplied URLs, so
-// egress to loopback, RFC1918, link-local, CGNAT, and "this network" ranges is
-// blocked at the microVM firewall. This catches what the pre-flight URL check
-// in validateBrowseUrl cannot: hostnames that *resolve* to private IPs and
-// redirects into private space.
-const PRIVATE_SUBNET_DENYLIST = [
-  "0.0.0.0/8",
-  "10.0.0.0/8",
-  "100.64.0.0/10",
-  "127.0.0.0/8",
-  "169.254.0.0/16",
-  "172.16.0.0/12",
-  "192.168.0.0/16",
-];
-
-const BROWSE_NETWORK_POLICY: NetworkPolicy = {
-  allow: { "*": [] },
-  subnets: { deny: PRIVATE_SUBNET_DENYLIST },
-};
-
-/**
- * Whether the runtime is configured to create Vercel Sandboxes. Local
- * development must expose an explicit token because it has no Vercel request
- * context. A deployed Vercel Function is different: Vercel supplies OIDC in
- * the request context, so the Sandbox SDK—not this environment-only probe—must
- * perform the credential check there.
- */
-export function isBrowseSandboxAvailable(): boolean {
-  const env = process.env;
-  // The browser helper is a Vercel Sandbox even when the Growth agent itself is
-  // running locally. Respect the explicit backend pin before falling back to the
-  // deployment probe; otherwise local dev can route Eve's sandboxes to Vercel
-  // while this helper incorrectly disables the browser and forces curl.
-  const configuredBackend = env.HEXCLAVE_GROWTH_SANDBOX_BACKEND;
-  const backend = configuredBackend != null && configuredBackend.length > 0
-    ? configuredBackend
-    : env.VERCEL != null && env.VERCEL.length > 0 ? "vercel" : "docker";
-  if (backend !== "vercel") return false;
-  // In a deployed Vercel Function, the OIDC token is available to the SDK via
-  // the incoming request context rather than process.env. Do not reject the
-  // call before withAgentBrowserSandbox() can use that runtime credential.
-  if (env.VERCEL != null && env.VERCEL.length > 0) return true;
-  const hasTokenTriple = [env.VERCEL_TOKEN, env.VERCEL_TEAM_ID, env.VERCEL_PROJECT_ID]
-    .every((value) => value != null && value.length > 0);
-  const hasOidcToken = env.VERCEL_OIDC_TOKEN != null && env.VERCEL_OIDC_TOKEN.length > 0;
-  return hasTokenTriple || hasOidcToken;
-}
+const SNAPSHOT_CHAR_CAP = 20_000;
 
 function isCurlFallbackSandboxSafe(): boolean {
   const configuredBackend = process.env.HEXCLAVE_GROWTH_SANDBOX_BACKEND;
@@ -128,7 +57,7 @@ function decodeHtmlEntities(value: string): string {
  * and styles are removed, block boundaries become newlines, and the result is
  * labelled so the researcher knows client-rendered content may be missing.
  */
-export function extractCurlFallbackPage(html: string, requestedUrl: string, finalUrl: string): BrowsePageResult {
+export function extractCurlFallbackPage(html: string, requestedUrl: string, finalUrl: string): BrowserPageResult {
   const titleMatch = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
   const title = decodeHtmlEntities(titleMatch?.[1]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() ?? "");
   const visibleText = decodeHtmlEntities(html
@@ -154,14 +83,14 @@ export function extractCurlFallbackPage(html: string, requestedUrl: string, fina
  * Fetches a public page through the website-research subagent's SSRF-hardened
  * Eve sandbox. The URL is passed through the process environment instead of
  * interpolated into the shell command, so arbitrary URL characters cannot
- * become shell syntax. This is the automatic fallback when the separate
- * Chromium sandbox cannot be created.
+ * become shell syntax. This is the automatic fallback when Chromium cannot
+ * run in the session sandbox.
  */
 export async function fetchPageWithCurl(options: {
   readonly url: string,
   readonly requestId: string,
   readonly sandbox: CurlFallbackSandbox,
-}): Promise<BrowsePageResult> {
+}): Promise<BrowserPageResult> {
   const validatedUrl = validateBrowseUrl(options.url);
   const safeRequestId = options.requestId.replace(/[^A-Za-z0-9_-]/g, "_");
   const outputPath = `/workspace/browse-page-${safeRequestId}.untracked.html`;
@@ -186,38 +115,20 @@ export async function fetchPageWithCurl(options: {
   }
 }
 
-/** Only credential/setup failures should switch rendering engines. Navigation
- * and page errors still surface normally so a broken target is not mistaken
- * for a successful static fetch. */
-export function isBrowserSandboxCredentialError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.name === "VercelOidcContextError"
-    || error.name === "LocalOidcContextError"
-    || /Could not get credentials from OIDC context|Missing credentials parameters to access the Vercel API|Browser sandbox is unavailable outside a Vercel deployment or its credentials are missing/.test(error.message);
-}
-
 export async function browsePageWithCurlFallback(options: {
+  readonly context: BrowserSessionContext,
   readonly url: string,
   readonly requestId: string,
-  readonly getSandbox: () => Promise<CurlFallbackSandbox>,
-}): Promise<BrowsePageResult> {
-  const curlFallback = async (): Promise<BrowsePageResult> => await fetchPageWithCurl({
+}): Promise<BrowserPageResult> {
+  const curlFallback = async (): Promise<BrowserPageResult> => await fetchPageWithCurl({
     url: options.url,
     requestId: options.requestId,
-    sandbox: await options.getSandbox(),
+    sandbox: await options.context.getSandbox(),
   });
-  if (!isBrowseSandboxAvailable()) {
-    if (!isCurlFallbackSandboxSafe()) {
-      throw new Error(
-        "Browser sandbox is unavailable and the current Eve sandbox does not enforce the subnet firewall required for a safe curl fallback.",
-      );
-    }
-    return await curlFallback();
-  }
   try {
-    return await browsePage({ url: options.url, screenshot: false });
+    return await browsePage({ context: options.context, url: options.url, screenshot: false });
   } catch (error) {
-    if (!isBrowserSandboxCredentialError(error)) throw error;
+    if (!isBrowserRuntimeUnavailableError(error)) throw error;
     if (!isCurlFallbackSandboxSafe()) throw error;
     return await curlFallback();
   }
@@ -251,7 +162,7 @@ function isPrivateIpv4(octets: readonly number[]): boolean {
 
 /**
  * Belt-and-braces pre-flight validation before spending sandbox time: the
- * microVM firewall (BROWSE_NETWORK_POLICY) is the real enforcement layer, but
+ * session sandbox firewall is the real enforcement layer, but
  * rejecting obviously-internal targets here fails fast with an actionable
  * message instead of a generic navigation error. http/https only; "localhost"
  * and literal private/loopback/link-local/CGNAT IPs are refused.
@@ -286,61 +197,25 @@ export function validateBrowseUrl(rawUrl: string): URL {
 }
 
 /**
- * Open `url` in a fresh browser microVM and return the rendered page's title,
- * final URL (after redirects), and interactive accessibility snapshot.
+ * Open `url` in the website-research session's browser and return the rendered
+ * page's title, final URL, and interactive accessibility snapshot.
  *
  * `screenshot: true` additionally returns a base64 PNG of the viewport. The
  * screenshot artifact tool sends these bytes directly to the backend rather
  * than placing a large base64 payload in the model's context.
  *
- * One sandbox per call, torn down in the helper's `finally`: agent tool calls
- * are independent model turns and eve gives us no cross-call lifecycle hook to
- * safely reuse a VM without risking an unbounded session, so per-call VMs
- * (sub-second with a sandbox snapshot configured) are the robust choice.
+ * The browser process is intentionally left open. A subagent hook closes it
+ * and stops the sandbox at the terminal session boundary.
  */
-export async function browsePage(options: { readonly url: string, readonly screenshot: boolean }): Promise<BrowsePageResult> {
+export async function browsePage(options: {
+  readonly context: BrowserSessionContext,
+  readonly url: string,
+  readonly screenshot: boolean,
+}): Promise<BrowserPageResult> {
   const validatedUrl = validateBrowseUrl(options.url);
-  if (!isBrowseSandboxAvailable()) {
-    throw new Error(
-      "Browser sandbox is unavailable outside a Vercel deployment or its credentials are missing. "
-      + "Fall back to fetching the page with curl.",
-    );
-  }
-  const hasSandboxSnapshot = process.env.AGENT_BROWSER_SNAPSHOT_ID != null && process.env.AGENT_BROWSER_SNAPSHOT_ID.length > 0;
-  return await withAgentBrowserSandbox(async (sandbox) => {
-    await runAgentBrowserCommand(sandbox, ["open", validatedUrl.toString()]);
-
-    const titleResult = await runAgentBrowserCommand<{ data?: { title?: string } }>(sandbox, ["get", "title"]);
-    const title = titleResult.json?.data?.title ?? "";
-
-    const urlResult = await runAgentBrowserCommand<{ data?: { url?: string } }>(sandbox, ["get", "url"]);
-    const finalUrl = urlResult.json?.data?.url ?? validatedUrl.toString();
-
-    // Interactive + compact accessibility tree: the token-efficient page
-    // representation agent-browser is built around. Not --json because the
-    // plain-text tree is the model-facing format.
-    const snapshotResult = await runAgentBrowserCommand(sandbox, ["snapshot", "-i", "-c"], { json: false });
-    const fullSnapshot = snapshotResult.stdout.trim();
-    const snapshotText = fullSnapshot.length > SNAPSHOT_CHAR_CAP
-      ? `${fullSnapshot.slice(0, SNAPSHOT_CHAR_CAP)}\n… [snapshot truncated at ${SNAPSHOT_CHAR_CAP} characters]`
-      : fullSnapshot;
-
-    let screenshotBase64: string | undefined;
-    if (options.screenshot) {
-      const screenshotResult = await runAgentBrowserCommand<{ data?: { path?: string } }>(sandbox, ["screenshot"]);
-      const screenshotPath = screenshotResult.json?.data?.path;
-      if (screenshotPath == null) {
-        throw new Error("agent-browser screenshot did not return a file path");
-      }
-      const base64Result = await sandbox.runCommand("base64", ["-w", "0", screenshotPath]);
-      screenshotBase64 = (await base64Result.stdout()).trim();
-    }
-
-    await runAgentBrowserCommand(sandbox, ["close"], { json: false });
-
-    return { finalUrl, title, snapshotText, ...screenshotBase64 === undefined ? {} : { screenshotBase64 } };
-  }, {
-    timeout: hasSandboxSnapshot ? SANDBOX_TIMEOUT_WITH_SNAPSHOT_MS : SANDBOX_TIMEOUT_COLD_BOOT_MS,
-    createOptions: { networkPolicy: BROWSE_NETWORK_POLICY },
+  return await renderPageInBrowser({
+    context: options.context,
+    screenshot: options.screenshot,
+    url: validatedUrl.toString(),
   });
 }
