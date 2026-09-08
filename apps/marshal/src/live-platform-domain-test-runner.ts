@@ -9,7 +9,7 @@ import { readSpec } from "./store.js";
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === "--help") {
-    console.log("Usage: test:platform-domains:live [--cleanup recovery-file]\nUses Fly/S3 credentials from apps/marshal/.env.local. Requires the dedicated Fly gateway and wildcard DNS/TLS to be configured first. No Vercel token, bypass secret, or alias is required.\nCreates a disposable Fly app, verifies HTTPS, waits up to 10 minutes for browser checks on both printed URLs, verifies redeploy, then deletes the disposable app. The shared gateway is never deleted.\nExit codes: 0 = passed, 1 = failed.");
+    console.log("Usage: test:platform-domains:live [--cleanup recovery-file]\nUses Fly/S3 credentials from apps/marshal/.env.local. Requires the dedicated Fly gateway and wildcard DNS/TLS to be configured first. Set HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN to match a test gateway domain; defaults to deploy.built-with-hexclave.com. No Vercel token, bypass secret, or alias is required.\nCreates a disposable Fly app, verifies HTTPS, waits up to 10 minutes for browser checks on both printed URLs, verifies redeploy, then deletes the disposable app. The shared gateway is never deleted.\nExit codes: 0 = passed, 1 = failed.");
     return;
   }
   if (args.length !== 0 && !(args.length === 2 && args[0] === "--cleanup")) throw new Error("Use --help for usage");

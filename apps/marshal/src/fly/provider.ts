@@ -5,7 +5,7 @@
 // flyVolumeName) is load-bearing for every existing tenant: change a derivation and every
 // live app becomes an orphan. See fly/naming.ts.
 import { createHash } from "node:crypto";
-import { isPlatformHostname, platformHostname } from "../platform-domain-names.js";
+import { platformHostname } from "../platform-domain-names.js";
 import { BASE_IMAGE, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, FLY_DEFAULT_MEMORY_MB, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, RAILPACK_BUILDKIT_TMPFS_SIZE, SOFT_CONCURRENCY_LIMIT, flyBuilderGuestFor, flyConfig, flyGuestFor, flyVolumeName, getConfig, memorySizesFor, resolveNamespaceOrg, serviceMemoryMb } from "../config.js";
 import { buildCompletionPath, buildHarnessScript, computeWebhookToken, generatedDockerfile, type Builder } from "../builds.js";
 import { badRequest, conflict, notFound } from "../errors.js";
@@ -427,7 +427,7 @@ async function serviceAddress(fly: FlyClient, ns: string, key: string, stored: S
     if (specIsPublic(stored.spec)) {
       platformUrl = `https://${platformHostname(envId, ns, key)}`;
     } else {
-      const verified = (certificates ?? await fly.listCertificates(appName)).filter((certificate) => !isPlatformHostname(certificate.hostname) && certificateIsVerified(certificate)).map((certificate) => certificate.hostname).sort();
+      const verified = (certificates ?? await fly.listCertificates(appName)).filter(certificateIsVerified).map((certificate) => certificate.hostname).sort();
       platformUrl = verified.length > 0 ? `https://${verified[0]}` : null;
     }
   }
@@ -891,7 +891,7 @@ export function createFlyProvider(): RuntimeProvider {
       async statesFor(ns, key) {
         const fly = flyFor(ns);
         const appName = appNameForService(getConfig().envId, ns, key);
-        const certificates = (await fly.listCertificates(appName)).filter((certificate) => !isPlatformHostname(certificate.hostname));
+        const certificates = await fly.listCertificates(appName);
         return await computeDomainStates(fly, appName, certificates);
       },
       async releaseForService(ns, key, _stored, lease) {

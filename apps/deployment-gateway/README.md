@@ -44,12 +44,16 @@ The gateway's default `.fly.dev` hostname intentionally returns 421: only deploy
 hostnames route traffic. Health checks use `Host: gateway-health.internal` and `/healthz`,
 so no customer URL path is reserved by the gateway.
 
-For a separate preproduction gateway, create another Fly app from the same source.
-Before the production wildcard exists, the dedicated namespace can point at that test
-app. If production is already live, direct only the live test's exact generated hostname
-to the test gateway using explicit DNS and a certificate for that exact hostname. Do not
-replace the production wildcard to test a branch. Remove the test-only DNS/certificate
-when finished. Production itself never needs per-deployment records.
+For a separate preproduction gateway, create another Fly app from the same source and
+use a separate wildcard domain. Set `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN` to the bare
+suffix (for example, `deploy.example.net`) on the gateway with `fly deploy --env
+HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=deploy.example.net`. Configure wildcard DNS and its
+certificate using that suffix. The value must be a lowercase DNS domain, without `*.`.
+
+Pass the same environment variable to the local Marshal live-test command and optionally
+the Docker test command. Both use the production domain when the variable is unset.
+The override does not change Fly app names. The backend's production namespace reservation
+is unchanged; this override supports testing the gateway and Marshal directly.
 
 ## Updates and operations
 
@@ -97,7 +101,9 @@ This builds the actual gateway image and runs a pinned Bun fixture on an isolate
 network. A generated test-only TLS certificate is trusted only inside that disposable
 container. Tests verify host rejection, health routing, path/method forwarding, cookies,
 TLS hostname validation, incremental SSE/chunked responses, and authenticated WebSocket
-text/binary echo with clean close. Containers, network, generated image tag and test keys
+text/binary echo with clean close. Additional checks cover concurrent applications,
+redirects and upstream errors, streaming uploads, disconnected clients, unavailable
+upstreams, gateway restart/reconnection, and invalid domain configuration. Containers, network, generated image tag and test keys
 are removed afterward. Docker may retain downloaded base images and build cache.
 
 The test port defaults to `10070 + 100 * NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX` (18170 by default).
@@ -116,5 +122,14 @@ application, and checks both its direct Fly URL and gateway URL. Open the two pr
 before asserting the combined result, then redeploys and checks its stable URL. Cleanup
 removes only the disposable application/state, never the shared gateway, DNS or wildcard
 certificate. No Vercel alias or bypass secret is needed.
+
+For browser cookie isolation, run two live tests in separate terminals. Before running
+both compatibility checks, open the first app's `/compatibility/cookie-isolation` page
+and click **Set test session**. Click **Read session** to see that app's marker. On the second app's isolation page,
+**Read session** should return only null values.
+Set a session on the second app and verify each still returns its own marker. Then run
+the normal compatibility checks on both direct and gateway URLs so both runners can
+verify redeploy and clean up. This checks host-only/current-host cookie isolation;
+applications must still avoid setting cookies on a shared parent domain.
 
 Before rollout, run this live check against the gateway and confirm every category passes.

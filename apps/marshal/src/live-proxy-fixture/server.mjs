@@ -166,6 +166,28 @@ Bun.serve({
       if (server.upgrade(request, { headers: { 'Sec-WebSocket-Protocol': 'hxc-live-test' } })) return;
       return new Response('Upgrade required', { status: 426, headers });
     }
+    if (path === '/compatibility/cookie-isolation') {
+      const publicHost = request.headers.get('x-forwarded-host') ?? url.hostname;
+      if (![hostname, flyHostname].includes(publicHost)) return new Response('Invalid test host', { status: 400, headers });
+      return new Response(`<!doctype html><title>Cookie isolation test</title><h1>Cookie isolation test</h1>
+        <button id="set">Set test session</button><button id="read">Read session</button><pre id="output"></pre>
+        <script>
+        async function check(set) {
+          const output = document.getElementById('output');
+          try {
+            if (set) {
+              const login = await fetch('/compatibility/login?domain=${publicHost}&value=first', { method: 'POST' });
+              if (!login.ok) throw new Error('Login failed: ' + login.status);
+            }
+            const response = await fetch('/compatibility/session', { cache: 'no-store' });
+            if (!response.ok) throw new Error('Session read failed: ' + response.status);
+            output.textContent = JSON.stringify(await response.json(), null, 2);
+          } catch (error) { output.textContent = 'FAIL: ' + String(error); }
+        }
+        document.getElementById('set').onclick = () => check(true);
+        document.getElementById('read').onclick = () => check(false);
+        </script>`, { headers: { ...headers, 'Content-Type': 'text/html' } });
+    }
     if (path === '/compatibility') return new Response(page, { headers: { ...headers, 'Content-Type': 'text/html' } });
     if (path === '/compatibility/stream') {
       const sse = url.searchParams.get('kind') === 'sse';
@@ -188,6 +210,20 @@ Bun.serve({
       const value = url.searchParams.get('value');
       if (request.method !== 'POST' || ![hostname, flyHostname].includes(domain) || (path.endsWith('login') && !['first', 'rotated', 'websocket'].includes(value))) return new Response('Invalid test request', { status: 400, headers });
       return new Response('ok', { headers: cookieHeaders(domain, `${marker}-${value}`, path.endsWith('logout')) });
+    }
+    if (path === '/compatibility/redirect') {
+      return new Response('redirect', { status: 307, headers: { ...headers, Location: `https://${hostname}/destination?q=a%2Fb` } });
+    }
+    if (path === '/compatibility/error') return new Response('fixture unavailable', { status: 503, headers: { ...headers, 'Retry-After': '7' } });
+    if (path === '/compatibility/upload-stream') {
+      if (request.body === null) return new Response('Body required', { status: 400, headers });
+      let bytes = 0;
+      return new Response(request.body.pipeThrough(new TransformStream({
+        transform(chunk, controller) {
+          bytes += chunk.byteLength;
+          controller.enqueue(new TextEncoder().encode(`${bytes}\n`));
+        },
+      })), { headers: { ...headers, 'Content-Type': 'text/plain', 'X-Accel-Buffering': 'no' } });
     }
     if (path === '/compatibility/request') {
       return Response.json({

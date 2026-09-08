@@ -119,10 +119,6 @@ services receive no generated platform URL. GCP routing is unchanged. The whole
 There is no per-service DNS record, certificate issuance, or routing database, and no
 automatic fallback to `.fly.dev` during a gateway outage.
 
-This replaces the unshipped hosted-components rewrite. Remove any manually-created test
-Vercel aliases or DNS records from that implementation after its disposable apps are cleaned
-up. Neither its aliases nor its old `deploy-<suffix>` URLs are used by this gateway.
-
 ## Local GCP simulator
 
 Development and provider-dependent backend E2E tests use `docker/dependencies/gcp-mock`. It implements only the Google REST resources Marshal owns; tests that do not cross the provider boundary continue to use focused `GcpClient` fakes. Set `HEXCLAVE_MARSHAL_GCP_MOCK_URL=local` to derive the simulator address from `NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX`, or provide an explicit URL. Both forms require `MARSHAL_ALLOW_MOCKS=1`, and the introspection API also requires `HEXCLAVE_MARSHAL_GCP_MOCK_TOKEN` because it exposes resolved container environment values.
@@ -181,7 +177,7 @@ For a disposable project created out-of-band, `HEXCLAVE_MARSHAL_GCP_EXISTING_PRO
 
 ## Disposable live verification
 
-### Fly platform domains with Vercel DNS
+### Fly gateway platform domains
 
 From the repository root, run:
 
@@ -193,8 +189,10 @@ The runner reads real Fly and S3 credentials from `apps/marshal/.env.local`, acc
 the `MARSHAL_*` names or `FLY_API_TOKEN`, `FLY_ORG_SLUG`, `S3_ACCESS_KEY_ID`,
 `S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`. No Vercel API token is required.
 Configure the dedicated gateway and wildcard DNS/TLS first, following its README.
-The test no longer prompts for Vercel credentials, preview URLs or aliases. `--help`
-prints usage without loading credentials or calling providers.
+For an isolated test gateway on a separate domain, pass
+`HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=deploy.example.net` to the command and configure the
+gateway with the same value. The production domain is the default when unset.
+`--help` prints usage without loading credentials or calling providers.
 
 The test creates one disposable Fly app/machine (which can incur usage charges), checks its
 default Fly HTTPS response and branded HTTPS proxy, redeploys while retaining the hostname,

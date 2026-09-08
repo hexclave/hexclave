@@ -657,7 +657,6 @@ export async function readDeploymentLog(ns: string, id: string): Promise<string 
 // ---------------------------------------------------------------------------
 // Domain registry
 
-
 function domainClaimKey(hostname: string): string {
   return `domains/${hostname}.json`;
 }

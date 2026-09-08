@@ -1,0 +1,15 @@
+#!/bin/sh
+# Sourced before nginx's envsubst hook. Validate before converting a literal DNS
+# suffix to a regex so configuration cannot broaden the allowed upstream mapping.
+set -eu
+domain="${HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN}"
+case "$domain" in
+    *[!a-z0-9.-]*) echo 'Invalid platform domain characters' >&2; exit 1 ;;
+esac
+if [ "${#domain}" -gt 190 ] || ! printf '%s\n' "$domain" | grep -Eq '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'; then
+    echo 'HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN must be a lowercase DNS domain of at most 190 characters' >&2
+    exit 1
+fi
+# Character classes survive nginx's quoted-string parsing without backslash escaping.
+HEXCLAVE_GATEWAY_DOMAIN_PATTERN=$(printf '%s' "$domain" | sed 's/\./[.]/g')
+export HEXCLAVE_GATEWAY_DOMAIN_PATTERN

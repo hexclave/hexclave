@@ -1,7 +1,7 @@
 # hxc- leaves at most 59 characters for the suffix of a 63-character Fly app name.
 map $host $deployment_app {
     default "";
-    "~^(?<deployment_suffix>[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)\.deploy\.built-with-hexclave\.com$" hxc-$deployment_suffix;
+    "~^(?<deployment_suffix>[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)[.]${HEXCLAVE_GATEWAY_DOMAIN_PATTERN}$" hxc-$deployment_suffix;
 }
 map $http_upgrade $connection_upgrade {
     default upgrade;

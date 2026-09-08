@@ -1,8 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { appNameForService } from "./fly/naming.js";
-import { isPlatformHostname, platformHostname } from "./platform-domain-names.js";
+import { isPlatformHostname, platformDomain, platformHostname } from "./platform-domain-names.js";
 
 describe("Fly proxy hostnames", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("uses an explicit domain override for generation and reservation", () => {
+    vi.stubEnv("HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN", "deploy.example.net");
+    expect(platformHostname("test", "project", "web")).toMatch(/\.deploy\.example\.net$/);
+    expect(isPlatformHostname("app.deploy.example.net")).toBe(true);
+    expect(isPlatformHostname("app.deploy.built-with-hexclave.com")).toBe(false);
+  });
+
+  it.each(["", "*.example.net", "Example.net", "-bad.example.net", "example.net/", "example.net\n", "a".repeat(64) + ".net", "a.".repeat(96) + "net"])("rejects invalid domain %j", (domain) => {
+    vi.stubEnv("HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN", domain);
+    expect(() => platformDomain()).toThrow("lowercase DNS domain");
+  });
   it("reuses the complete Fly app identity without a DNS lookup or certificate", () => {
     const hostname = platformHostname("prod", "project", "web");
     expect(`hxc-${hostname.split(".")[0]}`).toBe(appNameForService("prod", "project", "web"));
