@@ -9,7 +9,10 @@ import logging
 import os
 import re
 import secrets
+import socket
 import socketserver
+import stat
+import struct
 import subprocess
 import threading
 import time
@@ -21,8 +24,8 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
 
-from .policy import FRONTEND_RECOVERY_PROBE_SECONDS, NETWORK_POLL_SECONDS, SETUP_PORTAL_READY_TIMEOUT_SECONDS, NetworkMode, NetworkPolicy, NetworkState, advance_network_state, initial_network_state
-from .state import RUNTIME_ROOT, STATE_ROOT, atomic_write
+from .policy import ADMIN_CONFIRMATION, FRONTEND_RECOVERY_PROBE_SECONDS, NETWORK_POLL_SECONDS, SETUP_PORTAL_READY_TIMEOUT_SECONDS, NetworkMode, NetworkPolicy, NetworkState, advance_network_state, initial_network_state
+from .state import RUNTIME_ROOT, STATE_ROOT, atomic_write, clear_exact_state_directory
 
 LOGGER = logging.getLogger("hexclave-tv-box-network")
 SETUP_CONNECTION_NAME = "hexclave-tv-setup"
@@ -35,6 +38,7 @@ TEST_IMAGE_MARKER = Path("/etc/hexclave-tv-box-test-image")
 TEST_ORIGIN_FILE = Path("/boot/firmware/hexclave-tv-box-test-origin.txt")
 QUICK_TUNNEL_HOSTNAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$")
 MAX_AGENT_REQUEST_BYTES = 16_384
+MAX_KIOSK_HEALTH_BYTES = 256
 TEST_SETUP_PASSWORD_LENGTH = 8
 TEST_SETUP_PASSWORD_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
@@ -114,8 +118,8 @@ def _run(command: Sequence[str], timeout: int = 45) -> str:
 def _frontend_reachable(url: str, timeout: int = 10) -> bool:
     request = urllib_request.Request(url, method="GET", headers={"User-Agent": "Hexclave-TV-Box-Recovery/1"})
     try:
-        # The caller supplies either the fixed production URL or the strictly
-        # validated test-image URL resolved above.
+        # The caller supplies the fixed local setup URL or a validated
+        # public document URL, never credentials or a customer-selected URL.
         with urllib_request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             response.read(1)
             return 200 <= response.status < 400
@@ -254,11 +258,18 @@ class NetworkManagerController:
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 continue
 
+    def setup_active(self) -> bool:
+        values = self._nmcli(
+            "--get-values", "GENERAL.STATE,GENERAL.CONNECTION", "device", "show", WIFI_INTERFACE,
+        ).splitlines()
+        return len(values) == 2 and values[0].startswith("100") and values[1] == SETUP_CONNECTION_NAME
+
     def _delete_connection(self, name: str) -> None:
-        try:
+        # Check absence explicitly; a permission, storage or D-Bus failure
+        # must not be mistaken for successful removal of a saved credential.
+        names = self._nmcli("--get-values", "NAME", "connection", "show").splitlines()
+        if name in [split_nmcli_line(value)[0] for value in names]:
             self._nmcli("connection", "delete", "id", name, timeout=15)
-        except subprocess.CalledProcessError:
-            return
 
     def _password_file(self, property_name: str, value: str) -> Path:
         secret_root = self.runtime_root / "secrets"
@@ -270,8 +281,10 @@ class NetworkManagerController:
         return path
 
     def start_setup(self) -> None:
-        if self.setup_ssid is not None:
+        if self.setup_ssid is not None and self.setup_active():
             return
+        self.setup_ssid = None
+        self.setup_password = None
         self._delete_connection(SETUP_CONNECTION_NAME)
         # The Zero 2 W has one radio. Scan before switching it into AP mode so
         # a portal refresh cannot tear down the customer's setup connection.
@@ -384,8 +397,12 @@ class NetworkManagerController:
             raise
 
     def clear_saved_connections(self) -> None:
-        for name in self.saved_connections():
-            self._delete_connection(name)
+        names = self.saved_connections()
+        if names:
+            # nmcli accepts multiple exact profile IDs in one operation. A
+            # reset's deletion budget must not grow by one timeout per saved
+            # network, and unrelated NetworkManager profiles remain untouched.
+            self._nmcli("connection", "delete", "id", *names, timeout=30)
 
 
 class TvBoxNetworkAgent:
@@ -411,6 +428,7 @@ class TvBoxNetworkAgent:
         self.renderer_url = renderer_url
         self.lock = threading.RLock()
         self.portal_submission_active = False
+        self.maintenance_active = False
         self.has_saved_network = bool(controller.saved_connections())
         self.state = initial_network_state(
             has_saved_network=self.has_saved_network,
@@ -424,10 +442,60 @@ class TvBoxNetworkAgent:
     def _service(self, action: str, name: str) -> None:
         self.service_runner(["systemctl", action, name], 30)
 
+    def _service_properties(self, name: str) -> dict[str, str]:
+        output = self.service_runner([
+            "systemctl", "show", "--property=ActiveState,SubState,Result", name,
+        ], 10)
+        properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        if set(properties) != {"ActiveState", "SubState", "Result"}:
+            raise ValueError("TV Box service state is incomplete.")
+        return properties
+
+    def _ensure_service(self, name: str, *, running: bool) -> None:
+        properties = self._service_properties(name)
+        state = properties["ActiveState"]
+        if state in {"activating", "deactivating", "reloading", "refreshing"}:
+            return
+        if state == "failed" or properties["Result"] == "start-limit-hit":
+            # systemd owns crash recovery and its exhausted failure budget.
+            # Reissuing start every policy tick would defeat bounded recovery,
+            # particularly the deliberately stopped test-image failure state.
+            return
+        if state not in {"active", "inactive"}:
+            raise ValueError("TV Box service state is unsupported.")
+        active = state == "active"
+        if active != running:
+            self._service("start" if running else "stop", name)
+
+    def _reconcile_services(self) -> None:
+        setup = self.state.mode is NetworkMode.SETUP
+        # Stop the opposite tty owner first, even if it was started outside
+        # this process. systemd's active state is not implied by policy state.
+        self._ensure_service(
+            "hexclave-tv-box-kiosk.service" if setup else "hexclave-tv-box-setup-display.service",
+            running=False,
+        )
+        if setup:
+            self.controller.start_setup()
+            self._ensure_service("hexclave-tv-box-setup-display.service", running=True)
+            self._ensure_service("hexclave-tv-box-setup.service", running=True)
+        else:
+            self._ensure_service("hexclave-tv-box-setup.service", running=False)
+            self._ensure_service("hexclave-tv-box-kiosk.service", running=True)
+
     def _set_kiosk_url(self, url: str) -> None:
         atomic_write(self.runtime_root / "kiosk-url", f"{url}\n", 0o644)
 
-    def _restart_kiosk(self) -> None:
+    def _restart_kiosk(self, *, reset_healthy_budget: bool = True) -> None:
+        if reset_healthy_budget and self._kiosk_health_state() is not None:
+            properties = self._service_properties("hexclave-tv-box-kiosk.service")
+            if properties["ActiveState"] == "active" and properties["Result"] != "start-limit-hit":
+                # systemd counts intentional starts as well as crashes. A
+                # validated live renderer changing network content or retrying
+                # only its document must not spend the hardware-failure budget.
+                # Failed/inactive units and ordinary service reconciliation do
+                # not enter this exception to the crash policy.
+                self._service("reset-failed", "hexclave-tv-box-kiosk.service")
         # Cog 0.18.x can make Cage slow to close. Separate bounded operations
         # prevent one combined systemctl restart job from consuming the agent
         # request timeout after systemd has already performed the SIGKILL
@@ -435,9 +503,37 @@ class TvBoxNetworkAgent:
         self._service("stop", "hexclave-tv-box-kiosk.service")
         self._service("start", "hexclave-tv-box-kiosk.service")
 
+    def _kiosk_health_state(self) -> str | None:
+        # This renderer-owned file is only a bounded readiness signal, not a
+        # source of diagnostic text or authority to choose an action/path.
+        # Missing/stale-format signals leave recovery to the native supervisor.
+        path = self.controller.state_root / "browser" / "kiosk-health"
+        descriptor = None
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_KIOSK_HEALTH_BYTES:
+                return None
+            value = os.read(descriptor, MAX_KIOSK_HEALTH_BYTES + 1)
+        except OSError:
+            return None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        for state in ("ready", "document-loading", "document-failed", "document-timeout"):
+            if value == f"{state} cage=ready,cog=ready,web-process=ready\n".encode("ascii"):
+                return state
+        return None
+
+    def _document_recovery_requested(self) -> bool:
+        return self._kiosk_health_state() in {"document-failed", "document-timeout"}
+
     def apply_mode(self) -> None:
         with self.lock:
+            if self.maintenance_active:
+                return
             if self.state.mode is self.applied_mode:
+                self._reconcile_services()
                 return
             if self.state.mode in {NetworkMode.STATION_INITIAL, NetworkMode.STATION_RETRY}:
                 # NetworkManager's explicit activation is synchronous. Recheck
@@ -474,6 +570,8 @@ class TvBoxNetworkAgent:
 
     def tick(self) -> None:
         with self.lock:
+            if self.maintenance_active:
+                return
             next_state = advance_network_state(
                 self.state,
                 has_saved_network=self.has_saved_network,
@@ -483,8 +581,8 @@ class TvBoxNetworkAgent:
                 policy=self.policy,
             )
             self.state = next_state
-        self.apply_mode()
-        self._probe_frontend_recovery()
+            self.apply_mode()
+            self._probe_frontend_recovery()
 
     def _probe_frontend_recovery(self) -> None:
         if self.state.mode is not NetworkMode.CONNECTED:
@@ -496,17 +594,22 @@ class TvBoxNetworkAgent:
             return
         reachable = self.frontend_probe(self.renderer_url, 10)
         recovered = self.frontend_reachable is False and reachable
+        if recovered and self._document_recovery_requested():
+            # This is a fast path for observed origin outages. The kiosk
+            # supervisor independently retries native document-load failures,
+            # including outages this periodic probe never observed. A healthy
+            # loaded app must not consume its crash budget when only the public
+            # endpoint flaps; require the current renderer's failure signal.
+            properties = self._service_properties("hexclave-tv-box-kiosk.service")
+            if properties["ActiveState"] == "active" and properties["Result"] != "start-limit-hit":
+                self._restart_kiosk()
+                LOGGER.info("frontend-recovered")
+        # Keep failed restarts retryable instead of consuming the recovery
+        # edge before the renderer has actually been started successfully.
         self.frontend_reachable = reachable
         self.next_frontend_probe_at = now + FRONTEND_RECOVERY_PROBE_SECONDS
-        if recovered:
-            # Cog can remain on its engine error page when the application
-            # origin was unavailable during a browser restart. The in-page
-            # runtime handles API outages once loaded; this restart is only
-            # for recovery of the public application document itself.
-            self._restart_kiosk()
-            LOGGER.info("frontend-recovered")
 
-    def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
+    def handle_request(self, request: dict[str, Any], *, privileged: bool = False) -> dict[str, Any]:
         command = request.get("command")
         if not isinstance(command, str):
             raise ValueError("TV Box agent command is required.")
@@ -517,6 +620,42 @@ class TvBoxNetworkAgent:
                     "setupSsid": self.controller.setup_ssid,
                     "setupPassword": self.controller.setup_password,
                 }
+            if self.maintenance_active:
+                raise ValueError("TV Box maintenance is already in progress.")
+            if command in {"restart-kiosk", "reset-pairing", "reset-network", "prepare-factory-reset"}:
+                if not privileged:
+                    raise PermissionError("TV Box support commands require a root peer.")
+                if command in {"reset-pairing", "prepare-factory-reset"} and request.get("confirmation") != ADMIN_CONFIRMATION:
+                    raise ValueError("TV Box reset requires dashboard admin-unpair confirmation.")
+            if command == "restart-kiosk":
+                # Only an explicit root support operation resets a consumed
+                # systemd failure budget; periodic reconciliation never does.
+                if self.state.mode is NetworkMode.SETUP:
+                    self._service("reset-failed", "hexclave-tv-box-setup-display.service")
+                    self._service("reset-failed", "hexclave-tv-box-setup.service")
+                    self._reconcile_services()
+                else:
+                    self._service("reset-failed", "hexclave-tv-box-kiosk.service")
+                    self._restart_kiosk(reset_healthy_budget=False)
+                return {"restarted": True}
+            if command == "reset-pairing":
+                self._service("stop", "hexclave-tv-box-kiosk.service")
+                clear_exact_state_directory(self.controller.state_root, "browser")
+                self.service_runner(["chown", "hexclave-tv:hexclave-tv", str(self.controller.state_root / "browser")], 10)
+                # The reset and subsequent tty-owner reconciliation are one
+                # locked operation: no probe/policy tick can reopen the store
+                # while its contents are being removed.
+                self._reconcile_services()
+                return {"reset": True}
+            if command == "prepare-factory-reset":
+                self.controller.clear_saved_connections()
+                self.controller.stop_setup()
+                for service in (
+                    "hexclave-tv-box-kiosk.service", "hexclave-tv-box-setup-display.service", "hexclave-tv-box-setup.service",
+                ):
+                    self._service("stop", service)
+                self.maintenance_active = True
+                return {"prepared": True}
             if command == "scan":
                 if self.state.mode is not NetworkMode.SETUP:
                     raise ValueError("Wi-Fi scanning is available only during setup.")
@@ -565,7 +704,9 @@ class AgentRequestHandler(socketserver.StreamRequestHandler):
                 request = json.loads(raw)
                 if not isinstance(request, dict):
                     raise ValueError("TV Box agent request must be an object.")
-                response = {"ok": True, "result": self.server.agent.handle_request(request)}
+                credentials = self.request.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+                _pid, user_id, _group_id = struct.unpack("3i", credentials)
+                response = {"ok": True, "result": self.server.agent.handle_request(request, privileged=user_id == 0)}
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, OSError, subprocess.SubprocessError) as error:
             LOGGER.warning("agent-request-failed=%s", type(error).__name__)
             response = {"ok": False, "error": "request-failed"}

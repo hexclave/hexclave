@@ -2,6 +2,7 @@
 // Kept outside `src` because the framework-free browser runtime is a public ES module, not TypeScript application source.
 import { describe, expect, it, vi } from "vitest";
 import { createTvFixtureSnapshot, getTvProfileFixture } from "./src/lib/tv-mode/fixtures.ts";
+import { TV_FIXTURE_VARIANTS } from "./src/lib/tv-mode/types.ts";
 import { createCelebrationLayer } from "./public/tv-box/effects.mjs";
 import {
   assertPairingChallenge,
@@ -125,6 +126,42 @@ function createSnapshot() {
 }
 
 describe("TV Box runtime contract", () => {
+  it.each(TV_FIXTURE_VARIANTS.filter((variant) => variant !== "loading"))("accepts the shared %s snapshot fixture", (variant) => {
+    const profile = getTvProfileFixture("company-pulse");
+    if (profile == null) throw new Error("Missing company-pulse test fixture.");
+    const snapshot = createTvFixtureSnapshot("tv-box-contract-test", profile, variant);
+    expect(assertTvSnapshot(snapshot)).toBe(snapshot);
+  });
+
+  it.each([
+    ["generatedAt", (snapshot) => { snapshot.generatedAt = "invalid"; }],
+    ["staleAfter", (snapshot) => { snapshot.staleAfter = "invalid"; }],
+    ["connectionStatus", (snapshot) => { snapshot.connectionStatus = "unexpected"; }],
+    ["default duration", (snapshot) => { snapshot.profile.defaultDurationSeconds = 0; }],
+    ["fractional duration", (snapshot) => { snapshot.profile.defaultDurationSeconds = 1.5; }],
+    ["duration collection", (snapshot) => { snapshot.profile.screenDurations = {}; }],
+    ["screen duration", (snapshot) => { snapshot.profile.screenDurations[0].durationSeconds = -1; }],
+    ["duration screen identity", (snapshot) => { snapshot.profile.screenDurations[0].screenId = "email-health"; }],
+    ["duplicate playlist entry", (snapshot) => { snapshot.profile.playlist[1] = "live-pulse"; }],
+    ["insight message", (snapshot) => { snapshot.screens[0].insight = { message: 5 }; }],
+    ["insight evidence", (snapshot) => { snapshot.screens[0].insight = { message: "Activity changed", evidence: null }; }],
+    ["fatal error", (snapshot) => { snapshot.fatalErrorMessage = {}; }],
+    ["terminal source data", (snapshot) => { snapshot.screens[0].sourceStatus = "empty"; }],
+  ])("rejects invalid %s before replacing the last safe snapshot", (_field, mutate) => {
+    const snapshot = createSnapshot();
+    mutate(snapshot);
+    expect(() => assertTvSnapshot(snapshot)).toThrow();
+  });
+
+  it("accepts omitted per-screen durations and rejects invalid pairing intervals", () => {
+    const snapshot = createSnapshot();
+    delete snapshot.profile.screenDurations;
+    expect(assertTvSnapshot(snapshot)).toBe(snapshot);
+    expect(() => assertPairingChallenge({
+      challengeId: "challenge-a", deviceSecret: "secret", pairingCode: "1234ABCD", pollingIntervalSeconds: 0,
+    })).toThrow(/pairing challenge is invalid/);
+  });
+
   it("accepts the centralized celebration fixture used by the QA route", () => {
     const profile = getTvProfileFixture("company-pulse");
     if (profile == null) throw new Error("Missing company-pulse test fixture.");

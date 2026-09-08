@@ -24,9 +24,10 @@ import {
   resolveTvBoxRuntimeConfiguration,
   selectPresentationView,
   shouldPollDisplaySnapshot,
-} from "/tv-box/runtime.mjs";
-import { createCelebrationLayer } from "/tv-box/effects.mjs";
-import { createIcon } from "/tv-box/icons.mjs";
+} from "./runtime.mjs";
+import { createCelebrationLayer } from "./effects.mjs";
+import { createIcon } from "./icons.mjs";
+import { withTvRequestDeadline } from "./request.mjs";
 
 const root = document.querySelector("#tv-box-root");
 const stageRoot = document.querySelector("#tv-box-stage");
@@ -67,9 +68,12 @@ const state = {
   pairingTimer: undefined,
   pairingRetryAttempt: 0,
   pairingPollFailureAttempt: 0,
+  pairingGeneration: 0,
+  pairingRequest: null,
   sessionTimer: undefined,
   authenticationState: "restoring",
   sessionRecoveryInFlight: false,
+  sessionRequest: null,
   sessionRetryAttempt: 0,
   activeRequest: null,
   lastLoggedFailure: null,
@@ -78,7 +82,6 @@ const state = {
   controlsTimer: undefined,
   fullscreenAvailable: false,
   isFullscreen: false,
-  renderedViewKey: null,
   renderedHighlightKey: null,
   stopped: false,
 };
@@ -140,13 +143,11 @@ async function request(path, options = {}) {
 }
 
 async function requestWithTimeout(path, options, timeoutMilliseconds) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMilliseconds);
-  try {
-    return await request(path, { ...options, signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-  }
+  return await withTvRequestDeadline(async (signal) => {
+    const response = await request(path, { ...options, signal });
+    const body = response.ok ? await response.json() : null;
+    return { response, body };
+  }, timeoutMilliseconds, options.signal);
 }
 
 function replaceRoot(content) {
@@ -530,8 +531,8 @@ function audienceScreen(screen, highlight) {
     metric("Session Avg · 7d", unavailable
       ? "—"
       : analytics.data.averageSessionSeconds == null ? "No Sessions" : formatDuration(analytics.data.averageSessionSeconds), unavailable
-      ? analyticsDetail
-      : analytics.data.qualifyingSessions === 0 ? "No Sessions" : `${analytics.data.qualifyingSessions.toLocaleString()} ${analytics.data.qualifyingSessions === 1 ? "Session" : "Sessions"}`),
+        ? analyticsDetail
+        : analytics.data.qualifyingSessions === 0 ? "No Sessions" : `${analytics.data.qualifyingSessions.toLocaleString()} ${analytics.data.qualifyingSessions === 1 ? "Session" : "Sessions"}`),
   );
   left.append(metrics, insight(screen, "violet"));
   const right = createElement("div", "tv-chart-stack");
@@ -690,10 +691,13 @@ const SCREEN_RENDERERS = new Map([
 ]);
 
 function presentationStatus(snapshot) {
-  if (runtimeConfiguration.mode === "fixture-preview") return ["online", "Fixture Preview"];
-  const status = getConnectionStatus(snapshot, navigator.onLine, currentTimeMilliseconds());
+  const fixturePreview = runtimeConfiguration.mode === "fixture-preview";
+  const status = fixturePreview
+    ? snapshot.connectionStatus
+    : getConnectionStatus(snapshot, navigator.onLine, currentTimeMilliseconds());
   if (status === "offline") return ["offline", "Offline · showing the last safe snapshot"];
   if (status === "stale") return ["stale", "Data is stale"];
+  if (fixturePreview) return ["online", "Fixture Preview"];
   return ["online", `Updated ${formatTime(snapshot.generatedAt)}`];
 }
 
@@ -767,17 +771,6 @@ function currentView() {
   return state.snapshot == null
     ? null
     : selectPresentationView(state.snapshot, state.screenIndex, currentTimeMilliseconds());
-}
-
-function getViewKey(view) {
-  if (view == null) return "unavailable";
-  if (view.type === "takeover") {
-    return ["takeover", view.takeover.event.id, view.takeover.variant, view.takeover.startedAt, view.takeover.endsAt].join("\0");
-  }
-  if (view.type === "screen") {
-    return `screen\0${state.snapshot?.profile.playlist[view.screenIndex] ?? "missing"}`;
-  }
-  return view.type;
 }
 
 function renderControls() {
@@ -872,8 +865,6 @@ function renderCurrent() {
     return;
   }
   const view = currentView();
-  const nextViewKey = getViewKey(view);
-  state.renderedViewKey = nextViewKey;
   if (view?.type === "fatal-error") {
     renderMessage("error", "TV Mode Is Temporarily Unavailable", view.message);
     renderControls();
@@ -923,8 +914,13 @@ function updateFreshness() {
   );
 }
 
-function scheduleRotation() {
+function clearRotationTimer() {
   if (state.rotationTimer != null) window.clearTimeout(state.rotationTimer);
+  state.rotationTimer = undefined;
+}
+
+function scheduleRotation() {
+  clearRotationTimer();
   const snapshot = state.snapshot;
   if (snapshot == null
     || snapshot.profile.playlist.length <= 1
@@ -933,6 +929,7 @@ function scheduleRotation() {
   const screenId = snapshot.profile.playlist[state.screenIndex] ?? snapshot.profile.playlist[0];
   const duration = getScreenDurationSeconds(snapshot, screenId);
   state.rotationTimer = window.setTimeout(() => {
+    state.rotationTimer = undefined;
     state.screenIndex = getNextScreenIndex(state.screenIndex, snapshot.profile.playlist.length);
     renderCurrent();
     scheduleRotation();
@@ -945,16 +942,17 @@ function synchronizePresentationTimers() {
     state.presentationTimer = undefined;
   }
   const snapshot = state.snapshot;
-  if (snapshot == null) return;
+  if (snapshot == null) {
+    clearRotationTimer();
+    return;
+  }
   const now = currentTimeMilliseconds();
   const takeoverDeadline = snapshot.presentation.takeover == null
     ? null
     : Date.parse(snapshot.presentation.takeover.endsAt);
-  const takeoverActive = takeoverDeadline != null && takeoverDeadline > now;
-  if (takeoverActive && state.rotationTimer != null) {
-    window.clearTimeout(state.rotationTimer);
-    state.rotationTimer = undefined;
-  } else if (!takeoverActive && state.rotationTimer == null) {
+  if (currentView()?.type !== "screen") {
+    clearRotationTimer();
+  } else if (state.rotationTimer == null) {
     scheduleRotation();
   }
   const highlightDeadline = snapshot.presentation.highlight?.expiresAt == null
@@ -974,42 +972,80 @@ function synchronizePresentationTimers() {
   }, nextDeadline - now);
 }
 
-async function refreshAccess() {
-  const response = await requestWithTimeout("/tv-displays/auth/refresh", { method: "POST" }, PAIRING_REQUEST_TIMEOUT_MS);
+async function refreshAccess(signal) {
+  const { response, body } = await requestWithTimeout("/tv-displays/auth/refresh", { method: "POST", signal }, PAIRING_REQUEST_TIMEOUT_MS);
   const disposition = classifyDisplayRefreshResponse(response.status);
   if (disposition === "invalid-credential") return null;
   if (disposition === "temporary-failure") {
     throw new Error(`TV display credential refresh is temporarily unavailable (${response.status}).`);
   }
-  const body = await response.json();
   if (body == null || typeof body !== "object" || typeof body.accessToken !== "string") {
     throw new Error("TV display refresh response is invalid.");
   }
-  state.accessToken = body.accessToken;
+  if (!state.stopped) state.accessToken = body.accessToken;
   return body.accessToken;
 }
 
+function invalidatePairing() {
+  state.pairingGeneration += 1;
+  state.pairingRequest?.controller.abort();
+  state.pairingRequest = null;
+  if (state.pairingTimer != null) window.clearTimeout(state.pairingTimer);
+  state.pairingTimer = undefined;
+}
+
+function isCurrentPairingGeneration(generation) {
+  return !state.stopped && state.authenticationState === "pairing" && state.pairingGeneration === generation;
+}
+
+function beginPairingRequest() {
+  // A reconnect can arrive before the current poll finishes. Challenges are
+  // consumed once, so overlapping status requests can undo a successful pair.
+  if (!isCurrentPairingGeneration(state.pairingGeneration) || state.pairingRequest != null) return null;
+  if (state.pairingTimer != null) window.clearTimeout(state.pairingTimer);
+  state.pairingTimer = undefined;
+  const operation = { generation: state.pairingGeneration, controller: new AbortController() };
+  state.pairingRequest = operation;
+  return operation;
+}
+
+function finishPairingRequest(operation) {
+  if (state.pairingRequest === operation) state.pairingRequest = null;
+}
+
 async function createChallenge() {
-  state.authenticationState = "pairing";
-  state.pairingError = false;
-  state.challenge = null;
-  renderPairing();
-  const response = await requestWithTimeout("/tv-displays/pairing-challenges", { method: "POST" }, PAIRING_REQUEST_TIMEOUT_MS);
-  if (!response.ok) throw new Error("TV display pairing challenge could not be created.");
-  state.challenge = assertPairingChallenge(await response.json());
-  state.pairingError = false;
-  state.pairingRetryAttempt = 0;
-  state.pairingPollFailureAttempt = 0;
-  renderPairing();
-  schedulePairingPoll(0);
+  const operation = beginPairingRequest();
+  if (operation == null) return;
+  try {
+    state.pairingError = false;
+    state.challenge = null;
+    renderPairing();
+    const { response, body } = await requestWithTimeout("/tv-displays/pairing-challenges", {
+      method: "POST", signal: operation.controller.signal,
+    }, PAIRING_REQUEST_TIMEOUT_MS);
+    if (!isCurrentPairingGeneration(operation.generation)) return;
+    if (!response.ok) throw new Error("TV display pairing challenge could not be created.");
+    state.challenge = assertPairingChallenge(body);
+    state.pairingError = false;
+    state.pairingRetryAttempt = 0;
+    state.pairingPollFailureAttempt = 0;
+    renderPairing();
+    schedulePairingPoll(0);
+  } finally {
+    finishPairingRequest(operation);
+  }
 }
 
 function schedulePairingRetry() {
+  if (!isCurrentPairingGeneration(state.pairingGeneration)) return;
   if (state.pairingTimer != null) window.clearTimeout(state.pairingTimer);
   const delay = getDisplaySessionRetryDelay(state.pairingRetryAttempt);
   state.pairingRetryAttempt += 1;
+  const generation = state.pairingGeneration;
   state.pairingTimer = window.setTimeout(() => {
+    state.pairingTimer = undefined;
     createChallenge().catch((cause) => {
+      if (!isCurrentPairingGeneration(generation)) return;
       state.pairingError = true;
       reportFailure("pairing-challenge-failed", cause);
       renderPairing();
@@ -1019,9 +1055,11 @@ function schedulePairingRetry() {
 }
 
 async function createChallengeOrRetry() {
+  const generation = state.pairingGeneration;
   try {
     await createChallenge();
   } catch (cause) {
+    if (!isCurrentPairingGeneration(generation)) return;
     state.pairingError = true;
     reportFailure("pairing-challenge-failed", cause);
     renderPairing();
@@ -1030,9 +1068,13 @@ async function createChallengeOrRetry() {
 }
 
 function schedulePairingPoll(delayMilliseconds) {
+  if (!isCurrentPairingGeneration(state.pairingGeneration)) return;
   if (state.pairingTimer != null) window.clearTimeout(state.pairingTimer);
+  const generation = state.pairingGeneration;
   state.pairingTimer = window.setTimeout(() => {
+    state.pairingTimer = undefined;
     pollPairing().catch((cause) => {
+      if (!isCurrentPairingGeneration(generation)) return;
       state.pairingError = true;
       reportFailure("pairing-status-failed", cause);
       renderPairing();
@@ -1050,17 +1092,26 @@ function schedulePairingPoll(delayMilliseconds) {
 async function pollPairing() {
   const challenge = state.challenge;
   if (challenge == null || state.stopped) return;
-  const response = await requestWithTimeout(
-    `/tv-displays/pairing-challenges/${encodeURIComponent(challenge.challengeId)}/status`,
-    { method: "POST", body: JSON.stringify({ deviceSecret: challenge.deviceSecret }) },
-    PAIRING_REQUEST_TIMEOUT_MS,
-  );
-  if (!response.ok) throw new Error("TV display pairing status could not be loaded.");
-  const result = assertPairingStatus(await response.json());
+  const operation = beginPairingRequest();
+  if (operation == null) return;
+  let result;
+  try {
+    const { response, body } = await requestWithTimeout(
+      `/tv-displays/pairing-challenges/${encodeURIComponent(challenge.challengeId)}/status`,
+      { method: "POST", body: JSON.stringify({ deviceSecret: challenge.deviceSecret }), signal: operation.controller.signal },
+      PAIRING_REQUEST_TIMEOUT_MS,
+    );
+    if (!isCurrentPairingGeneration(operation.generation) || state.challenge !== challenge) return;
+    if (!response.ok) throw new Error("TV display pairing status could not be loaded.");
+    result = assertPairingStatus(body);
+  } finally {
+    finishPairingRequest(operation);
+  }
   clearFailure();
   state.pairingError = false;
   state.pairingPollFailureAttempt = 0;
   if (result.status === "paired") {
+    invalidatePairing();
     state.authenticationState = "paired";
     state.accessToken = result.accessToken;
     state.challenge = null;
@@ -1088,24 +1139,29 @@ async function refreshSnapshot() {
   if (state.accessToken == null || state.activeRequest != null || state.stopped) return;
   const controller = new AbortController();
   state.activeRequest = controller;
-  const timeout = window.setTimeout(() => controller.abort(), TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
   try {
-    let response = await loadSnapshot(state.accessToken, controller.signal);
-    if (response.status === 401) {
-      const refreshed = await refreshAccess();
-      if (refreshed == null) {
-        state.authenticationState = "pairing";
-        state.accessToken = null;
-        state.snapshot = null;
-        state.unavailableReason = "unauthorized";
-        renderCurrent();
-        await createChallengeOrRetry();
-        return;
+    const next = await withTvRequestDeadline(async (signal) => {
+      let response = await loadSnapshot(state.accessToken, signal);
+      if (response.status === 401) {
+        const refreshed = await refreshAccess(signal);
+        if (refreshed == null) return null;
+        response = await loadSnapshot(refreshed, signal);
       }
-      response = await loadSnapshot(refreshed, controller.signal);
+      if (!response.ok) throw new Error(`TV display snapshot failed with ${response.status}.`);
+      return assertTvSnapshot(await response.json());
+    }, TV_SNAPSHOT_REQUEST_TIMEOUT_MS, controller.signal);
+    if (state.stopped) return;
+    if (next == null) {
+      invalidatePairing();
+      state.authenticationState = "pairing";
+      state.accessToken = null;
+      state.snapshot = null;
+      state.unavailableReason = "unauthorized";
+      synchronizePresentationTimers();
+      renderCurrent();
+      await createChallengeOrRetry();
+      return;
     }
-    if (!response.ok) throw new Error(`TV display snapshot failed with ${response.status}.`);
-    const next = assertTvSnapshot(await response.json());
     const nextProfileKey = `${next.profile.id}\0${next.profile.playlist.join("\0")}`;
     const profileChanged = state.profileKey !== null && state.profileKey !== nextProfileKey;
     state.profileKey = nextProfileKey;
@@ -1123,6 +1179,7 @@ async function refreshSnapshot() {
     }
     synchronizePresentationTimers();
   } catch (cause) {
+    if (state.stopped) return;
     if (controller.signal.aborted) {
       reportFailure("snapshot-timeout", new Error("TV snapshot request timed out."));
     } else {
@@ -1135,7 +1192,6 @@ async function refreshSnapshot() {
       updateFreshness();
     }
   } finally {
-    window.clearTimeout(timeout);
     if (state.activeRequest === controller) state.activeRequest = null;
   }
 }
@@ -1161,6 +1217,7 @@ function scheduleFreshnessUpdate() {
 }
 
 function handleNetworkChange() {
+  if (state.stopped) return;
   updateFreshness();
   if (!navigator.onLine) return;
   if (state.authenticationState === "restoring") {
@@ -1211,6 +1268,7 @@ function renderSessionUnavailable() {
 }
 
 function scheduleDisplaySessionRetry() {
+  if (state.stopped) return;
   if (state.sessionTimer != null) window.clearTimeout(state.sessionTimer);
   const delay = getDisplaySessionRetryDelay(state.sessionRetryAttempt);
   state.sessionRetryAttempt += 1;
@@ -1227,6 +1285,8 @@ function scheduleDisplaySessionRetry() {
 async function recoverDisplaySession() {
   if (state.stopped || state.sessionRecoveryInFlight || state.authenticationState !== "restoring") return;
   state.sessionRecoveryInFlight = true;
+  const controller = new AbortController();
+  state.sessionRequest = controller;
   if (state.sessionTimer != null) {
     window.clearTimeout(state.sessionTimer);
     state.sessionTimer = undefined;
@@ -1234,19 +1294,23 @@ async function recoverDisplaySession() {
   try {
     let token;
     try {
-      token = await refreshAccess();
+      token = await refreshAccess(controller.signal);
     } catch (cause) {
+      if (state.stopped) return;
       reportFailure("session-refresh-unavailable", cause);
       renderSessionUnavailable();
       scheduleDisplaySessionRetry();
       return;
     }
     if (token == null) {
+      if (state.stopped) return;
+      invalidatePairing();
       state.sessionRetryAttempt = 0;
       state.authenticationState = "pairing";
       await createChallengeOrRetry();
       return;
     }
+    if (state.stopped) return;
     state.sessionRetryAttempt = 0;
     state.authenticationState = "paired";
     renderMessage("loading", "Preparing TV Mode", "Assembling the latest office-safe snapshot…");
@@ -1260,6 +1324,7 @@ async function recoverDisplaySession() {
     }
   } finally {
     state.sessionRecoveryInFlight = false;
+    if (state.sessionRequest === controller) state.sessionRequest = null;
   }
 }
 
@@ -1269,10 +1334,12 @@ async function start() {
     state.profileKey = `${state.snapshot.profile.id}\0${state.snapshot.profile.playlist.join("\0")}`;
     renderCurrent();
     synchronizePresentationTimers();
+    window.dispatchEvent(new Event("hexclave-tv-box-ready"));
     return;
   }
   renderMessage("loading", "Connecting TV Mode", "Restoring this display’s secure connection…");
   scheduleFreshnessUpdate();
+  window.dispatchEvent(new Event("hexclave-tv-box-ready"));
   await recoverDisplaySession();
 }
 
@@ -1285,17 +1352,27 @@ window.addEventListener("keydown", handleKeyDown);
 document.addEventListener("fullscreenchange", handleFullscreenChange);
 state.fullscreenAvailable = typeof document.documentElement.requestFullscreen === "function"
   && typeof document.exitFullscreen === "function";
-window.addEventListener("pagehide", () => {
+function stop() {
   state.stopped = true;
+  invalidatePairing();
   state.activeRequest?.abort();
+  state.sessionRequest?.abort();
+  window.removeEventListener("online", handleNetworkChange);
+  window.removeEventListener("offline", handleNetworkChange);
+  window.removeEventListener("mousemove", showControls);
+  window.removeEventListener("keydown", handleKeyDown);
+  document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  window.removeEventListener("pagehide", stop);
   for (const timer of [state.rotationTimer, state.presentationTimer, state.snapshotTimer, state.freshnessTimer, state.pairingTimer, state.sessionTimer, state.controlsTimer]) {
     if (timer != null) window.clearTimeout(timer);
   }
   backgroundEffects.destroy();
   foregroundEffects.destroy();
-});
+}
+window.addEventListener("pagehide", stop);
 
 start().catch((cause) => {
+  if (state.stopped) return;
   reportFailure("startup-failed", cause);
   if (runtimeConfiguration.mode === "fixture-preview") {
     renderMessage("error", "Fixture Preview Is Unavailable", "The selected synthetic presentation could not be rendered.");

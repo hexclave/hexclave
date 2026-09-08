@@ -53,6 +53,16 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
       <div id="tv-box-controls" class="tv-controls-host"></div>
     </main>
     <script id="tv-box-config" type="application/json">${config}</script>
+    <script>
+      (() => {
+        // A loaded document can still lose an external module to a brief outage.
+        // Only initialization clears this deadline; backend outages use the app's retries.
+        const timeout = window.setTimeout(() => window.location.reload(), 30000);
+        const cancel = () => window.clearTimeout(timeout);
+        window.addEventListener("hexclave-tv-box-ready", cancel, { once: true });
+        window.addEventListener("pagehide", cancel, { once: true });
+      })();
+    </script>
     <script type="module" src="/tv-box/app.mjs"></script>
   </body>
 </html>`;

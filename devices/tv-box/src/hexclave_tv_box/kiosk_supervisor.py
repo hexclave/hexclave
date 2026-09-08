@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import ctypes
 import logging
 import os
 import re
@@ -23,7 +24,10 @@ READINESS_TIMEOUT_SECONDS = 45
 LIVENESS_GRACE_SECONDS = 15
 POLL_SECONDS = 1
 RENDERER_EXIT_WAIT_SECONDS = 0.1
-RENDERER_EXIT_WAIT_ATTEMPTS = 40
+RENDERER_GRACEFUL_STOP_SECONDS = 10
+RENDERER_KILL_WAIT_SECONDS = 5
+DOCUMENT_LOAD_TIMEOUT_SECONDS = 120
+DOCUMENT_RETRY_SECONDS = 240
 MAX_RENDERER_DIAGNOSTIC_LINES = 64
 MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS = 512
 SENSITIVE_RENDERER_VALUE_PATTERN = re.compile(
@@ -37,6 +41,12 @@ URL_QUERY_PATTERN = re.compile(r"(https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?")
 class ProcessInfo:
     parent_pid: int
     name: str
+    state: str = "S"
+    start_ticks: int = 0
+
+    @property
+    def runnable(self) -> bool:
+        return self.state not in {"T", "t", "Z", "X"}
 
 
 @dataclass(frozen=True)
@@ -79,9 +89,38 @@ class _RendererOutputTail:
     def __init__(self) -> None:
         self._lines: collections.deque[str] = collections.deque(maxlen=MAX_RENDERER_DIAGNOSTIC_LINES)
         self._lock = threading.Lock()
+        self.document_state = "loading"
+        self.document_generation = 0
+        self.document_failed = False
+
+    def document_status(self) -> tuple[str, int]:
+        with self._lock:
+            return self.document_state, self.document_generation
 
     def consume(self, stream: BinaryIO) -> None:
         for raw_line in iter(stream.readline, b""):
+            # Cog's native load callbacks are independent of page console
+            # forwarding. Never forward these URL-bearing progress messages.
+            native = raw_line.decode("utf-8", errors="replace").strip()
+            if "Cog-Core" in native:
+                progress = True
+                with self._lock:
+                    if re.search(r"> Load started\.$", native):
+                        self.document_generation += 1
+                        if not self.document_failed:
+                            self.document_state = "loading"
+                    elif re.search(r"> (?:Page load error|TLS Error):", native):
+                        self.document_state = "failed"
+                        self.document_failed = True
+                    elif re.search(r"> Loaded successfully\.$", native):
+                        # WebKit also emits LOAD_FINISHED after a failed load;
+                        # that event must not make its engine error page ready.
+                        if not self.document_failed:
+                            self.document_state = "loaded"
+                    elif re.search(r"> (?:Loading\.\.\.|Redirected\.)$", native) is None:
+                        progress = False
+                if progress:
+                    continue
             line = _sanitize_renderer_output(raw_line)
             if line is not None:
                 with self._lock:
@@ -93,28 +132,26 @@ class _RendererOutputTail:
 
 
 def read_process_table(proc_root: Path = Path("/proc")) -> dict[int, ProcessInfo]:
-    """Read only process names and parent IDs; never inspect process arguments or environments."""
+    """Read process identity/state, never arguments or environments."""
     result: dict[int, ProcessInfo] = {}
-    try:
-        entries = list(proc_root.iterdir())
-    except OSError:
-        return result
+    # An unreadable /proc is not evidence that the owned tree exited. Fail
+    # visibly instead of declaring cleanup successful with unknown ownership.
+    entries = list(proc_root.iterdir())
     for entry in entries:
         if not entry.name.isdecimal():
             continue
         try:
-            status_lines = (entry / "status").read_text(encoding="utf-8").splitlines()
-            values = {
-                key: value.strip()
-                for line in status_lines
-                if ":" in line
-                for key, value in (line.split(":", maxsplit=1),)
-            }
+            stat_value = (entry / "stat").read_text(encoding="utf-8")
+            # comm (field 2) may contain spaces or parentheses. Fields after
+            # its final ')' start with state (field 3); starttime is field 22.
+            stat_fields = stat_value[stat_value.rindex(")") + 2:].split()
             result[int(entry.name)] = ProcessInfo(
-                parent_pid=int(values["PPid"]),
-                name=values["Name"],
+                parent_pid=int(stat_fields[1]),
+                name=stat_value[stat_value.index("(") + 1:stat_value.rindex(")")],
+                state=stat_fields[0],
+                start_ticks=int(stat_fields[19]),
             )
-        except (KeyError, OSError, UnicodeError, ValueError):
+        except (IndexError, KeyError, OSError, UnicodeError, ValueError):
             # Processes may exit between listing /proc and reading status.
             continue
     return result
@@ -138,9 +175,9 @@ def descendant_processes(process_table: Mapping[int, ProcessInfo], root_pid: int
 def renderer_health(process_table: Mapping[int, ProcessInfo], cage_pid: int) -> RendererHealth:
     cage = process_table.get(cage_pid)
     descendants = descendant_processes(process_table, cage_pid)
-    names = {info.name for info in descendants.values()}
+    names = {info.name for info in descendants.values() if info.runnable}
     return RendererHealth(
-        cage=cage is not None and cage.name == "cage",
+        cage=cage is not None and cage.name == "cage" and cage.runnable,
         cog="cog" in names,
         web_process="WPEWebProcess" in names,
     )
@@ -151,80 +188,102 @@ def _health_value(state: str, health: RendererHealth | None = None) -> str:
     return f"{state}{suffix}\n"
 
 
-def _terminate_exact_tree(
-    process: subprocess.Popen[bytes],
+def enable_child_subreaper() -> None:
+    """Keep renderer orphans attributable even when PAM uses a session scope."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _signal_exact_process(
+    pid: int,
+    identity: ProcessInfo,
+    signum: int,
     process_reader: Callable[[], dict[int, ProcessInfo]],
-) -> dict[int, str]:
-    if process.poll() is not None:
-        return {}
-    processes = process_reader()
-    descendants = descendant_processes(processes, process.pid)
-    tracked_descendants = {pid: info.name for pid, info in descendants.items()}
-    cog_processes = sorted(
-        pid
-        for pid, info in descendants.items()
-        if info.name == "cog"
-    )
-    if len(cog_processes) == 1:
-        # Cog owns the WebKit processes. Signal it directly for supervisor-
-        # initiated recovery; during a systemd stop, KillMode=control-group has
-        # already delivered the same graceful signal to the complete renderer
-        # tree, including the process that persists cookies.
-        try:
-            os.kill(cog_processes[0], signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        return tracked_descendants
-    # A missing or ambiguous Cog child cannot complete the normal lifecycle.
-    # Stop only this exact Cage process; systemd's cgroup timeout remains the
-    # bounded fallback for descendants that do not exit with it.
+) -> None:
     try:
-        process.terminate()
+        descriptor = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return
+    try:
+        current = process_reader().get(pid)
+        if current is None or current.start_ticks != identity.start_ticks:
+            return
+        # The pidfd pins this process across the check/send race. Never signal
+        # a recycled PID, a global process name, or the user's entire session.
+        signal.pidfd_send_signal(descriptor, signum)
     except ProcessLookupError:
         pass
-    return tracked_descendants
+    finally:
+        os.close(descriptor)
 
 
-def _wait_for_renderer_shutdown(
-    tracked_processes: Mapping[int, str],
-    process_reader: Callable[[], dict[int, ProcessInfo]],
-    sleeper: Callable[[float], None],
-    attempts: int = RENDERER_EXIT_WAIT_ATTEMPTS,
-) -> bool:
-    """Wait for the exact pre-signal renderer processes without following reparented children."""
-    if attempts < 0:
-        raise ValueError("Renderer shutdown attempts cannot be negative.")
-    for attempt in range(attempts + 1):
-        current = process_reader()
-        remaining = {
-            pid
-            for pid, name in tracked_processes.items()
-            if (process_info := current.get(pid)) is not None and process_info.name == name
+class RendererProcessTree:
+    def __init__(self, owner_pid: int, process_reader: Callable[[], dict[int, ProcessInfo]]) -> None:
+        self.owner_pid = owner_pid
+        self.process_reader = process_reader
+        # systemd's pre-existing PAM helper must outlive renderer cleanup. The
+        # supervisor creates no other children besides its one Cage launch.
+        self.preexisting = descendant_processes(process_reader(), owner_pid)
+
+    def processes(self) -> dict[int, ProcessInfo]:
+        current = self.process_reader()
+        excluded: set[int] = set()
+        for pid, original in self.preexisting.items():
+            existing = current.get(pid)
+            if existing is not None and existing.start_ticks == original.start_ticks:
+                excluded.add(pid)
+                excluded.update(descendant_processes(current, pid))
+        return {
+            pid: info
+            for pid, info in descendant_processes(current, self.owner_pid).items()
+            if pid not in excluded
         }
-        if len(remaining) == 0:
-            return True
-        if attempt < attempts:
+
+    def stop(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+        graceful_seconds: float = RENDERER_GRACEFUL_STOP_SECONDS,
+        kill_seconds: float = RENDERER_KILL_WAIT_SECONDS,
+    ) -> None:
+        started = monotonic()
+        signalled: set[tuple[int, int, int]] = set()
+        forced = False
+        while True:
+            process.poll()  # Reap Cage through Popen, preserving its exit code.
+            remaining = self.processes()
+            for pid, info in remaining.items():
+                if info.parent_pid == self.owner_pid and pid != process.pid:
+                    try:
+                        os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        pass
+            remaining = self.processes()
+            if not remaining:
+                LOGGER.info("kiosk-renderer-stopped forced=%s", "yes" if forced else "no")
+                return
+            elapsed = monotonic() - started
+            if elapsed >= graceful_seconds + kill_seconds:
+                raise RuntimeError("TV Box renderer descendants survived their exact shutdown deadline.")
+            signum = signal.SIGTERM if elapsed < graceful_seconds else signal.SIGKILL
+            if signum == signal.SIGKILL and not forced:
+                LOGGER.warning("kiosk-renderer-force-stop")
+                forced = True
+            for pid, info in remaining.items():
+                key = (pid, info.start_ticks, signum)
+                if key not in signalled:
+                    # Signal the network process as well as Cog so the existing
+                    # persistent-cookie flush behavior is preserved. Re-scan
+                    # adopted children until the entire owned tree is reaped.
+                    _signal_exact_process(pid, info, signum, self.process_reader)
+                    signalled.add(key)
             sleeper(RENDERER_EXIT_WAIT_SECONDS)
-    return False
-
-
-def _stop_renderer(
-    process: subprocess.Popen[bytes],
-    process_reader: Callable[[], dict[int, ProcessInfo]],
-    sleeper: Callable[[float], None],
-) -> None:
-    tracked_processes = _terminate_exact_tree(process, process_reader)
-    cage_exited = False
-    try:
-        process.wait(timeout=5)
-        cage_exited = True
-    except subprocess.TimeoutExpired:
-        pass
-    descendants_exited = _wait_for_renderer_shutdown(tracked_processes, process_reader, sleeper)
-    if not cage_exited or not descendants_exited:
-        # systemd retains a bounded SIGKILL fallback for exactly this unit's
-        # control group after the graceful stop deadline.
-        LOGGER.warning("kiosk-renderer-stop-timeout")
 
 
 def supervise(
@@ -237,13 +296,17 @@ def supervise(
     process_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     readiness_timeout: int = READINESS_TIMEOUT_SECONDS,
     liveness_grace: int = LIVENESS_GRACE_SECONDS,
+    require_document_load: bool = False,
+    document_load_timeout: int = DOCUMENT_LOAD_TIMEOUT_SECONDS,
+    document_retry_seconds: int = DOCUMENT_RETRY_SECONDS,
 ) -> int:
-    if readiness_timeout <= 0 or liveness_grace <= 0:
+    if min(readiness_timeout, liveness_grace, document_load_timeout, document_retry_seconds) <= 0:
         raise ValueError("TV Box kiosk supervision intervals must be positive.")
 
     # Page console forwarding is disabled in the Cog command below. Capture
     # only compositor/browser output so a failed appliance can report the
     # actual platform error without allowing an unbounded local log file.
+    tree = RendererProcessTree(os.getpid(), process_reader)
     process = process_factory(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     output_tail = _RendererOutputTail()
     output_thread: threading.Thread | None = None
@@ -257,6 +320,12 @@ def supervise(
         output_thread.start()
     stopping = False
     last_health_value: str | None = None
+    stop_started = False
+
+    def stop_renderer() -> None:
+        nonlocal stop_started
+        stop_started = True
+        tree.stop(process)
 
     def report_renderer_failure() -> None:
         if output_thread is not None:
@@ -286,13 +355,16 @@ def supervise(
         started_at = monotonic()
         missing_since: float | None = None
         was_ready = False
+        document_generation = 0
+        document_started_at = started_at
+        document_retry_at: float | None = None
         publish_health("starting")
         LOGGER.info("kiosk-supervisor-started")
 
         while True:
             if stopping:
                 publish_health("stopping")
-                _stop_renderer(process, process_reader, sleeper)
+                stop_renderer()
                 return 0
 
             return_code = process.poll()
@@ -309,13 +381,14 @@ def supervise(
                     LOGGER.info("kiosk-renderer-ready")
                 was_ready = True
                 missing_since = None
-                publish_health("ready", health)
+                if not require_document_load:
+                    publish_health("ready", health)
             elif not was_ready:
                 publish_health("starting", health)
                 if now - started_at >= readiness_timeout:
                     LOGGER.error("kiosk-renderer-readiness-timeout %s", health.summary())
                     publish_health("failed-readiness", health)
-                    _stop_renderer(process, process_reader, sleeper)
+                    stop_renderer()
                     report_renderer_failure()
                     return 1
             else:
@@ -326,13 +399,36 @@ def supervise(
                 if now - missing_since >= liveness_grace:
                     LOGGER.error("kiosk-renderer-liveness-timeout %s", health.summary())
                     publish_health("failed-liveness", health)
-                    _stop_renderer(process, process_reader, sleeper)
+                    stop_renderer()
                     report_renderer_failure()
+                    return 1
+            if require_document_load and health.ready:
+                document_state, generation = output_tail.document_status()
+                if generation != document_generation:
+                    document_generation = generation
+                    document_started_at = now
+                timed_out = document_state == "loading" and now - document_started_at >= document_load_timeout
+                if document_state == "failed" or timed_out:
+                    if document_retry_at is None:
+                        document_retry_at = now + document_retry_seconds
+                        LOGGER.warning("kiosk-document-recovery-scheduled")
+                    publish_health("document-failed" if document_state == "failed" else "document-timeout", health)
+                elif document_retry_at is None:
+                    publish_health("ready" if document_state == "loaded" else "document-loading", health)
+                if document_retry_at is not None and now >= document_retry_at:
+                    # Origin outages are not a hardware crash loop. This wait
+                    # keeps navigation-only retries below systemd's restart
+                    # budget without changing or erasing browser credentials.
+                    stop_renderer()
                     return 1
             sleeper(POLL_SECONDS)
     finally:
-        signal.signal(signal.SIGTERM, previous_sigterm)
-        signal.signal(signal.SIGINT, previous_sigint)
+        try:
+            if not stop_started:
+                stop_renderer()
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 def main() -> None:
@@ -344,6 +440,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if os.environ.get("WLR_LIBINPUT_NO_DEVICES") != "1":
         raise RuntimeError("TV Box kiosk requires explicit no-input Cage operation.")
+    enable_child_subreaper()
     return_code = supervise(
         [
             "/usr/bin/cage",
@@ -356,6 +453,7 @@ def main() -> None:
             arguments.url,
         ],
         health_path=arguments.health_file,
+        require_document_load=True,
     )
     raise SystemExit(return_code)
 

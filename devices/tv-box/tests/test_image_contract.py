@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_image_preflight import make_raw_image, mount_command_environment
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOTFS = ROOT / "image" / "rootfs"
@@ -62,6 +64,8 @@ class ImageContractTests(unittest.TestCase):
         kiosk = (ROOTFS / "etc/systemd/system/hexclave-tv-box-kiosk.service").read_text(encoding="utf-8")
         self.assertIn("Restart=always", kiosk)
         self.assertIn("StartLimitAction=reboot", kiosk)
+        self.assertIn("StartLimitIntervalSec=15min", kiosk)
+        self.assertIn("StartLimitBurst=5", kiosk)
         self.assertIn("RuntimeDirectory=hexclave-tv-box-wayland hexclave-tv-box-browser-cache", kiosk)
         self.assertIn("Environment=XDG_RUNTIME_DIR=/run/hexclave-tv-box-wayland", kiosk)
         self.assertIn(
@@ -248,7 +252,7 @@ class ImageContractTests(unittest.TestCase):
             rootfs = temporary_root / "rootfs"
             state = temporary_root / "state"
             output = temporary_root / "verification"
-            image.write_bytes(b"pilot-image")
+            make_raw_image(image)
             for path in (
                 "usr/lib/hexclave-tv-box/kiosk-launch",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py",
@@ -274,7 +278,7 @@ class ImageContractTests(unittest.TestCase):
                             "hexclave_tv_box.kiosk_supervisor\n"
                         )
                         if path == "usr/lib/hexclave-tv-box/kiosk-launch"
-                        else '"--platform=wl"\n'
+                        else '"--platform=wl"\nenable_child_subreaper()\nsignal.pidfd_send_signal\nrequire_document_load=True\n'
                         if path == "usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py"
                         else (
                             "Environment=WLR_LIBINPUT_NO_DEVICES=1\n"
@@ -282,6 +286,8 @@ class ImageContractTests(unittest.TestCase):
                             "TimeoutStopSec=20\n"
                             "KillMode=control-group\n"
                             "StartLimitAction=reboot\n"
+                            "StartLimitIntervalSec=15min\n"
+                            "StartLimitBurst=5\n"
                         )
                         if path == "etc/systemd/system/hexclave-tv-box-kiosk.service"
                         else "StartLimitAction=reboot\n"
@@ -308,38 +314,29 @@ class ImageContractTests(unittest.TestCase):
             (state / "network-connections").mkdir()
 
             command = [str(ROOT / "scripts/verify-image.sh"), str(image), str(rootfs), str(state), str(output)]
-            subprocess.run(command, check=True)
+            environment = mount_command_environment(image, rootfs, state, temporary_root)
+
+            def run_verifier() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+            accepted = run_verifier()
+            self.assertEqual(accepted.returncode, 0, accepted.stdout)
             self.assertIn("tv-box.img", (output / "disk-image-sha256.txt").read_text(encoding="utf-8"))
             self.assertTrue((output / "state-sha256.txt").exists())
 
             marker = rootfs / "etc/hexclave-tv-box-test-image"
             marker.write_text("test\n", encoding="utf-8")
-            rejected_production_marker = subprocess.run(
-                command,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
+            rejected_production_marker = run_verifier()
             self.assertNotEqual(rejected_production_marker.returncode, 0)
             self.assertIn("Production image contains", rejected_production_marker.stdout)
             marker.unlink()
 
             (rootfs / "etc/hexclave-tv-box-release").write_text("image-channel=test\n", encoding="utf-8")
-            rejected_missing_test_marker = subprocess.run(
-                command,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
+            rejected_missing_test_marker = run_verifier()
             self.assertNotEqual(rejected_missing_test_marker.returncode, 0)
             self.assertIn("missing its build-time", rejected_missing_test_marker.stdout)
             marker.write_text("test\n", encoding="utf-8")
-            rejected_test_reboot = subprocess.run(
-                command,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
+            rejected_test_reboot = run_verifier()
             self.assertNotEqual(rejected_test_reboot.returncode, 0)
             self.assertIn("test-channel restart-limit action", rejected_test_reboot.stdout)
             for service in (
@@ -356,7 +353,8 @@ class ImageContractTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-            subprocess.run(command, check=True)
+            accepted = run_verifier()
+            self.assertEqual(accepted.returncode, 0, accepted.stdout)
             marker.unlink()
             (rootfs / "etc/hexclave-tv-box-release").write_text("image-channel=production\n", encoding="utf-8")
             for service in (
@@ -376,14 +374,14 @@ class ImageContractTests(unittest.TestCase):
 
             saved_network = state / "network-connections/customer.nmconnection"
             saved_network.write_text("[connection]\n", encoding="utf-8")
-            rejected_network = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            rejected_network = run_verifier()
             self.assertNotEqual(rejected_network.returncode, 0)
             self.assertIn("saved customer network", rejected_network.stdout)
             saved_network.unlink()
 
             (state / "identity").mkdir()
             (state / "identity/device-id").write_text("cloned", encoding="utf-8")
-            rejected = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            rejected = run_verifier()
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("initialized device data", rejected.stdout)
 

@@ -6,8 +6,10 @@ After=hexclave-tv-box-network.service systemd-user-sessions.service dbus.socket 
 Before=graphical.target
 ConditionPathExists=/dev/tty0
 Conflicts=getty@tty1.service hexclave-tv-box-setup-display.service
-StartLimitIntervalSec=60
-StartLimitBurst=10
+# Include slow readiness failures, not only immediate crashes. Five complete
+# 60s URL waits + 45s readiness waits + 15s cleanup + 2s restart delays fit here.
+StartLimitIntervalSec=15min
+StartLimitBurst=5
 StartLimitAction=reboot
 
 [Service]
@@ -42,7 +44,8 @@ RestartSec=2
 TimeoutStopSec=20
 # WPE keeps persistent cookies in its separate network process. Terminate the
 # complete renderer group gracefully so that process can close its SQLite
-# store; the supervisor still observes the exact descendants until they exit.
+# store. PAM can move descendants into a session scope; the child-subreaper
+# supervisor also signals, escalates, and reaps its exact attributable tree.
 KillMode=control-group
 SendSIGKILL=yes
 NoNewPrivileges=yes

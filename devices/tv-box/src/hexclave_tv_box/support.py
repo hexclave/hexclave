@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import json
 import os
 import socket
 import stat
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 from .kiosk_supervisor import read_process_table, renderer_health
+from .policy import ADMIN_CONFIRMATION
 from .state import RUNTIME_ROOT, STATE_ROOT, clear_exact_state_directory
 
-ADMIN_CONFIRMATION = "CONFIRM-ADMIN-UNPAIRED"
 SERVICES = (
     "hexclave-tv-box-kiosk.service",
     "hexclave-tv-box-network.service",
@@ -26,6 +28,10 @@ MAX_DIAGNOSTIC_FILE_BYTES = 2_048
 KIOSK_HEALTH_PATH = STATE_ROOT / "browser" / "kiosk-health"
 KIOSK_LOG_IDENTIFIER = "hexclave-tv-box-kiosk"
 SQLITE_HEADER = b"SQLite format 3\x00"
+SUPPORT_MUTATION_LOCK_PATH = Path("/run/hexclave-tv-box-support.lock")
+MUTATING_COMMANDS = frozenset({
+    "restart-kiosk", "restart-network", "reset-network", "reset-pairing", "factory-reset", "reboot", "shutdown",
+})
 
 
 def run(command: Sequence[str]) -> str:
@@ -82,7 +88,9 @@ def _sqlite_store_state(path: Path) -> str:
 def agent_request(request: dict[str, object], socket_path: Path = RUNTIME_ROOT / "control.sock") -> dict[str, object]:
     payload = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(30)
+        # A support transaction can include bounded renderer shutdown and
+        # NetworkManager operations; it must outlive those component budgets.
+        connection.settimeout(600)
         connection.connect(str(socket_path))
         connection.sendall(payload)
         response = connection.makefile("rb").readline(16_385)
@@ -225,13 +233,10 @@ def previous_service_logs() -> str:
     return _bounded_service_logs("-1")
 
 
-def reset_pairing(state_root: Path, confirmation: str) -> None:
+def reset_pairing(confirmation: str) -> None:
     if confirmation != ADMIN_CONFIRMATION:
         raise ValueError("Pairing reset requires dashboard admin-unpair confirmation.")
-    run(["systemctl", "stop", "hexclave-tv-box-kiosk.service"])
-    clear_exact_state_directory(state_root, "browser")
-    run(["chown", "hexclave-tv:hexclave-tv", str(state_root / "browser")])
-    run(["systemctl", "start", "hexclave-tv-box-kiosk.service"])
+    agent_request({"command": "reset-pairing", "confirmation": confirmation})
 
 
 def factory_reset(state_root: Path, confirmation: str) -> None:
@@ -240,14 +245,8 @@ def factory_reset(state_root: Path, confirmation: str) -> None:
     # NetworkManager owns an in-memory copy of its profiles. Ask the scoped
     # root agent to remove only Hexclave TV Box profiles before stopping it;
     # deleting files underneath a live NetworkManager process is not enough.
-    agent_request({"command": "reset-network"})
-    run([
-        "systemctl", "stop",
-        "hexclave-tv-box-kiosk.service",
-        "hexclave-tv-box-setup-display.service",
-        "hexclave-tv-box-setup.service",
-        "hexclave-tv-box-network.service",
-    ])
+    agent_request({"command": "prepare-factory-reset", "confirmation": confirmation})
+    run(["systemctl", "stop", "hexclave-tv-box-network.service"])
     # Rotate first so journald closes its active file before exact-scope
     # cleanup. The state helper preserves the bind-mount source directory.
     run(["journalctl", "--rotate"])
@@ -257,7 +256,30 @@ def factory_reset(state_root: Path, confirmation: str) -> None:
     run(["systemctl", "reboot"])
 
 
+@contextmanager
+def support_mutation_lock(path: Path = SUPPORT_MUTATION_LOCK_PATH) -> Iterator[None]:
+    # This lock outlives network.service's RuntimeDirectory. Separate support
+    # sessions must not restart that service midway through a factory reset
+    # after its in-process maintenance lock has necessarily disappeared.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise ValueError("TV Box support lock must be a private root-owned regular file.")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def execute(command: str, arguments: list[str], state_root: Path = STATE_ROOT) -> str:
+    if command in MUTATING_COMMANDS:
+        with support_mutation_lock():
+            return _execute(command, arguments, state_root)
+    return _execute(command, arguments, state_root)
+
+
+def _execute(command: str, arguments: list[str], state_root: Path) -> str:
     if command == "diagnostics" and not arguments:
         return diagnostics()
     if command == "recent-logs" and not arguments:
@@ -265,12 +287,8 @@ def execute(command: str, arguments: list[str], state_root: Path = STATE_ROOT) -
     if command == "previous-logs" and not arguments:
         return previous_service_logs()
     if command == "restart-kiosk" and not arguments:
-        # Keep shutdown and startup as independently bounded operations. A
-        # wedged Cog/Cage shutdown may require the unit's SIGKILL fallback but
-        # must not consume the timeout of the subsequent start operation.
-        run(["systemctl", "stop", "hexclave-tv-box-kiosk.service"])
-        run(["systemctl", "start", "hexclave-tv-box-kiosk.service"])
-        return "Kiosk restarted."
+        agent_request({"command": "restart-kiosk"})
+        return "Display reconciled with the current network mode."
     if command == "restart-network" and not arguments:
         run(["systemctl", "restart", "hexclave-tv-box-network.service"])
         return "Network service restarted."
@@ -278,7 +296,7 @@ def execute(command: str, arguments: list[str], state_root: Path = STATE_ROOT) -
         agent_request({"command": "reset-network"})
         return "Saved Hexclave TV Box networks removed; setup mode started."
     if command == "reset-pairing" and len(arguments) == 1:
-        reset_pairing(state_root, arguments[0])
+        reset_pairing(arguments[0])
         return "Local pairing identity reset."
     if command == "factory-reset" and len(arguments) == 1:
         factory_reset(state_root, arguments[0])

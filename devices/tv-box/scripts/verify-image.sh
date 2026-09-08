@@ -12,6 +12,8 @@ output=$4
 test -f "$image"
 test -d "$rootfs"
 test -d "$state"
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+python3 -B "$script_directory/image_preflight.py" mounts "$image" "$rootfs" "$state"
 mkdir -p "$output"
 
 required='usr/lib/hexclave-tv-box/kiosk-launch usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py usr/lib/python3/dist-packages/hexclave_tv_box/network_agent.py usr/lib/python3/dist-packages/hexclave_tv_box/setup_display.py etc/systemd/system/hexclave-tv-box-kiosk.service etc/systemd/system/hexclave-tv-box-network.service etc/systemd/system/hexclave-tv-box-setup-display.service etc/systemd/system/hexclave-tv-box-setup.service etc/pam.d/hexclave-tv-box-kiosk etc/ssh/hexclave-support-ca.pub etc/hexclave-tv-box-release'
@@ -31,9 +33,21 @@ grep -qxF 'TimeoutStopSec=20' "$rootfs/etc/systemd/system/hexclave-tv-box-kiosk.
   exit 1
 }
 grep -qxF 'KillMode=control-group' "$rootfs/etc/systemd/system/hexclave-tv-box-kiosk.service" || {
-  printf '%s\n' 'Image kiosk does not gracefully stop the complete WebKit process group.' >&2
+  printf '%s\n' 'Image kiosk does not retain its service-group shutdown fallback.' >&2
   exit 1
 }
+for directive in 'StartLimitIntervalSec=15min' 'StartLimitBurst=5'; do
+  grep -qxF "$directive" "$rootfs/etc/systemd/system/hexclave-tv-box-kiosk.service" || {
+    printf '%s\n' 'Image kiosk restart budget does not cover slow readiness failures.' >&2
+    exit 1
+  }
+done
+for mechanism in 'enable_child_subreaper()' 'signal.pidfd_send_signal' 'require_document_load=True'; do
+  grep -qF "$mechanism" "$rootfs/usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py" || {
+    printf '%s\n' 'Image kiosk lacks exact renderer cleanup or native document-load recovery.' >&2
+    exit 1
+  }
+done
 grep -qF 'hexclave_tv_box.kiosk_supervisor' "$rootfs/usr/lib/hexclave-tv-box/kiosk-launch" || {
   printf '%s\n' 'Image kiosk does not launch the renderer supervisor.' >&2
   exit 1

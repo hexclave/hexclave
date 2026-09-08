@@ -30,6 +30,7 @@ const TV_EVENT_PRESENTATION_CLASSES = new Set(["celebration", "incident", "criti
 const TV_EVENT_STATUSES = new Set(["active", "resolved"]);
 const TV_TAKEOVER_VARIANTS = new Set(["celebration", "incident", "critical-incident", "recovery-confirmation"]);
 const TV_HIGHLIGHT_VARIANTS = new Set(["celebration", "active-incident", "resolved-incident"]);
+const TV_CONNECTION_STATUSES = new Set(["online", "offline", "stale"]);
 
 export function classifyDisplayRefreshResponse(status) {
   if (!Number.isInteger(status) || status < 100 || status > 599) {
@@ -67,6 +68,10 @@ function hasDateString(record, key) {
   return hasString(record, key) && Number.isFinite(Date.parse(record[key]));
 }
 
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
 function isTrendPoint(value) {
   return isRecord(value) && hasString(value, "label") && hasFiniteNumber(value, "value");
 }
@@ -85,13 +90,17 @@ function hasScreenEnvelope(screen, id) {
     && typeof screen.sourceStatus === "string"
     && TV_SOURCE_STATUSES.has(screen.sourceStatus)
     && hasString(screen, "sourceLabel")
-    && (screen.data === null || isRecord(screen.data));
+    && (screen.insight === null || (isRecord(screen.insight) && hasString(screen.insight, "message")))
+    && (["empty", "unavailable", "error"].includes(screen.sourceStatus)
+      ? screen.data === null && screen.insight === null
+      : isRecord(screen.data));
 }
 
 function isLivePulseScreen(screen) {
   if (!hasScreenEnvelope(screen, "live-pulse")) return false;
   if (screen.data === null) return ["empty", "unavailable", "error"].includes(screen.sourceStatus);
-  return hasFiniteNumber(screen.data, "liveUsers")
+  return (screen.insight === null || (isRecord(screen.insight.evidence) && hasFiniteNumber(screen.insight.evidence, "deltaPercent")))
+    && hasFiniteNumber(screen.data, "liveUsers")
     && hasFiniteNumber(screen.data, "todayActiveUsers")
     && Array.isArray(screen.data.hourlyActivity)
     && screen.data.hourlyActivity.every(isTrendPoint)
@@ -232,7 +241,7 @@ const SCREEN_VALIDATORS = new Map([
 
 export function assertTvSnapshot(value) {
   if (!isRecord(value)) throw new Error("TV snapshot must be an object.");
-  if (!hasString(value, "generatedAt") || !hasString(value, "staleAfter")) {
+  if (!hasDateString(value, "generatedAt") || !hasDateString(value, "staleAfter") || !TV_CONNECTION_STATUSES.has(value.connectionStatus)) {
     throw new Error("TV snapshot freshness metadata is invalid.");
   }
   if (!isRecord(value.project) || !hasString(value.project, "displayName")) {
@@ -241,11 +250,23 @@ export function assertTvSnapshot(value) {
   if (!isRecord(value.profile)
     || !hasString(value.profile, "id")
     || !hasString(value.profile, "displayName")
-    || !hasFiniteNumber(value.profile, "defaultDurationSeconds")
+    || !isPositiveInteger(value.profile.defaultDurationSeconds)
     || !Array.isArray(value.profile.playlist)
     || value.profile.playlist.length === 0
-    || !value.profile.playlist.every((screenId) => TV_SCREEN_IDS.includes(screenId))) {
+    || !value.profile.playlist.every((screenId) => TV_SCREEN_IDS.includes(screenId))
+    || new Set(value.profile.playlist).size !== value.profile.playlist.length) {
     throw new Error("TV snapshot profile is invalid.");
+  }
+  const durations = value.profile.screenDurations;
+  if (durations !== undefined && (!Array.isArray(durations)
+    || durations.length !== value.profile.playlist.length
+    || !durations.every((entry, index) => isRecord(entry)
+      && entry.screenId === value.profile.playlist[index]
+      && isPositiveInteger(entry.durationSeconds)))) {
+    throw new Error("TV snapshot screen durations are invalid.");
+  }
+  if (value.fatalErrorMessage !== null && !hasString(value, "fatalErrorMessage")) {
+    throw new Error("TV snapshot error state is invalid.");
   }
   if (!Array.isArray(value.screens) || value.screens.length !== TV_SCREEN_IDS.length) {
     throw new Error("TV snapshot screen collection is invalid.");
@@ -272,7 +293,7 @@ export function assertPairingChallenge(value) {
     || !hasString(value, "challengeId")
     || !hasString(value, "deviceSecret")
     || !hasString(value, "pairingCode")
-    || !hasFiniteNumber(value, "pollingIntervalSeconds")) {
+    || !isPositiveInteger(value.pollingIntervalSeconds)) {
     throw new Error("TV display pairing challenge is invalid.");
   }
   return value;

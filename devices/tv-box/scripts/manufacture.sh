@@ -7,7 +7,10 @@ if [ "$#" -ne 2 ]; then
 fi
 image=$1
 device=$2
-test -f "$image"
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Validate the artifact before even inspecting the destructive target. In
+# particular, dd cannot decompress the .xz/.zst artifacts produced for download.
+python3 -B "$script_directory/image_preflight.py" raw-image "$image"
 case "$device" in
   /dev/mmcblk[0-9]|/dev/sd[a-z]) ;;
   *) printf 'Refusing unsupported manufacturing target: %s\n' "$device" >&2; exit 1 ;;
@@ -22,6 +25,12 @@ if [ "$device" = "$root_source" ] || lsblk -sno PATH "$root_source" 2>/dev/null 
 fi
 if lsblk -nr -o MOUNTPOINT "$device" | grep -Eq '[^[:space:]]'; then
   printf 'Refusing a manufacturing target with mounted filesystems: %s\n' "$device" >&2
+  exit 1
+fi
+image_bytes=$(stat -c %s "$image")
+device_bytes=$(blockdev --getsize64 "$device")
+if [ "$image_bytes" -gt "$device_bytes" ]; then
+  printf '%s\n' 'Image is larger than the selected manufacturing device.' >&2
   exit 1
 fi
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import sys
 import time
@@ -11,6 +12,8 @@ from pathlib import Path
 
 from .setup_portal import send_agent_request
 from .state import RUNTIME_ROOT
+
+LOGGER = logging.getLogger("hexclave-tv-box-setup-display")
 
 
 def _display_value(status: Mapping[str, object], key: str) -> str:
@@ -53,6 +56,11 @@ def wait_for_setup_status(socket_path: Path, timeout: int) -> Mapping[str, objec
             time.sleep(min(0.25, remaining))
 
 
+def current_setup_screen(socket_path: Path) -> str | None:
+    status = send_agent_request(socket_path, {"command": "status"})
+    return format_setup_screen(status) if status.get("mode") == "setup" else None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Display local Hexclave TV Box Wi-Fi setup credentials.")
     parser.add_argument("--agent-socket", type=Path, default=RUNTIME_ROOT / "control.sock")
@@ -62,7 +70,8 @@ def main() -> None:
         raise ValueError("TV Box setup display timeout must be positive.")
 
     status = wait_for_setup_status(arguments.agent_socket, arguments.ready_timeout)
-    sys.stdout.write(format_setup_screen(status))
+    screen = format_setup_screen(status)
+    sys.stdout.write(screen)
     sys.stdout.flush()
 
     def terminate(_signal_number: int, _frame: object) -> None:
@@ -72,8 +81,24 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
+    unavailable = False
     while True:
-        time.sleep(3600)
+        time.sleep(2)
+        try:
+            next_screen = current_setup_screen(arguments.agent_socket)
+        except (ConnectionError, OSError, RuntimeError, ValueError):
+            if not unavailable:
+                LOGGER.warning("setup-status-unavailable")
+            unavailable = True
+            continue
+        unavailable = False
+        # A failed station join or a recovered radio creates a new temporary
+        # AP session. systemctl start is idempotent, so the running display
+        # must observe changed credentials instead of keeping its first frame.
+        if next_screen is not None and next_screen != screen:
+            sys.stdout.write(next_screen)
+            sys.stdout.flush()
+            screen = next_screen
 
 
 if __name__ == "__main__":

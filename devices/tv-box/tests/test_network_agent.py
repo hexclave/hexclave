@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import io
+import json
+import struct
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from hexclave_tv_box.network_agent import (
+    AgentRequestHandler,
     NetworkManagerController,
     NetworkMode,
     PRODUCTION_URL,
@@ -18,7 +24,7 @@ from hexclave_tv_box.network_agent import (
     split_nmcli_line,
     validate_wifi_request,
 )
-from hexclave_tv_box.policy import NetworkPolicy
+from hexclave_tv_box.policy import ADMIN_CONFIRMATION, NetworkPolicy
 
 
 class FakeController:
@@ -28,6 +34,9 @@ class FakeController:
         self.setup_ssid = None
         self.setup_password = None
         self.calls: list[str] = []
+        self.state_root = Path("/unused")
+        self.ap_active = False
+        self.setup_generation = 0
 
     def saved_connections(self) -> list[str]:
         return ["hexclave-tv-network-test"] if self.saved else []
@@ -36,14 +45,19 @@ class FakeController:
         return self.is_connected
 
     def start_setup(self) -> None:
+        if self.setup_ssid is not None and self.ap_active:
+            return
         self.calls.append("start-setup")
+        self.ap_active = True
+        self.setup_generation += 1
         self.setup_ssid = "Hexclave TV Box-TEST"
-        self.setup_password = "temporary-password"
+        self.setup_password = "temporary-password" if self.setup_generation == 1 else f"temporary-password-{self.setup_generation}"
 
     def stop_setup(self) -> None:
         self.calls.append("stop-setup")
         self.setup_ssid = None
         self.setup_password = None
+        self.ap_active = False
 
     def activate_saved_connections(self) -> None:
         self.calls.append("activate-saved")
@@ -61,6 +75,49 @@ class FakeController:
     def clear_saved_connections(self) -> None:
         self.calls.append("clear-saved")
         self.saved = False
+
+
+class FakeServices:
+    def __init__(self) -> None:
+        self.active: set[str] = set()
+        self.calls: list[tuple[str, ...]] = []
+        self.states: dict[str, tuple[str, str, str]] = {}
+
+    def __call__(self, command: list[str], _timeout: int) -> str:
+        if command[0] != "systemctl":
+            self.calls.append(tuple(command))
+            return ""
+        action, name = command[1], command[-1]
+        if action == "show":
+            state, substate, result = self.states.get(name, ("active", "running", "success") if name in self.active else ("inactive", "dead", "success"))
+            return f"ActiveState={state}\nSubState={substate}\nResult={result}\n"
+        self.calls.append(tuple(command))
+        if action == "start":
+            self.active.add(name)
+        elif action == "stop":
+            self.active.discard(name)
+        elif action == "reset-failed":
+            self.states.pop(name, None)
+        return ""
+
+
+class BudgetedServices(FakeServices):
+    def __init__(self) -> None:
+        super().__init__()
+        self.starts_since_reset = 0
+        self.total_starts = 0
+
+    def __call__(self, command: list[str], timeout: int) -> str:
+        if command[-1] == "hexclave-tv-box-kiosk.service":
+            if command[1] == "reset-failed":
+                self.starts_since_reset = 0
+            elif command[1] == "start":
+                if self.starts_since_reset >= 5:
+                    self.states[command[-1]] = ("failed", "failed", "start-limit-hit")
+                    raise subprocess.CalledProcessError(1, command)
+                self.starts_since_reset += 1
+                self.total_starts += 1
+        return super().__call__(command, timeout)
 
 
 class NetworkAgentTests(unittest.TestCase):
@@ -342,7 +399,7 @@ class NetworkAgentTests(unittest.TestCase):
             self.assertIn(("systemctl", "stop", "hexclave-tv-box-kiosk.service"), services)
             self.assertIn(("systemctl", "start", "hexclave-tv-box-kiosk.service"), services)
 
-            agent.handle_request({"command": "reset-network"})
+            agent.handle_request({"command": "reset-network"}, privileged=True)
             self.assertFalse(agent.has_saved_network)
 
     def test_frontend_origin_recovery_restarts_only_the_kiosk(self) -> None:
@@ -350,8 +407,13 @@ class NetworkAgentTests(unittest.TestCase):
             now = [0.0]
             probe_results = iter((False, True))
             probed_urls: list[str] = []
-            services: list[tuple[str, ...]] = []
+            services = FakeServices()
             controller = FakeController(saved=True, connected=True)
+            controller.state_root = Path(directory)
+            (controller.state_root / "browser").mkdir()
+            (controller.state_root / "browser/kiosk-health").write_text(
+                "document-failed cage=ready,cog=ready,web-process=ready\n", encoding="utf-8",
+            )
 
             def probe(url: str, _timeout: int) -> bool:
                 probed_urls.append(url)
@@ -360,7 +422,7 @@ class NetworkAgentTests(unittest.TestCase):
             agent = TvBoxNetworkAgent(
                 controller,
                 runtime_root=Path(directory),
-                service_runner=lambda command, _timeout: services.append(tuple(command)) or "",
+                service_runner=services,
                 frontend_probe=probe,
                 setup_portal_waiter=lambda _url, _timeout: True,
                 monotonic=lambda: now[0],
@@ -371,10 +433,11 @@ class NetworkAgentTests(unittest.TestCase):
                 (Path(directory) / "kiosk-url").read_text(encoding="utf-8"),
                 "https://pilot-box.trycloudflare.com/tv-box\n",
             )
-            services.clear()
+            services.calls.clear()
             now[0] = 60
             agent.tick()
-            self.assertEqual(services, [
+            self.assertEqual(services.calls, [
+                ("systemctl", "reset-failed", "hexclave-tv-box-kiosk.service"),
                 ("systemctl", "stop", "hexclave-tv-box-kiosk.service"),
                 ("systemctl", "start", "hexclave-tv-box-kiosk.service"),
             ])
@@ -383,6 +446,393 @@ class NetworkAgentTests(unittest.TestCase):
                 "https://pilot-box.trycloudflare.com/tv-box",
             ])
             self.assertEqual(controller.calls, ["stop-setup"])
+
+    def test_setup_reconciles_a_lost_ap_and_stopped_services_without_mode_change(self) -> None:
+        controller = FakeController(saved=False, connected=False)
+        services = FakeServices()
+        agent = TvBoxNetworkAgent(controller, service_runner=services, setup_portal_waiter=lambda *_: True)
+        agent.tick()
+        first_password = controller.setup_password
+        controller.ap_active = False
+        services.active.remove("hexclave-tv-box-setup-display.service")
+        services.active.remove("hexclave-tv-box-setup.service")
+        services.calls.clear()
+
+        agent.tick()
+
+        self.assertEqual(agent.state.mode, NetworkMode.SETUP)
+        self.assertTrue(controller.ap_active)
+        self.assertNotEqual(controller.setup_password, first_password)
+        self.assertEqual(services.active, {"hexclave-tv-box-setup-display.service", "hexclave-tv-box-setup.service"})
+        services.calls.clear()
+        agent.tick()
+        self.assertEqual(services.calls, [])
+        self.assertEqual(controller.setup_generation, 2)
+
+    def test_failed_wifi_join_publishes_the_new_setup_session_to_running_display(self) -> None:
+        class RejectingController(FakeController):
+            def connect(self, request: dict[str, object]) -> None:
+                self.stop_setup()
+                raise subprocess.CalledProcessError(4, ["nmcli"])
+
+        controller = RejectingController(saved=False, connected=False)
+        services = FakeServices()
+        agent = TvBoxNetworkAgent(controller, service_runner=services, setup_portal_waiter=lambda *_: True)
+        agent.tick()
+        first_status = agent.handle_request({"command": "status"})
+        with self.assertRaises(subprocess.CalledProcessError):
+            agent.handle_request({"command": "connect"})
+        agent.tick()
+        next_status = agent.handle_request({"command": "status"})
+        self.assertNotEqual(first_status["setupPassword"], next_status["setupPassword"])
+        self.assertEqual(next_status["setupPassword"], controller.setup_password)
+        self.assertEqual(services.active, {"hexclave-tv-box-setup-display.service", "hexclave-tv-box-setup.service"})
+
+    def test_support_commands_require_a_root_peer_and_reset_confirmation(self) -> None:
+        agent = TvBoxNetworkAgent(FakeController(saved=False, connected=False))
+        for command in ("restart-kiosk", "reset-network", "reset-pairing", "prepare-factory-reset"):
+            with self.subTest(command=command), self.assertRaises(PermissionError):
+                agent.handle_request({"command": command, "confirmation": ADMIN_CONFIRMATION})
+        for command in ("reset-pairing", "prepare-factory-reset"):
+            with self.subTest(command=command), self.assertRaisesRegex(ValueError, "admin-unpair"):
+                agent.handle_request({"command": command}, privileged=True)
+
+    def test_pairing_reset_and_support_restart_preserve_setup_and_exact_state_scope(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            controller = FakeController(saved=False, connected=False)
+            controller.state_root = Path(directory)
+            browser = controller.state_root / "browser"
+            browser.mkdir()
+            (browser / "cookies.sqlite").write_text("simulated-cookie", encoding="utf-8")
+            sibling = controller.state_root / "keep"
+            sibling.write_text("keep", encoding="utf-8")
+            services = FakeServices()
+            agent = TvBoxNetworkAgent(controller, service_runner=services, setup_portal_waiter=lambda *_: True)
+            agent.tick()
+            password = controller.setup_password
+            services.calls.clear()
+            agent.handle_request({"command": "reset-pairing", "confirmation": ADMIN_CONFIRMATION}, privileged=True)
+            agent.handle_request({"command": "restart-kiosk"}, privileged=True)
+            self.assertEqual(list(browser.iterdir()), [])
+            self.assertEqual(sibling.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(controller.setup_password, password)
+            self.assertNotIn(("systemctl", "start", "hexclave-tv-box-kiosk.service"), services.calls)
+            self.assertEqual(services.active, {"hexclave-tv-box-setup-display.service", "hexclave-tv-box-setup.service"})
+
+    def test_pairing_reset_blocks_policy_tick_until_store_cleanup_finishes(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            controller = FakeController(saved=True, connected=True)
+            controller.state_root = Path(directory)
+            services = FakeServices()
+            agent = TvBoxNetworkAgent(controller, runtime_root=Path(directory), service_runner=services, frontend_probe=lambda *_: True)
+            agent.tick()
+            cleanup_entered = threading.Event()
+            allow_cleanup = threading.Event()
+            tick_finished = threading.Event()
+            failures: list[BaseException] = []
+
+            def cleanup(_root: Path, _name: str) -> None:
+                cleanup_entered.set()
+                if not allow_cleanup.wait(2):
+                    raise TimeoutError("Test cleanup was not released.")
+
+            def reset() -> None:
+                try:
+                    agent.handle_request({"command": "reset-pairing", "confirmation": ADMIN_CONFIRMATION}, privileged=True)
+                except (OSError, ValueError) as error:
+                    failures.append(error)
+
+            def tick() -> None:
+                agent.tick()
+                tick_finished.set()
+
+            with mock.patch("hexclave_tv_box.network_agent.clear_exact_state_directory", side_effect=cleanup):
+                reset_thread = threading.Thread(target=reset)
+                reset_thread.start()
+                self.assertTrue(cleanup_entered.wait(2))
+                tick_thread = threading.Thread(target=tick)
+                tick_thread.start()
+                try:
+                    self.assertFalse(tick_finished.wait(0.05))
+                    self.assertNotIn("hexclave-tv-box-kiosk.service", services.active)
+                finally:
+                    allow_cleanup.set()
+                    reset_thread.join(2)
+                    tick_thread.join(2)
+            self.assertEqual(failures, [])
+            self.assertTrue(tick_finished.is_set())
+            self.assertIn("hexclave-tv-box-kiosk.service", services.active)
+
+    def test_factory_reset_preparation_quiesces_ticks_and_removes_only_box_connections(self) -> None:
+        controller = FakeController(saved=False, connected=False)
+        services = FakeServices()
+        agent = TvBoxNetworkAgent(controller, service_runner=services, setup_portal_waiter=lambda *_: True)
+        agent.tick()
+        agent.handle_request({"command": "prepare-factory-reset", "confirmation": ADMIN_CONFIRMATION}, privileged=True)
+        self.assertTrue(agent.maintenance_active)
+        self.assertEqual(services.active, set())
+        self.assertIsNone(controller.setup_password)
+        services.calls.clear()
+        agent.tick()
+        self.assertEqual(services.calls, [])
+        with self.assertRaisesRegex(ValueError, "maintenance"):
+            agent.handle_request({"command": "connect"})
+
+    def test_networkmanager_deletion_failure_is_not_reported_as_success(self) -> None:
+        def runner(command: list[str], _timeout: int) -> str:
+            if "delete" in command:
+                raise subprocess.CalledProcessError(1, command)
+            return "hexclave-tv-network-test\n"
+
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            controller = NetworkManagerController(runtime_root=Path(directory), runner=runner)
+            with self.assertRaises(subprocess.CalledProcessError):
+                controller._delete_connection("hexclave-tv-network-test")
+
+    def test_reset_deletes_only_saved_box_profiles_in_one_bounded_nmcli_operation(self) -> None:
+        commands: list[tuple[list[str], int]] = []
+
+        def runner(command: list[str], timeout: int) -> str:
+            commands.append((command, timeout))
+            return "hexclave-tv-network-one:wifi\nhexclave-tv-network-two:802-11-wireless\nkeep:wifi\nhexclave-tv-setup:wifi\n"
+
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            controller = NetworkManagerController(runtime_root=Path(directory), runner=runner)
+            controller.clear_saved_connections()
+        deletions = [(command, timeout) for command, timeout in commands if "delete" in command]
+        self.assertEqual(deletions, [([
+            "nmcli", "--terse", "--escape", "yes", "connection", "delete", "id",
+            "hexclave-tv-network-one", "hexclave-tv-network-two",
+        ], 30)])
+
+    def test_controller_verifies_actual_ap_activity_before_reusing_credentials(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            (root / "identity").mkdir()
+            (root / "identity/hostname").write_text("hexclave-tv-test\n", encoding="utf-8")
+            active = False
+            activations = 0
+            profiles: set[str] = set()
+
+            def runner(command: list[str], _timeout: int) -> str:
+                nonlocal active, activations
+                if "GENERAL.STATE,GENERAL.CONNECTION" in command:
+                    return "100 (connected)\nhexclave-tv-setup\n" if active else "30 (disconnected)\n--\n"
+                if "--get-values" in command and "NAME" in command:
+                    return "\n".join(profiles)
+                if "add" in command:
+                    profiles.add("hexclave-tv-setup")
+                if "delete" in command:
+                    profiles.remove("hexclave-tv-setup")
+                    active = False
+                if "up" in command:
+                    active = True
+                    activations += 1
+                return ""
+
+            controller = NetworkManagerController(state_root=root, runtime_root=root / "run", runner=runner)
+            controller.start_setup()
+            first_password = controller.setup_password
+            controller.start_setup()
+            self.assertEqual(activations, 1)
+            active = False
+            controller.start_setup()
+            self.assertEqual(activations, 2)
+            self.assertNotEqual(first_password, controller.setup_password)
+            self.assertEqual(list((root / "run/secrets").iterdir()), [])
+
+    def test_agent_uses_kernel_peer_identity_instead_of_request_privilege_fields(self) -> None:
+        for user_id in (0, 12345):
+            with self.subTest(user_id=user_id):
+                handler = AgentRequestHandler.__new__(AgentRequestHandler)
+                handler.request = mock.Mock()
+                handler.request.getsockopt.return_value = struct.pack("3i", 123, user_id, 100)
+                handler.rfile = io.BytesIO(b'{"command":"reset-network","privileged":true}\n')
+                handler.wfile = io.BytesIO()
+                handler.server = mock.Mock()
+                handler.server.agent.handle_request.return_value = {"reset": True}
+                handler.handle()
+                handler.server.agent.handle_request.assert_called_once_with(
+                    {"command": "reset-network", "privileged": True}, privileged=user_id == 0,
+                )
+                self.assertEqual(json.loads(handler.wfile.getvalue()), {"ok": True, "result": {"reset": True}})
+
+    def test_failed_factory_reset_preparation_leaves_policy_recovery_enabled(self) -> None:
+        controller = FakeController(saved=False, connected=False)
+        services = FakeServices()
+        agent = TvBoxNetworkAgent(controller, service_runner=services, setup_portal_waiter=lambda *_: True)
+        agent.tick()
+        with mock.patch.object(controller, "clear_saved_connections", side_effect=OSError("simulated failure")):
+            with self.assertRaises(OSError):
+                agent.handle_request({"command": "prepare-factory-reset", "confirmation": ADMIN_CONFIRMATION}, privileged=True)
+        self.assertFalse(agent.maintenance_active)
+        agent.tick()
+        self.assertTrue(controller.ap_active)
+
+    def test_service_reconciliation_preserves_systemd_restart_and_failure_budgets(self) -> None:
+        for state, substate, result in (
+            ("activating", "auto-restart", "exit-code"),
+            ("activating", "start-post", "success"),
+            ("deactivating", "stop-sigterm", "success"),
+            ("failed", "failed", "start-limit-hit"),
+            ("failed", "failed", "exit-code"),
+        ):
+            with self.subTest(state=state, substate=substate):
+                services = FakeServices()
+                services.states["hexclave-tv-box-kiosk.service"] = (state, substate, result)
+                agent = TvBoxNetworkAgent(FakeController(saved=True, connected=True), service_runner=services)
+                agent._reconcile_services()
+                self.assertEqual(services.calls, [])
+
+    def test_origin_recovery_does_not_restart_a_failed_or_restarting_kiosk(self) -> None:
+        for state, substate in (("failed", "failed"), ("activating", "auto-restart")):
+            with self.subTest(state=state):
+                services = FakeServices()
+                services.states["hexclave-tv-box-kiosk.service"] = (state, substate, "start-limit-hit")
+                agent = TvBoxNetworkAgent(FakeController(saved=True, connected=True), service_runner=services, frontend_probe=lambda *_: True)
+                agent.frontend_reachable = False
+                with mock.patch.object(agent, "_document_recovery_requested", return_value=True):
+                    agent._probe_frontend_recovery()
+                self.assertEqual(services.calls, [])
+
+    def test_public_origin_flapping_does_not_restart_a_loaded_healthy_application(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            (root / "browser").mkdir()
+            (root / "browser/kiosk-health").write_text("ready cage=ready,cog=ready,web-process=ready\n", encoding="utf-8")
+            controller = FakeController(saved=True, connected=True)
+            controller.state_root = root
+            services = FakeServices()
+            results = iter([False, True] * 6)
+            now = [0.0]
+            agent = TvBoxNetworkAgent(
+                controller, runtime_root=root, service_runner=services, frontend_probe=lambda *_: next(results),
+                monotonic=lambda: now[0],
+            )
+            agent.tick()
+            services.calls.clear()
+            for minute in range(1, 12):
+                now[0] = minute * 60
+                agent.tick()
+            self.assertEqual(services.calls, [])
+
+    def test_document_recovery_signal_accepts_only_bounded_regular_failure_records(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            (root / "browser").mkdir()
+            path = root / "browser/kiosk-health"
+            controller = FakeController(saved=True, connected=True)
+            controller.state_root = root
+            agent = TvBoxNetworkAgent(controller)
+            self.assertFalse(agent._document_recovery_requested())
+            for state in ("document-failed", "document-timeout"):
+                path.write_text(f"{state} cage=ready,cog=ready,web-process=ready\n", encoding="utf-8")
+                self.assertTrue(agent._document_recovery_requested())
+            for value in (
+                "ready cage=ready,cog=ready,web-process=ready\n",
+                "document-loading cage=ready,cog=ready,web-process=ready\n",
+                "document-failed cage=ready,cog=ready,web-process=missing\n",
+                "document-failed\nanything-else\n",
+                "x" * 257,
+            ):
+                path.write_text(value, encoding="utf-8")
+                self.assertFalse(agent._document_recovery_requested())
+            path.unlink()
+            target = root / "target"
+            target.write_text("document-failed cage=ready,cog=ready,web-process=ready\n", encoding="utf-8")
+            path.symlink_to(target)
+            self.assertFalse(agent._document_recovery_requested())
+            path.unlink()
+            path.mkdir()
+            self.assertFalse(agent._document_recovery_requested())
+
+    def test_healthy_wifi_mode_changes_do_not_consume_the_crash_restart_budget(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            (root / "browser").mkdir()
+            (root / "browser/kiosk-health").write_text("ready cage=ready,cog=ready,web-process=ready\n", encoding="utf-8")
+            controller = FakeController(saved=True, connected=True)
+            controller.state_root = root
+            services = BudgetedServices()
+            now = [0.0]
+            agent = TvBoxNetworkAgent(
+                controller, runtime_root=root, service_runner=services, frontend_probe=lambda *_: True, monotonic=lambda: now[0],
+            )
+            agent.tick()
+            for _ in range(6):
+                now[0] += 10
+                controller.is_connected = False
+                agent.tick()
+                now[0] += 10
+                controller.is_connected = True
+                agent.tick()
+            self.assertEqual(services.total_starts, 13)
+            self.assertEqual(services.starts_since_reset, 1)
+            self.assertEqual(agent.state.mode, NetworkMode.CONNECTED)
+
+    def test_document_only_fast_recovery_does_not_consume_the_crash_restart_budget(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            (root / "browser").mkdir()
+            (root / "browser/kiosk-health").write_text("document-failed cage=ready,cog=ready,web-process=ready\n", encoding="utf-8")
+            controller = FakeController(saved=True, connected=True)
+            controller.state_root = root
+            services = BudgetedServices()
+            now = [0.0]
+            results = iter([False, True] * 7)
+            agent = TvBoxNetworkAgent(
+                controller, runtime_root=root, service_runner=services, frontend_probe=lambda *_: next(results),
+                monotonic=lambda: now[0],
+            )
+            for minute in range(14):
+                now[0] = minute * 60
+                agent.tick()
+            self.assertEqual(services.total_starts, 8)
+            self.assertEqual(services.starts_since_reset, 1)
+
+    def test_process_failure_records_never_reset_the_crash_restart_budget(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            (root / "browser").mkdir()
+            path = root / "browser/kiosk-health"
+            controller = FakeController(saved=True, connected=True)
+            controller.state_root = root
+            for state in ("failed-readiness", "failed-liveness", "stopped", "starting", "degraded"):
+                with self.subTest(state=state):
+                    path.write_text(f"{state} cage=ready,cog=ready,web-process=ready\n", encoding="utf-8")
+                    services = BudgetedServices()
+                    services.active.add("hexclave-tv-box-kiosk.service")
+                    agent = TvBoxNetworkAgent(controller, service_runner=services)
+                    for _ in range(5):
+                        agent._restart_kiosk()
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        agent._restart_kiosk()
+                    self.assertFalse(any(call[1] == "reset-failed" for call in services.calls))
+
+    def test_stale_healthy_record_does_not_clear_inactive_failed_or_transitional_unit_budget(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            (root / "browser").mkdir()
+            (root / "browser/kiosk-health").write_text("ready cage=ready,cog=ready,web-process=ready\n", encoding="utf-8")
+            controller = FakeController(saved=True, connected=True)
+            controller.state_root = root
+            for state in ("inactive", "failed", "activating", "deactivating"):
+                with self.subTest(state=state):
+                    services = FakeServices()
+                    services.states["hexclave-tv-box-kiosk.service"] = (state, "simulated", "exit-code")
+                    agent = TvBoxNetworkAgent(controller, service_runner=services)
+                    agent._restart_kiosk()
+                    self.assertNotIn(("systemctl", "reset-failed", "hexclave-tv-box-kiosk.service"), services.calls)
+
+    def test_explicit_support_restart_can_clear_exhausted_display_budget(self) -> None:
+        services = FakeServices()
+        services.states["hexclave-tv-box-setup-display.service"] = ("failed", "failed", "start-limit-hit")
+        controller = FakeController(saved=False, connected=False)
+        agent = TvBoxNetworkAgent(controller, service_runner=services)
+        agent.handle_request({"command": "restart-kiosk"}, privileged=True)
+        self.assertIn("hexclave-tv-box-setup-display.service", services.active)
+        self.assertNotIn("hexclave-tv-box-kiosk.service", services.active)
+        self.assertTrue(controller.ap_active)
 
     def test_setup_credentials_remain_on_console_when_the_portal_is_slow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
