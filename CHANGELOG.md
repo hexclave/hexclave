@@ -4,6 +4,7 @@
 
 ## 9/11/26
 
+- Trusted domains can now include a custom port, e.g. `*.example.com:4250`.
 - Fixed impersonation links and console snippets not navigating correctly.
 
 ## 8/28/26
