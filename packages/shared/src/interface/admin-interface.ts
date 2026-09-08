@@ -1,6 +1,6 @@
 import * as yup from "yup";
 import type { EnvironmentConfigOverrideOverride } from "../config/schema";
-import type { DeploymentSourceManifest } from "../deployments";
+import type { DeploymentMemorySize, DeploymentSourceManifest } from "../deployments";
 import { KnownErrors } from "../known-errors";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type RestrictedReason } from "../schema-fields";
 import { AccessToken, InternalSession, RefreshToken } from "../sessions";
@@ -93,10 +93,12 @@ export type AdminDeploymentJson = {
   id: string,
   // The user-facing "#47", monotonic per project.
   number: number,
-  // WHICH deploy file this came from: the `id` export of the hexclave.deploy.ts
-  // that ran, or "hexclave.config.ts" for deployments declared there. A project
-  // deployed from several repositories has one source per repository, and this
-  // is what tells their deployments apart in a single list.
+  // WHICH deploy file this came from: the `deploymentGroupId` export of the
+  // hexclave.deploy.ts that ran. (A project deployed before services moved out
+  // of hexclave.config.ts may still show a source named after that file; nothing
+  // writes one any more.) A project deployed from several repositories has one
+  // source per repository, and this is what tells their deployments apart in a
+  // single list.
   deployment_source_id: string,
   status: "queued" | "building" | "deploying" | "deployed" | "failed" | "canceled",
   triggered_by: string,
@@ -138,6 +140,17 @@ export type AdminDeploymentServiceJson = {
   // Scaling bounds; null on unsynced rows.
   min_instances: number | null,
   max_instances: number | null,
+  // The memory the service RUNS with. Never null, unlike the bounds above: a
+  // service that names no size runs its type's default, and resolving that
+  // needs the type-to-default mapping, which is not something a reader of this
+  // shape should have to carry.
+  memory: DeploymentMemorySize,
+  // The CPU that comes with that memory. Derived rather than declared — the two
+  // runtimes accept only certain machine shapes and cpu/memory pairs, so memory
+  // is the only dial — and reported because `shared` is a genuine surprise
+  // otherwise: on the smaller server sizes the vCPU is a burstable fraction of
+  // a core rather than a whole one.
+  cpu: { count: number, shared: boolean },
   root_directory: string | null,
   // Null = built with Railpack auto-detection rather than a Dockerfile.
   dockerfile_path: string | null,

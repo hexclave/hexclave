@@ -1,8 +1,10 @@
-import { assertGlobalDeploymentCapacity, assertMinInstancesAllowedByPlan, createDeployment, definitionFromServiceRow, deploymentToApiShape, encryptDeploymentRedactionSecrets, getServiceVolume, isTerminalDeploymentStatus, refreshDeploymentFromMarshal, resolveEnvVars, startDeployment } from "@/lib/deployments";
+import { assertGlobalDeploymentCapacity, assertServicesAllowedByPlan, createDeployment, definitionFromServiceRow, deploymentToApiShape, encryptDeploymentRedactionSecrets, getServiceVolume, isTerminalDeploymentStatus, refreshDeploymentFromMarshal, resolveEnvVars, startDeployment } from "@/lib/deployments";
 import { getMarshalDeploymentsConfigOrNull } from "@/lib/deployments/marshal-client";
+import { assertDeploymentsEnabled } from "@/lib/deployments/platform-config";
+import { runtimeFromStored } from "@/lib/deployments/runtime";
 import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { DEPLOYMENT_SOURCE_ID_REGEX, MAX_DEPLOYMENT_SOURCE_ID_LENGTH, deploymentSecretDefaultsSchema, deploymentServiceIsBuilt, parseSourceManifest, type DeploymentServiceDefinition } from "@hexclave/shared/dist/deployments";
+import { DEPLOYMENT_SOURCE_ID_REGEX, MAX_DEPLOYMENT_SOURCE_ID_LENGTH, deploymentCiEnvSchema, deploymentMemoryFromMb, deploymentSecretDefaultsSchema, deploymentServiceIsBuilt, parseSourceManifest, type DeploymentServiceDefinition } from "@hexclave/shared/dist/deployments";
 import type { MarshalEnvValue } from "@/lib/deployments/marshal-client";
 import { adaptSchema, serverOrHigherAuthTypeSchema, userSpecifiedIdSchema, yupArray, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
@@ -83,7 +85,7 @@ export const GET = createSmartRouteHandler({
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Deploy a deployment source",
-    description: "Deploys one deployment source from a previously uploaded source tree: every service the deploy file declares is built by ONE builder machine and then rolled out in dependency order. The services' STORED definitions (as last synced via PUT /deployments/services) are authoritative — connections are resolved server-side and secret env vars are filled from the project's stored secret values (Project Settings > Secrets), falling back to any `secret_defaults` sent with this request. Defaults are request-scoped and never stored. A secret with neither fails the deploy with the full list of keys that need a value. Returns as soon as the runtime has accepted the deployment; the build continues remotely, so poll the deployment endpoint for its status.",
+    description: "Deploys one deployment source from a previously uploaded source tree: every service the deploy file declares is built by ONE builder machine and then rolled out in dependency order. The services' STORED definitions (as last synced via PUT /deployments/services) are authoritative — connections are resolved server-side and secret env vars are filled from the project's stored secret values (Project Settings > Secrets), falling back to any `secret_defaults` sent with this request. Defaults are request-scoped and never stored, as are the `ci_env` variables (CI_COMMIT_SHA and friends), which are injected into every deployed service's env. A secret with neither fails the deploy with the full list of keys that need a value. Returns as soon as the runtime has accepted the deployment; the build continues remotely, so poll the deployment endpoint for its status.",
     tags: ["Deploy"],
     hidden: true,
   },
@@ -113,6 +115,12 @@ export const POST = createSmartRouteHandler({
       // service id and then by env var key. Request-scoped: used only to fill
       // secrets that have no stored value, and never written to the database.
       secret_defaults: yupMixed().optional(),
+      // The GitLab-style CI variables the deploy was invoked with (CI_COMMIT_SHA
+      // and friends), injected into every deployed service's env. Request-scoped
+      // like the secret defaults: they describe THIS deploy, so storing them on
+      // the definition would leave a stale commit sha on every service a later
+      // deploy doesn't ship.
+      ci_env: yupMixed().optional(),
       // A listing of what the client packaged (paths and sizes, never contents),
       // recorded with the deployment because the tarball itself is consumed by
       // the build and deleted. Optional and validated leniently by
@@ -137,6 +145,11 @@ export const POST = createSmartRouteHandler({
     if (getMarshalDeploymentsConfigOrNull() == null) {
       throw new StatusError(400, "Deploy is not configured on this Hexclave instance. Configure HEXCLAVE_MARSHAL_API_KEY (and HEXCLAVE_MARSHAL_URL) first.");
     }
+    // The operator's fusebox, checked here for the same reason as the line
+    // above: it must refuse before this request consumes the upload. Unlike the
+    // capacity guard below it does not care what this deploy would provision —
+    // "off" means no new deployment at all.
+    await assertDeploymentsEnabled();
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
 
     const plannedServiceIds = body.levels.flat();
@@ -149,7 +162,7 @@ export const POST = createSmartRouteHandler({
 
     const source = await prisma.deploymentSource.findUnique({
       where: { tenancyId_sourceId: { tenancyId: auth.tenancy.id, sourceId: body.source_id } },
-      select: { id: true, sourceId: true },
+      select: { id: true, sourceId: true, builderMemoryMb: true, runtime: true },
     });
     if (source == null) {
       throw new StatusError(400, `No deployment source ${JSON.stringify(body.source_id)} exists in this project. Sync its service definitions first (PUT /deployments/services).`);
@@ -197,7 +210,16 @@ export const POST = createSmartRouteHandler({
     // Re-check the plan against the STORED definitions. The sync checks too, but
     // only as CLI UX — this is the actual entitlement boundary, since a stored
     // definition can outlive the plan that was allowed to create it.
-    await assertMinInstancesAllowedByPlan(auth.tenancy, Object.fromEntries(definitionsByServiceId));
+    // The builder rides the same re-check as the services: it was authorised at
+    // sync time under whatever plan was active then, and a stored source can
+    // outlive that plan exactly as a stored definition can.
+    await assertServicesAllowedByPlan(
+      auth.tenancy,
+      Object.fromEntries(definitionsByServiceId),
+      source.builderMemoryMb === null ? undefined : { memory: deploymentMemoryFromMb(source.builderMemoryMb) ?? undefined },
+      runtimeFromStored(source.runtime),
+      source.sourceId,
+    );
 
     // Platform capacity, before the upload is consumed and before anything is
     // handed to the runtime. Only services that do not yet hold a Fly app count:
@@ -212,6 +234,7 @@ export const POST = createSmartRouteHandler({
     // or a dangling connection must not spend it. One redaction snapshot covers
     // the whole deploy, because one build log does.
     const secretDefaults = await parseSecretDefaults(body.secret_defaults);
+    const ciEnv = await parseCiEnv(body.ci_env);
     const resolvedEnvByServiceId = new Map<string, Record<string, MarshalEnvValue>>();
     const redactionSecrets = new Set<string>();
     for (const [serviceId, definition] of definitionsByServiceId) {
@@ -221,6 +244,7 @@ export const POST = createSmartRouteHandler({
         serviceId,
         definition,
         secretDefaults: secretDefaults[serviceId] ?? {},
+        ciEnv,
       });
       resolvedEnvByServiceId.set(serviceId, resolved.resolvedEnv);
       for (const secret of resolved.redactionSecrets) redactionSecrets.add(secret);
@@ -247,26 +271,31 @@ export const POST = createSmartRouteHandler({
       if (upload == null || upload.expiresAt < new Date()) {
         throw new StatusError(404, "Upload not found or expired. Create a new upload and try again.");
       }
-      // deleteMany (not delete) so a concurrent duplicate request loses the race
-      // with a clean 4xx instead of an unhandled P2025 500.
-      const consumed = await prisma.deploymentSourceUpload.deleteMany({
-        where: { tenancyId: auth.tenancy.id, id: body.upload_id },
-      });
-      if (consumed.count === 0) {
-        throw new StatusError(409, "This upload was already consumed by another deploy request.");
-      }
     }
 
     // SERIALIZABLE: the deployment number is `max + 1` within the tenancy, so
     // the read and the insert have to be atomic. The unique index makes the
     // residual race a retry rather than two deployments printing as "#47".
     const deployment = await retryTransaction(prisma, async (transaction) => {
-      return await createDeployment(transaction, auth.tenancy, {
+      const created = await createDeployment(transaction, auth.tenancy, {
         sourceRowId: source.id,
+        runtime: runtimeFromStored(source.runtime),
+        definitions: definitionsByServiceId,
         triggeredBy: body.triggered_by ?? auth.type,
         plannedServiceIds,
         sourceManifest: parseSourceManifest(body.source_manifest),
       });
+      // Capacity/runtime checks and consuming the upload must commit together. A rejected
+      // reservation must leave the upload available for a retry, including transaction races.
+      if (upload !== null) {
+        const consumed = await transaction.deploymentSourceUpload.deleteMany({
+          where: { tenancyId: auth.tenancy.id, id: upload.id },
+        });
+        if (consumed.count === 0) {
+          throw new StatusError(409, "This upload was already consumed by another deploy request.");
+        }
+      }
+      return created;
     }, { level: "serializable" });
     await prisma.deployment.update({
       where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: deployment.id } },
@@ -346,4 +375,26 @@ async function parseSecretDefaults(raw: unknown): Promise<Record<string, Record<
     parsed[serviceId] = validated as Record<string, string>;
   }
   return parsed;
+}
+
+/**
+ * `ci_env` is a flat record of CI variable names to values — it describes the
+ * deploy, not any one service, so unlike `secret_defaults` it is not keyed by
+ * service id. Validated here rather than in the request schema for the same
+ * reason as the secret defaults: yupRecord validates its entries in an ASYNC
+ * test, which the request schema's synchronous path cannot run.
+ */
+async function parseCiEnv(raw: unknown): Promise<Record<string, string>> {
+  if (raw === undefined || raw === null) return {};
+  // Checked before yup sees it so a wrong SHAPE reads as one, rather than as a
+  // per-key message about a record whose keys the caller never wrote.
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new StatusError(400, "ci_env must be an object keyed by CI variable name.");
+  }
+  try {
+    return await deploymentCiEnvSchema.validate(raw, { strict: true }) as Record<string, string>;
+  } catch (error) {
+    if (!(error instanceof yup.ValidationError)) throw error;
+    throw new StatusError(400, `ci_env is not a record of CI variable names to string values: ${error.message}`);
+  }
 }

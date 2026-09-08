@@ -1,13 +1,15 @@
 // Core logic for the Deployments app: service definitions (synced from a deploy
 // file's `services` export into DeploymentService rows) + operational state
-// (Prisma) + the write-through to Marshal, the Fly.io-backed container runtime
+// (Prisma) + the write-through to Marshal, the container runtime (Fly by default, Google
+// Cloud when a project opts in)
 // (apps/marshal).
 //
 // The shape of the world, because it is easy to mix up:
 //
 // - A DEPLOYMENT SOURCE is one deploy file: hexclave.deploy.ts, named by its own
-//   `id` export (or hexclave.config.ts, whose services belong to a source named
-//   after the file). It is the unit one `hexclave deploy` ships — one upload,
+//   `deploymentGroupId` export. (Projects deployed before services moved out of
+//   hexclave.config.ts still have a stored source named after that file; nothing
+//   writes one any more.) It is the unit one `hexclave deploy` ships — one upload,
 //   one build — which is what lets several repositories deploy into one project
 //   without touching each other's services.
 // - A "service id" is the user-facing key of the record returned by that file's
@@ -39,29 +41,44 @@
 
 import { getPlanIdForProjectOrNull } from "@/lib/plan-entitlements";
 import { Tenancy } from "@/lib/tenancies";
-import { PrismaClientTransaction, globalPrismaClient } from "@/prisma-client";
+import { PrismaClientTransaction, getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import type { DeploymentStatus, Prisma } from "@/generated/prisma/client";
 import { readProjectSecretValue } from "@/lib/project-secrets";
 import {
+  DEFAULT_BUILDER_MEMORY,
+  DEFAULT_SERVERLESS_MEMORY,
+  FREE_PLAN_MAX_VOLUMES_PER_PROJECT,
+  FREE_PLAN_MAX_VOLUME_SIZE_GB,
   DEPLOYMENT_CONNECTION_VALUE_REGEX,
   DEPLOYMENT_ENV_VAR_KEY_REGEX,
+  DeploymentBuilderDefinition,
   DeploymentEnvVarDefinition,
   DeploymentPortEntry,
   DeploymentPorts,
+  DeploymentMemorySize,
   DeploymentServiceDefinition,
   DeploymentServiceType,
   DeploymentSourceManifest,
   HEXCLAVE_OUTPUT_KEYS,
   HEXCLAVE_SERVICE_ID,
+  MAX_PROJECT_ALWAYS_ON_MEMORY_MB,
   SERVICE_OUTPUT_KEYS,
+  defaultDeploymentMemoryForType,
+  deploymentCpuForMemory,
+  deploymentMemoryFromMb,
+  deploymentMemoryToMb,
   deploymentPortEntries,
   deploymentPortEntry,
+  deploymentServiceIsBuilt,
   formatConnectionValue,
   parseConnectionValue,
   parseSourceManifest,
   soleHttpDeploymentPort,
   standardPortsHolderPort,
+  DEFAULT_DEPLOYMENT_RUNTIME,
+  type DeploymentRuntime,
 } from "@hexclave/shared/dist/deployments";
+import { runtimeFromStored } from "./runtime";
 import { decryptWithKms, encryptWithKms } from "@hexclave/shared/dist/helpers/vault/server-side";
 import { PROJECT_SECRET_KEY_REGEX } from "@hexclave/shared/dist/project-secrets";
 import { generateSecureRandomString } from "@hexclave/shared/dist/utils/crypto";
@@ -193,6 +210,7 @@ export function definitionFromServiceRow(row: {
   image: string | null,
   buildCommand: string | null,
   startCommand: string | null,
+  memoryMb: number | null,
   env: Prisma.JsonValue,
 }, volume: { volumeId: string, path: string | null, sizeGb: number } | null = null): DeploymentServiceDefinition {
   if (row.type !== "server" && row.type !== "serverless") {
@@ -208,6 +226,11 @@ export function definitionFromServiceRow(row: {
     ports: parseStoredPorts(row.ports, row.serviceId),
     min_instances: row.minInstances ?? undefined,
     max_instances: row.maxInstances ?? undefined,
+    // Undefined when the column is null (the type's default) AND when it holds a
+    // megabyte count matching no size we run — a row written by a future version
+    // or edited by hand degrades to "unset", which every reader already handles,
+    // rather than claiming a size the service is not on.
+    memory: row.memoryMb === null ? undefined : deploymentMemoryFromMb(row.memoryMb) ?? undefined,
     root_directory: row.rootDirectory ?? undefined,
     dockerfile_path: row.dockerfilePath ?? undefined,
     image: row.image ?? undefined,
@@ -260,12 +283,93 @@ export async function getServiceVolume(prisma: PrismaClientTransaction, tenancy:
   });
 }
 
+export function assertAlwaysOnMemoryCapacity(services: Iterable<{
+  serviceId: string,
+  definition: DeploymentServiceDefinition,
+  runtime: DeploymentRuntime,
+}>): void {
+  const alwaysOnMemory = [...services].map(({ serviceId, definition, runtime }) => ({
+    serviceId,
+    megabytes: effectiveMemoryMb(definition, runtime) * (runtime === "gcp" && definition.type === "server" ? 1 : effectiveMinInstances(definition)),
+  }));
+  const totalAlwaysOnMemoryMb = alwaysOnMemory.reduce((total, service) => total + service.megabytes, 0);
+  if (totalAlwaysOnMemoryMb > MAX_PROJECT_ALWAYS_ON_MEMORY_MB) {
+    const biggest = [...alwaysOnMemory]
+      .sort((a, b) => b.megabytes - a.megabytes || stringCompare(a.serviceId, b.serviceId))
+      .slice(0, 5)
+      .map((service) => `  - \`${service.serviceId}\`: ${deploymentMemoryFromMb(service.megabytes) ?? `${service.megabytes}MB`}`);
+    throw new StatusError(400, [
+      `This project's always-on services would need ${Math.round(totalAlwaysOnMemoryMb / 1024)}GB of memory at once, but a project may hold at most ${MAX_PROJECT_ALWAYS_ON_MEMORY_MB / 1024}GB.`,
+      "",
+      "The largest of them:",
+      ...biggest,
+      "",
+      "Either give one of them less `memory`, or let it scale to zero with `type: \"serverless\"` and `minInstances: 0` — a service that scales to zero does not count against this.",
+    ].join("\n"));
+  }
+}
+
+/** Read every source inside the caller's serializable transaction, including undeployed
+ * definitions. This reserves capacity at sync time and prevents concurrent sources from
+ * each claiming the same remaining capacity. Selected deploy definitions override their
+ * rows so a concurrent sync cannot hide the size of the spec this request will apply.
+ */
+async function assertProjectDeploymentConstraints(prisma: PrismaClientTransaction, tenancy: Tenancy, overrides: ReadonlyMap<string, DeploymentServiceDefinition> = new Map(), runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME): Promise<void> {
+  // TODO: retain applied/in-flight memory reservations until downsizing or teardown succeeds.
+  // Sync updates every definition, but a --service-id deploy only applies one service;
+  // desired-state accounting alone can release capacity still held by another service.
+  const rows = await prisma.deploymentService.findMany({
+    where: { tenancyId: tenancy.id },
+    include: { source: { select: { runtime: true } } },
+  });
+  const services = new Map(rows.map((row) => [row.serviceId, {
+    serviceId: row.serviceId,
+    definition: definitionFromServiceRow(row),
+    runtime: runtimeFromStored(row.source.runtime),
+  }]));
+  for (const [serviceId, definition] of overrides) services.set(serviceId, { serviceId, definition, runtime });
+  assertAlwaysOnMemoryCapacity(services.values());
+  // Check the resulting project, not just incoming refs: making a target private can
+  // otherwise break a dependent belonging to a different deployment source.
+  for (const { definition } of services.values()) {
+    for (const [key, value] of Object.entries(definition.env)) {
+      if (value.type !== "connection") continue;
+      const normalized = normalizeEnvVarConfig(key, value);
+      if (normalized.type !== "connection") continue;
+      const target = services.get(normalized.serviceId);
+      if (target === undefined) continue;
+      assertServiceConnectionSupported(
+        formatConnectionValue(normalized.serviceId, normalized.outputKey, normalized.port),
+        target.definition.type, target.definition.public === true, target.runtime,
+      );
+    }
+  }
+}
+
+function assertServiceConnectionSupported(reference: string, targetType: string, targetPublic: boolean, runtime: string): void {
+  // Private Cloud Run endpoints need VPC DNS/routing the internal beta does not provision.
+  if (runtime === "gcp" && targetType === "serverless" && !targetPublic) {
+    throw new StatusError(400, `The env var connection ${JSON.stringify(reference)} targets a private GCP serverless service. These connections are not supported in the internal beta. Use a public serverless service or a private server.`);
+  }
+}
+
 /**
- * Always-on instances are a paid capability: they hold a machine up around the
- * clock instead of scaling to zero between requests. That is one rule for both
- * service types — a "server" with `minInstances: 1` (its default!) is as
- * always-on as a "serverless" with `minInstances: 1`, so a Free project must
- * write `minInstances: 0` and let its services suspend or stop when idle.
+ * The Free plan's deployment entitlements. Three rules, one plan read.
+ *
+ * A `server` is paid-only, whatever its `minInstances`. A server is a VM that
+ * runs from the moment it is applied until the service is torn down: GCP offers
+ * no idle-suspend and no wake-on-request (Compute Engine's suspend is a manual
+ * API call, unavailable on the E2 machine types and COS images these VMs use),
+ * so `minInstances: 0` on a server does not scale it to zero. It is accepted
+ * and ignored — `applyRuntimeService` never passes it to Compute Engine.
+ * Gating on `minInstances` alone therefore let a Free project hold a machine up
+ * around the clock by writing the one value that reads like opting out of
+ * exactly that, which is why the type is now gated on its own.
+ *
+ * A `serverless` may still choose its floor, and `minInstances` above 0 is
+ * paid: it keeps a Cloud Run instance warm between requests. Cloud Run really
+ * does scale to zero, so there `minInstances: 0` means what it says and stays
+ * free.
  *
  * Called from BOTH doors, and it has to be:
  *
@@ -278,8 +382,27 @@ export async function getServiceVolume(prisma: PrismaClientTransaction, tenancy:
  *     a team could sync while paid, downgrade, and keep deploying always-on
  *     machines with the old sync id.
  *
- * `persistentVolumes` is deliberately NOT gated: disks are available on every
- * plan for now. That is a pricing decision, not an oversight.
+ * `persistentVolumes` ARE gated, by count and by size: a Free project may hold
+ * FREE_PLAN_MAX_VOLUMES_PER_PROJECT disk(s) of at most
+ * FREE_PLAN_MAX_VOLUME_SIZE_GB GB each.
+ *
+ * This used to read "only a `server` may hold a disk, so the type gate above
+ * already reserves them". That was true when GCP was the only runtime. It is
+ * not true now: `serverIsPaidOnly` is GCP-only, so on Fly — the DEFAULT runtime
+ * — a `server` with an explicit `minInstances: 0` passes every other rule here
+ * and may mount a disk, which left disks ungated on the runtime most projects
+ * actually use.
+ *
+ * Disks need their own rule rather than leaning on a compute gate because they
+ * are the one resource that keeps billing after the project stops using it. A
+ * suspended machine costs nothing; a provisioned volume bills on its size
+ * whether or not anything mounts it, and tearing a service down DETACHES its
+ * disk instead of destroying it (see deleteService in the Fly provider), so an
+ * abandoned volume outlives the service that created it.
+ *
+ * That is also why the count is over the PROJECT's stored volume rows rather
+ * than over the services in front of us: unmounted disks are exactly the ones a
+ * definition-only count would miss, and they cost the same as mounted ones.
  *
  * FUTURE: this gates new DEPLOYS, not machines already running. A team can
  * subscribe, deploy always-on services, cancel, and keep those machines
@@ -287,32 +410,231 @@ export async function getServiceVolume(prisma: PrismaClientTransaction, tenancy:
  * downgrade-time sweep that rescales running services, which belongs with the
  * billing lifecycle rather than here.
  */
-export async function assertMinInstancesAllowedByPlan(tenancy: Tenancy, services: Record<string, DeploymentServiceDefinition>): Promise<void> {
-  const offending = Object.entries(services)
-    .filter(([, definition]) => effectiveMinInstances(definition) > 0)
+export async function assertServicesAllowedByPlan(
+  tenancy: Tenancy,
+  services: Record<string, DeploymentServiceDefinition>,
+  builder?: DeploymentBuilderDefinition | undefined,
+  runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME,
+  // The deploy file these services belong to (`deploymentGroupId`), needed only
+  // by the volume count: a disk this very call is re-declaring already has a row,
+  // and counting the row AND the declaration would refuse every re-deploy of a
+  // project's one legitimate volume. Optional so a caller with no source in hand
+  // still gets every other rule; it then counts conservatively (every stored row
+  // is treated as a disk this call is not re-declaring).
+  sourceId?: string | undefined,
+): Promise<void> {
+  const entries = Object.entries(services);
+
+  // A server is paid-only ON GCP, where it has no suspend — see the doc comment — and there
+  // it is refused on its type alone, so it is deliberately excluded from the always-on list
+  // below: the two problems have different remedies, and a service named under both would be
+  // told to fix it twice. On Fly a server SUSPENDS at `minInstances: 0` (it resumes with its
+  // memory intact), so it is gated exactly like a serverless: always-on is what is paid.
+  const serverIsPaidOnly = runtime === "gcp";
+  const serverServices = entries
+    .filter(([, definition]) => serverIsPaidOnly && definition.type === "server")
     .map(([serviceId]) => serviceId)
     .sort(stringCompare);
-  if (offending.length === 0) return;
+  const alwaysOnServices = entries
+    .filter(([, definition]) => !(serverIsPaidOnly && definition.type === "server") && effectiveMinInstances(definition) > 0)
+    .map(([serviceId]) => serviceId)
+    .sort(stringCompare);
+  // Any size above the type's own default. Stated as "above the default" rather
+  // than as a rung list so the Free entitlement stays one idea — the smallest
+  // thing each type runs on — however the paid ladder later moves.
+  //
+  // A `server` is refused outright above, so a sized server is not named here
+  // too: it would be two errors for one edit, and dropping the `memory` line
+  // would not make the service deployable anyway.
+  const oversizedServices = entries
+    .filter(([, definition]) => !(serverIsPaidOnly && definition.type === "server")
+      && definition.memory !== undefined
+      && definition.memory !== defaultDeploymentMemoryForType(definition.type, runtime))
+    .map(([serviceId]) => serviceId)
+    .sort(stringCompare);
+  // The size itself, not a flag: the message quotes it, and carrying the value
+  // rather than a boolean is what keeps the two in step.
+  const oversizedBuilderMemory = builder?.memory !== undefined && builder.memory !== DEFAULT_BUILDER_MEMORY ? builder.memory : null;
+  // Every disk this call declares. Read through singleVolume so it sees exactly
+  // what the sync will store — a service may hold at most one, so this is one
+  // entry per service that asks for a disk at all.
+  const declaredVolumes = entries
+    .flatMap(([serviceId, definition]) => {
+      const volume = singleVolume(definition);
+      return volume === null ? [] : [{ serviceId, volumeId: volume.volumeId, sizeGb: volume.sizeGb }];
+    })
+    .sort((a, b) => stringCompare(a.serviceId, b.serviceId));
+  const oversizedVolumes = declaredVolumes.filter((volume) => volume.sizeGb > FREE_PLAN_MAX_VOLUME_SIZE_GB);
+  if (
+    serverServices.length === 0
+    && alwaysOnServices.length === 0
+    && oversizedServices.length === 0
+    && oversizedBuilderMemory === null
+    // Declaring a disk at all is enough to need the plan read: how many the
+    // project already holds is a question only the Free branch below can answer.
+    && declaredVolumes.length === 0
+  ) return;
 
   // Null = this project isn't plan-gated at all (self-hosted, or plan limits
   // disabled) or the plan couldn't be read. All of those must fail open —
   // deploying can't depend on the billing store being reachable.
   if (await getPlanIdForProjectOrNull(tenancy.project) !== "free") return;
 
-  // The CLI truncates the surfaced message at 1000 chars, and the remedy comes
-  // last — so cap the list rather than let a config with many long service ids
-  // push the actionable half off the end.
-  const shown = offending.slice(0, 5).map((serviceId) => `\`${serviceId}\``);
-  const list = offending.length > shown.length
-    ? `${shown.join(", ")}, and ${offending.length - shown.length} more`
+  // How many disks this project would hold once this call lands. Stored rows
+  // rather than declarations, plus the declarations that have no row yet: a
+  // volume row outlives the service that mounted it (removing a service detaches
+  // its disk, it does not destroy it), so the rows ARE the disks Fly is billing
+  // for, mounted or not.
+  //
+  // Not transactional — the sync's own transaction opens after this returns, so
+  // two concurrent syncs could each see room for the last disk. Deliberately
+  // accepted, exactly as assertGlobalDeploymentCapacity accepts it: the window
+  // is one extra disk on one project, and closing it would mean holding a
+  // serializable transaction across the whole plan read.
+  const existingVolumes = declaredVolumes.length === 0 ? [] : await (async () => {
+    const prisma = await getPrismaClientForTenancy(tenancy);
+    return await prisma.deploymentVolume.findMany({
+      where: { tenancyId: tenancy.id },
+      select: { volumeId: true, sizeGb: true, serviceId: true, source: { select: { sourceId: true } } },
+    });
+  })();
+  // A declared volume that already has a row is the SAME disk, not a second one.
+  // Identity is (source, volumeId), which is what the row is unique on.
+  const newVolumes = declaredVolumes.filter((declared) => !existingVolumes.some(
+    (row) => sourceId !== undefined && row.source.sourceId === sourceId && row.volumeId === declared.volumeId,
+  ));
+  const totalVolumes = existingVolumes.length + newVolumes.length;
+  const volumeCountExceeded = declaredVolumes.length > 0 && totalVolumes > FREE_PLAN_MAX_VOLUMES_PER_PROJECT;
+  // A disk within BOTH caps is the one way to reach here with nothing to say: the
+  // early return above lets any declared volume through so the count can be read,
+  // and a Free project's one legitimate disk then breaks no rule. Without this
+  // the throw below would raise an empty 400 on a perfectly valid deploy.
+  if (
+    serverServices.length === 0
+    && alwaysOnServices.length === 0
+    && oversizedServices.length === 0
+    && oversizedBuilderMemory === null
+    && oversizedVolumes.length === 0
+    && !volumeCountExceeded
+  ) return;
+
+  // Both sections can fire at once, and the CLI truncates the whole message at
+  // 1000 chars — so name fewer services when there are two remedies to fit.
+  const sections = [
+    serverServices.length > 0,
+    alwaysOnServices.length > 0,
+    oversizedServices.length > 0,
+    oversizedVolumes.length > 0,
+    volumeCountExceeded,
+  ].filter(Boolean).length;
+  const cap = sections > 1 ? 3 : 5;
+  const lines: string[] = [];
+  if (serverServices.length > 0) {
+    lines.push(
+      `\`server\` services are not available on the Free plan, but ${serverServices.length === 1 ? `service ${planGateServiceList(serverServices, cap)} is` : `services ${planGateServiceList(serverServices, cap)} are`} declared as one.`,
+      "",
+      "A `server` holds a machine and its disk from deploy until you tear it down — `minInstances: 0` does not make it scale to zero. Either:",
+      "  - use `type: \"serverless\"`, which scales to zero and cold-starts on the next request (it can have no persistent volume); or",
+      "  - upgrade your plan at https://app.hexclave.com to run persistent servers.",
+    );
+  }
+  if (alwaysOnServices.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(
+      `Always-on instances are not available on the Free plan, but ${alwaysOnServices.length === 1 ? `service ${planGateServiceList(alwaysOnServices, cap)} keeps` : `services ${planGateServiceList(alwaysOnServices, cap)} keep`} an instance running (\`minInstances\` above 0).`,
+      "",
+      "Either:",
+      serverIsPaidOnly
+        ? `  - set \`minInstances: 0\` on ${alwaysOnServices.length === 1 ? "that service" : "those services"}, which scales to zero and cold-starts on the next request; or`
+        : `  - set \`minInstances: 0\` on ${alwaysOnServices.length === 1 ? "that service" : "those services"} — a \`server\` then suspends when idle and resumes with its memory intact, and a \`serverless\` scales to zero and cold-starts on the next request. Note that a \`server\` defaults to \`minInstances: 1\`, so this has to be written out; or`,
+      "  - upgrade your plan at https://app.hexclave.com to keep instances always on.",
+    );
+  }
+  if (oversizedServices.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(
+      `Extra memory is not available on the Free plan, but ${oversizedServices.length === 1 ? `service ${planGateServiceList(oversizedServices, cap)} asks` : `services ${planGateServiceList(oversizedServices, cap)} ask`} for more than the ${DEFAULT_SERVERLESS_MEMORY} every service gets.`,
+      "",
+      "Either:",
+      `  - drop \`memory\` from ${oversizedServices.length === 1 ? "that service" : "those services"}; or`,
+      "  - upgrade your plan at https://app.hexclave.com to size your services.",
+    );
+  }
+  if (oversizedBuilderMemory !== null) {
+    if (lines.length > 0) lines.push("");
+    lines.push(
+      `A larger builder is not available on the Free plan, but \`builder\` asks for ${oversizedBuilderMemory}.`,
+      "",
+      "Either:",
+      "  - drop `memory` from `builder`; or",
+      "  - upgrade your plan at https://app.hexclave.com to build on a bigger machine.",
+    );
+  }
+  if (oversizedVolumes.length > 0) {
+    if (lines.length > 0) lines.push("");
+    const biggest = [...oversizedVolumes].sort((a, b) => b.sizeGb - a.sizeGb || stringCompare(a.serviceId, b.serviceId))[0];
+    lines.push(
+      `Persistent volumes larger than ${FREE_PLAN_MAX_VOLUME_SIZE_GB}GB are not available on the Free plan, but ${oversizedVolumes.length === 1 ? `service ${planGateServiceList(oversizedVolumes.map((volume) => volume.serviceId), cap)} asks` : `services ${planGateServiceList(oversizedVolumes.map((volume) => volume.serviceId), cap)} ask`} for ${oversizedVolumes.length === 1 ? `a ${biggest.sizeGb}GB disk` : `up to ${biggest.sizeGb}GB`}.`,
+      "",
+      // A disk bills on the size it was PROVISIONED at, for as long as it exists,
+      // so "shrink it later" is not a remedy we can offer: volumes are grow-only.
+      "A volume is billed on its size for as long as it exists, and volumes are grow-only — a disk created at this size cannot be made smaller later. Either:",
+      `  - set \`sizeGb\` to ${FREE_PLAN_MAX_VOLUME_SIZE_GB} or less; or`,
+      "  - upgrade your plan at https://app.hexclave.com to use larger disks.",
+    );
+  }
+  if (volumeCountExceeded) {
+    if (lines.length > 0) lines.push("");
+    // Disks nothing mounts AND this call is not re-attaching — an unmounted disk
+    // is invisible in the deploy file, so the count reads as the platform
+    // miscounting unless the message names it. A row this very sync re-declares
+    // is detached only for the instant before it is written back, so it is
+    // excluded rather than reported as abandoned.
+    const unmounted = existingVolumes.filter((row) => row.serviceId === null && !declaredVolumes.some(
+      (declared) => sourceId !== undefined && row.source.sourceId === sourceId && row.volumeId === declared.volumeId,
+    ));
+    lines.push(
+      `The Free plan allows ${FREE_PLAN_MAX_VOLUMES_PER_PROJECT} persistent volume per project, but this project would hold ${totalVolumes}.`,
+      "",
+    );
+    if (unmounted.length > 0) {
+      lines.push(
+        `${unmounted.length === 1 ? "One of them is a disk" : `${unmounted.length} of them are disks`} no service currently mounts: removing a service from a deploy file keeps its volume, so it still exists and is still counted. Contact support to delete ${unmounted.length === 1 ? "it" : "them"}.`,
+        "",
+      );
+    }
+    lines.push(
+      "Either:",
+      `  - hold at most ${FREE_PLAN_MAX_VOLUMES_PER_PROJECT} \`persistentVolumes\` disk, and keep other state in a database or object storage; or`,
+      "  - upgrade your plan at https://app.hexclave.com to run more disks.",
+    );
+  }
+  throw new StatusError(400, lines.join("\n"));
+}
+
+/**
+ * How much memory a service actually runs with, in megabytes.
+ *
+ * The definition's own size, or its type's default — the same resolution
+ * marshalSpecForDefinition does, which is what makes "unset" and "set to the
+ * default" the same amount of machine here too.
+ */
+export function effectiveMemoryMb(definition: DeploymentServiceDefinition, runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME): number {
+  return deploymentMemoryToMb(definition.memory ?? defaultDeploymentMemoryForType(definition.type, runtime));
+}
+
+/**
+ * Names the offending services for a plan-gate message.
+ *
+ * The CLI truncates the surfaced message at 1000 chars and the remedy comes
+ * last, so cap the list rather than let a config with many long service ids
+ * push the actionable half off the end.
+ */
+function planGateServiceList(serviceIds: string[], cap: number): string {
+  const shown = serviceIds.slice(0, cap).map((serviceId) => `\`${serviceId}\``);
+  return serviceIds.length > shown.length
+    ? `${shown.join(", ")}, and ${serviceIds.length - shown.length} more`
     : shown.join(", ");
-  throw new StatusError(400, [
-    `Always-on instances are not available on the Free plan, but ${offending.length === 1 ? `service ${list} keeps` : `services ${list} keep`} an instance running (\`minInstances\` above 0).`,
-    "",
-    "Either:",
-    `  - set \`minInstances: 0\` on ${offending.length === 1 ? "that service" : "those services"} — a \`server\` then suspends when idle and resumes with its memory intact, and a \`serverless\` scales to zero and cold-starts on the next request. Note that a \`server\` defaults to \`minInstances: 1\`, so this has to be written out; or`,
-    "  - upgrade your plan at https://app.hexclave.com to keep instances always on.",
-  ].join("\n"));
 }
 
 /**
@@ -459,13 +781,58 @@ export type SyncSourceServicesResult = {
  * belonging to other sources are never touched here, which is what lets several
  * repositories deploy into one project.
  */
+/**
+ * Deployment history fixes the runtime, including after failed attempts and service removal.
+ * Before the first attempt, use a source with definitions, or the default for an empty project.
+ */
+export async function deploymentRuntimeForProject(prisma: PrismaClientTransaction, tenancy: Tenancy): Promise<DeploymentRuntime> {
+  const deployedSource = await prisma.deploymentSource.findFirst({
+    where: { tenancyId: tenancy.id, deployments: { some: {} } },
+    select: { runtime: true },
+  });
+  if (deployedSource !== null) return runtimeFromStored(deployedSource.runtime);
+  const anySource = await prisma.deploymentSource.findFirst({
+    where: { tenancyId: tenancy.id, services: { some: {} } },
+    select: { runtime: true },
+  });
+  return anySource === null ? DEFAULT_DEPLOYMENT_RUNTIME : runtimeFromStored(anySource.runtime);
+}
+
+/**
+ * Deployment history pins the runtime even after services are removed or an attempt fails:
+ * a failed attempt can still leave provider resources behind. Do not infer emptiness from
+ * current services. Both sync and deployment creation call this inside serializable
+ * transactions so a first deployment cannot race a runtime change or another source.
+ */
+async function assertRuntimeAgreesWithProject(prisma: PrismaClientTransaction, tenancy: Tenancy, runtime: DeploymentRuntime): Promise<void> {
+  const conflicting = await prisma.deploymentSource.findFirst({
+    where: { tenancyId: tenancy.id, runtime: { not: runtime }, deployments: { some: {} } },
+    select: { runtime: true },
+  });
+  if (conflicting === null) return;
+  throw new StatusError(400, `This project has deployment history on the ${JSON.stringify(conflicting.runtime)} runtime and cannot change to ${JSON.stringify(runtime)}. Create a new project to test another runtime.`);
+}
+
 export async function syncSourceServices(
   prisma: PrismaClientTransaction,
   tenancy: Tenancy,
   source: { id: string, sourceId: string },
   services: Record<string, DeploymentServiceDefinition>,
   definitionSyncId: string,
+  builder?: DeploymentBuilderDefinition | undefined,
+  runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME,
 ): Promise<SyncSourceServicesResult> {
+  await assertRuntimeAgreesWithProject(prisma, tenancy, runtime);
+  // The builder and the runtime belong to the SOURCE, and they are written here
+  // rather than in their own call so they land inside the same transaction — and
+  // so the same fence — as the definitions they were authored beside. An
+  // undefined builder clears it back to the deployment's own choice, because a
+  // deploy file that no longer says `builder` is a deploy file that no longer
+  // wants a size pinned.
+  await prisma.deploymentSource.update({
+    where: { tenancyId_id: { tenancyId: tenancy.id, id: source.id } },
+    data: { builderMemoryMb: builder?.memory === undefined ? null : deploymentMemoryToMb(builder.memory), runtime },
+  });
   await assertNoVolumeShrink(prisma, tenancy, source.id, services);
   assertNoVolumeIdConflicts(services);
 
@@ -494,6 +861,15 @@ export async function syncSourceServices(
   });
   for (const domain of domainHolders) {
     if (domain.serviceId === null) continue;
+    if (runtime === "gcp") {
+      const previous = await prisma.deploymentService.findUniqueOrThrow({
+        where: { tenancyId_serviceId: { tenancyId: tenancy.id, serviceId: domain.serviceId } },
+        select: { type: true },
+      });
+      if (previous.type !== services[domain.serviceId].type) {
+        throw new StatusError(400, `Detach all custom domains from service ${JSON.stringify(domain.serviceId)} before changing its type, then reattach them after deployment.`);
+      }
+    }
     const problem = domainPortProblem(services[domain.serviceId].ports, services[domain.serviceId].public === true);
     if (problem !== null) {
       throw new StatusError(400, `Service ${JSON.stringify(domain.serviceId)} has the custom domain ${domain.hostname}, so ${problem}. Remove the domain first, or fix the service's ports.`);
@@ -521,6 +897,11 @@ export async function syncSourceServices(
       ports: definition.ports,
       minInstances: definition.min_instances ?? null,
       maxInstances: definition.max_instances ?? null,
+      // Null when the definition says nothing, so the service keeps running at
+      // its type's default and the column can tell "unset" from "set to the
+      // default" — the two must NOT hash the same downstream by accident, they
+      // are made to hash the same deliberately (see buildServiceSpec).
+      memoryMb: definition.memory === undefined ? null : deploymentMemoryToMb(definition.memory),
       rootDirectory: definition.root_directory ?? null,
       dockerfilePath: definition.dockerfile_path ?? null,
       // With no buildCommand this is the image to run and the service is not
@@ -583,6 +964,7 @@ export async function syncSourceServices(
     });
   }
 
+  await assertProjectDeploymentConstraints(prisma, tenancy);
   return { removedServiceIds };
 }
 
@@ -827,6 +1209,10 @@ const SERVICE_OUTPUT_KEY_TO_MARSHAL = {
  * - the Hexclave credentials are injected first, so a service can reach its own
  *   project with no configuration — and any explicitly declared var of the same
  *   name overrides them,
+ * - the deploy's `CI_*` variables are injected next, on the same terms, and
+ *   only for a service built from source (they describe the commit that was
+ *   built, and putting them on an unchanged prebuilt service would re-roll it
+ *   on every deploy),
  * - plain vars pass through as literal `{ value }`s,
  * - secret vars are filled from the project's stored secrets (dashboard →
  *   Project Settings → Secrets), falling back to `secretDefaults` — the deploy
@@ -859,18 +1245,23 @@ export async function resolveEnvVars(options: {
   // Deploy-request-only fallbacks for `secret()` env vars, keyed by ENV VAR
   // key (see deploymentSecretDefaultsSchema). Never read from the database.
   secretDefaults: Record<string, string>,
+  // The GitLab-style CI variables this deploy was invoked with (see
+  // deploymentCiEnvSchema). Also request-scoped, and the same for every service
+  // in the deploy — they describe the commit, not the service. Applied only to
+  // services BUILT from this commit's source; see the injection site.
+  ciEnv?: Record<string, string>,
 }): Promise<{
   resolvedEnv: Record<string, MarshalEnvValue>,
   redactionSecrets: string[],
 }> {
-  const { tenancy, prisma, serviceId, definition, secretDefaults } = options;
+  const { tenancy, prisma, serviceId, definition, secretDefaults, ciEnv = {} } = options;
   const env = definition.env;
   const existingServices = await prisma.deploymentService.findMany({
     where: { tenancyId: tenancy.id },
     // isPublic decides whether a service's own url() is a cycle: a public one
     // resolves to a platform URL that does not exist yet, a private one to its
     // deterministic internal address.
-    select: { serviceId: true, isPublic: true, ports: true },
+    select: { serviceId: true, isPublic: true, ports: true, type: true, source: { select: { runtime: true } } },
   });
   const existingServicesById = new Map(existingServices.map((row) => [row.serviceId, row]));
 
@@ -888,6 +1279,31 @@ export async function resolveEnvVars(options: {
   }))) {
     resolvedEnv.set(envVarKey, { value: injected.value });
     if (injected.secret) redactionSecrets.add(injected.value);
+  }
+
+  // The deploy's CI provenance, injected after the credentials and before the
+  // declared vars: the CI namespace cannot collide with the injected
+  // HEXCLAVE_* names (deploymentCiEnvSchema is what guarantees that), and a
+  // service that declares a CI_* var of its own still wins. Deliberately not
+  // added to `redactionSecrets`: a commit sha is the opposite of a secret.
+  // (Marshal skips them in its own build-log scrubbing for the same reason —
+  // see UNREDACTED_ENV_KEY_REGEX; both sides have to agree or the value is
+  // blacked out anyway.)
+  //
+  // ONLY for a service built from source, and that restriction is load-bearing
+  // rather than cosmetic. These values change on every commit, and Marshal
+  // hashes a service's env into its REVISION — so injecting them everywhere
+  // would give every service a new revision on every deploy, which for a
+  // `server` means its VM is deleted and recreated. A stateful sibling that
+  // nothing touched (`image: "postgres:16"` next to the web app being deployed)
+  // would go down on each unrelated deploy. A built service is already rolling:
+  // its image is tagged with the deployment id, so its revision changes anyway
+  // and these add no churn. It is also the only service the values DESCRIBE — a
+  // prebuilt image has no relationship to the commit being deployed.
+  if (deploymentServiceIsBuilt(definition)) {
+    for (const [envVarKey, value] of Object.entries(ciEnv)) {
+      resolvedEnv.set(envVarKey, { value });
+    }
   }
 
   // Cache per-secret reads so N env vars filled from the same secret don't
@@ -959,6 +1375,7 @@ export async function resolveEnvVars(options: {
         if (target === undefined) {
           throw new StatusError(400, `The env var connection "${raw}" points to a service that doesn't exist in this project. Add it to a deploy file's \`services\` and deploy it first — service ids are unique across the project, so it may live in another repository's hexclave.deploy.ts.`);
         }
+        assertServiceConnectionSupported(raw, target.type, target.isPublic, target.source.runtime);
         const targetPorts = parseStoredPorts(target.ports, normalized.serviceId);
         if (normalized.outputKey === "url") {
           resolveUrlPortOrThrow(raw, normalized.serviceId, targetPorts, normalized.port);
@@ -1118,7 +1535,7 @@ export function redactSecrets(text: string, secretValues: string[]): string {
 // Deploying
 
 /** Assembles the Marshal spec for a service's stored definition. */
-export function marshalSpecForDefinition(definition: DeploymentServiceDefinition, resolvedEnv: Record<string, MarshalEnvValue>) {
+export function marshalSpecForDefinition(definition: DeploymentServiceDefinition, resolvedEnv: Record<string, MarshalEnvValue>, runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME) {
   // A "server" is always a single instance whatever the definition says; the
   // schema and the CLI both reject other bounds, so this only applies the
   // defaults rather than overriding a stated intent, and it keeps the spec
@@ -1150,6 +1567,20 @@ export function marshalSpecForDefinition(definition: DeploymentServiceDefinition
       // machine with it instead of the image's own entrypoint and command, so
       // changing only this rolls the machines without rebuilding anything.
       ...(definition.start_command !== undefined ? { start_command: definition.start_command } : {}),
+      // NORMALIZED OUT when it is the type's default, rather than written out
+      // like `min_instances` above. Marshal hashes this field into the service's
+      // revision (it has to — otherwise a resize would find a matching revision
+      // and silently never happen), and a "server" whose revision changes is a
+      // VM that gets replaced. So a definition that spells out the size it is
+      // already running on must produce the SAME spec as one that says nothing:
+      // writing `memory: "1GB"` into a deploy file next to a live Postgres is a
+      // no-op edit, and it must not take the database down.
+      //
+      // The same normalization is why every service that predates this field
+      // keeps its existing revision and is not re-rolled on rollout.
+      ...(definition.memory === undefined || definition.memory === defaultDeploymentMemoryForType(definition.type, runtime)
+        ? {}
+        : { memory_mb: deploymentMemoryToMb(definition.memory) }),
     },
     env: resolvedEnv,
   };
@@ -1164,6 +1595,8 @@ export function marshalSpecForDefinition(definition: DeploymentServiceDefinition
  */
 export async function createDeployment(prisma: PrismaClientTransaction, tenancy: Tenancy, options: {
   sourceRowId: string,
+  runtime: DeploymentRuntime,
+  definitions: ReadonlyMap<string, DeploymentServiceDefinition>,
   triggeredBy: string,
   plannedServiceIds: string[],
   // What the client packaged, or null when it packaged nothing (an all-prebuilt
@@ -1171,6 +1604,17 @@ export async function createDeployment(prisma: PrismaClientTransaction, tenancy:
   // building the tarball, and re-deriving it would mean inflating the archive.
   sourceManifest?: DeploymentSourceManifest | null,
 }): Promise<{ id: string, number: number }> {
+  const source = await prisma.deploymentSource.findUniqueOrThrow({
+    where: { tenancyId_id: { tenancyId: tenancy.id, id: options.sourceRowId } },
+    select: { runtime: true },
+  });
+  // The route read the source before entering this transaction. Reject a concurrent sync
+  // rather than recording history on one runtime and starting the captured spec on another.
+  if (source.runtime !== options.runtime) {
+    throw new StatusError(409, "The deployment source's runtime changed. Sync its definitions and retry the deployment.");
+  }
+  await assertRuntimeAgreesWithProject(prisma, tenancy, options.runtime);
+  await assertProjectDeploymentConstraints(prisma, tenancy, options.definitions, options.runtime);
   const latest = await prisma.deployment.findFirst({
     where: { tenancyId: tenancy.id },
     orderBy: { number: "desc" },
@@ -1247,7 +1691,7 @@ export async function startDeployment(options: {
   tenancy: Tenancy,
   prisma: PrismaClientTransaction,
   deploymentId: string,
-  source: { id: string, sourceId: string },
+  source: { id: string, sourceId: string, builderMemoryMb?: number | null, runtime?: string | null },
   // In dependency order: every service in one level is applied concurrently,
   // and a level starts only once the previous one has converged.
   levels: string[][],
@@ -1260,6 +1704,7 @@ export async function startDeployment(options: {
   const { tenancy, prisma, deploymentId, source, levels, definitionsByServiceId, resolvedEnvByServiceId, marshalUploadId } = options;
   const client = getMarshalClientOrThrow();
   const ns = marshalNamespaceForTenancy(tenancy);
+  const runtime = runtimeFromStored(source.runtime);
 
   const targets: MarshalDeploymentTarget[] = levels.flat().map((serviceId) => {
     const definition = definitionsByServiceId.get(serviceId) ?? throwErr(`No definition for planned service ${serviceId}`);
@@ -1275,7 +1720,7 @@ export async function startDeployment(options: {
       // from `image` alone.
       ...(definition.image !== undefined ? { image: definition.image } : {}),
       ...(definition.build_command !== undefined ? { build_command: definition.build_command } : {}),
-      spec: marshalSpecForDefinition(definition, resolvedEnv),
+      spec: marshalSpecForDefinition(definition, resolvedEnv, runtime),
     };
   });
 
@@ -1285,6 +1730,14 @@ export async function startDeployment(options: {
       ...(marshalUploadId === undefined ? {} : { upload_id: marshalUploadId }),
       targets,
       order: levels,
+      // One builder per deployment, so it sits beside `targets` rather than on
+      // one of them. Omitted when the source pins no size, which leaves the
+      // runtime to pick the floor its build shape needs — a Railpack build needs
+      // more than a Dockerfile one, and only the runtime knows which this is.
+      ...(source.builderMemoryMb == null ? {} : { builder: { memory_mb: source.builderMemoryMb } }),
+      // The deploy file's runtime, which Marshal pins the namespace to on its first deploy
+      // and checks on every later one.
+      runtime,
     });
   } catch (e) {
     sanitizeMarshalError(e, "Starting the deployment failed");
@@ -1544,6 +1997,19 @@ export type DeploymentServiceApiShape = {
   ports: DeploymentPorts,
   min_instances: number | null,
   max_instances: number | null,
+  // The size the service RUNS at, never null: unlike the two bounds above, a
+  // reader has no way to apply the type's default itself without knowing which
+  // default belongs to which type, and every surface that shows this wants the
+  // effective value rather than "unset".
+  // Which infrastructure runtime the service runs on: the default, or the one its deploy
+  // file's internal `version` export selected. Every service of a project shares it.
+  runtime: DeploymentRuntime,
+  memory: DeploymentMemorySize,
+  // The CPU that comes with that size, and whether it is a whole core or a
+  // burstable fraction of one. Sent rather than derived client-side because the
+  // mapping is a property of the machine shapes the runtime picks, and a second
+  // copy of it in the dashboard is a second thing to keep in step.
+  cpu: { count: number, shared: boolean },
   root_directory: string | null,
   // Null = built with Railpack auto-detection rather than a Dockerfile.
   dockerfile_path: string | null,
@@ -1653,6 +2119,7 @@ export async function serviceToApiShape(options: {
   const { prisma, tenancy, row } = options;
   const volume = await getServiceVolume(prisma, tenancy, row.serviceId);
   const definition = definitionFromServiceRow(row, volume);
+  const runtime = runtimeFromStored(row.source.runtime);
 
   // The newest deployment that PLANNED this service, whatever became of it.
   // Read from the deployments themselves rather than from a column on the
@@ -1750,6 +2217,9 @@ export async function serviceToApiShape(options: {
     ports: definition.ports,
     min_instances: row.minInstances,
     max_instances: row.maxInstances,
+    runtime,
+    memory: definition.memory ?? defaultDeploymentMemoryForType(definition.type, runtime),
+    cpu: deploymentCpuForMemory(definition.type, definition.memory ?? defaultDeploymentMemoryForType(definition.type, runtime), runtime),
     root_directory: row.rootDirectory,
     dockerfile_path: row.dockerfilePath,
     image: row.image,

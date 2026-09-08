@@ -1,5 +1,5 @@
-import { getConfig, MOCK_FLY_TOKEN } from "../config.js";
-import { FLY_MUTATION_TIMEOUT_MS, FLY_READ_TIMEOUT_MS, MutationOutcomeUnknownError } from "../mutation-safety.js";
+import { flyConfig, MOCK_FLY_TOKEN } from "../config.js";
+import { PROVIDER_MUTATION_TIMEOUT_MS, PROVIDER_READ_TIMEOUT_MS, MutationOutcomeUnknownError } from "../mutation-safety.js";
 
 // Thin client for the three Fly API surfaces Marshal talks to, plus the Docker registry.
 // One instance per (org, token) — resolved per namespace via resolveNamespaceOrg.
@@ -120,12 +120,12 @@ export class FlyClient {
 
   private async fetchWithReadRetry(url: string, init: RequestInit & { method: string }): Promise<Response> {
     if (init.method === "GET" || init.method === "HEAD") {
-      // Reads are bounded too — see FLY_READ_TIMEOUT_MS. A fresh signal per attempt, because
+      // Reads are bounded too — see PROVIDER_READ_TIMEOUT_MS. A fresh signal per attempt, because
       // an AbortSignal.timeout that already fired would abort the retry instantly.
-      return await this.retryReadOnSocketReset(() => fetch(url, { ...init, signal: AbortSignal.timeout(FLY_READ_TIMEOUT_MS) }));
+      return await this.retryReadOnSocketReset(() => fetch(url, { ...init, signal: AbortSignal.timeout(PROVIDER_READ_TIMEOUT_MS) }));
     }
     try {
-      return await fetch(url, { ...init, signal: AbortSignal.timeout(FLY_MUTATION_TIMEOUT_MS) });
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(PROVIDER_MUTATION_TIMEOUT_MS) });
     } catch (error) {
       // A failed write request can have reached Fly even when no response reached Marshal.
       // Keep the lease until expiry+drain so a replacement cannot overlap that operation.
@@ -145,7 +145,7 @@ export class FlyClient {
   }
 
   private async fetchMachinesApi<T>(path: string, init?: { method?: string, body?: unknown, allow404?: boolean }): Promise<T | null> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     const method = init?.method ?? "GET";
     const response = await this.fetchWithReadRetry(`${fly.machinesApiUrl}/v1${path}`, {
       method,
@@ -178,14 +178,14 @@ export class FlyClient {
   // "Could not find App" GraphQL error (not a null app); the read paths treat
   // that as "no data" so a service without an app reads as empty.
   private async fetchGraphql<T>(query: string, variables: Record<string, unknown>, options?: { allowNotFound?: boolean, read?: boolean }): Promise<T | null> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     const doFetch = () => fetch(fly.graphqlApiUrl, {
       method: "POST",
       headers: { "authorization": `Bearer ${this.token}`, "content-type": "application/json" },
       body: JSON.stringify({ query, variables }),
       // Both are bounded, at different limits: a write's timeout is what the reconciliation
       // takeover grace is derived from, while a read only has to not hang forever.
-      signal: AbortSignal.timeout(options?.read ? FLY_READ_TIMEOUT_MS : FLY_MUTATION_TIMEOUT_MS),
+      signal: AbortSignal.timeout(options?.read ? PROVIDER_READ_TIMEOUT_MS : PROVIDER_MUTATION_TIMEOUT_MS),
     });
     // Read queries get the same one-shot socket-reset retry the REST reads get.
     let response: Response;
@@ -433,7 +433,7 @@ export class FlyClient {
   // Logs API
 
   async getLogs(app: string, options?: { nextToken?: string, instance?: string }): Promise<{ entries: FlyLogEntry[], nextToken: string | null }> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     const params = new URLSearchParams();
     if (options?.nextToken !== undefined) params.set("next_token", options.nextToken);
     if (options?.instance !== undefined) params.set("instance", options.instance);
@@ -491,7 +491,7 @@ export class FlyClient {
   }
 
   async resolveImageDigest(app: string, tag: string): Promise<string | null> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     // The registry has no mock; when the mock Fly token is in use, don't send a real HTTPS
     // request to registry.fly.io with a sentinel credential (surprising egress + a 401 that
     // surfaces as "digest could not be resolved"). Mock builds always supply the digest in
@@ -510,7 +510,7 @@ export class FlyClient {
   }
 
   async deleteImageManifest(app: string, digest: string): Promise<void> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     if (this.token === MOCK_FLY_TOKEN) return; // no mock registry — see resolveImageDigest
     const response = await fetch(`https://${fly.registryHost}/v2/${encodeURIComponent(app)}/manifests/${digest}`, {
       method: "DELETE",

@@ -71,7 +71,7 @@ async function acquireLease(ns: string, key: string, ownerId: string, timings: L
       }
     } else if (current.value.expires_at_millis + timings.takeoverGraceMs <= now) {
       // Conditional replacement is the distributed arbiter: exactly one Marshal replica can
-      // take over an expired lease. The grace period also drains every bounded Fly write the
+      // take over an expired lease. The grace period also drains every bounded provider write the
       // previous owner could have started immediately before its last confirmed expiry.
       const etag = await replaceReconciliationLease(ns, key, desired, current.etag);
       if (etag !== null) {
@@ -144,7 +144,7 @@ export async function withReconciliationLease<T>(
     assertOwned: async () => {
       if (lostError !== null) throw lostError;
       if (Date.now() >= held.value.expires_at_millis) {
-        throw new ReconciliationLeaseLostError(`reconciliation lease for ${ns}/${key} expired before a Fly mutation`);
+        throw new ReconciliationLeaseLostError(`reconciliation lease for ${ns}/${key} expired before a provider mutation`);
       }
     },
   };

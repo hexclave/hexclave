@@ -135,6 +135,11 @@ const internalToolsItem: AppSection = {
       href: "/ask-hexclave-history",
       match: (fullUrl: URL) => /^\/projects\/[^\/]+\/ask-hexclave-history(\/.*)?$/.test(fullUrl.pathname),
     },
+    {
+      name: "Deploy Admin",
+      href: "/deploy-admin",
+      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/deploy-admin(\/.*)?$/.test(fullUrl.pathname),
+    },
   ],
 };
 
@@ -523,7 +528,7 @@ function SidebarContent({
     /^\/projects\/[^\/]+\/(project-settings|project-keys|domains)(\/.*)?$/.test(pathname)
   );
   const [isInternalToolsExpanded, setIsInternalToolsExpanded] = useState(() =>
-    /^\/projects\/[^\/]+\/(platform-analytics|external-db-sync|newly-created-projects|ask-hexclave-history)(\/.*)?$/.test(pathname)
+    /^\/projects\/[^\/]+\/(platform-analytics|external-db-sync|newly-created-projects|ask-hexclave-history|deploy-admin)(\/.*)?$/.test(pathname)
   );
   const internalToolsSection = useMemo<AppSection>(() => ({
     ...internalToolsItem,

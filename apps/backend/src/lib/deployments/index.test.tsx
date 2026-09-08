@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MarshalDeployment } from "./marshal-client";
-import { autoInjectedEnvVars, definitionFromServiceRow, deploymentToApiShape, effectiveMinInstances, marshalSpecForDefinition } from "./index";
+import { assertAlwaysOnMemoryCapacity, autoInjectedEnvVars, definitionFromServiceRow, deploymentToApiShape, effectiveMinInstances, marshalSpecForDefinition } from "./index";
 
 const baseRow = {
   serviceId: "api",
@@ -15,6 +15,9 @@ const baseRow = {
   // Null = the base decides the build, and the image decides what starts.
   buildCommand: null as string | null,
   startCommand: null as string | null,
+  // Null = the type's default size, which is what every row predating the
+  // column reads as.
+  memoryMb: null as number | null,
   env: [] as [string, { value: string }][],
 };
 
@@ -217,5 +220,31 @@ describe("marshal deployment shape", () => {
       services: [{ service_key: "web", status: "deployed", revision: "rev1", url: null, image: "registry.fly.io/web@sha256:abc", error: null }],
     };
     expect(deployment.services[0].service_key).toBe("web");
+  });
+});
+
+
+describe("project always-on memory", () => {
+  const service = (id: number, runtime: "fly" | "gcp", type: "server" | "serverless", min: number) => ({
+    serviceId: `service-${id}`,
+    runtime,
+    definition: { ...definitionFromServiceRow({ ...baseRow, type, minInstances: min, memoryMb: 8192 }), max_instances: type === "server" ? 1 : 10 },
+  });
+
+  it("counts every minimum instance, rather than one allocation per service", () => {
+    expect(() => assertAlwaysOnMemoryCapacity([service(1, "fly", "serverless", 4)])).not.toThrow();
+    expect(() => assertAlwaysOnMemoryCapacity([service(1, "fly", "serverless", 10)])).toThrow(/80GB/);
+  });
+
+  it("allows exactly the project limit and rejects an additional allocation", () => {
+    const services = Array.from({ length: 4 }, (_, i) => service(i, "fly", "serverless", 1));
+    expect(() => assertAlwaysOnMemoryCapacity(services)).not.toThrow();
+    expect(() => assertAlwaysOnMemoryCapacity([...services, service(5, "fly", "serverless", 1)])).toThrow(/40GB/);
+  });
+
+  it("counts GCP servers even with a zero minimum, while Fly servers can suspend", () => {
+    expect(() => assertAlwaysOnMemoryCapacity(Array.from({ length: 5 }, (_, i) => service(i, "gcp", "server", 0)))).toThrow(/40GB/);
+    expect(() => assertAlwaysOnMemoryCapacity(Array.from({ length: 5 }, (_, i) => service(i, "fly", "server", 0)))).not.toThrow();
+    expect(() => assertAlwaysOnMemoryCapacity([service(1, "gcp", "serverless", 0)])).not.toThrow();
   });
 });

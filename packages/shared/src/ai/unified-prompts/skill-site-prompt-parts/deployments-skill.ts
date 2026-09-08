@@ -11,7 +11,7 @@ export const deploymentsSkillSection = deindent`
 
   Every service is either a \`"server"\` or a \`"serverless"\`. A \`server\` is a single instance that SUSPENDS when idle and resumes with its memory intact, and it is the only type that may have a persistent disk. A \`serverless\` scales out between \`minInstances\` and \`maxInstances\` and STOPS on scale-down, so each start is a cold start and it can have no disk. Use \`server\` for anything stateful (a database, a queue, anything writing to a volume) and \`serverless\` for stateless web apps and APIs.
 
-  Enable the app by adding \`"deploy"\` under \`apps.installed\` in your config (quote it — it contains a hyphen). Services themselves are NOT part of the \`config\` export: they live in their own file, \`hexclave.deploy.ts\`, next to \`hexclave.config.ts\`.
+  Enable the app by adding \`"deploy"\` under \`apps.installed\` in your config (quote it — it contains a hyphen). Services themselves are NOT part of the \`config\` export and cannot be declared in \`hexclave.config.ts\`: they live in their own file, \`hexclave.deploy.ts\`, next to it.
 
   ## The deploy export
 
@@ -37,7 +37,7 @@ export const deploymentsSkillSection = deindent`
           DATABASE_PORT: "5432",
         },
       },
-      api: { type: "serverless", ports: { 8080: { protocol: "http" } }, rootDirectory: "./api" },
+      api: { type: "serverless", ports: { 8080: { protocol: "http" } }, rootDirectory: "./api", memory: "1GB" },
       cache: { type: "server", ports: { 6379: { protocol: "tcp" } }, image: "redis:7-alpine", minInstances: 0 },
       database: {
         type: "server",
@@ -45,19 +45,23 @@ export const deploymentsSkillSection = deindent`
         rootDirectory: "./database",
         dockerfilePath: "Dockerfile",
         persistentVolumes: { pgdata: { path: "/data", sizeGb: 10 } },
+        memory: "4GB",
         env: { POSTGRES_PASSWORD: secret("POSTGRES_PASSWORD") },
       },
     },
+    builder: { memory: "16GB" },
   });
   \`\`\`
 
   Always annotate the \`deploy\` export with \`HexclaveDeploymentConfig\`, imported as a type from \`@hexclave/js\` (the same type is re-exported from \`@hexclave/next\`, \`@hexclave/react\` and \`@hexclave/tanstack-start\`, so import from whichever SDK package this project already uses). It gives completion for every field below and catches typos before a deploy.
 
-  The \`deploy\` export is a FUNCTION of the deployment context returning \`{ services }\`, keyed by service id. \`type\` (required) is \`"server"\` or \`"serverless"\` as above. \`public\` (default false) is what exposes the service to the internet and gives it a stable platform URL; it is a property of the SERVICE, not of a port, because every port a service declares is served on every address it has. \`ports\` (required) is an object KEYED BY PORT NUMBER, and every non-empty entry must explicitly be \`{ protocol: "http" }\` or \`{ protocol: "tcp" }\`; use \`ports: {}\` for a worker that only dials out, which needs an always-on instance since nothing inbound can wake it (and cannot be \`public\`). A public service may declare several ports — each is reachable at its own port number, and the lowest additionally owns the standard 80/443, so it is the port the service's URL points at and the only one a custom domain can front. Only a PRIVATE service may declare TCP ports (a public address cannot route raw TCP), and a service with no HTTP port cannot have custom domains. \`rootDirectory\` (relative to the deploy file, default \`./\`) is where the service's code lives; \`dockerfilePath\` (optional, relative to \`rootDirectory\`) selects a Dockerfile to build from — omit it to build with Railpack auto-detection; \`image\` runs an already-built public image instead of building anything (\`"postgres:16"\`, \`"ghcr.io/org/app:1.2.3"\`), and is mutually exclusive with \`dockerfilePath\` — a tag is resolved when the image is pulled, so name a digest (\`"postgres@sha256:..."\`) if every deploy must run the same bytes; \`buildCommand\` and \`startCommand\` (both optional, single command lines run through \`sh -c\`) say how to build and how to start, and are described under Building below; \`minInstances\`/\`maxInstances\` (defaults: 1/1 for a server, 0/1 for a serverless; max 10) are the scaling bounds; \`persistentVolumes\` (server only) attaches a persistent disk; \`devCommand\` is what \`hexclave dev --service-id <id>\` runs.
+  The \`deploy\` export is a FUNCTION of the deployment context returning \`{ services, builder }\`. \`services\` is keyed by service id. \`type\` (required) is \`"server"\` or \`"serverless"\` as above. \`public\` (default false) is what exposes the service to the internet and gives it a stable platform URL; it is a property of the SERVICE, not of a port, because every port a service declares is served on every address it has. \`ports\` (required) is an object KEYED BY PORT NUMBER, and every non-empty entry must explicitly be \`{ protocol: "http" }\` or \`{ protocol: "tcp" }\`; use \`ports: {}\` for a worker that only dials out, which needs an always-on instance since nothing inbound can wake it (and cannot be \`public\`). A public service may declare several ports — each is reachable at its own port number, and the lowest additionally owns the standard 80/443, so it is the port the service's URL points at and the only one a custom domain can front. Only a PRIVATE service may declare TCP ports (a public address cannot route raw TCP), and a service with no HTTP port cannot have custom domains. \`rootDirectory\` (relative to the deploy file, default \`./\`) is where the service's code lives; \`dockerfilePath\` (optional, relative to \`rootDirectory\`) selects a Dockerfile to build from — omit it to build with Railpack auto-detection; \`image\` runs an already-built public image instead of building anything (\`"postgres:16"\`, \`"ghcr.io/org/app:1.2.3"\`), and is mutually exclusive with \`dockerfilePath\` — a tag is resolved when the image is pulled, so name a digest (\`"postgres@sha256:..."\`) if every deploy must run the same bytes; \`buildCommand\` and \`startCommand\` (both optional, single command lines run through \`sh -c\`) say how to build and how to start, and are described under Building below; \`minInstances\`/\`maxInstances\` (defaults: 1/1 for a server, 0/1 for a serverless; max 10) are the scaling bounds; \`memory\` sizes the container and is covered under Compute below; \`persistentVolumes\` (server only) attaches a persistent disk; \`devCommand\` is what \`hexclave dev --service-id <id>\` runs.
 
   A \`server\` holds exactly one instance: \`minInstances: 1\` (the default) keeps it up, and \`0\` lets it suspend when idle and resume with its memory intact. \`minInstances\` above 0 requires a paid plan for BOTH types — on the Free plan the deploy fails up front naming the offending services, so write \`minInstances: 0\` (note that a \`server\` needs it written out).
 
   Every service automatically receives \`HEXCLAVE_PROJECT_ID\`, \`HEXCLAVE_API_URL\`, \`HEXCLAVE_PUBLISHABLE_CLIENT_KEY\` and \`HEXCLAVE_SECRET_SERVER_KEY\`, plus \`NEXT_PUBLIC_\`/\`VITE_\` copies of the first three so client bundles can read them. An API key set is created for the project if it has none. Declaring an env var of the same name overrides the injected one.
+
+  \`CI\` is \`"true"\` during every remote build. If \`hexclave deploy\` was itself run in CI, the GitLab-style \`CI_COMMIT_SHA\`, \`CI_COMMIT_SHORT_SHA\`, \`CI_COMMIT_REF_NAME\`, \`CI_COMMIT_BRANCH\`, \`CI_COMMIT_TAG\` and \`CI_REPOSITORY_URL\` are passed through to the service too (GitHub Actions' \`GITHUB_*\` are translated into the same names); one that nothing can answer is absent rather than empty. Declaring an env var of the same name overrides these as well.
 
   ## Network model: HTTP and private TCP
 
@@ -66,6 +70,16 @@ export const deploymentsSkillSection = deindent`
   Use \`protocol: "tcp"\` on a port for a database, cache, queue, SMTP server, or other raw TCP daemon such as PostgreSQL, MySQL, Redis, or RabbitMQ. TCP ports are reachable only from other services in the same project: pass \`service("database").hostname()\` and the port as a literal, as separate env vars. Only a private service may declare TCP ports, and a service with no HTTP port exposes no \`url\` and cannot take custom domains. The daemon must bind to \`0.0.0.0\`, not only localhost. Do not manually change generated Fly infrastructure; Hexclave reconciliation owns it and can replace out-of-band changes.
 
   A service with \`minInstances: 0\` autostarts when a connection reaches its Flycast host and port. Make clients retry initial DNS/connect/auth failures with a bounded backoff: an HTTP app and its TCP dependency may be cold-starting simultaneously. If startup latency is unacceptable, use \`minInstances: 1\` on a paid plan.
+
+  ## Compute: memory sizes the machine, and CPU comes with it
+
+  \`memory\` sets how much memory a service gets, for either type: \`"512MB" | "1GB" | "2GB" | "4GB" | "8GB"\` (default \`"512MB"\`). Write the size with its unit and that exact capitalization — \`"4gb"\`, \`"4 GB"\` and \`"4Gi"\` are all rejected, and \`Mb\` means megabits. Anything above the default needs a paid plan, and a project may hold at most 32GB across its always-on services at once.
+
+  There is no \`cpu\` setting: CPU is derived from memory, because the platform only offers valid machine shapes and a separately chosen CPU could name one that does not exist. Up to \`"2GB"\` a service runs on one SHARED, burstable vCPU; \`"4GB"\` gets two shared vCPUs; \`"8GB"\` is the first size with 2 dedicated cores, so a CPU-bound service wants \`"8GB"\` even when it fits in less memory.
+
+  Changing \`memory\` restarts the service's machine with the new shape: a \`server\` is briefly unavailable (its persistent disk survives — the disk outlives the machine — so no data is lost), and a \`serverless\` is rolled one machine at a time. Resize a stateful server deliberately, not incidentally. Writing the size a service is ALREADY running at (\`memory: "512MB"\` on a service that has never set one) changes nothing and restarts nothing.
+
+  \`builder\` sits beside \`services\`, not inside one, because one machine builds every service of a deploy: \`builder: { memory: "32GB" }\`, one of \`"8GB" | "16GB" | "32GB"\`. Leave it out and the build gets a machine sized for its shape (a larger one when the build is auto-detected by Railpack); a request below what the build shape needs is raised to it rather than refused. Raise it when a build is KILLED for running out of memory or disk — a large monorepo install, or a compiler that wants the whole project in memory. It does not affect what services run on; that is each service's own \`memory\`.
 
   ## Storage: the container filesystem is ephemeral
 
@@ -146,7 +160,7 @@ export const deploymentsSkillSection = deindent`
 
   A sync is the whole truth about its own deploy file: a service you REMOVE from \`services\` is torn down on the next deploy, keeping its persistent volume and any custom domain (unattached) so a config edit can never destroy data. Services of other deployment sources are never touched.
 
-  Options: \`--service-id <id>\` (deploy just one service; its connections resolve against already-deployed services), \`--deploy-file <path>\` (default: auto-discover \`hexclave.deploy.ts\` in the current directory; a deploy file is required), \`--cloud-project-id <id>\` (default: the \`HEXCLAVE_PROJECT_ID\` env var), \`--config-push\` (also push \`hexclave.config.ts\`'s \`config\` export; off by default, since several repositories can deploy into one project and each push replaces the whole config), \`--no-build-logs\` (status lines only).
+  Options: \`--service-id <id>\` (deploy just one service; its connections resolve against already-deployed services), \`--deploy-file <path>\` (default: auto-discover \`hexclave.deploy.ts\` in the current directory; a deploy file is required), \`--cloud-project-id <id>\` (default: the \`HEXCLAVE_PROJECT_ID\` env var), \`--no-build-logs\` (status lines only). It never publishes your project configuration — that is \`hexclave config push\`, a separate command, because several repositories can deploy into one project and each push replaces the whole config.
 
   GitHub Actions example:
 

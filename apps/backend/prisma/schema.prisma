@@ -1602,8 +1602,8 @@ model DeletedRow {
 // plaintext never touches this table. Only the feature consuming a secret
 // decrypts it, server-side.
 //
-// Deployments are the only consumer today (`secret()` env vars in the config
-// file's `services` export name a key here), but the store deliberately isn't
+// Deployments are the only consumer today (`secret()` env vars in the deploy
+// file's `deploy` export name a key here), but the store deliberately isn't
 // deployments-specific — see @/lib/project-secrets.
 //
 // Keyed by project, not tenancy: these are infrastructure credentials that
@@ -1635,7 +1635,7 @@ model ProjectSecret {
 //
 // A project owns DEPLOYMENT SOURCES; a source is deployed one or more times;
 // each deployment ships a set of SERVICES. A source is one deploy file
-// (hexclave.deploy.ts, named by its own `id` export) and what one
+// (hexclave.deploy.ts, named by its own `deploymentGroupId` export) and what one
 // `hexclave deploy` ships — one upload, one build — so a project deployed from
 // several repositories gives each of them a source of its own. Service ids stay
 // unique per PROJECT, so a reference never has to name a source.
@@ -1662,11 +1662,30 @@ model DeploymentSource {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // The deploy file's own `id` export — which deploy file (and so which
-  // repository) these services were deployed from. Deployments declared in
-  // hexclave.config.ts, which has no id of its own, belong to a source named
-  // after that file. Created implicitly by the first deploy that names it.
+  // The deploy file's own `deploymentGroupId` export — which deploy file (and so
+  // which repository) these services were deployed from. Created implicitly by
+  // the first deploy that names it. Projects deployed before services moved out
+  // of hexclave.config.ts still have a source named after that file; nothing
+  // writes one any more.
   sourceId String
+
+  // How much memory this source's BUILDER machine gets, in megabytes. Null = the
+  // deployment picks the floor its build shape needs.
+  //
+  // On the source rather than on a service because one `hexclave deploy` builds
+  // every service of the source on ONE machine: there is a single builder to
+  // size, and a per-service column could only ever record a request that another
+  // service's request overrode. Written by the same sync that stores the service
+  // definitions, so it rides that sync's fence rather than needing one of its own.
+  builderMemoryMb Int?
+
+  // Which infrastructure runtime this source's services run on: "fly" (the
+  // default, and what an absent `version` export in the deploy file means) or
+  // "gcp" (opted into with an internal `version` token). Written by the same
+  // sync that stores the definitions. Every source of one project must agree —
+  // services share a private network, which cannot span providers — and the
+  // sync route refuses one that does not; see syncSourceServices.
+  runtime String @default("fly")
 
   tenancy     Tenancy             @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
   services    DeploymentService[]
@@ -1729,6 +1748,20 @@ model DeploymentService {
   ports         Json   @default("{}")
   minInstances  Int?
   maxInstances  Int?
+  // How much memory the container gets, in megabytes. Null = the type's default
+  // (see defaultDeploymentMemoryForType), which is what every service ran at
+  // before compute was configurable — so an existing row needs no backfill and
+  // deploys the machine it already had.
+  //
+  // Stored as a number rather than the "4GB" token the deploy file writes: the
+  // token is an authoring spelling with exactly one canonical form per size, and
+  // a column that stores it would have to be re-validated against that ladder on
+  // every read. A megabyte count off the ladder reads back as "unset".
+  //
+  // CPU is not stored because it is not declared: it is derived from this by the
+  // runtime, which is what keeps every size valid on both a whole-VM "server"
+  // and a "serverless" container.
+  memoryMb      Int?
   // Where the service's code lives inside the deployment source's upload, relative to the
   // deploy file. The build CONTEXT is the whole upload (a monorepo service
   // usually has to reach shared code above its own directory); this only scopes
@@ -1987,6 +2020,39 @@ model DeploymentSourceUpload {
 
   @@id([tenancyId, id])
   @@index([expiresAt])
+}
+
+
+// Platform-wide (cross-tenant) switches for the Deployments app.
+//
+// A singleton: one row for the whole Hexclave instance, matching
+// ExternalDbSyncMetadata's shape. Not per-project and not per-tenancy — this is
+// the operator's control over the alpha as a whole, and a per-project override
+// is deliberately not modelled until something needs one.
+//
+// Its own table rather than a column on ExternalDbSyncMetadata: the two features
+// share nothing but the singleton pattern, and a deployments switch living in a
+// table named after the DB-sync pipeline is exactly the confusion an emergency
+// switch must not cause.
+//
+// Every column defaults to today's behaviour, and a MISSING row reads as those
+// defaults (see getDeploymentsPlatformConfig) — so this table needs no backfill
+// and there is no window in which deploys are off because nobody has written to
+// it yet.
+model DeploymentsPlatformConfig {
+  id String @id @default(dbgenerated("gen_random_uuid()"))
+
+  singleton BooleanTrue @unique @default(TRUE)
+
+  // The emergency fusebox. False = no NEW deployment may be created anywhere on
+  // this instance: the deploy and upload routes refuse with a 503. Deliberately
+  // narrow — deployments already in flight run to completion, status and logs
+  // stay readable, and tearing services down keeps working, because an operator
+  // flipping this during an incident needs those more than ever.
+  deploymentsEnabled Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 

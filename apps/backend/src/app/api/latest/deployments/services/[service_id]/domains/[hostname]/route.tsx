@@ -96,10 +96,8 @@ export const GET = createSmartRouteHandler({
     const client = getMarshalClientOrThrow();
     let result;
     try {
-      // Strictly a read: it returns the current certificate state + DNS records
-      // without touching Fly. It must NOT be putDomain — a PUT repoints the
-      // hostname, so polling this endpoint would silently steal the domain from
-      // whichever service currently holds it.
+      // Safe for polling: Marshal may promote this tenancy's pending TXT proof, but it cannot
+      // repoint an already claimed hostname. A PUT can repoint, so it must not be used here.
       result = await client.getDomain(marshalNamespaceForTenancy(auth.tenancy), params.hostname);
     } catch (e) {
       if (e instanceof MarshalApiError && e.status === 404) {
@@ -166,8 +164,8 @@ export const GET = createSmartRouteHandler({
         is_primary: domain.isPrimary,
         verified: result.verified,
         pending_first_deploy: false,
-        // Once verified there is nothing left for the user to create; while
-        // pending, the records include the ACME pre-issuance challenge.
+        // Once verified there is nothing left for the user to create; while pending, the records
+        // include both Hexclave's ownership TXT proof and the shared frontend routing record.
         dns_records: result.verified ? [] : result.dns_records,
       },
     };

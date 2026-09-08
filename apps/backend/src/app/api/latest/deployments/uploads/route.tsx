@@ -1,5 +1,6 @@
 import { marshalNamespaceForTenancy } from "@/lib/deployments";
 import { getMarshalClientOrThrow, sanitizeMarshalError } from "@/lib/deployments/marshal-client";
+import { assertDeploymentsEnabled } from "@/lib/deployments/platform-config";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, serverOrHigherAuthTypeSchema, yupArray, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
@@ -48,6 +49,11 @@ export const POST = createSmartRouteHandler({
     }).defined(),
   }),
   handler: async ({ auth, body }) => {
+    // Before anything is allocated: an upload only exists to be deployed, so
+    // while the platform fusebox is off there is no point taking the tarball —
+    // and failing here is what makes the CLI stop in a second rather than after
+    // pushing a source it could never deploy.
+    await assertDeploymentsEnabled();
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     // Opportunistically drop expired references. Their objects are covered by
     // the Marshal bucket's uploads/ lifecycle rule because an abandoned CLI
