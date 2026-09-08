@@ -44,7 +44,6 @@ vi.mock("../store.js", async (importOriginal) => ({
   readTenantRecord: async () => null,
   listSpecKeys: async () => [],
   readSpec: async () => null,
-  readPlatformDomain: async () => null,
   listDomainClaimsForService: domainClaims,
   readDomainClaimVersioned: async (hostname: string) => ({ value: { ns: "ns", service_key: "web", hostname }, etag: "etag" }),
   releaseDomainClaim: async () => {},

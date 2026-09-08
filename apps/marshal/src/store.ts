@@ -1,6 +1,6 @@
 import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client, UploadPartCommand, type ListObjectsV2CommandOutput } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import type { PlatformDomainState } from "./platform-domain-state.js";
+import { logicalStorageKey, storageKey } from "./storage-prefix.js";
 import { getConfig, MAX_UPLOAD_BYTES, MULTIPART_UPLOAD_THRESHOLD_BYTES, UPLOAD_EXPIRY_SECONDS, UPLOAD_PART_SIZE_BYTES } from "./config.js";
 import { authenticateControlPlaneState, decryptString, encryptString, verifyControlPlaneStateAuthentication } from "./spec-crypto.js";
 import { POOL_PROJECT_STATES, type DomainClaim, type EnvValue, type PendingDomainClaim, type PoolProjectEntry, type PoolProjectState, type ReconciliationLease, type ServiceSpec, type StoredDeployment, type StoredSpec, type TenantRecord } from "./types.js";
@@ -70,7 +70,7 @@ async function withTransientRetry<T>(fn: () => Promise<T>): Promise<T> {
 async function getJson<T>(key: string): Promise<T | null> {
   try {
     return await withTransientRetry(async () => {
-      const result = await s3().send(new GetObjectCommand({ Bucket: bucket(), Key: key }));
+      const result = await s3().send(new GetObjectCommand({ Bucket: bucket(), Key: storageKey(key) }));
       const body = await result.Body?.transformToString();
       if (body === undefined) return null;
       return JSON.parse(body) as T;
@@ -84,7 +84,7 @@ async function getJson<T>(key: string): Promise<T | null> {
 async function putJson(key: string, value: unknown): Promise<void> {
   await withTransientRetry(async () => await s3().send(new PutObjectCommand({
     Bucket: bucket(),
-    Key: key,
+    Key: storageKey(key),
     Body: JSON.stringify(value),
     ContentType: "application/json",
   })));
@@ -95,7 +95,7 @@ export type Versioned<T> = { value: T, etag: string };
 async function getJsonVersioned<T>(key: string): Promise<Versioned<T> | null> {
   try {
     return await withTransientRetry(async () => {
-      const result = await s3().send(new GetObjectCommand({ Bucket: bucket(), Key: key }));
+      const result = await s3().send(new GetObjectCommand({ Bucket: bucket(), Key: storageKey(key) }));
       const body = await result.Body?.transformToString();
       if (body === undefined) return null;
       if (result.ETag === undefined) throw new Error(`S3 omitted ETag for ${key}; conditional updates cannot be made safely`);
@@ -113,7 +113,7 @@ async function putJsonConditionally(key: string, value: unknown, condition: Writ
   try {
     const result = await s3().send(new PutObjectCommand({
       Bucket: bucket(),
-      Key: key,
+      Key: storageKey(key),
       Body: JSON.stringify(value),
       ContentType: "application/json",
       ...("ifMatch" in condition ? { IfMatch: condition.ifMatch } : { IfNoneMatch: "*" }),
@@ -140,7 +140,7 @@ function authenticatedControlPlaneState(key: string, value: unknown): Authentica
   return {
     authentication_version: 1,
     value,
-    mac_base64: authenticateControlPlaneState(serialized, key, getConfig().dataEncryptionRootKey),
+    mac_base64: authenticateControlPlaneState(serialized, storageKey(key), getConfig().dataEncryptionRootKey),
   };
 }
 
@@ -157,14 +157,14 @@ function readAuthenticatedControlPlaneState(key: string, stored: unknown): unkno
     throw new Error(`authoritative state ${JSON.stringify(key)} is unsigned; migrate it before starting this Marshal version`);
   }
   const serialized = JSON.stringify(stored.value);
-  if (!verifyControlPlaneStateAuthentication(serialized, key, stored.mac_base64, getConfig().dataEncryptionRootKey)) {
+  if (!verifyControlPlaneStateAuthentication(serialized, storageKey(key), stored.mac_base64, getConfig().dataEncryptionRootKey)) {
     throw new Error(`authoritative state ${JSON.stringify(key)} failed authentication`);
   }
   return stored.value;
 }
 
 async function deleteObject(key: string): Promise<void> {
-  await withTransientRetry(async () => await s3().send(new DeleteObjectCommand({ Bucket: bucket(), Key: key })));
+  await withTransientRetry(async () => await s3().send(new DeleteObjectCommand({ Bucket: bucket(), Key: storageKey(key) })));
 }
 
 async function deleteObjectConditionally(key: string, etag: string): Promise<boolean> {
@@ -174,7 +174,7 @@ async function deleteObjectConditionally(key: string, etag: string): Promise<boo
   try {
     await withTransientRetry(async () => await s3().send(new DeleteObjectCommand({
       Bucket: bucket(),
-      Key: key,
+      Key: storageKey(key),
       IfMatch: etag,
     })));
     return true;
@@ -195,11 +195,11 @@ async function listKeys(prefix: string): Promise<string[]> {
   do {
     const result: ListObjectsV2CommandOutput = await withTransientRetry(async () => await s3().send(new ListObjectsV2Command({
       Bucket: bucket(),
-      Prefix: prefix,
+      Prefix: storageKey(prefix),
       ContinuationToken: continuationToken,
     })));
     for (const item of result.Contents ?? []) {
-      if (item.Key !== undefined) keys.push(item.Key);
+      if (item.Key !== undefined) keys.push(logicalStorageKey(item.Key));
     }
     continuationToken = result.IsTruncated ? result.NextContinuationToken : undefined;
   } while (continuationToken !== undefined);
@@ -223,7 +223,7 @@ function specEncryptionContext(ns: string, key: string, stored: Omit<StoredSpecO
   // let a bucket writer move a complete object without invalidating its authentication tag.
   // Authenticate the remaining plaintext too, so config/source/revision tampering is detected
   // even though only the secret-bearing environment needs confidentiality.
-  return JSON.stringify({ object_key: specKey(ns, key), stored });
+  return JSON.stringify({ object_key: storageKey(specKey(ns, key)), stored });
 }
 
 function storedSpecForDisk(spec: StoredSpec): StoredSpecOnDisk {
@@ -362,7 +362,7 @@ export async function createUploadSlot(ns: string, id: string): Promise<{ upload
   // ingress cost before bucket lifecycle cleanup removes an oversized object.
   const uploadUrl = await getSignedUrl(s3(), new PutObjectCommand({
     Bucket: bucket(),
-    Key: uploadObjectKey(ns, id),
+    Key: storageKey(uploadObjectKey(ns, id)),
     ContentType: "application/gzip",
   }), { expiresIn: UPLOAD_EXPIRY_SECONDS });
   return { uploadUrl, expiresAtMillis: Date.now() + UPLOAD_EXPIRY_SECONDS * 1000 };
@@ -419,7 +419,7 @@ export function multipartPartCount(sizeBytes: number | undefined): number | null
  */
 export async function createMultipartUploadSlot(ns: string, id: string, partCount: number): Promise<MultipartUploadSlot> {
   const Bucket = bucket();
-  const Key = uploadObjectKey(ns, id);
+  const Key = storageKey(uploadObjectKey(ns, id));
   const created = await withTransientRetry(async () => await s3().send(new CreateMultipartUploadCommand({
     Bucket,
     Key,
@@ -443,7 +443,7 @@ export async function createMultipartUploadSlot(ns: string, id: string, partCoun
 // (smoke-verified), so the size gate is here, at consume time.
 export async function statUpload(ns: string, id: string): Promise<{ sizeBytes: number, etag: string } | null> {
   try {
-    const result = await withTransientRetry(async () => await s3().send(new HeadObjectCommand({ Bucket: bucket(), Key: uploadObjectKey(ns, id) })));
+    const result = await withTransientRetry(async () => await s3().send(new HeadObjectCommand({ Bucket: bucket(), Key: storageKey(uploadObjectKey(ns, id)) })));
     if (result.ETag === undefined) throw new Error(`S3 omitted ETag for upload ${uploadObjectKey(ns, id)}; a validated read cannot be fenced`);
     return { sizeBytes: result.ContentLength ?? 0, etag: result.ETag };
   } catch (error) {
@@ -457,7 +457,7 @@ export async function readUpload(ns: string, id: string, expectedEtag: string, m
     return await withTransientRetry(async () => {
       const result = await s3().send(new GetObjectCommand({
         Bucket: bucket(),
-        Key: uploadObjectKey(ns, id),
+        Key: storageKey(uploadObjectKey(ns, id)),
         IfMatch: expectedEtag,
       }));
       if (result.Body === undefined) return null;
@@ -495,7 +495,7 @@ export async function readUpload(ns: string, id: string, expectedEtag: string, m
 export async function presignUploadGet(ns: string, id: string, expiresInSeconds: number): Promise<string> {
   return await getSignedUrl(s3(), new GetObjectCommand({
     Bucket: bucket(),
-    Key: uploadObjectKey(ns, id),
+    Key: storageKey(uploadObjectKey(ns, id)),
   }), { expiresIn: expiresInSeconds });
 }
 
@@ -506,7 +506,7 @@ function validatedUploadObjectKey(ns: string, buildId: string): string {
 export async function writeValidatedUpload(ns: string, buildId: string, bytes: Uint8Array): Promise<void> {
   await withTransientRetry(async () => await s3().send(new PutObjectCommand({
     Bucket: bucket(),
-    Key: validatedUploadObjectKey(ns, buildId),
+    Key: storageKey(validatedUploadObjectKey(ns, buildId)),
     Body: bytes,
     ContentType: "application/gzip",
   })));
@@ -515,7 +515,7 @@ export async function writeValidatedUpload(ns: string, buildId: string, bytes: U
 export async function presignValidatedUploadGet(ns: string, buildId: string, expiresInSeconds: number): Promise<string> {
   return await getSignedUrl(s3(), new GetObjectCommand({
     Bucket: bucket(),
-    Key: validatedUploadObjectKey(ns, buildId),
+    Key: storageKey(validatedUploadObjectKey(ns, buildId)),
   }), { expiresIn: expiresInSeconds });
 }
 
@@ -553,7 +553,7 @@ type StoredDeploymentOnDisk = Omit<StoredDeployment, "targets"> & {
 type PersistedStoredDeployment = StoredDeploymentOnDisk | StoredDeployment;
 
 function deploymentEncryptionContext(ns: string, id: string, stored: Omit<StoredDeploymentOnDisk, "encrypted_target_env">): string {
-  return JSON.stringify({ object_key: deploymentRecordKey(ns, id), stored });
+  return JSON.stringify({ object_key: storageKey(deploymentRecordKey(ns, id)), stored });
 }
 
 function storedDeploymentForDisk(deployment: StoredDeployment): StoredDeploymentOnDisk {
@@ -636,7 +636,7 @@ export async function replaceDeployment(deployment: StoredDeployment, previousEt
 export async function writeDeploymentLog(ns: string, id: string, jsonlBody: string): Promise<void> {
   await withTransientRetry(async () => await s3().send(new PutObjectCommand({
     Bucket: bucket(),
-    Key: deploymentLogKey(ns, id),
+    Key: storageKey(deploymentLogKey(ns, id)),
     Body: jsonlBody,
     ContentType: "application/jsonl",
   })));
@@ -645,7 +645,7 @@ export async function writeDeploymentLog(ns: string, id: string, jsonlBody: stri
 export async function readDeploymentLog(ns: string, id: string): Promise<string | null> {
   try {
     return await withTransientRetry(async () => {
-      const result = await s3().send(new GetObjectCommand({ Bucket: bucket(), Key: deploymentLogKey(ns, id) }));
+      const result = await s3().send(new GetObjectCommand({ Bucket: bucket(), Key: storageKey(deploymentLogKey(ns, id)) }));
       return (await result.Body?.transformToString()) ?? null;
     });
   } catch (error) {
@@ -657,41 +657,6 @@ export async function readDeploymentLog(ns: string, id: string): Promise<string 
 // ---------------------------------------------------------------------------
 // Domain registry
 
-function platformDomainKey(ns: string, key: string): string {
-  return `platform-domains/${encodeURIComponent(ns)}/${encodeURIComponent(key)}.json`;
-}
-
-export async function readPlatformDomain(ns: string, key: string): Promise<PlatformDomainState | null> {
-  const objectKey = platformDomainKey(ns, key);
-  const stored = await getJson<unknown>(objectKey);
-  if (stored === null) return null;
-  const value = readAuthenticatedControlPlaneState(objectKey, stored);
-  if (!isRecord(value) || value.ns !== ns || value.key !== key || typeof value.hostname !== "string"
-    || typeof value.ready !== "boolean" || typeof value.nextAttemptAt !== "number" || !Number.isSafeInteger(value.nextAttemptAt) || value.nextAttemptAt < 0) {
-    throw new Error("authenticated platform domain state is malformed");
-  }
-  const error = value.error;
-  if (error !== null && error !== "pending" && error !== "rate_limited" && error !== "provider_error") throw new Error("invalid platform domain error");
-  return { ns, key, hostname: value.hostname, ready: value.ready, nextAttemptAt: value.nextAttemptAt, error };
-}
-
-// Callers hold the service reconciliation lease for every state mutation.
-export async function writePlatformDomain(state: PlatformDomainState): Promise<void> {
-  const key = platformDomainKey(state.ns, state.key);
-  await putJson(key, authenticatedControlPlaneState(key, state));
-}
-
-export async function deletePlatformDomain(ns: string, key: string): Promise<void> {
-  await deleteObject(platformDomainKey(ns, key));
-}
-
-export async function listPlatformDomains(): Promise<{ ns: string, key: string }[]> {
-  return (await listKeys("platform-domains/")).map((key) => {
-    const match = /^platform-domains\/([^/]+)\/([^/]+)\.json$/.exec(key);
-    if (match === null) throw new Error("invalid platform domain object key");
-    return { ns: decodeURIComponent(match[1]), key: decodeURIComponent(match[2]) };
-  });
-}
 
 function domainClaimKey(hostname: string): string {
   return `domains/${hostname}.json`;

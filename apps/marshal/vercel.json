@@ -3,10 +3,6 @@
   "framework": "elysia",
   "crons": [
     {
-      "path": "/v1/maintenance/platform-domains/step",
-      "schedule": "*/5 * * * *"
-    },
-    {
       "path": "/v1/maintenance/project-pool/step",
       "schedule": "*/2 * * * *"
     },

@@ -15,7 +15,6 @@ const endpoints: { path: string, intervalMs: number, target?: Target }[] = [
   // exactly these two on the same cadence.
   { path: "/v1/maintenance/project-pool/step", intervalMs: 2 * 60_000, target: "marshal" },
   { path: "/v1/maintenance/project-pool/reap", intervalMs: 60 * 60_000, target: "marshal" },
-  { path: "/v1/maintenance/platform-domains/step", intervalMs: 5 * 60_000, target: "marshal" },
 ];
 
 async function main() {

@@ -30,7 +30,7 @@ vi.mock("./config.js", () => ({
   UPLOAD_EXPIRY_SECONDS: 1,
 }));
 
-import { assignTenantProject, claimDomain, createDeployment, createPoolProject, readDeployment, readDomainClaimVersioned, readPlatformDomain, readPoolCreationLedgerVersioned, readPoolProject, readSpec, readTenantProjectAssignment, readUpload, releaseDomainClaim, writePlatformDomain, writePoolCreationLedgerConditionally, writeSpec } from "./store.js";
+import { assignTenantProject, claimDomain, createDeployment, createPoolProject, deleteSpec, listSpecKeys, readDeployment, readDomainClaimVersioned, readPoolCreationLedgerVersioned, readPoolProject, readSpec, readTenantProjectAssignment, readUpload, releaseDomainClaim, writePoolCreationLedgerConditionally, writeSpec } from "./store.js";
 
 describe("domain claim release", () => {
   const claim = {
@@ -78,20 +78,6 @@ describe("domain claim release", () => {
 });
 
 describe("authoritative state authentication", () => {
-  it("authenticates platform domain readiness and binds it to the service identity", async () => {
-    const state = { ns: "tenant", key: "web", hostname: "deploy-test.built-with-hexclave.com", ready: true, nextAttemptAt: 123, error: null };
-    send.mockResolvedValueOnce({});
-    await writePlatformDomain(state);
-    const body: unknown = send.mock.calls[0][0].input.Body;
-    if (typeof body !== "string") throw new Error("expected serialized domain state");
-    send.mockResolvedValueOnce({ Body: { transformToString: async () => body } });
-    await expect(readPlatformDomain("tenant", "web")).resolves.toEqual(state);
-    send.mockResolvedValueOnce({ Body: { transformToString: async () => body } });
-    await expect(readPlatformDomain("other", "web")).rejects.toThrow("failed authentication");
-    send.mockResolvedValueOnce({ Body: { transformToString: async () => JSON.stringify(state) } });
-    await expect(readPlatformDomain("tenant", "web")).rejects.toThrow("is unsigned");
-  });
-
   afterEach(() => {
     send.mockReset();
   });
@@ -194,6 +180,29 @@ describe("stored service spec encryption", () => {
 
   afterEach(() => {
     send.mockReset();
+    vi.unstubAllEnvs();
+  });
+
+  it("isolates live-test writes, reads, listings and deletes from normal service state", async () => {
+    vi.stubEnv("HEXCLAVE_MARSHAL_S3_KEY_PREFIX", "live-domain-tests/one/");
+    send.mockResolvedValueOnce({ ETag: "etag" });
+    await writeSpec(spec, { ifNoneMatch: true });
+    const body: unknown = send.mock.calls[0][0].input.Body;
+    if (typeof body !== "string") throw new Error("expected serialized spec");
+    const physicalKey = `live-domain-tests/one/specs/${spec.ns}/${spec.key}.json`;
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ input: expect.objectContaining({ Key: physicalKey }) }));
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => body }, ETag: "etag" });
+    await expect(readSpec(spec.ns, spec.key)).resolves.toEqual(spec);
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ input: expect.objectContaining({ Key: physicalKey }) }));
+    send.mockResolvedValueOnce({ Contents: [{ Key: physicalKey }] });
+    await expect(listSpecKeys(spec.ns)).resolves.toEqual([spec.key]);
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ input: expect.objectContaining({ Prefix: `live-domain-tests/one/specs/${spec.ns}/` }) }));
+    send.mockResolvedValueOnce({});
+    await deleteSpec(spec.ns, spec.key);
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ input: expect.objectContaining({ Key: physicalKey }) }));
+    vi.stubEnv("HEXCLAVE_MARSHAL_S3_KEY_PREFIX", "live-domain-tests/two/");
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => body }, ETag: "etag" });
+    await expect(readSpec(spec.ns, spec.key)).rejects.toThrow();
   });
 
   it("never writes plaintext environment values and decrypts the stored payload", async () => {

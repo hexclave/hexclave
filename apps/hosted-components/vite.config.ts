@@ -5,6 +5,7 @@ import viteReact from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
 import { nitro } from 'nitro/vite'
 import tsConfigPaths from 'vite-tsconfig-paths'
+import { deploymentProxyRoutes } from './src/deployment-proxy-routes'
 
 /**
  * Makes Vite watch specific packages inside node_modules for changes.
@@ -87,6 +88,9 @@ export default defineConfig({
     tanstackStart(),
     nitro({
       config: {
+        vercel: {
+          config: { routes: deploymentProxyRoutes },
+        },
         scanDirs: [
           'src/server',
         ],

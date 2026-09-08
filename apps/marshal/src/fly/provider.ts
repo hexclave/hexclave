@@ -5,10 +5,7 @@
 // flyVolumeName) is load-bearing for every existing tenant: change a derivation and every
 // live app becomes an orphan. See fly/naming.ts.
 import { createHash } from "node:crypto";
-import { enqueuePlatformDomain, removePlatformDomain } from "../platform-domains.js";
 import { isPlatformHostname, platformHostname } from "../platform-domain-names.js";
-import { platformDomainsEnabled } from "../platform-domain-api.js";
-import { readPlatformDomain } from "../store.js";
 import { BASE_IMAGE, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, FLY_DEFAULT_MEMORY_MB, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, RAILPACK_BUILDKIT_TMPFS_SIZE, SOFT_CONCURRENCY_LIMIT, flyBuilderGuestFor, flyConfig, flyGuestFor, flyVolumeName, getConfig, memorySizesFor, resolveNamespaceOrg, serviceMemoryMb } from "../config.js";
 import { buildCompletionPath, buildHarnessScript, computeWebhookToken, generatedDockerfile, type Builder } from "../builds.js";
 import { badRequest, conflict, notFound } from "../errors.js";
@@ -428,15 +425,7 @@ async function serviceAddress(fly: FlyClient, ns: string, key: string, stored: S
   let platformUrl: string | null = null;
   if (servesHttp) {
     if (specIsPublic(stored.spec)) {
-      platformUrl = `https://${appName}.fly.dev`;
-      if (platformDomainsEnabled()) {
-        const state = await readPlatformDomain(ns, key);
-        const expected = platformHostname(envId, ns, key);
-        const certificate = (certificates ?? await fly.listCertificates(appName)).find((entry) => entry.hostname === expected);
-        if (state?.hostname === expected && state.ready && certificate !== undefined && certificateIsVerified(certificate)) {
-          platformUrl = `https://${expected}`;
-        }
-      }
+      platformUrl = `https://${platformHostname(envId, ns, key)}`;
     } else {
       const verified = (certificates ?? await fly.listCertificates(appName)).filter((certificate) => !isPlatformHostname(certificate.hostname) && certificateIsVerified(certificate)).map((certificate) => certificate.hostname).sort();
       platformUrl = verified.length > 0 ? `https://${verified[0]}` : null;
@@ -769,10 +758,7 @@ export function createFlyProvider(): RuntimeProvider {
     },
 
     async applyService(stored, image, env, lease) {
-      if (!specIsPublic(stored.spec)) await removePlatformDomain(stored.ns, stored.key, lease);
-      const result = await applyMachines(flyFor(stored.ns), stored, image, env, lease);
-      await enqueuePlatformDomain(stored, lease);
-      return result;
+      return await applyMachines(flyFor(stored.ns), stored, image, env, lease);
     },
 
     async observeService(stored) {
@@ -906,20 +892,9 @@ export function createFlyProvider(): RuntimeProvider {
         const fly = flyFor(ns);
         const appName = appNameForService(getConfig().envId, ns, key);
         const certificates = (await fly.listCertificates(appName)).filter((certificate) => !isPlatformHostname(certificate.hostname));
-        const states = await computeDomainStates(fly, appName, certificates);
-        if (platformDomainsEnabled()) {
-          const state = await readPlatformDomain(ns, key);
-          if (state !== null) states.push({
-            hostname: state.hostname, verified: state.ready, dns_records: [],
-            error: state.error === "rate_limited" ? "Branded domain issuance is rate-limited; using the default domain. Provisioning will retry automatically."
-              : state.error === "provider_error" ? "Branded domain provisioning failed; using the default domain. Provisioning will retry automatically."
-                : state.error === "pending" ? "Branded domain provisioning is pending; using the default domain." : null,
-          });
-        }
-        return states;
+        return await computeDomainStates(fly, appName, certificates);
       },
       async releaseForService(ns, key, _stored, lease) {
-        await removePlatformDomain(ns, key, lease);
         const fly = flyFor(ns);
         const appName = appNameForService(getConfig().envId, ns, key);
         // Release hostname claims first — the bucket registry would otherwise block the

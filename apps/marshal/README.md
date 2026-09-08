@@ -107,51 +107,35 @@ Cloud Run has no equivalent of Fly's request-triggered VM suspend/resume for a p
 
 ## Fly deployment platform domains
 
-Set `HEXCLAVE_VERCEL_DNS_TOKEN` on Marshal to enable automatic
-`deploy-<service-identity-hash>.built-with-hexclave.com` addresses for public Fly services.
-Set `HEXCLAVE_VERCEL_DNS_TEAM_ID` when the DNS zone belongs to a Vercel team. The token
-must be authorized to list/create/update/delete DNS records in that zone; an integration
-token with Domain Read/Write can be used. No integration installation UI is required by
-Marshal: configure the resulting token as a secret. Leave the token unset to retain the
-existing Fly-only behavior. Never pass this token to builders or tenant containers.
+Public HTTP services advertise `https://deploy-<suffix>.built-with-hexclave.com`, where
+`hxc-<suffix>` is the existing Fly app name. The name remains stable across redeploys.
+The hosted-components Vercel project uses its existing wildcard DNS and TLS certificate
+and proxies the request to `https://hxc-<suffix>.fly.dev`, preserving the path and query.
+Deploy hosted-components with the new routing rule before deploying this Marshal version.
+Existing `.fly.dev` addresses continue to work. Customer custom domains keep their existing
+provisioning and display priority; private services receive no generated platform URL.
+GCP routing is unchanged.
 
-The hostname includes the Marshal environment, namespace and complete service key in its
-hash. Service keys are already unique across deployment groups in a project. Redeploys
-reuse the address and certificate; this is a stable service URL, not an immutable URL for
-each historical build. Private services receive no generated public address.
+No per-service certificate, DNS record, DNS API token, background domain worker, or domain
+registration lookup is involved. Consequently, deleting a service removes its Fly resources
+but does not revoke the deterministic proxy alias. The proxy intentionally accepts every
+syntactically valid matching Fly app name, including apps outside this platform. Fly app
+names must not be treated as proof of ownership.
 
-Successful runtime applies queue authenticated state in `platform-domains/` in the bucket.
-The authenticated `GET /v1/maintenance/platform-domains/step` cron runs every five minutes
-and reconciles up to ten due services per invocation, oldest first. Configure `CRON_SECRET`
-as for the other maintenance endpoints. Provisioning uses the service's reconciliation
-lease, so deletion and visibility changes cannot race certificate/DNS mutations. Existing
-services are enrolled on their next deployment. Ready entries are rechecked daily.
+The route lives in `apps/hosted-components/src/deployment-proxy-routes.ts`. Nitro prepends
+it to the Vercel Build Output API routes before filesystem lookup so deployment paths such
+as `/llms.txt`, `/assets/...`, and `/handler/...` do not serve hosted-component content.
+Requests without a matching deployment hostname continue through normal hosted routing.
+The native Vercel proxy forwards traffic; Marshal and the hosted-components React server
+are not involved in each proxied request. This rule is specific to Vercel, not Vite's local
+server or the standalone Nitro server. There is no automatic switch to `.fly.dev` on a
+proxy outage. Validate Vercel's upload, streaming, WebSocket, redirect and cookie behavior
+with the intended workloads before rollout.
 
-The worker uses the [Fly Machines certificate API](https://fly.io/docs/machines/api/certificates-resource/)
-to request/check certificates and reads its returned routing and DNS challenge targets.
-It writes two explicit CNAMEs through the [Vercel DNS API](https://vercel.com/docs/rest-api/dns/create-a-dns-record):
-the service hostname and its `_acme-challenge` name. It never modifies the wildcard, apex,
-hosted-component project hostnames, or the wildcard certificate's validation record.
-DNS records carry an ownership comment; conflicting unowned records are reported rather
-than overwritten. The generated namespace cannot be attached as a customer custom domain.
-
-Until DNS reconciliation and certificate validation succeed, the service continues reporting
-its working `.fly.dev` URL. Expected Fly/Vercel API failures only update domain retry state,
-not deployment success. Fly's certificate-limit errors use `Retry-After` when present, or
-a seven-day cooldown when the response identifies an ACME certificate limit without a retry
-time. A successful Fly response with `rate_limited_until` is also respected. Other provider
-errors retry after fifteen minutes; pending certificates poll every five minutes. Redeploys
-do not reset cooldowns. Provider response bodies are not exposed in status messages.
-
-Service references already resolved to `.fly.dev` remain valid. The backend continues to
-prefer verified customer custom domains. On service deletion or a change to private, DNS
-and the generated certificate are removed before public ingress/app teardown; cleanup
-failures block that teardown so it can be retried safely. Keep the Vercel credentials
-configured until existing generated domains have been removed.
-
-Unit/contract tests use mocked provider responses. Real DNS propagation, certificate
-issuance/renewal, and integration-token permissions still need a live test with real keys.
-The maintenance endpoint refuses to provision real DNS against the local Fly simulator.
+This replaces the unshipped per-service DNS/certificate implementation. If that earlier
+implementation was used manually, remove its explicit deployment CNAMEs and certificates
+before retiring its cleanup credentials. Old explicit DNS records override wildcard routing,
+and the old hashed platform hostnames are not compatible with this naming scheme.
 
 ## Local GCP simulator
 
@@ -210,6 +194,41 @@ Marshal enables Compute Engine, Cloud Run, Artifact Registry, IAM, and Cloud Log
 For a disposable project created out-of-band, `HEXCLAVE_MARSHAL_GCP_EXISTING_PROJECT_ID_FOR_TESTS` bypasses project creation. It is guarded by `MARSHAL_ALLOW_MOCKS=1` and must never point at a production project.
 
 ## Disposable live verification
+
+### Fly platform domains with Vercel DNS
+
+From the repository root, run:
+
+```sh
+pnpm -C apps/marshal test:platform-domains:live
+```
+
+The runner reads real Fly and S3 credentials from `apps/marshal/.env.local`, accepting either
+the `MARSHAL_*` names or `FLY_API_TOKEN`, `FLY_ORG_SLUG`, `S3_ACCESS_KEY_ID`,
+`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`. No Vercel token is required.
+Deploy the hosted-components proxy first; this local runner cannot install a Vercel routing
+rule. `--help` prints usage without loading credentials or calling providers.
+
+The test creates one disposable Fly app/machine (which can incur usage charges), checks its
+default Fly HTTPS response and branded HTTPS proxy, redeploys while retaining the hostname,
+and verifies cleanup. It uses a pinned prebuilt nginx image and production service code;
+source builds and the backend/dashboard deployment flow are outside its scope. No custom
+certificate is requested, so the test does not consume custom-domain issuance quota.
+
+Test state is isolated under a unique `live-domain-tests/<run-id>/` S3 prefix. The runner
+cleans up after success, failure, or Ctrl+C. A complete pass exits **0**; test or cleanup
+failures exit **1**. A private recovery file containing the disposable identity and encryption
+key (no provider tokens) is printed before provisioning. If cleanup fails or the process is
+killed, retain that file and run:
+
+```sh
+pnpm -C apps/marshal test:platform-domains:live --cleanup /path/printed/by/the/test.untracked.json
+```
+
+Use the same Fly/S3 account for cleanup. The file is removed only after cleanup is verified.
+The live runner is not included in the normal Vitest suite.
+
+### GCP
 
 `src/gcp/live.test.ts` is opt-in because it creates billable resources. Set Application Default Credentials plus `HEXCLAVE_MARSHAL_GCP_LIVE_TEST=1`, `HEXCLAVE_MARSHAL_GCP_LIVE_BILLING_ACCOUNT`, and `HEXCLAVE_MARSHAL_GCP_LIVE_PLATFORM_PROJECT_ID`; optionally set `HEXCLAVE_MARSHAL_GCP_LIVE_PROJECT_PARENT=folders/<id>`. The existing platform project must have Compute Engine and Certificate Manager enabled and the controller roles documented above. Then run `pnpm -C apps/marshal test -- src/gcp/live.test.ts`.
 
