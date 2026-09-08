@@ -166,10 +166,10 @@ def _terminate_exact_tree(
         if info.name == "cog"
     )
     if len(cog_processes) == 1:
-        # Cog owns the WebKit processes. Give it the first and only graceful
-        # signal so WebKit can flush persistent cookies before Cog closes its
-        # Cage surface. Signalling WPENetworkProcess independently races that
-        # write and can turn a routine service restart into lost pairing state.
+        # Cog owns the WebKit processes. Signal it directly for supervisor-
+        # initiated recovery; during a systemd stop, KillMode=control-group has
+        # already delivered the same graceful signal to the complete renderer
+        # tree, including the process that persists cookies.
         try:
             os.kill(cog_processes[0], signal.SIGTERM)
         except ProcessLookupError:
@@ -222,8 +222,8 @@ def _stop_renderer(
         pass
     descendants_exited = _wait_for_renderer_shutdown(tracked_processes, process_reader, sleeper)
     if not cage_exited or not descendants_exited:
-        # The unit uses KillMode=mixed, so systemd retains a bounded SIGKILL
-        # fallback for exactly this control group after the supervisor exits.
+        # systemd retains a bounded SIGKILL fallback for exactly this unit's
+        # control group after the graceful stop deadline.
         LOGGER.warning("kiosk-renderer-stop-timeout")
 
 

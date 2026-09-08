@@ -73,11 +73,12 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn("StandardInput=tty-fail", kiosk)
         self.assertIn("PAMName=hexclave-tv-box-kiosk", kiosk)
         self.assertIn("ExecStartPost=+/usr/bin/chvt 1", kiosk)
-        self.assertIn("TimeoutStopSec=10", kiosk)
-        self.assertIn("KillMode=mixed", kiosk)
-        self.assertNotIn("KillMode=control-group", kiosk)
+        self.assertIn("TimeoutStopSec=20", kiosk)
+        self.assertIn("KillMode=control-group", kiosk)
+        self.assertNotIn("KillMode=mixed", kiosk)
         verifier = (ROOT / "scripts/verify-image.sh").read_text(encoding="utf-8")
-        self.assertIn("grep -qxF 'KillMode=mixed'", verifier)
+        self.assertIn("grep -qxF 'TimeoutStopSec=20'", verifier)
+        self.assertIn("grep -qxF 'KillMode=control-group'", verifier)
         self.assertIn("Environment=WLR_LIBINPUT_NO_DEVICES=1", kiosk)
         self.assertIn("SyslogIdentifier=hexclave-tv-box-kiosk", kiosk)
         kiosk_pam = (ROOTFS / "etc/pam.d/hexclave-tv-box-kiosk").read_text(encoding="utf-8")
@@ -278,7 +279,8 @@ class ImageContractTests(unittest.TestCase):
                         else (
                             "Environment=WLR_LIBINPUT_NO_DEVICES=1\n"
                             "Environment=XDG_RUNTIME_DIR=/run/hexclave-tv-box-wayland\n"
-                            "KillMode=mixed\n"
+                            "TimeoutStopSec=20\n"
+                            "KillMode=control-group\n"
                             "StartLimitAction=reboot\n"
                         )
                         if path == "etc/systemd/system/hexclave-tv-box-kiosk.service"

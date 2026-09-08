@@ -36,7 +36,7 @@ class FakeProcess:
 
 
 class KioskSupervisorTests(unittest.TestCase):
-    def test_graceful_shutdown_signals_only_cog_so_webkit_can_flush_state(self) -> None:
+    def test_supervisor_initiated_shutdown_signals_only_its_exact_cog_child(self) -> None:
         process = FakeProcess()
         processes = {
             100: ProcessInfo(90, "cage"),

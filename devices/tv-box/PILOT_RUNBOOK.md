@@ -36,7 +36,7 @@ Perform these checks on the exact Raspberry Pi Zero 2 W, power supply, microSD c
 - Disconnect Wi-Fi, restore it, deny backend access temporarily, and restore access. Local network setup and browser recovery must remain independent; backend failure must not erase pairing or Wi-Fi state.
 - Remove and restore HDMI while running. The compositor must recover a stable fullscreen picture at the pilot resolution.
 - Perform five controlled abrupt power cuts across boot, pairing, normal playback, and network recovery. The filesystem, pairing cookie, unique identity, and saved network must remain valid, or the box must return to a safe setup state.
-- Run the restricted `diagnostics` and `recent-logs` support commands and verify that they contain useful health information but no tokens, cookies, pairing secrets, Wi-Fi names/passwords, snapshot payloads, or customer data.
+- Run the restricted `diagnostics`, `recent-logs`, and `previous-logs` support commands and verify that they contain useful health information but no tokens, cookies, pairing secrets, Wi-Fi names/passwords, snapshot payloads, or customer data. After an OS reboot, use `previous-logs` to confirm that the prior kiosk process group completed its bounded shutdown.
 - From another LAN host, verify that no dashboard/backend development ports are reachable and that SSH rejects passwords, ordinary keys, root login, forwarding, and expired/untrusted certificates.
 - Exercise `reset-network`, dashboard-admin-unpair followed by `reset-pairing`, and dashboard-admin-unpair followed by `factory-reset`. Factory reset must remove the browser cookie jar, saved TV Box network profiles, local logs/state, and SSH host keys; the next boot must create a new unpaired local identity.
 

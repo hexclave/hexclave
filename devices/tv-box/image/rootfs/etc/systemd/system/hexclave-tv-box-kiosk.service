@@ -39,11 +39,11 @@ ExecStart=/usr/lib/hexclave-tv-box/kiosk-launch
 ExecStartPost=+/usr/bin/chvt 1
 Restart=always
 RestartSec=2
-TimeoutStopSec=10
-# Send SIGTERM only to the supervisor so it can stop Cog first and wait for
-# WebKit's persistent-cookie flush. Any process still alive at the bounded
-# stop deadline is killed across this exact unit control group.
-KillMode=mixed
+TimeoutStopSec=20
+# WPE keeps persistent cookies in its separate network process. Terminate the
+# complete renderer group gracefully so that process can close its SQLite
+# store; the supervisor still observes the exact descendants until they exit.
+KillMode=control-group
 SendSIGKILL=yes
 NoNewPrivileges=yes
 PrivateTmp=yes

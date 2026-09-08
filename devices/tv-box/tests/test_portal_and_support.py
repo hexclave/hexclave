@@ -10,7 +10,17 @@ from unittest import mock
 
 from hexclave_tv_box.setup_portal import SetupPortalServer, SubmissionLimiter
 from hexclave_tv_box.kiosk_supervisor import ProcessInfo
-from hexclave_tv_box.support import ADMIN_CONFIRMATION, _sqlite_store_state, diagnostics, execute, factory_reset, forced_command_main, recent_service_logs, reset_pairing
+from hexclave_tv_box.support import (
+    ADMIN_CONFIRMATION,
+    _sqlite_store_state,
+    diagnostics,
+    execute,
+    factory_reset,
+    forced_command_main,
+    previous_service_logs,
+    recent_service_logs,
+    reset_pairing,
+)
 
 
 class PortalAndSupportTests(unittest.TestCase):
@@ -115,6 +125,21 @@ class PortalAndSupportTests(unittest.TestCase):
             self.assertIn("--boot=0", renderer_command)
             self.assertIn("--identifier=hexclave-tv-box-kiosk", renderer_command)
             self.assertFalse(any(value.startswith("--unit=") for value in renderer_command))
+
+    def test_previous_logs_use_the_same_bounded_tv_box_scope(self) -> None:
+        with mock.patch("hexclave_tv_box.support.run", return_value="previous logs") as runner:
+            self.assertEqual(previous_service_logs(), "previous logs\nprevious logs")
+            self.assertEqual(execute("previous-logs", []), "previous logs\nprevious logs")
+            self.assertEqual(runner.call_count, 4)
+            for call in runner.call_args_list:
+                command = call.args[0]
+                self.assertIn("--boot=-1", command)
+                self.assertIn("--lines=200", command)
+                self.assertNotIn("NetworkManager.service", command)
+                self.assertTrue(
+                    any(value.startswith("--unit=hexclave-tv-box-") for value in command)
+                    or "--identifier=hexclave-tv-box-kiosk" in command
+                )
 
     def test_diagnostics_exposes_only_the_public_device_identifier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

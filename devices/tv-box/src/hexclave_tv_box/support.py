@@ -186,12 +186,14 @@ def diagnostics() -> str:
     return "\n".join(lines)
 
 
-def recent_service_logs() -> str:
+def _bounded_service_logs(boot: str) -> str:
+    if boot not in {"0", "-1"}:
+        raise ValueError("TV Box diagnostic boot selector is invalid.")
     service_logs = run([
         "journalctl",
         "--no-pager",
         "--output=short-iso",
-        "--boot=0",
+        f"--boot={boot}",
         "--lines=200",
         "--unit=hexclave-tv-box-firstboot.service",
         "--unit=hexclave-tv-box-network.service",
@@ -207,12 +209,20 @@ def recent_service_logs() -> str:
         "journalctl",
         "--no-pager",
         "--output=short-iso",
-        "--boot=0",
+        f"--boot={boot}",
         "--lines=200",
         f"--identifier={KIOSK_LOG_IDENTIFIER}",
     ])
     sections = [section for section in (service_logs, renderer_logs) if section != ""]
     return "\n".join(sections)
+
+
+def recent_service_logs() -> str:
+    return _bounded_service_logs("0")
+
+
+def previous_service_logs() -> str:
+    return _bounded_service_logs("-1")
 
 
 def reset_pairing(state_root: Path, confirmation: str) -> None:
@@ -252,6 +262,8 @@ def execute(command: str, arguments: list[str], state_root: Path = STATE_ROOT) -
         return diagnostics()
     if command == "recent-logs" and not arguments:
         return recent_service_logs()
+    if command == "previous-logs" and not arguments:
+        return previous_service_logs()
     if command == "restart-kiosk" and not arguments:
         # Keep shutdown and startup as independently bounded operations. A
         # wedged Cog/Cage shutdown may require the unit's SIGKILL fallback but
@@ -288,7 +300,7 @@ def main() -> None:
 def forced_command_main() -> None:
     original = os.environ.get("SSH_ORIGINAL_COMMAND", "").strip()
     if original == "":
-        print("Allowed commands: diagnostics, recent-logs, restart-kiosk, restart-network, reset-network, reset-pairing, factory-reset, reboot, shutdown")
+        print("Allowed commands: diagnostics, recent-logs, previous-logs, restart-kiosk, restart-network, reset-network, reset-pairing, factory-reset, reboot, shutdown")
         return
     # Support commands deliberately use a tiny token grammar; quoting, shell
     # metacharacters and arbitrary paths are never interpreted.
