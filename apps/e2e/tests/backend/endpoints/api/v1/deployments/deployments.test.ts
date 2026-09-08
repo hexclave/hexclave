@@ -1425,13 +1425,13 @@ describe("deploys against the Marshal runtime", () => {
 
     const first = await syncServiceAndUpload(serviceId, { public: true, ports: { 3000: { protocol: "http" } } });
     const publicRun = await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
-    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/deploy-.+\.built-with-hexclave\.com$/);
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/[^.]+\.deploy\.built-with-hexclave\.com$/);
     const publicService = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
     expect((publicService.body as any).public).toBe(true);
     expect((publicService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
     expect((publicService.body as any).url).toBe(serviceOutcome(publicRun, serviceId).url);
     const publicApp = await findMockApp(serviceId);
-    expect(serviceOutcome(publicRun, serviceId).url).toBe(`https://deploy-${publicApp.name.slice(4)}.built-with-hexclave.com`);
+    expect(serviceOutcome(publicRun, serviceId).url).toBe(`https://${publicApp.name.slice(4)}.deploy.built-with-hexclave.com`);
     expect(publicApp.certificates).toEqual([]);
     expect(publicApp.sharedIpv4).not.toBeNull();
     expect(publicApp.dedicatedIps.some((ip) => ip.type === "v6")).toBe(true);
@@ -1723,13 +1723,15 @@ describe("domains", () => {
     await Project.createAndSwitch();
     const serviceId = uniqueServiceId("reserved-domain");
     await syncServices({ [serviceId]: { type: "serverless", public: true, ports: { 3000: { protocol: "http" } }, env: {} } });
-    const response = await niceBackendFetch(`/api/v1/deployments/services/${encodeURIComponent(serviceId)}/domains`, {
-      method: "POST",
-      accessType: "admin",
-      body: { hostname: "Deploy-example.built-with-hexclave.com", is_primary: true },
-    });
-    expect(response.status).toBe(400);
-    expect(JSON.stringify(response.body)).toContain("managed automatically");
+    for (const hostname of ["Example.deploy.built-with-hexclave.com", "deploy.built-with-hexclave.com", "nested.example.deploy.built-with-hexclave.com"]) {
+      const response = await niceBackendFetch(`/api/v1/deployments/services/${encodeURIComponent(serviceId)}/domains`, {
+        method: "POST",
+        accessType: "admin",
+        body: { hostname, is_primary: true },
+      });
+      expect(response.status).toBe(400);
+      expect(JSON.stringify(response.body)).toContain("managed automatically");
+    }
   });
 
   it("adds a domain, reports its DNS records, and removes it", { timeout: 120_000 }, async ({ expect }) => {

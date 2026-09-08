@@ -4,7 +4,9 @@ import { assertAlwaysOnMemoryCapacity, autoInjectedEnvVars, definitionFromServic
 
 describe("deployment domain names", () => {
   it("reserves platform-generated names while preserving customer and hosted-component names", () => {
-    expect(() => normalizeHostnameOrThrow("Deploy-example.built-with-hexclave.com")).toThrow("managed automatically");
+    expect(() => normalizeHostnameOrThrow("Example.deploy.built-with-hexclave.com")).toThrow("managed automatically");
+    expect(() => normalizeHostnameOrThrow("deploy.built-with-hexclave.com")).toThrow("managed automatically");
+    expect(() => normalizeHostnameOrThrow("nested.example.deploy.built-with-hexclave.com")).toThrow("managed automatically");
     expect(normalizeHostnameOrThrow("project-id.built-with-hexclave.com")).toBe("project-id.built-with-hexclave.com");
     expect(normalizeHostnameOrThrow("deploy-example.customer.com")).toBe("deploy-example.customer.com");
   });

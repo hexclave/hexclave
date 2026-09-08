@@ -16,7 +16,7 @@ import type { ServiceSpec } from "./types.js";
 const ENV_ID = "domain-live-test";
 const KEY = "web";
 const MINUTE = 60_000;
-const IMAGE = "docker.io/library/nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de";
+const IMAGE = "docker.io/oven/bun:1.3.13@sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e";
 
 export type LiveDomainRun = { version: 1, id: string, encryptionKey: string, scopeHash: string };
 export type LiveDomainResult = { kind: "passed" };
@@ -103,13 +103,20 @@ export async function saveRecoveryFile(run: LiveDomainRun): Promise<string> {
   return path;
 }
 
-function testSpec(marker: string): ServiceSpec {
+async function testSpec(marker: string, hostname: string, flyHostname: string): Promise<ServiceSpec> {
+  const fixture = await readFile(new URL("./live-proxy-fixture/server.mjs", import.meta.url), "utf8");
   return {
-    source: { image: IMAGE }, env: { HEXCLAVE_LIVE_TEST_MARKER: { value: marker } },
+    source: { image: IMAGE },
+    env: {
+      HEXCLAVE_LIVE_TEST_MARKER: { value: marker },
+      HEXCLAVE_LIVE_TEST_HOSTNAME: { value: hostname },
+      HEXCLAVE_LIVE_TEST_FLY_HOSTNAME: { value: flyHostname },
+      HEXCLAVE_LIVE_TEST_SOURCE: { value: Buffer.from(fixture).toString("base64") },
+    },
     config: {
       type: "serverless", public: true, min_instances: 1, max_instances: 1,
       ports: { "80": { protocol: "http" } },
-      start_command: 'printf "%s" "$HEXCLAVE_LIVE_TEST_MARKER" > /usr/share/nginx/html/index.html && cp /usr/share/nginx/html/index.html /usr/share/nginx/html/llms.txt && exec nginx -g "daemon off;"',
+      start_command: `bun -e 'eval(Buffer.from(process.env.HEXCLAVE_LIVE_TEST_SOURCE, "base64").toString())'`,
     },
   };
 }
@@ -158,8 +165,8 @@ export async function exerciseLiveRun(run: LiveDomainRun, signal: AbortSignal, t
   const brandedUrl = `https://${hostname}`;
   const marker = `hexclave-domain-live-${run.id}`;
   getConfig(); // Validate every setting before creating resources.
-  console.log(`Fly app: ${app}\nBranded URL: ${brandedUrl}\nDeploying a disposable nginx service...`);
-  const applied = await applyServiceSpec(ns, KEY, testSpec(marker), { runtime: "fly" });
+  console.log(`Fly app: ${app}\nBranded URL: ${brandedUrl}\nDeploying a disposable compatibility service...`);
+  const applied = await applyServiceSpec(ns, KEY, await testSpec(marker, hostname, `${app}.fly.dev`), { runtime: "fly" });
   assert.equal(applied.state.error, null, "Test service failed to deploy");
   assert.equal(applied.state.outputs.url, brandedUrl, "A public service should immediately advertise its proxy URL");
   await waitForLiveCheck("the default Fly HTTPS URL", async () => await servesMarker(flyUrl, marker), signal, 3 * MINUTE);
@@ -168,23 +175,65 @@ export async function exerciseLiveRun(run: LiveDomainRun, signal: AbortSignal, t
   await waitForLiveCheck("the branded HTTPS URL", async () => {
     return (await getServiceState(ns, KEY)).outputs.url === brandedUrl && await servesMarker(brandedUrl, marker);
   }, signal, timeoutMs);
-  console.log("PASS: branded HTTPS proxies this test's response through hosted components.");
-  // Hosted components has its own /llms.txt route. This catches proxy rules that
-  // accidentally run after the framework/filesystem has already handled a path.
-  await waitForLiveCheck("deployment routing ahead of hosted-component paths", async () => await servesMarker(`${brandedUrl}/llms.txt?probe=${run.id}`, marker), signal, timeoutMs);
+  console.log("PASS: branded HTTPS proxies this test's response through the dedicated Fly gateway.");
+  // Exercise paths that could otherwise collide with a gateway/framework route.
+  await waitForLiveCheck("deployment path forwarding", async () => await servesMarker(`${brandedUrl}/llms.txt?probe=${run.id}`, marker), signal, timeoutMs);
   const head = await fetch(`${brandedUrl}/llms.txt`, { method: "HEAD", redirect: "error", signal: AbortSignal.timeout(10_000) });
   assert.equal(head.status, 200, "HEAD was not forwarded to the deployment");
   assert.equal(await head.text(), "", "HEAD unexpectedly returned a response body");
   const post = await fetch(`${brandedUrl}/llms.txt`, { method: "POST", body: "proxy-method-check", redirect: "error", signal: AbortSignal.timeout(10_000) });
   await post.text();
-  assert.equal(post.status, 405, "nginx's static-file POST rejection was not preserved by the proxy");
-  console.log("PASS: overlapping hosted paths, HEAD, and POST response status are forwarded.");
+  assert.equal(post.status, 405, "The fixture's POST rejection was not preserved by the proxy");
+  console.log("PASS: deployment paths, HEAD, and POST response status are forwarded.");
+
+  for (const origin of [flyUrl, brandedUrl]) {
+    const domain = new URL(origin).hostname;
+    const response = await fetch(`${origin}/compatibility/login?domain=${encodeURIComponent(domain)}&value=first`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000) });
+    assert.equal(response.status, 200, "Cookie fixture login failed");
+    const cookies = response.headers.getSetCookie();
+    for (const expected of [
+      `__Host-hxc_session=${marker}-first; Secure; HttpOnly; SameSite=Lax; Path=/`,
+      `hxc_path=${marker}-first; Secure; SameSite=Strict; Path=/compatibility/scoped`,
+      `hxc_domain=${marker}-first; Secure; SameSite=None; Domain=${domain}; Path=/`,
+    ]) assert(cookies.includes(expected), `Cookie attributes changed on ${domain}`);
+    await response.text();
+  }
+  console.log("PASS: separate Set-Cookie headers and Secure, HttpOnly, SameSite, Path, and Domain attributes preserved.");
+
+  console.log(`Open both URLs in your browser and click Run browser checks:\n${flyUrl}/compatibility\n${brandedUrl}/compatibility\nYou have 10 minutes. The shared gateway stays running after the disposable test app is removed.`);
+  await waitForLiveCheck("browser compatibility results from both origins", async () => {
+    const response = await fetch(`${flyUrl}/compatibility/result`, { redirect: "error", signal: AbortSignal.timeout(10_000) });
+    assert.equal(response.status, 200, "Could not read browser test results");
+    return checkBrowserReports(await response.json(), marker, [hostname, `${app}.fly.dev`]);
+  }, signal, 10 * MINUTE);
+  console.log("PASS: browser streaming, WebSockets, and session cookies on both Fly and branded origins.");
 
   const updatedMarker = `${marker}-redeployed`;
-  const redeployed = await applyServiceSpec(ns, KEY, testSpec(updatedMarker), { runtime: "fly" });
+  const redeployed = await applyServiceSpec(ns, KEY, await testSpec(updatedMarker, hostname, `${app}.fly.dev`), { runtime: "fly" });
   assert.equal(redeployed.state.error, null, "Redeployment failed");
   assert.equal(redeployed.state.outputs.url, brandedUrl, "Redeployment changed the platform URL");
   await waitForLiveCheck("the redeployed response", async () => await servesMarker(brandedUrl, updatedMarker) && await servesMarker(flyUrl, updatedMarker), signal, 3 * MINUTE);
   console.log("PASS: redeploy retained its hostname; both HTTPS URLs serve the new response.");
   return { kind: "passed" };
+}
+
+
+export function checkBrowserReports(value: unknown, marker: string, hostnames: string[]): boolean {
+  assert(Array.isArray(value), "Invalid browser report collection");
+  const completed = new Set<string>();
+  const summaries: string[] = [];
+  let failed = false;
+  for (const report of value) {
+    assert(isRecord(report) && report.marker === marker && typeof report.origin === "string" && hostnames.includes(report.origin), "Unexpected browser report identity");
+    assert(Array.isArray(report.failures) && report.failures.every(item => typeof item === "string"), "Invalid browser failures");
+    assert(Array.isArray(report.lines) && report.lines.length === 3 && report.lines.every(item => typeof item === "string"), "Incomplete browser checks");
+    failed ||= report.failures.length > 0;
+    summaries.push(`${report.origin}:\n${report.lines.join("\n")}`);
+    completed.add(report.origin);
+  }
+  // Keep the fixture alive for the baseline even when the proxy fails first.
+  // Otherwise cleanup can prevent us from distinguishing origin and proxy failures.
+  if (!hostnames.every(hostname => completed.has(hostname))) return false;
+  assert(!failed, `Browser compatibility failed. Results from both origins:\n${summaries.join("\n\n")}`);
+  return true;
 }

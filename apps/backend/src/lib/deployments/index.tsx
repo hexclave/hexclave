@@ -1049,7 +1049,7 @@ export function normalizeHostnameOrThrow(hostname: string): string {
   }
   // Match Marshal's reserved namespace before storing a customer-domain row.
   // These addresses are provisioned by the platform and cannot be reassigned.
-  if (/^deploy-[^.]+\.built-with-hexclave\.com$/.test(normalized)) {
+  if (/^(?:.+\.)?deploy\.built-with-hexclave\.com$/.test(normalized)) {
     throw new StatusError(400, "Deployment platform domains are managed automatically and cannot be used as custom domains.");
   }
   return normalized;

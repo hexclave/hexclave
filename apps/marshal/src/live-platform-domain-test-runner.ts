@@ -9,7 +9,7 @@ import { readSpec } from "./store.js";
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === "--help") {
-    console.log("Usage: test:platform-domains:live [--cleanup recovery-file]\nUses Fly/S3 credentials from apps/marshal/.env.local. No Vercel token required.\nRequires the hosted-components proxy to be deployed first. Creates a disposable Fly app, verifies HTTPS and redeploy, then deletes it.\nExit codes: 0 = passed, 1 = failed.");
+    console.log("Usage: test:platform-domains:live [--cleanup recovery-file]\nUses Fly/S3 credentials from apps/marshal/.env.local. Requires the dedicated Fly gateway and wildcard DNS/TLS to be configured first. No Vercel token, bypass secret, or alias is required.\nCreates a disposable Fly app, verifies HTTPS, waits up to 10 minutes for browser checks on both printed URLs, verifies redeploy, then deletes the disposable app. The shared gateway is never deleted.\nExit codes: 0 = passed, 1 = failed.");
     return;
   }
   if (args.length !== 0 && !(args.length === 2 && args[0] === "--cleanup")) throw new Error("Use --help for usage");
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
     throw new AggregateError([exercise, cleanup].flatMap((result) => result.status === "rejected" ? [result.reason] : []), "Live test failed");
   }
   if (controller.signal.aborted) throw new Error("Live test interrupted; cleanup completed");
-  console.log("PASS: real Fly deployment, branded HTTPS proxy, stable redeploy, and cleanup verified.");
+  console.log("PASS: real Fly deployment, branded HTTPS proxy, browser streaming/WebSockets/cookies, stable redeploy, and cleanup verified.");
 }
 
 const [result] = await Promise.allSettled([main()]);

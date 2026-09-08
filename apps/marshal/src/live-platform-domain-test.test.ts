@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { configureLiveRun, liveCredentialSettings, liveRunIdentity, newLiveRun, parseLiveRun, waitForLiveCheck } from "./live-platform-domain-test.js";
+import { checkBrowserReports, configureLiveRun, liveCredentialSettings, liveRunIdentity, newLiveRun, parseLiveRun, waitForLiveCheck } from "./live-platform-domain-test.js";
 import { logicalStorageKey, storageKey } from "./storage-prefix.js";
 
 const credentials = {
@@ -10,6 +10,7 @@ const credentials = {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("live test setup (no provider calls)", () => {
@@ -31,7 +32,7 @@ describe("live test setup (no provider calls)", () => {
     expect(() => parseLiveRun(run, { ...settings, MARSHAL_FLY_ORG_SLUG: "other-org" })).toThrow("different Fly");
     expect(() => parseLiveRun(run, { ...settings, MARSHAL_S3_BUCKET: "other-bucket" })).toThrow("different Fly");
     const identity = liveRunIdentity(run);
-    expect(identity.hostname).toMatch(/^deploy-[a-z0-9-]+\.built-with-hexclave\.com$/);
+    expect(identity.hostname).toMatch(/^[a-z0-9-]+\.deploy\.built-with-hexclave\.com$/);
     expect(liveRunIdentity(newLiveRun(settings))).not.toEqual(identity);
   });
 
@@ -74,5 +75,28 @@ describe("isolated S3 keys", () => {
   it.each(["/absolute/", "../", "missing-slash", "double//slash/"])("rejects ambiguous prefix %s", (prefix) => {
     vi.stubEnv("HEXCLAVE_MARSHAL_S3_KEY_PREFIX", prefix);
     expect(() => storageKey("test")).toThrow("HEXCLAVE_MARSHAL_S3_KEY_PREFIX");
+  });
+});
+
+
+describe("browser compatibility reports", () => {
+  const hosts = ["test.deploy.built-with-hexclave.com", "hxc-test.fly.dev"];
+  const report = (origin: string) => ({ marker: "run-marker", origin, failures: [], lines: ["PASS: streaming", "PASS: cookies", "PASS: WebSockets"] });
+  it("requires completed checks from both origins", () => {
+    expect(checkBrowserReports([], "run-marker", hosts)).toBe(false);
+    expect(checkBrowserReports([report(hosts[0])], "run-marker", hosts)).toBe(false);
+    expect(checkBrowserReports(hosts.map(report), "run-marker", hosts)).toBe(true);
+  });
+  it("waits for the baseline after a proxy failure and includes both reports in the error", () => {
+    const failed = { ...report(hosts[0]), failures: ["WebSockets"], lines: ["PASS: streaming", "PASS: cookies", "FAIL: WebSockets"] };
+    expect(checkBrowserReports([failed], "run-marker", hosts)).toBe(false);
+    expect(checkBrowserReports([failed, failed], "run-marker", hosts)).toBe(false);
+    expect(() => checkBrowserReports([failed, report(hosts[1])], "run-marker", hosts)).toThrow(hosts[1]);
+  });
+  it("rejects stale, incomplete, and failed results", () => {
+    expect(() => checkBrowserReports([report(hosts[0])], "another-run", hosts)).toThrow("identity");
+    expect(() => checkBrowserReports([report("another-host")], "run-marker", hosts)).toThrow("identity");
+    expect(() => checkBrowserReports([{ ...report(hosts[0]), lines: [] }], "run-marker", hosts)).toThrow("Incomplete");
+    expect(() => checkBrowserReports([{ ...report(hosts[0]), failures: ["WebSockets"] }, report(hosts[1])], "run-marker", hosts)).toThrow("WebSockets");
   });
 });

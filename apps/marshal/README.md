@@ -107,35 +107,21 @@ Cloud Run has no equivalent of Fly's request-triggered VM suspend/resume for a p
 
 ## Fly deployment platform domains
 
-Public HTTP services advertise `https://deploy-<suffix>.built-with-hexclave.com`, where
+Public HTTP services advertise `https://<suffix>.deploy.built-with-hexclave.com`, where
 `hxc-<suffix>` is the existing Fly app name. The name remains stable across redeploys.
-The hosted-components Vercel project uses its existing wildcard DNS and TLS certificate
-and proxies the request to `https://hxc-<suffix>.fly.dev`, preserving the path and query.
-Deploy hosted-components with the new routing rule before deploying this Marshal version.
-Existing `.fly.dev` addresses continue to work. Customer custom domains keep their existing
-provisioning and display priority; private services receive no generated platform URL.
-GCP routing is unchanged.
+The dedicated Fly gateway in [apps/deployment-gateway](../deployment-gateway/README.md)
+proxies HTTP, streaming, and WebSockets to the existing `.fly.dev` origin. Provision its
+wildcard DNS/TLS before deploying this Marshal version. Hosted components remain on Vercel.
 
-No per-service certificate, DNS record, DNS API token, background domain worker, or domain
-registration lookup is involved. Consequently, deleting a service removes its Fly resources
-but does not revoke the deterministic proxy alias. The proxy intentionally accepts every
-syntactically valid matching Fly app name, including apps outside this platform. Fly app
-names must not be treated as proof of ownership.
+Customer custom domains keep their existing provisioning and display priority; private
+services receive no generated platform URL. GCP routing is unchanged. The whole
+`deploy.built-with-hexclave.com` namespace is reserved from customer-domain attachment.
+There is no per-service DNS record, certificate issuance, or routing database, and no
+automatic fallback to `.fly.dev` during a gateway outage.
 
-The route lives in `apps/hosted-components/src/deployment-proxy-routes.ts`. Nitro prepends
-it to the Vercel Build Output API routes before filesystem lookup so deployment paths such
-as `/llms.txt`, `/assets/...`, and `/handler/...` do not serve hosted-component content.
-Requests without a matching deployment hostname continue through normal hosted routing.
-The native Vercel proxy forwards traffic; Marshal and the hosted-components React server
-are not involved in each proxied request. This rule is specific to Vercel, not Vite's local
-server or the standalone Nitro server. There is no automatic switch to `.fly.dev` on a
-proxy outage. Validate Vercel's upload, streaming, WebSocket, redirect and cookie behavior
-with the intended workloads before rollout.
-
-This replaces the unshipped per-service DNS/certificate implementation. If that earlier
-implementation was used manually, remove its explicit deployment CNAMEs and certificates
-before retiring its cleanup credentials. Old explicit DNS records override wildcard routing,
-and the old hashed platform hostnames are not compatible with this naming scheme.
+This replaces the unshipped hosted-components rewrite. Remove any manually-created test
+Vercel aliases or DNS records from that implementation after its disposable apps are cleaned
+up. Neither its aliases nor its old `deploy-<suffix>` URLs are used by this gateway.
 
 ## Local GCP simulator
 
@@ -205,15 +191,35 @@ pnpm -C apps/marshal test:platform-domains:live
 
 The runner reads real Fly and S3 credentials from `apps/marshal/.env.local`, accepting either
 the `MARSHAL_*` names or `FLY_API_TOKEN`, `FLY_ORG_SLUG`, `S3_ACCESS_KEY_ID`,
-`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`. No Vercel token is required.
-Deploy the hosted-components proxy first; this local runner cannot install a Vercel routing
-rule. `--help` prints usage without loading credentials or calling providers.
+`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`. No Vercel API token is required.
+Configure the dedicated gateway and wildcard DNS/TLS first, following its README.
+The test no longer prompts for Vercel credentials, preview URLs or aliases. `--help`
+prints usage without loading credentials or calling providers.
 
 The test creates one disposable Fly app/machine (which can incur usage charges), checks its
 default Fly HTTPS response and branded HTTPS proxy, redeploys while retaining the hostname,
-and verifies cleanup. It uses a pinned prebuilt nginx image and production service code;
+and verifies cleanup. It uses a pinned prebuilt Bun image and production service code;
 source builds and the backend/dashboard deployment flow are outside its scope. No custom
 certificate is requested, so the test does not consume custom-domain issuance quota.
+
+After the HTTP checks pass, the runner prints two `/compatibility` URLs. Open **both**
+in a browser and click **Run browser checks** on each page. Keep the terminal running. It waits up to ten minutes for reports from both origins before redeploy
+and cleanup. No browser packages need to be installed.
+
+The browser checks cover:
+- SSE and chunked responses: first and final markers must arrive at least 1.5 seconds apart
+  from an origin that waits 3 seconds, detecting a proxy that buffers the whole response.
+- WebSockets: upgrade, session cookie authentication, subprotocol negotiation, text and
+  binary echo, and a clean close.
+- Cookies: Secure host-only `__Host-`/HttpOnly sessions, explicit current-host Domain cookies,
+  Path scope, rejection of cookies scoped to the other origin, rotation, and logout.
+  Separate Set-Cookie headers and SameSite/Secure/HttpOnly/Path/Domain attributes are also
+  checked by the terminal probes.
+
+A failure on either origin fails the run and still triggers cleanup. These are compatibility
+fixtures, not tests of a particular application's OAuth flow. Cross-site iframe/third-party
+cookie policies, cross-site SameSite enforcement, long-lived connection limits, and large
+uploads remain outside this test. The fixture creates no parent-domain cookies.
 
 Test state is isolated under a unique `live-domain-tests/<run-id>/` S3 prefix. The runner
 cleans up after success, failure, or Ctrl+C. A complete pass exits **0**; test or cleanup
