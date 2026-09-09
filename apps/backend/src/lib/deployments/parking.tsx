@@ -3,7 +3,7 @@
 // A Free-plan project's services run for a fixed window after each deploy and are
 // then PARKED: stopped, with the platform's parked page served in their place on
 // every hostname they hold (see parkService in apps/marshal/src/services.ts, and
-// apps/deployment-parked-page for what a visitor sees). Redeploying restarts the
+// apps/deployment-gateway/parked-page for what a visitor sees). Redeploying restarts
 // window; upgrading to a paid plan lifts it and unparks whatever is parked.
 //
 // This closes the gap assertServicesAllowedByPlan's doc comment names: that gate

@@ -47,7 +47,7 @@ credentials. Fly's own registry repositories are app-scoped, so an image pushed
 to one app's repository is not reliably pullable from another app's machines.
 
 ```sh
-cd apps/deployment-parked-page
+cd apps/deployment-gateway/parked-page
 docker buildx build --platform linux/amd64 -t hexclave/deployment-parked-page:1 --push .
 docker buildx imagetools inspect hexclave/deployment-parked-page:1
 ```
@@ -64,14 +64,15 @@ services would roll every one of them the next time it reconciled.
 
 ## Tests
 
-`server.test.mjs` runs in the normal workspace suite:
+`server.test.mjs` runs in the normal workspace suite (the gateway's vitest config
+includes this directory by name; its own Docker integration test stays opt-in):
 
 ```sh
-pnpm test run apps/deployment-parked-page
+pnpm test run apps/deployment-gateway
 ```
 
 To look at the page:
 
 ```sh
-PORT=8080 node apps/deployment-parked-page/server.mjs
+PORT=8080 node apps/deployment-gateway/parked-page/server.mjs
 ```

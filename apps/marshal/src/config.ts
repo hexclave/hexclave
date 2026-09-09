@@ -15,7 +15,8 @@ import type { ServiceKind } from "./types.js";
 export const MOCK_FLY_TOKEN = "mock_hexclave_fly_key";
 
 // The published parked page. A tag by default so a dev or test Marshal needs no
-// configuration; production pins the digest (see apps/deployment-parked-page/README.md).
+// configuration; production pins the digest (see
+// apps/deployment-gateway/parked-page/README.md).
 export const DEFAULT_PARKED_IMAGE = "hexclave/deployment-parked-page:1";
 
 export type FlyConfig = {
@@ -69,9 +70,9 @@ export type MarshalConfig = {
   // in-process with a fake digest (dev/e2e; non-prod only).
   builderKind: "real" | "mock",
   // The image a PARKED service runs instead of the tenant's own — see
-  // apps/deployment-parked-page. Public (tenant machines pull it with no registry
-  // credentials) and, in production, pinned to a digest: a tag that moved under a
-  // fleet of already-parked services would roll every one of them.
+  // apps/deployment-gateway/parked-page. Public (tenant machines pull it with no
+  // registry credentials) and, in production, pinned to a digest: a tag that
+  // moved under a fleet of already-parked services would roll every one of them.
   parkedImage: string,
   s3: {
     endpoint: string,

@@ -124,7 +124,8 @@ automatic fallback to `.fly.dev` during a gateway outage.
 `POST /v1/namespaces/:ns/services/:key/park` stops a service and runs the platform's
 parked page in its place; `POST .../unpark` puts the service's own image back. The backend
 calls both from its Free-plan sweeper (`apps/backend/src/lib/deployments/parking.tsx`); the
-page itself lives in [apps/deployment-parked-page](../deployment-parked-page/README.md).
+page itself lives in
+[apps/deployment-gateway/parked-page](../deployment-gateway/parked-page/README.md).
 
 Parking swaps the image and the environment the machines run with, and nothing else. The
 Fly app, ports, public IPs, certificates, custom domains, volumes and the stored spec all
