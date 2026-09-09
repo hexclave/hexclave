@@ -52,11 +52,17 @@ docker buildx build --platform linux/amd64 -t hexclave/deployment-parked-page:1 
 docker buildx imagetools inspect hexclave/deployment-parked-page:1
 ```
 
-Take the digest from that last command and set it on Marshal, pinned:
+Take the digest from that last command and set it on Marshal, which deploys on Vercel
+(see [apps/marshal/README.md](../../marshal/README.md)):
 
 ```sh
-fly secrets set HEXCLAVE_DEPLOYMENT_PARKED_IMAGE=hexclave/deployment-parked-page@sha256:<digest> --app <marshal-app>
+vercel env add HEXCLAVE_DEPLOYMENT_PARKED_IMAGE production
+# paste: hexclave/deployment-parked-page@sha256:<digest>
 ```
+
+A Vercel environment variable only reaches the running function on the next deployment, so
+redeploy Marshal after setting it. Until then Marshal falls back to the tag in
+DEFAULT_PARKED_IMAGE.
 
 Pin the digest rather than the tag. Marshal hands this reference to Fly as the
 image a parked machine runs, and a tag that moved under a fleet of already-parked
