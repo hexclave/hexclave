@@ -18,8 +18,13 @@ import { MagnifyingGlassIcon, PlusIcon, TicketIcon } from "@phosphor-icons/react
 import { CheckIcon } from "@radix-ui/react-icons";
 import { useId, useState, type ReactNode } from "react";
 import { PageLayout } from "../../page-layout";
+import {
+  DUMMY_PROMO_CODES,
+  PromoCodesListView,
+  type DiscountKind,
+  type PromoCodeRow,
+} from "./promo-codes-list";
 
-type DiscountKind = "percent" | "fixed";
 type ProductScope = "all" | "specific";
 type RedemptionLimitMode = "total" | "per_period";
 type SubscriptionApplicability = "first_payment" | "between_dates" | "every_renewal";
@@ -98,36 +103,64 @@ function parseValidDatesMode(id: string): ValidDatesMode {
 
 export default function PageClient() {
   const [createOpen, setCreateOpen] = useState(false);
+  const [promoCodes, setPromoCodes] = useState<PromoCodeRow[]>(() => [...DUMMY_PROMO_CODES]);
+
+  const handleCreate = (row: PromoCodeRow) => {
+    setPromoCodes((current) => [row, ...current]);
+    setCreateOpen(false);
+  };
+
+  if (promoCodes.length === 0) {
+    return (
+      <PageLayout containedHeight>
+        <div className="flex flex-1 min-h-0 flex-col items-center justify-center">
+          <div className="relative w-full h-64 md:h-80 lg:h-96">
+            <PromoCodesIllustration />
+          </div>
+
+          <div className="w-full flex flex-col items-center px-4 pt-4 md:pt-6">
+            <p className="text-center max-w-xl text-muted-foreground text-sm md:text-base">
+              Promo codes are codes your users can apply at checkout to discount their purchases. Make them seasonal or valid only for a short period.
+            </p>
+            <DesignButton
+              className="mt-5 mb-4 md:mb-6 gap-1.5"
+              onClick={() => setCreateOpen(true)}
+            >
+              <PlusIcon className="h-4 w-4" weight="bold" />
+              Create a Promo Code
+            </DesignButton>
+          </div>
+        </div>
+
+        <CreatePromoCodeDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          onConfirm={handleCreate}
+        />
+      </PageLayout>
+    );
+  }
 
   return (
-    <PageLayout containedHeight>
-      <div className="flex flex-1 min-h-0 flex-col items-center justify-center">
-        <div className="relative w-full h-64 md:h-80 lg:h-96">
-          <PromoCodesIllustration />
-        </div>
-
-        <div className="w-full flex flex-col items-center px-4 pt-4 md:pt-6">
-          <p className="text-center max-w-xl text-muted-foreground text-sm md:text-base">
-            Promo codes are codes your users can apply at checkout to discount their purchases. Make them seasonal or valid only for a short period.
-          </p>
-          <DesignButton
-            className="mt-5 mb-4 md:mb-6 gap-1.5"
-            onClick={() => setCreateOpen(true)}
-          >
-            <PlusIcon className="h-4 w-4" weight="bold" />
-            Create a Promo Code
-          </DesignButton>
-        </div>
-      </div>
-
-      <CreatePromoCodeDialog open={createOpen} onOpenChange={setCreateOpen} />
-    </PageLayout>
+    <>
+      <PromoCodesListView
+        promoCodes={promoCodes}
+        onPromoCodesChange={setPromoCodes}
+        onCreate={() => setCreateOpen(true)}
+      />
+      <CreatePromoCodeDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onConfirm={handleCreate}
+      />
+    </>
   );
 }
 
 function CreatePromoCodeDialog(props: {
   open: boolean,
   onOpenChange: (open: boolean) => void,
+  onConfirm: (row: PromoCodeRow) => void,
 }) {
   const ids = {
     codename: useId(),
@@ -174,7 +207,35 @@ function CreatePromoCodeDialog(props: {
           </DesignDialogClose>
           <DesignButton
             size="sm"
-            onClick={() => props.onOpenChange(false)}
+            onClick={() => {
+              const productLabels = productScope === "all"
+                ? "All products"
+                : PRODUCT_OPTIONS
+                  .filter((option) => selectedProductIds.has(option.value))
+                  .map((option) => option.label)
+                  .join(", ");
+              const parsedDiscount = Number(discount);
+              const parsedMax = Number(maxRedemptions);
+              props.onConfirm({
+                id: `dummy-${crypto.randomUUID()}`,
+                codename: codename.trim().length > 0 ? codename.trim().toUpperCase() : "NEWCODE",
+                status: "active",
+                statusDetail: null,
+                discountKind,
+                discountAmount: Number.isFinite(parsedDiscount) ? parsedDiscount : 0,
+                productsLabel: productLabels.length > 0 ? productLabels : "All products",
+                numRedemptions: 0,
+                maxRedemptions: isUnlimited || !Number.isFinite(parsedMax) || parsedMax <= 0 ? null : parsedMax,
+                availability: validDatesMode === "always"
+                  ? "Always"
+                  : validDatesMode === "recurring"
+                    ? `${recurringSchedule === "yearly" ? "Yearly" : "Monthly"}`
+                    : "Between dates",
+                // Dummy: treat "on every renewal" as if live subscription
+                // redemptions exist so both End-modal variants can be exercised.
+                hasActiveSubscriptionRedemptions: subscriptionApplicability === "every_renewal",
+              });
+            }}
           >
             Confirm
           </DesignButton>
