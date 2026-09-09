@@ -19,7 +19,7 @@
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { getTenancy, type Tenancy } from "@/lib/tenancies";
 import { arePlanLimitsEnforced, getPlanIdForProjectOrNull } from "@/lib/plan-entitlements";
-import { captureError } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, captureError } from "@hexclave/shared/dist/utils/errors";
 import { getMarshalClientOrThrow, getMarshalDeploymentsConfigOrNull } from "./marshal-client";
 import { getDeploymentsPlatformConfig } from "./platform-config";
 import { marshalNamespaceForTenancy } from "./index";
@@ -45,9 +45,14 @@ export const FREE_PLAN_PARK_REASON = "free_plan_24h";
 export const MAX_SERVICES_PER_SWEEP = 25;
 
 export type ParkingSweepSummary = {
-  // Null when the sweep ran. Otherwise why it did nothing, which is the only
-  // thing an operator reading the cron's response wants from a quiet tick.
-  skipped: "parking_disabled" | "plan_limits_not_enforced" | "runtime_not_configured" | null,
+  // Null when the whole sweep ran. Otherwise why it did nothing, which is the
+  // only thing an operator reading the cron's response wants from a quiet tick.
+  //
+  // "parking_paused" is the one value that does NOT mean a quiet tick: it says
+  // the PARK half was skipped, while the unpark half ran and its counts below
+  // are real. See sweepFreePlanParking for why the switch only gates one
+  // direction.
+  skipped: "parking_paused" | "plan_limits_not_enforced" | "runtime_not_configured" | null,
   parked: number,
   unparked: number,
   failed: number,
@@ -95,6 +100,36 @@ export function servicesPastFreePlanLimit<T extends Pick<CandidateRow, "runningS
     const startedAt = windowStartedAt(row);
     return startedAt !== null && startedAt.getTime() <= cutoff;
   });
+}
+
+/**
+ * Whether a project's window has closed, given every service of it that is
+ * running and could be parked.
+ *
+ * A project's window starts at its MOST RECENT deploy, and "every one of these
+ * has expired" is how that is said in terms of the rows: max(runningSince) is
+ * past the cutoff exactly when all of them are.
+ *
+ * The alternative — parking as soon as ANY service expires — breaks the promise
+ * the feature makes. `hexclave deploy` and the dashboard both say a deploy
+ * restarts the window, so a project whose sibling was deployed an hour ago would
+ * be stopped anyway, minutes after its author deployed it. It buys nothing
+ * either: redeploying already restarts the window by design, so anyone willing
+ * to redeploy every window keeps a project running under either rule, and
+ * whether they redeploy one service or all of them is immaterial.
+ *
+ * The consequence to know about is grandfathering. A service with no
+ * `runningSince` has no window, so a project holding one never parks until that
+ * service is redeployed — the exempt set drains per PROJECT, not per service.
+ * That is the right way round: parking the project would stop a service that was
+ * promised it would be left alone, and parking only its siblings is exactly the
+ * half-parked project this rule exists to prevent.
+ */
+export function projectWindowClosed<T extends Pick<CandidateRow, "runningSince">>(
+  rows: T[],
+  options: { now: Date, parkAfterHours: number },
+): boolean {
+  return rows.length > 0 && servicesPastFreePlanLimit(rows, options).length === rows.length;
 }
 
 /**
@@ -155,12 +190,20 @@ export async function sweepFreePlanParking(options?: { now?: Date }): Promise<Pa
   // No Marshal, no services to park — and getMarshalClientOrThrow would 400.
   if (getMarshalDeploymentsConfigOrNull() == null) return { skipped: "runtime_not_configured", ...empty };
   const config = await getDeploymentsPlatformConfig();
-  if (!config.freePlanParkingEnabled) return { skipped: "parking_disabled", ...empty };
 
-  const parked = await parkExpiredFreePlanServices({ now, parkAfterHours: config.freePlanParkAfterHours });
+  // The switch gates the PARK direction ONLY, and the asymmetry is the point: a
+  // switch that pauses enforcement must never pause the escape hatch from it.
+  // Unparking is how an upgrade takes effect and the only automatic way back for
+  // a service that is already stopped, so gating it here would strand a paying
+  // customer's site until they happened to redeploy — while the Deploy Admin page
+  // is on screen promising the opposite ("services already stopped stay stopped
+  // until their projects redeploy or upgrade").
+  const parked = config.freePlanParkingEnabled
+    ? await parkExpiredFreePlanServices({ now, parkAfterHours: config.freePlanParkAfterHours })
+    : { acted: 0, failed: 0 };
   const unparked = await unparkUpgradedProjects();
   return {
-    skipped: null,
+    skipped: config.freePlanParkingEnabled ? null : "parking_paused",
     parked: parked.acted,
     unparked: unparked.acted,
     failed: parked.failed + unparked.failed,
@@ -192,11 +235,40 @@ async function parkExpiredFreePlanServices(options: { now: Date, parkAfterHours:
     // of not-yet-expired services hide the expired ones behind them.
     take: MAX_SERVICES_PER_SWEEP * 20,
   });
+  // The expired rows only say WHICH PROJECTS are worth looking at. Whether a
+  // project's window has actually closed is a question about all of its
+  // services, and this list holds only the expired ones — so the decision is
+  // made per project in servicesToParkForTenancy, against a fresh read.
   const expired = servicesPastFreePlanLimit(candidates, options);
   return await actOnCandidates(expired, {
     shouldAct: planShouldBeParked,
+    servicesFor: async (tenancy) => await servicesToParkForTenancy(tenancy, options),
     act: async (tenancy, serviceIds) => await parkServices(tenancy, serviceIds),
   });
+}
+
+/**
+ * Every service of this project to park, or nothing if its window is still open.
+ *
+ * The re-read is what makes parking whole-project rather than per service. The
+ * sweep's candidate query returns only rows whose own window has closed, so
+ * grouping THOSE by project would park a project by halves the moment its
+ * services were last deployed at different times — which two ordinary things
+ * cause: a project with more than one deployment source, and a deploy in which
+ * one service failed while its siblings went out.
+ *
+ * Scoped to provisioned, NOT-yet-parked services. Excluding the already-parked
+ * ones is what keeps a project that was half-parked before this rule existed from
+ * deadlocking: a parked sibling has no window to expire, and counting it would
+ * block its siblings from ever being parked.
+ */
+async function servicesToParkForTenancy(tenancy: Tenancy, options: { now: Date, parkAfterHours: number }): Promise<string[]> {
+  const rows = await globalPrismaClient.deploymentService.findMany({
+    where: { tenancyId: tenancy.id, provisionedAt: { not: null }, parkedAt: null },
+    select: { serviceId: true, runningSince: true },
+  });
+  if (!projectWindowClosed(rows, options)) return [];
+  return rows.map((row) => row.serviceId);
 }
 
 /**
@@ -240,6 +312,11 @@ async function actOnCandidates(
   candidates: CandidateRow[],
   options: {
     shouldAct: (planId: string | null) => boolean,
+    // Which of the tenancy's services to act on, when the candidate rows are only
+    // a hint at that. The park direction re-reads the project here; the unpark
+    // direction omits it, because "this row is parked" is already the whole
+    // answer for the row in front of it.
+    servicesFor?: (tenancy: Tenancy) => Promise<string[]>,
     act: (tenancy: Tenancy, serviceIds: string[]) => Promise<{ acted: number, failed: number }>,
   },
 ): Promise<{ acted: number, failed: number }> {
@@ -252,7 +329,7 @@ async function actOnCandidates(
 
   let acted = 0;
   let failed = 0;
-  for (const [tenancyId, serviceIds] of byTenancy) {
+  for (const [tenancyId, candidateServiceIds] of byTenancy) {
     // Checked between tenancies, never inside one: a tenancy with more services
     // than the remaining budget is finished rather than split, because a project
     // parked by halves is the state this module exists to avoid. So the cap is a
@@ -265,6 +342,11 @@ async function actOnCandidates(
       // this sweep's.
       if (tenancy === null) continue;
       if (!options.shouldAct(await getPlanIdForProjectOrNull(tenancy.project))) continue;
+      const serviceIds = options.servicesFor === undefined ? candidateServiceIds : await options.servicesFor(tenancy);
+      // Nothing to do for this project after the closer look — its window is
+      // still open because something was deployed more recently than whatever
+      // put it on this list.
+      if (serviceIds.length === 0) continue;
       const result = await options.act(tenancy, serviceIds);
       acted += result.acted;
       failed += result.failed;
@@ -286,10 +368,29 @@ async function parkServices(tenancy: Tenancy, serviceIds: string[]): Promise<{ a
   let failed = 0;
   for (const serviceId of serviceIds) {
     try {
-      await client.parkService(ns, serviceId, FREE_PLAN_PARK_REASON);
-      // Recorded only after the runtime accepted it. The other order would let a
-      // failed park read as a stopped service in the dashboard, and the next tick
-      // would skip it because the row already said it was parked.
+      const state = await client.parkService(ns, serviceId, FREE_PLAN_PARK_REASON);
+      // A call that did not throw is NOT a park that happened. Marshal catches an
+      // ordinary provider failure and answers 200 with a failed state rather than
+      // an error, so the returned status is the only thing that says whether the
+      // machines really run the parked page: serviceStateWith checks
+      // `last_apply_error` BEFORE the park branch, so a park whose apply failed
+      // reports "degraded" or "failed" with the park state still attached, and
+      // "parked" is unambiguous.
+      //
+      // Erring towards NOT recording it is the safe direction, and the only one
+      // that heals itself. The row keeps a null `parkedAt`, so it stays a
+      // candidate and the next tick tries again — and Marshal re-applies rather
+      // than trusting its own stored park state once `last_apply_error` is set.
+      // Recording a park that did not happen is permanent in the other direction:
+      // both candidate queries key off `parkedAt`, so the row would leave this
+      // sweep for good with the tenant's app still serving.
+      if (state.status !== "parked") {
+        failed += 1;
+        captureError("deployments-parking-park-not-applied", new HexclaveAssertionError(
+          `Marshal accepted the park of service ${JSON.stringify(serviceId)} in namespace ${JSON.stringify(ns)} but reported status ${JSON.stringify(state.status)}, so the tenant's app is still running. Leaving the row unparked so the next sweep retries.`,
+        ));
+        continue;
+      }
       await prisma.deploymentService.updateMany({
         where: { tenancyId: tenancy.id, serviceId },
         data: { parkedAt: new Date(), parkedReason: FREE_PLAN_PARK_REASON },
@@ -311,7 +412,26 @@ async function unparkServices(tenancy: Tenancy, serviceIds: string[]): Promise<{
   let failed = 0;
   for (const serviceId of serviceIds) {
     try {
-      await client.unparkService(ns, serviceId);
+      const state = await client.unparkService(ns, serviceId);
+      // The same asymmetry as parkServices, seen from the other side, and here
+      // the park state alone cannot answer it: the apply CLEARS the park state
+      // before it runs (claimDesiredSpec), so an unpark whose apply failed leaves
+      // a spec that is no longer parked while the machines still serve the parked
+      // page. The status is what separates the two.
+      //
+      // "degraded" is treated as a failure even though it is also what a healthy
+      // rollout looks like before it is ready, because the two costs are not
+      // comparable. Being wrong that way costs one more tick: the row keeps its
+      // `parkedAt`, and on the next pass the service has settled and the write
+      // commits then. Being wrong the other way strands a customer who has just
+      // PAID on the parked page for good, because the row leaves the sweep.
+      if (state.parked !== null || state.status === "failed" || state.status === "degraded") {
+        failed += 1;
+        captureError("deployments-parking-unpark-not-applied", new HexclaveAssertionError(
+          `Marshal accepted the unpark of service ${JSON.stringify(serviceId)} in namespace ${JSON.stringify(ns)} but reported status ${JSON.stringify(state.status)}, so the parked page may still be serving. Leaving the row parked so the next sweep retries.`,
+        ));
+        continue;
+      }
       // `runningSince` moves with it: unparking is the moment this service went
       // back to running the tenant's own image, which is what the column records.
       // It also means a project that upgrades and later downgrades gets a fresh

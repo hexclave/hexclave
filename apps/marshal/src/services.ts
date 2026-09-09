@@ -641,11 +641,19 @@ export async function parkService(ns: string, key: string, reason: string): Prom
  * A service that is not parked is left completely alone rather than re-applied:
  * the sweeper unparks on every pass over an upgraded project, and re-rolling a
  * running service each time would be a redeploy nobody asked for.
+ *
+ * `last_apply_error` has to be checked alongside the park state, for the same
+ * reason parkService checks it and with more force: claimDesiredSpec clears
+ * `parked` BEFORE the apply runs, so an unpark whose apply failed leaves a spec
+ * that is no longer parked while the machines still serve the parked page.
+ * Reading the park state alone would make that state PERMANENT — every later
+ * call would take the early return above it and never retry the apply, leaving a
+ * customer who has already paid on the parked page until they redeployed.
  */
 export async function unparkService(ns: string, key: string): Promise<ServiceState> {
   const stored = await readSpec(ns, key);
   if (stored === null) throw notFound(`service ${JSON.stringify(key)} not found in namespace ${JSON.stringify(ns)}`);
-  if (parkStateFromStored(stored) === null) return await getServiceState(ns, key, stored);
+  if (parkStateFromStored(stored) === null && stored.last_apply_error === null) return await getServiceState(ns, key, stored);
   return (await applyServiceSpec(ns, key, stored.spec)).state;
 }
 

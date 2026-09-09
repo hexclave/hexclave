@@ -245,6 +245,17 @@ describe("unparkService", () => {
     expect(applies).toHaveLength(0);
     expect(writes).toHaveLength(0);
   });
+
+  it("retries when the last unpark failed, which the park state alone cannot say", async () => {
+    // claimDesiredSpec clears `parked` BEFORE the apply runs, so a failed unpark
+    // leaves a spec that is no longer parked while the machines still serve the
+    // parked page. Trusting the park state alone would make that permanent: every
+    // later call would take the not-parked early return and never retry.
+    reset({ parked: null, last_apply_error: "deploy failed: fly said no" });
+    await unparkService("namespace", "web");
+    expect(applies).toHaveLength(1);
+    expect(applies[0].image).toBe(TENANT_IMAGE);
+  });
 });
 
 describe("deploying a parked service", () => {

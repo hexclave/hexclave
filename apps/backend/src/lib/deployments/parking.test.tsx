@@ -13,6 +13,11 @@ const serviceRows = vi.hoisted(() => ({ value: [] as Record<string, unknown>[] }
 const marshalCalls = vi.hoisted(() => [] as { call: "park" | "unpark", ns: string, serviceId: string, reason?: string }[]);
 const rowWrites = vi.hoisted(() => [] as { serviceId: string, data: Record<string, unknown> }[]);
 const parkThrows = vi.hoisted(() => ({ value: false }));
+// What Marshal REPORTS after each call. It answers 200 with a failed state rather
+// than throwing when a provider refuses an apply, so these are the difference
+// between a park that happened and one that only returned.
+const parkStatus = vi.hoisted(() => ({ value: "parked" as string }));
+const unparkStatus = vi.hoisted(() => ({ value: "running" as string }));
 
 vi.mock("@/prisma-client", () => ({
   globalPrismaClient: {
@@ -20,6 +25,12 @@ vi.mock("@/prisma-client", () => ({
       findMany: vi.fn(async (args: { where: Record<string, unknown> }) => {
         const wantsParked = "parkedReason" in args.where;
         if (wantsParked) return serviceRows.value.filter((row) => row.parkedAt != null);
+        // The park path's second read: every running service of ONE project,
+        // grandfathered rows included, which is what makes the window a question
+        // about the whole project rather than the row that raised it.
+        if ("tenancyId" in args.where) {
+          return serviceRows.value.filter((row) => row.tenancyId === args.where.tenancyId && row.parkedAt == null);
+        }
         // Mirrors the real query's grandfathering filter, so a test row with no
         // runningSince is invisible to the park sweep exactly as it would be.
         return serviceRows.value.filter((row) => row.parkedAt == null && row.runningSince != null);
@@ -53,9 +64,15 @@ vi.mock("./marshal-client", () => ({
     parkService: async (ns: string, serviceId: string, reason: string) => {
       if (parkThrows.value) throw new Error("marshal said no");
       marshalCalls.push({ call: "park", ns, serviceId, reason });
+      // A park whose apply failed keeps the park state and reports a status that
+      // is not "parked" — see serviceStateWith in apps/marshal/src/services.ts.
+      return { status: parkStatus.value, parked: { reason, since_millis: 1000 }, error: null };
     },
     unparkService: async (ns: string, serviceId: string) => {
       marshalCalls.push({ call: "unpark", ns, serviceId });
+      // The apply clears the park state before it runs, so a failed unpark
+      // reports a null `parked` too: only the status separates the two.
+      return { status: unparkStatus.value, parked: null, error: null };
     },
   }),
 }));
@@ -64,7 +81,7 @@ vi.mock("./platform-config", () => ({
   getDeploymentsPlatformConfig: async () => platformConfig.value,
 }));
 
-import { FREE_PLAN_PARK_REASON, planShouldBeParked, servicesPastFreePlanLimit, sweepFreePlanParking, windowStartedAt } from "./parking";
+import { FREE_PLAN_PARK_REASON, planShouldBeParked, projectWindowClosed, servicesPastFreePlanLimit, sweepFreePlanParking, windowStartedAt } from "./parking";
 
 const NOW = new Date("2026-09-09T12:00:00.000Z");
 const hoursAgo = (hours: number) => new Date(NOW.getTime() - hours * 60 * 60 * 1000);
@@ -87,6 +104,8 @@ beforeEach(() => {
   planLimitsEnforced.value = true;
   marshalConfigured.value = true;
   parkThrows.value = false;
+  parkStatus.value = "parked";
+  unparkStatus.value = "running";
   platformConfig.value = { deploymentsEnabled: true, freePlanParkingEnabled: true, freePlanParkAfterHours: 24 };
   serviceRows.value = [];
   marshalCalls.length = 0;
@@ -125,6 +144,23 @@ describe("servicesPastFreePlanLimit", () => {
   });
 });
 
+describe("projectWindowClosed", () => {
+  it("is closed only once every service is past the window", () => {
+    expect(projectWindowClosed([{ runningSince: hoursAgo(48) }, { runningSince: hoursAgo(2) }], { now: NOW, parkAfterHours: 24 })).toBe(false);
+    expect(projectWindowClosed([{ runningSince: hoursAgo(48) }, { runningSince: hoursAgo(25) }], { now: NOW, parkAfterHours: 24 })).toBe(true);
+  });
+
+  it("stays open while any service is grandfathered", () => {
+    expect(projectWindowClosed([{ runningSince: hoursAgo(48) }, { runningSince: null }], { now: NOW, parkAfterHours: 24 })).toBe(false);
+  });
+
+  it("is open for a project with nothing running", () => {
+    // Never "vacuously closed": an empty list would otherwise park a project that
+    // has no services to park.
+    expect(projectWindowClosed([], { now: NOW, parkAfterHours: 24 })).toBe(false);
+  });
+});
+
 describe("which plans are parked", () => {
   it("parks the Free plan and nothing else", () => {
     expect(planShouldBeParked("free")).toBe(true);
@@ -140,11 +176,23 @@ describe("which plans are parked", () => {
 });
 
 describe("the sweep's gates", () => {
-  it("does nothing while parking is switched off", async () => {
+  it("parks nothing while parking is switched off", async () => {
     platformConfig.value = { ...platformConfig.value, freePlanParkingEnabled: false };
     serviceRows.value = [row()];
-    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ skipped: "parking_disabled", parked: 0 });
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ skipped: "parking_paused", parked: 0 });
     expect(marshalCalls).toEqual([]);
+  });
+
+  it("still unparks an upgraded project while parking is switched off", async () => {
+    // The switch pauses ENFORCEMENT, never the way back out of it. Gating both
+    // directions on it would leave a project that upgraded while it was off
+    // stopped until it happened to redeploy — which is the opposite of what the
+    // Deploy Admin page says the switch does.
+    platformConfig.value = { ...platformConfig.value, freePlanParkingEnabled: false };
+    planIds.set("tenancy-1", "team");
+    serviceRows.value = [row({ parkedAt: hoursAgo(3), parkedReason: FREE_PLAN_PARK_REASON })];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ skipped: "parking_paused", unparked: 1 });
+    expect(marshalCalls).toEqual([{ call: "unpark", ns: "tenancy-1", serviceId: "web" }]);
   });
 
   it("does nothing on an instance that does not enforce plans", async () => {
@@ -191,10 +239,57 @@ describe("parking a Free-plan project", () => {
     await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 2 });
   });
 
+  it("waits for the project's most recent deploy, not its oldest", async () => {
+    // The half-parked project this module exists to avoid, reached the other way:
+    // "web" is well past the window on its own, but its sibling was redeployed
+    // twenty minutes ago. Deciding per service would stop "web" and leave "api"
+    // running against a dead dependency.
+    serviceRows.value = [row({ serviceId: "web" }), row({ serviceId: "api", runningSince: hoursAgo(0.3) })];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 0, failed: 0 });
+    expect(marshalCalls).toEqual([]);
+  });
+
+  it("parks the project once the newest of its services is past the window too", async () => {
+    serviceRows.value = [row({ serviceId: "web" }), row({ serviceId: "api", runningSince: hoursAgo(25) })];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 2 });
+  });
+
+  it("leaves the whole project alone while one of its services is grandfathered", async () => {
+    // A grandfathered service has no window at all, so the project has none:
+    // parking it would stop a service that was promised it would be left alone,
+    // and parking only its sibling is the half-parked project again. The exempt
+    // set drains per project, on the redeploy that gives that service a window.
+    serviceRows.value = [row({ serviceId: "web" }), row({ serviceId: "api", runningSince: null })];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 0, failed: 0 });
+    expect(marshalCalls).toEqual([]);
+  });
+
+  it("ignores an already-parked sibling when deciding, so a half-parked project converges", async () => {
+    // A service parked by an earlier tick has no window left to expire. Counting
+    // it would deadlock the project: its running sibling could never be parked.
+    serviceRows.value = [
+      row({ serviceId: "web", parkedAt: hoursAgo(3), parkedReason: FREE_PLAN_PARK_REASON }),
+      row({ serviceId: "api" }),
+    ];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 1 });
+    expect(marshalCalls).toEqual([{ call: "park", ns: "tenancy-1", serviceId: "api", reason: FREE_PLAN_PARK_REASON }]);
+  });
+
   it("does not record a park the runtime refused", async () => {
     // The other order would read as a stopped service in the dashboard and make
     // the next tick skip it, leaving it running forever.
     parkThrows.value = true;
+    serviceRows.value = [row()];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 0, failed: 1 });
+    expect(rowWrites).toEqual([]);
+  });
+
+  it("does not record a park Marshal accepted but did not apply", async () => {
+    // Marshal answers 200 with a failed state rather than throwing when a
+    // provider refuses the apply. Recording that as parked would be permanent:
+    // the candidate query keys off parkedAt, so the row would leave the sweep for
+    // good with the tenant's app still serving.
+    parkStatus.value = "degraded";
     serviceRows.value = [row()];
     await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 0, failed: 1 });
     expect(rowWrites).toEqual([]);
@@ -239,6 +334,17 @@ describe("unparking after an upgrade", () => {
     planIds.set("tenancy-1", null);
     serviceRows.value = [row({ parkedAt: hoursAgo(3), parkedReason: FREE_PLAN_PARK_REASON })];
     await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ unparked: 1 });
+  });
+
+  it("does not record an unpark Marshal accepted but did not apply", async () => {
+    // The mirror of the park case, and the one that costs a customer who has
+    // already PAID: clearing parkedAt takes the row out of the unpark sweep, so a
+    // failed unpark would leave the parked page serving indefinitely.
+    planIds.set("tenancy-1", "team");
+    unparkStatus.value = "failed";
+    serviceRows.value = [row({ parkedAt: hoursAgo(3), parkedReason: FREE_PLAN_PARK_REASON })];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ unparked: 0, failed: 1 });
+    expect(rowWrites).toEqual([]);
   });
 
   it("restarts the window, so a later downgrade does not park it instantly", async () => {
