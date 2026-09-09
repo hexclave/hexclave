@@ -11,6 +11,12 @@ DNS can stay on Vercel. The gateway has one wildcard certificate, rather than re
 a certificate for each deployment. Fly app certificates for customer-supplied domains
 continue to be managed separately by Marshal.
 
+This directory also holds [parked-page](parked-page/README.md), the page a STOPPED
+deployment serves. It is a separate image with its own lifecycle: the gateway is one Fly app
+this repository deploys, while the parked page is published to Docker Hub and pulled by
+tenant apps whose services Marshal has parked. They live together because both are platform
+infrastructure sitting in front of customer deployments, and neither is a tenant's own code.
+
 ## Initial setup
 
 Run once for the shared gateway, before deploying the Marshal hostname change.
@@ -108,7 +114,12 @@ are removed afterward. Docker may retain downloaded base images and build cache.
 
 The test port defaults to `10070 + 100 * NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX` (18170 by default).
 Override it with `HEXCLAVE_GATEWAY_TEST_PORT` if occupied. The normal Vitest suite skips
-this opt-in container test.
+this opt-in container test, and runs `parked-page`'s ordinary unit tests instead — the
+vitest config here includes that directory by name rather than opting the whole app out:
+
+```sh
+pnpm test run apps/deployment-gateway
+```
 
 Once the gateway and wildcard DNS/TLS are ready:
 

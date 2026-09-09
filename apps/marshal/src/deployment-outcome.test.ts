@@ -17,6 +17,7 @@ function state(overrides: Partial<ServiceState> = {}): ServiceState {
     outputs: { hostname: "web.internal", internal_url: "http://web.internal:3000", url: "https://web-example.run.app" },
     domains: [],
     error: null,
+    parked: null,
     observed_at_millis: 0,
     ...overrides,
   };

@@ -206,16 +206,44 @@ export type Deployment = {
 
 export type DnsRecord = { type: string, name: string, value: string };
 
+/**
+ * How far along a custom domain is, beyond the verified/not-verified boolean.
+ *
+ * "issuing" is the state a user otherwise cannot distinguish from "nothing has happened":
+ * the runtime has accepted at least one proof of ownership and is waiting on the
+ * certificate authority. Surfacing it is what stops a working setup from looking stuck.
+ */
+export type DomainStatus = "awaiting_dns" | "issuing" | "verified";
+
 export type ServiceDomainState = {
   hostname: string,
   verified: boolean,
+  status: DomainStatus,
   dns_records: DnsRecord[],
   error: string | null,
 };
 
 export type ServiceStatus =
   | "pending" | "blocked" | "building" | "deploying" | "running"
-  | "idle" | "degraded" | "failed" | "stopped";
+  | "idle" | "degraded" | "failed" | "stopped" | "parked";
+
+/**
+ * Why a service is parked, and since when.
+ *
+ * Parking runs the service's machines on the platform's parked-page image
+ * instead of the tenant's own, leaving everything else about the service
+ * untouched: same app, same ports, same IPs, same certificates, same disks, same
+ * stored spec. So a parked service still answers on every hostname it holds, and
+ * unparking is a roll back onto the image the spec already names.
+ *
+ * `reason` is opaque here. Marshal neither interprets it nor decides it; it is
+ * passed to the parked page (which picks its copy from it) and reported back, so
+ * whoever parked the service can say why.
+ */
+export type ParkState = {
+  reason: string,
+  since_millis: number,
+};
 
 export type ServiceState = {
   key: string,
@@ -229,6 +257,10 @@ export type ServiceState = {
   outputs: Record<string, string | null>,
   domains: ServiceDomainState[],
   error: string | null,
+  // Null unless the service is parked. Reported alongside the status rather than
+  // folded into it because the status says the service is not serving while this
+  // says why, and the caller that parked it needs both to decide what to show.
+  parked: ParkState | null,
   observed_at_millis: number,
 };
 
@@ -253,6 +285,10 @@ export type StoredSpec = {
   updated_at_millis: number,
   // Last machine-apply failure, surfaced as ServiceState.error until a later apply succeeds.
   last_apply_error: string | null,
+  // Set while the service runs the parked page instead of its own image. Absent
+  // on every spec written before parking existed, which reads as "not parked" —
+  // see parkStateFromStored.
+  parked?: ParkState | null,
 };
 
 export type StoredDeployment = Omit<Deployment, "services"> & {

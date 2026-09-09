@@ -10,6 +10,7 @@ import { badRequest, conflict, notFound } from "../errors.js";
 import { builderInstanceName, serviceName } from "../naming.js";
 import { withPlatformDomainLease } from "../platform-domain-lock.js";
 import type { AttachDomainResult, RuntimeProvider } from "../provider.js";
+import type { DomainStatus } from "../types.js";
 import { withReconciliationLease } from "../reconciliation-lock.js";
 import { redactBuildLogLines } from "../redact-build-log.js";
 import { assertServiceCanHoldADomain } from "../spec-helpers.js";
@@ -73,7 +74,8 @@ async function attachDomain(ns: string, hostname: string, serviceKey: string): P
       });
       const verificationRecord = domainVerificationRecord(hostname, pending.value.verification_token);
       if (!await hasDomainVerificationRecord(hostname, pending.value.verification_token)) {
-        return { hostname, service_key: serviceKey, verified: false, dns_records: [verificationRecord, ...routingRecords] };
+        // Nothing has been proven yet: the tenant-bound TXT is exactly what is still missing.
+        return { hostname, service_key: serviceKey, verified: false, status: "awaiting_dns", dns_records: [verificationRecord, ...routingRecords] };
       }
 
       const claimed = await claimDomain({ hostname, ns, service_key: serviceKey, claimed_at_millis: Date.now() });
@@ -114,8 +116,17 @@ async function attachDomain(ns: string, hostname: string, serviceKey: string): P
       await platformLease.assertOwned();
       return await (await tenantContext(ns)).domains.ensure(hostname, target);
     });
-    return { hostname, service_key: serviceKey, verified: state.verified, dns_records: state.dnsRecords };
+    return { hostname, service_key: serviceKey, verified: state.verified, status: gcpDomainStatus(state.verified), dns_records: state.dnsRecords };
   });
+}
+
+/**
+ * GCP's managed certificate has its own provisioning states, which this provider does not
+ * read yet, so a claimed-but-unverified domain reports "awaiting_dns" rather than guessing
+ * at "issuing". Fly is where the intermediate state is observable today.
+ */
+function gcpDomainStatus(verified: boolean): DomainStatus {
+  return verified ? "verified" : "awaiting_dns";
 }
 
 async function readDomain(ns: string, hostname: string): Promise<AttachDomainResult> {
@@ -130,7 +141,7 @@ async function readDomain(ns: string, hostname: string): Promise<AttachDomainRes
   if (claim.ns !== ns) throw notFound(`hostname ${JSON.stringify(hostname)} is not attached in namespace ${JSON.stringify(ns)}`);
   const state = await (await tenantContext(ns)).domains.get(hostname);
   if (state === null) throw notFound(`hostname ${JSON.stringify(hostname)} has no load balancer on service ${JSON.stringify(claim.service_key)}`);
-  return { hostname, service_key: claim.service_key, verified: state.verified, dns_records: state.dnsRecords };
+  return { hostname, service_key: claim.service_key, verified: state.verified, status: gcpDomainStatus(state.verified), dns_records: state.dnsRecords };
 }
 
 async function detachDomain(ns: string, hostname: string, expectedServiceKey?: string): Promise<void> {
@@ -414,8 +425,8 @@ export function createGcpProvider(): RuntimeProvider {
           if (claim === null || claim.value.ns !== ns || claim.value.service_key !== key) return null;
           const domain = await domainContext.domains.get(hostname);
           return domain === null
-            ? { hostname, verified: false, dns_records: [], error: "custom-domain infrastructure is missing" }
-            : { hostname, verified: domain.verified, dns_records: domain.dnsRecords, error: null };
+            ? { hostname, verified: false, status: "awaiting_dns" as const, dns_records: [], error: "custom-domain infrastructure is missing" }
+            : { hostname, verified: domain.verified, status: gcpDomainStatus(domain.verified), dns_records: domain.dnsRecords, error: null };
         }));
         const pendingDomains = await Promise.all(pendingHostnames.sort().map(async (hostname) => {
           const pending = await readPendingDomainClaimVersioned(ns, hostname);
@@ -427,6 +438,7 @@ export function createGcpProvider(): RuntimeProvider {
           return {
             hostname,
             verified: false,
+            status: "awaiting_dns" as const,
             dns_records: [domainVerificationRecord(hostname, pending.value.verification_token), ...routingRecords],
             error: null,
           };

@@ -145,13 +145,17 @@ export type MarshalDeploymentTarget = {
 export type MarshalServiceState = {
   key: string,
   type: string,
-  status: "pending" | "blocked" | "building" | "deploying" | "running" | "idle" | "degraded" | "failed" | "stopped",
+  status: "pending" | "blocked" | "building" | "deploying" | "running" | "idle" | "degraded" | "failed" | "stopped" | "parked",
   instances: number,
   revision: string | null,
   target_revision: string | null,
   outputs: Record<string, string | null>,
-  domains: { hostname: string, verified: boolean, dns_records: MarshalDnsRecord[], error: string | null }[],
+  domains: { hostname: string, verified: boolean, status: MarshalDomainStatus, dns_records: MarshalDnsRecord[], error: string | null }[],
   error: string | null,
+  // Set while the service runs the platform's parked page instead of its own
+  // image. Non-null with a status OTHER than "parked" means a park whose apply
+  // failed: the runtime is still serving the tenant's app.
+  parked: { reason: string, since_millis: number } | null,
   observed_at_millis: number,
 };
 
@@ -213,10 +217,16 @@ export type MarshalApplyResult = {
   state: MarshalServiceState,
 };
 
+// How far along a domain is beyond verified/not-verified. "issuing" means the runtime has
+// accepted a proof of ownership and is waiting on the certificate authority — the state that
+// otherwise looks identical to nothing having happened.
+export type MarshalDomainStatus = "awaiting_dns" | "issuing" | "verified";
+
 export type MarshalDomainResult = {
   hostname: string,
   service_key: string,
   verified: boolean,
+  status: MarshalDomainStatus,
   dns_records: MarshalDnsRecord[],
 };
 
@@ -359,6 +369,27 @@ export class MarshalClient {
 
   async getService(ns: string, serviceKey: string): Promise<MarshalServiceState> {
     return await this.fetchMarshal(urlString`/v1/namespaces/${ns}/services/${serviceKey}`);
+  }
+
+  // Stops the service and serves the platform's parked page in its place, on every
+  // hostname it holds. Everything else about the service survives: its app, ports,
+  // IPs, certificates, disks and stored spec — so unparkService is all it takes to
+  // get it back. Idempotent, which is what lets the sweeper retry.
+  //
+  // The apply tier: parking rolls machines exactly the way a deploy does.
+  async parkService(ns: string, serviceKey: string, reason: string): Promise<MarshalServiceState> {
+    return await this.fetchMarshal(urlString`/v1/namespaces/${ns}/services/${serviceKey}/park`, {
+      method: "POST",
+      body: { reason },
+      timeoutMs: APPLY_TIMEOUT_MS,
+    });
+  }
+
+  async unparkService(ns: string, serviceKey: string): Promise<MarshalServiceState> {
+    return await this.fetchMarshal(urlString`/v1/namespaces/${ns}/services/${serviceKey}/unpark`, {
+      method: "POST",
+      timeoutMs: APPLY_TIMEOUT_MS,
+    });
   }
 
   async deleteService(ns: string, serviceKey: string): Promise<void> {

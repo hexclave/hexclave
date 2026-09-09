@@ -21,12 +21,22 @@ describe("getDeploymentsPlatformConfig", () => {
     // The normal state of an instance where nobody has ever flipped a switch:
     // the migration writes no row, so this must not read as "off".
     mockFindFirst.mockResolvedValue(null as never);
-    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({ deploymentsEnabled: true });
+    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({
+      deploymentsEnabled: true,
+      // Enforced without configuration: the window is part of what the Free plan
+      // is, so a missing row must not read as "no limit".
+      freePlanParkingEnabled: true,
+      freePlanParkAfterHours: 24,
+    });
   });
 
   it("reads the stored row when one exists", async () => {
-    mockFindFirst.mockResolvedValue({ deploymentsEnabled: false } as never);
-    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({ deploymentsEnabled: false });
+    mockFindFirst.mockResolvedValue({ deploymentsEnabled: false, freePlanParkingEnabled: true, freePlanParkAfterHours: 48 } as never);
+    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({
+      deploymentsEnabled: false,
+      freePlanParkingEnabled: true,
+      freePlanParkAfterHours: 48,
+    });
   });
 });
 

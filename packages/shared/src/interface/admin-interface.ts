@@ -174,6 +174,15 @@ export type AdminDeploymentServiceJson = {
   // hand-maintained duplicates, so they must be edited together.
   persistent_volumes: Record<string, { path: string, size_gb: number }> | null,
   provisioned: boolean,
+  // Set while the service is PARKED: stopped by the platform, with an
+  // explanation served in its place on every hostname it holds. Separate from
+  // `status`, which goes on describing how the last DEPLOY ended — a parked
+  // service was deployed successfully, and stopped afterwards.
+  //
+  // `parked_reason` decides the wording shown to the project's team;
+  // "free_plan_24h" (the Free plan's deployment window) is the only value today.
+  parked_at: string | null,
+  parked_reason: string | null,
   status: "not_deployed" | "queued" | "building" | "deploying" | "deployed" | "failed" | "canceled",
   has_successful_deploy: boolean,
   url: string | null,
@@ -193,6 +202,12 @@ export type AdminDeploymentDomainJson = {
   hostname: string,
   is_primary: boolean,
   verified: boolean,
+  /**
+   * Finer-grained than `verified`. "issuing" means the deployment runtime has accepted the
+   * DNS and is waiting on the certificate authority; without it that window looks exactly
+   * like the user having created no records at all.
+   */
+  status: "awaiting_dns" | "issuing" | "verified",
   pending_first_deploy: boolean,
   dns_records: { type: string, name: string, value: string }[],
 };

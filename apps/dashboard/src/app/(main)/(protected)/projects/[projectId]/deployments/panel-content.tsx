@@ -965,47 +965,89 @@ export function RuntimeLogsContent({ service, project, isHexclave }: {
 // expanded — verification flips when the user creates the DNS records.
 const DOMAIN_POLL_INTERVAL_MS = 10_000;
 
-function DomainDetails({ project, serviceId, hostname, onVerifiedChange }: {
+// A failed check must not stop the polling — a single blip would otherwise leave the panel
+// permanently stuck on an error with no way back short of collapsing and reopening it. Back
+// off instead, so a Marshal outage doesn't turn into a request storm either.
+const DOMAIN_POLL_ERROR_INTERVAL_MS = 30_000;
+
+function relativeCheckedAt(at: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.round(seconds / 60)}m ago`;
+}
+
+// One cell of the DNS table. The name and the value each get their own copy button because
+// they go into two DIFFERENT fields of a DNS provider's form — a single button copying the
+// whole row produces a string that can't be pasted anywhere. `break-all` rather than
+// `truncate` for the same reason: these values (an ACME target, an ownership token) are long,
+// and a user checking their work against what they already created has to be able to read it.
+function DnsRecordCell({ value }: { value: string }) {
+  return (
+    <td className="px-2 py-1">
+      <div className="flex items-start justify-between gap-1">
+        <span className="min-w-0 break-all text-foreground" title={value}>{value}</span>
+        <CopyButton content={value} size="sm" variant="ghost" className="shrink-0" />
+      </div>
+    </td>
+  );
+}
+
+function DomainDetails({ project, serviceId, hostname, onVerifiedChange, onStatusChange }: {
   project: AdminProject,
   serviceId: string,
   hostname: string,
   onVerifiedChange: () => Promise<void>,
+  onStatusChange: (hostname: string, status: AdminDeploymentDomainJson["status"]) => void,
 }) {
   const [details, setDetails] = useState<AdminDeploymentDomainJson | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
   const wasVerifiedRef = useRef<boolean | null>(null);
+  const cancelledRef = useRef(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  useEffect(() => {
-    let cancelled = false;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const load = async () => {
-      try {
-        const result = await project.getDeploymentServiceDomain(serviceId, hostname);
-        if (cancelled) return;
-        setDetails(result);
-        setError(null);
-        if (wasVerifiedRef.current === false && result.verified) {
-          // Freshly verified: let the board refresh so badges update.
-          runAsynchronouslyWithAlert(onVerifiedChange());
-        }
-        wasVerifiedRef.current = result.verified;
-        if (!result.verified) {
-          timeout = setTimeout(() => runAsynchronously(load()), DOMAIN_POLL_INTERVAL_MS);
-        }
-      } catch (loadError) {
-        if (cancelled) return;
-        setError(errorMessageOf(loadError));
+  // Hoisted out of the effect so the refresh button and the poll run the SAME load, and a
+  // manual check reschedules the timer instead of racing it.
+  const load = useCallback(async () => {
+    if (timeoutRef.current !== undefined) clearTimeout(timeoutRef.current);
+    setChecking(true);
+    try {
+      const result = await project.getDeploymentServiceDomain(serviceId, hostname);
+      if (cancelledRef.current) return;
+      setDetails(result);
+      setError(null);
+      setCheckedAt(Date.now());
+      onStatusChange(hostname, result.status);
+      if (wasVerifiedRef.current === false && result.verified) {
+        // Freshly verified: let the board refresh so badges update.
+        runAsynchronouslyWithAlert(onVerifiedChange());
       }
-    };
-    runAsynchronously(load());
-    return () => {
-      cancelled = true;
-      if (timeout !== undefined) clearTimeout(timeout);
-    };
+      wasVerifiedRef.current = result.verified;
+      if (!result.verified) {
+        timeoutRef.current = setTimeout(() => runAsynchronously(load()), DOMAIN_POLL_INTERVAL_MS);
+      }
+    } catch (loadError) {
+      if (cancelledRef.current) return;
+      setError(errorMessageOf(loadError));
+      timeoutRef.current = setTimeout(() => runAsynchronously(load()), DOMAIN_POLL_ERROR_INTERVAL_MS);
+    } finally {
+      if (!cancelledRef.current) setChecking(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, serviceId, hostname]);
 
-  if (error != null) {
+  useEffect(() => {
+    cancelledRef.current = false;
+    runAsynchronously(load());
+    return () => {
+      cancelledRef.current = true;
+      if (timeoutRef.current !== undefined) clearTimeout(timeoutRef.current);
+    };
+  }, [load]);
+
+  if (details == null && error != null) {
     return (
       <InlineError
         message="We couldn't check this domain's status. Make sure it's a real domain name — you can remove it and add it again."
@@ -1017,6 +1059,13 @@ function DomainDetails({ project, serviceId, hostname, onVerifiedChange }: {
 
   return (
     <div className="space-y-2">
+      {/* Kept ABOVE the records rather than replacing them: a failed check says nothing about
+          whether the records already on screen are still the right ones to create. */}
+      {error != null && (
+        <p className="text-[11px] text-orange-500">
+          Couldn&apos;t check just now — still retrying. The records below are from the last successful check.
+        </p>
+      )}
       {details.pending_first_deploy && (
         <p className="text-[11px] text-muted-foreground">
           This service hasn&apos;t been deployed yet — the domain will be registered with the deployment target on the first deploy. You can already create these DNS records:
@@ -1029,34 +1078,61 @@ function DomainDetails({ project, serviceId, hostname, onVerifiedChange }: {
           <table className="w-full text-left text-[11px]">
             <thead>
               <tr className="bg-foreground/[0.04] text-muted-foreground">
-                <th className="px-2 py-1.5 font-medium">Type</th>
+                <th className="w-12 px-2 py-1.5 font-medium">Type</th>
                 <th className="px-2 py-1.5 font-medium">Name</th>
                 <th className="px-2 py-1.5 font-medium">Value</th>
-                <th className="w-8 px-2 py-1.5" />
               </tr>
             </thead>
             <tbody>
               {details.dns_records.map((record, index) => (
-                <tr key={index} className="border-t border-border/40 font-mono">
+                <tr key={index} className="border-t border-border/40 align-top font-mono">
                   <td className="px-2 py-1.5 text-foreground">{record.type}</td>
-                  <td className="max-w-32 truncate px-2 py-1.5 text-foreground">{record.name}</td>
-                  <td className="max-w-40 truncate px-2 py-1.5 text-foreground">{record.value}</td>
-                  <td className="px-1 py-1">
-                    <CopyButton content={`${record.type} ${record.name} ${record.value}`} size="sm" />
-                  </td>
+                  <DnsRecordCell value={record.name} />
+                  <DnsRecordCell value={record.value} />
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-      {!details.verified && (
+      <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-muted-foreground">
-          Checking automatically — verification usually completes within a few minutes of creating the records.
+          {details.verified
+            ? "Verified."
+            : details.status === "issuing"
+              ? "DNS records found — issuing the TLS certificate. This usually takes under a minute."
+              : "Checking automatically — verification usually completes within a few minutes of creating the records."}
+          {checkedAt != null && !details.verified && ` Last checked ${relativeCheckedAt(checkedAt)}.`}
         </p>
-      )}
+        <DesignButton
+          variant="ghost"
+          size="sm"
+          className="h-6 shrink-0 px-2 text-[11px] text-muted-foreground"
+          disabled={checking}
+          onClick={() => runAsynchronously(load())}
+        >
+          <ArrowClockwiseIcon className={cn("mr-1 h-3 w-3", checking && "animate-spin")} />
+          {checking ? "Checking" : "Check now"}
+        </DesignButton>
+      </div>
     </div>
   );
+}
+
+/**
+ * Three states, not two. "Issuing" is the window the Fly dashboard shows under the same name:
+ * the DNS has been accepted and the certificate authority is working. Reporting it as
+ * "Pending verification" — indistinguishable from having created no records — is what made a
+ * correctly configured domain look broken.
+ *
+ * `status` is the live answer from the expanded DNS panel and may be undefined; `verified` is
+ * the persisted row and is always available, so it is the fallback.
+ */
+function DomainStatusBadge({ verified, status }: { verified: boolean, status?: AdminDeploymentDomainJson["status"] }) {
+  const effective = status ?? (verified ? "verified" : "awaiting_dns");
+  if (effective === "verified") return <DesignBadge label="Verified" color="green" size="sm" icon={CheckCircleIcon} />;
+  if (effective === "issuing") return <DesignBadge label="Issuing" color="blue" size="sm" icon={CircleNotchIcon} iconClassName="animate-spin" />;
+  return <DesignBadge label="Pending verification" color="orange" size="sm" icon={WarningIcon} />;
 }
 
 export function DomainsContent({ service, project, isHexclave, refresh }: {
@@ -1068,6 +1144,14 @@ export function DomainsContent({ service, project, isHexclave, refresh }: {
   const [newDomain, setNewDomain] = useState("");
   const [expandedHostname, setExpandedHostname] = useState<string | null>(null);
   const [actionError, setActionError] = useState<{ message: string, detail?: string } | null>(null);
+  // Live status per hostname, reported up by the expanded DNS panel. The domain ROW only
+  // persists a verified boolean, so "issuing" exists solely in the freshly polled answer —
+  // keeping it here lets the badge show it without a schema change, and it simply falls back
+  // to the row while a domain has never been expanded.
+  const [liveStatuses, setLiveStatuses] = useState<Record<string, AdminDeploymentDomainJson["status"]>>({});
+  const handleStatusChange = useCallback((hostname: string, status: AdminDeploymentDomainJson["status"]) => {
+    setLiveStatuses((previous) => previous[hostname] === status ? previous : { ...previous, [hostname]: status });
+  }, []);
 
   const domains = service.api?.domains ?? [];
   // Domains are operational state (not part of the config-managed definition),
@@ -1120,9 +1204,7 @@ export function DomainsContent({ service, project, isHexclave, refresh }: {
                   <ExternalLink hostname={domain.hostname} />
                   <div className="mt-1 flex items-center gap-1.5">
                     {domain.is_primary && <DesignBadge label="Primary" color="purple" size="sm" icon={StarIcon} />}
-                    {domain.verified
-                      ? <DesignBadge label="Verified" color="green" size="sm" icon={CheckCircleIcon} />
-                      : <DesignBadge label="Pending verification" color="orange" size="sm" icon={WarningIcon} />}
+                    <DomainStatusBadge verified={domain.verified} status={liveStatuses[domain.hostname]} />
                   </div>
                 </div>
                 <DesignButton
@@ -1159,7 +1241,7 @@ export function DomainsContent({ service, project, isHexclave, refresh }: {
               </div>
               {expanded && (
                 <div className="border-t border-border/40 px-3 py-2.5">
-                  <DomainDetails project={project} serviceId={service.id} hostname={domain.hostname} onVerifiedChange={refresh} />
+                  <DomainDetails project={project} serviceId={service.id} hostname={domain.hostname} onVerifiedChange={refresh} onStatusChange={handleStatusChange} />
                 </div>
               )}
             </div>

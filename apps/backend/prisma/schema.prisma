@@ -1721,6 +1721,35 @@ model DeploymentService {
   // is no foreign id to store, only the fact that provisioning happened.
   provisionedAt DateTime?
 
+  // When this service last STARTED running the tenant's own image, which is what
+  // the Free plan's 24-hour limit is measured from. Set on every successful
+  // deploy, so a redeploy buys another 24 hours.
+  //
+  // NULL MEANS NO LIMIT, not "unknown". Every row that existed before this column
+  // shipped has null here and is grandfathered: the limit applies to deployments
+  // made after it, not retroactively to work whose authors were never told about
+  // a window. The first redeploy writes this and opts that service in, so the
+  // exempt set only ever shrinks. See windowStartedAt in
+  // apps/backend/src/lib/deployments/parking.tsx.
+  //
+  // A column of its own rather than `updatedAt`, which any edit to the row bumps
+  // (a definition sync, a domain change), and rather than the newest Deployment
+  // row, which would make the sweeper's candidate query a join over a table it
+  // otherwise never touches.
+  runningSince DateTime?
+
+  // Set while the service is PARKED: stopped, with the platform's parked page
+  // served in its place on every hostname it holds. See parkService in
+  // apps/marshal/src/services.ts for what parking does to the runtime, and
+  // apps/backend/src/lib/deployments/parking.tsx for what decides it.
+  //
+  // Two columns rather than one enum: `parkedReason` is passed through to Marshal
+  // (which passes it to the parked page, which picks its copy from it) and is
+  // expected to grow values that have nothing to do with plans — a platform
+  // pause, an abuse suspension — while `parkedAt` is what every query filters on.
+  parkedAt     DateTime?
+  parkedReason String?
+
   // The definition as last synced from the deploy file's `services` export.
   // `definitionSyncId` is regenerated once per source sync and fenced by the
   // deploy that follows it, so two CLIs cannot silently combine one checkout's
@@ -2050,6 +2079,25 @@ model DeploymentsPlatformConfig {
   // stay readable, and tearing services down keeps working, because an operator
   // flipping this during an incident needs those more than ever.
   deploymentsEnabled Boolean @default(true)
+
+  // Whether the Free plan's time limit is enforced at all. Default TRUE: the limit
+  // is part of what the Free plan IS, so an instance that has never been
+  // configured enforces it. An operator can still pause it from the Deploy Admin
+  // page — which is the switch to reach for if parking ever misbehaves, because
+  // turning it off stops new parks immediately (already-parked services stay
+  // parked until their projects redeploy or upgrade).
+  //
+  // Note what this default means on the deploy that ships it: every Free-plan
+  // project whose services last deployed more than the window ago is parked by
+  // the first sweep, within ten minutes. That is the intended behaviour, but it
+  // is not a quiet rollout.
+  freePlanParkingEnabled Boolean @default(true)
+
+  // How long a Free-plan project's services run after each deploy before they are
+  // parked. Configurable because the right number is a pricing decision that will
+  // move, and because an operator handling an incident needs to be able to widen
+  // it without a deploy.
+  freePlanParkAfterHours Int @default(24)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

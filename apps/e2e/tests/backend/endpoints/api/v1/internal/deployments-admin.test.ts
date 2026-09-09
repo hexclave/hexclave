@@ -77,18 +77,23 @@ describe("internal deployments admin", () => {
     const before = await niceBackendFetch(BASE_PATH, { accessType: "client" });
     expect(before.status).toBe(200);
 
-    // Writes the SAME value back rather than flipping it, exactly as the
+    // Writes the SAME values back rather than flipping them, exactly as the
     // external-db-sync fusebox test does: this row is GLOBAL, so actually
     // turning deploys off here would fail every deployment test running
     // concurrently in another worker. The refusal itself is covered by
     // apps/backend/src/lib/deployments/platform-config.test.tsx, which needs no
     // shared state to prove both directions.
+    //
+    // The WHOLE fusebox goes back, which is the route's contract and what the
+    // Deploy Admin page sends: it merges each switch onto what it last read
+    // rather than posting the one field that changed, so that flipping one
+    // switch cannot reset the others.
     const write = await niceBackendFetch(BASE_PATH, {
       accessType: "client",
       method: "POST",
-      body: { deployments_enabled: before.body.fusebox.deployments_enabled },
+      body: before.body.fusebox,
     });
     expect(write.status).toBe(200);
-    expect(write.body).toMatchObject({ deployments_enabled: before.body.fusebox.deployments_enabled });
+    expect(write.body).toMatchObject(before.body.fusebox);
   });
 });

@@ -1,5 +1,6 @@
 import { assertGlobalDeploymentCapacity, assertServicesAllowedByPlan, createDeployment, definitionFromServiceRow, deploymentToApiShape, encryptDeploymentRedactionSecrets, getServiceVolume, isTerminalDeploymentStatus, refreshDeploymentFromMarshal, resolveEnvVars, startDeployment } from "@/lib/deployments";
 import { getMarshalDeploymentsConfigOrNull } from "@/lib/deployments/marshal-client";
+import { freePlanDeployNoticeOrNull } from "@/lib/deployments/parking";
 import { assertDeploymentsEnabled } from "@/lib/deployments/platform-config";
 import { runtimeFromStored } from "@/lib/deployments/runtime";
 import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
@@ -137,6 +138,11 @@ export const POST = createSmartRouteHandler({
     body: yupObject({
       id: yupString().defined(),
       number: yupNumber().defined(),
+      // Anything the author should know about this deploy that is not a failure.
+      // Today: that a Free-plan deployment stops after the plan's window. Always
+      // present (empty when there is nothing to say) so the CLI needs no version
+      // check to read it.
+      notices: yupArray(yupString().defined()).defined(),
     }).defined(),
   }),
   handler: async ({ auth, body }) => {
@@ -337,10 +343,20 @@ export const POST = createSmartRouteHandler({
       throw error;
     }
 
+    // After the deploy is accepted, and never able to fail it: this is a message
+    // about the deployment, not a gate on it.
+    const notices: string[] = [];
+    try {
+      const freePlanNotice = await freePlanDeployNoticeOrNull(auth.tenancy.project);
+      if (freePlanNotice !== null) notices.push(freePlanNotice);
+    } catch (error) {
+      captureError("deployments-free-plan-notice", error);
+    }
+
     return {
       statusCode: 200,
       bodyType: "json",
-      body: { id: deployment.id, number: deployment.number },
+      body: { id: deployment.id, number: deployment.number, notices },
     };
   },
 });
