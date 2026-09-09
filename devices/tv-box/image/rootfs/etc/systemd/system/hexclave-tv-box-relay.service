@@ -1,30 +1,38 @@
 [Unit]
 Description=Hexclave TV Box optional outbound support transport
 Requires=hexclave-tv-box-firstboot.service hexclave-tv-box-relay-identity.service
-After=hexclave-tv-box-firstboot.service hexclave-tv-box-relay-identity.service network.target ssh.service
+After=hexclave-tv-box-firstboot.service hexclave-tv-box-relay-identity.service
 ConditionPathExists=/var/lib/hexclave-tv-box/relay/enrollment.json
-StartLimitIntervalSec=300
-StartLimitBurst=3
+# Backoff bounds retries without permanently abandoning an extended outage.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=exec
 User=hexclave-tv-relay
 Group=hexclave-tv-relay
 SupplementaryGroups=hexclave-tv-runtime
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 -m hexclave_tv_box.relay
-Restart=on-failure
+Restart=always
 RestartPreventExitStatus=78
-RestartSec=30
+RestartSec=5s
+RestartSteps=6
+RestartMaxDelaySec=5min
 TimeoutStopSec=15
 KillMode=control-group
-RuntimeDirectory=hexclave-tv-box-relay
-RuntimeDirectoryMode=0700
+# The launcher execs SSH in place. Neither untrusted server banners nor raw
+# SSH errors enter the journal; systemd records lifecycle and exit status.
+StandardInput=null
+StandardOutput=null
+StandardError=null
 UMask=0077
 Nice=10
 CPUWeight=10
 IOWeight=10
 TasksMax=16
+CPUAccounting=yes
+MemoryAccounting=yes
+TasksAccounting=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -39,7 +47,6 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 CapabilityBoundingSet=
 ReadOnlyPaths=/var/lib/hexclave-tv-box/relay
-ReadWritePaths=/run/hexclave-tv-box-relay
 
 [Install]
 WantedBy=multi-user.target

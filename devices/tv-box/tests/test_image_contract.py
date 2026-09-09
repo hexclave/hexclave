@@ -293,6 +293,7 @@ class ImageContractTests(unittest.TestCase):
                 "usr/lib/hexclave-tv-box/relay-enroll",
                 "usr/lib/hexclave-tv-box/factory-reset-job",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/relay.py",
+                "usr/lib/python3/dist-packages/hexclave_tv_box/relay_metrics.py",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/network_agent.py",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/setup_display.py",

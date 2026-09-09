@@ -39,7 +39,7 @@ def make_verification_fixture(rootfs: Path, manifest: Path, channel: str = "prod
 
 class ImageVerificationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = tempfile.TemporaryDirectory(suffix=".untracked")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.rootfs, self.state, self.boot = (self.root / name for name in ("rootfs", "state", "boot"))
@@ -153,6 +153,55 @@ class ImageVerificationTests(unittest.TestCase):
         path.write_bytes(b"x" * (1024 * 1024 - 8) + b"\n-----BEGIN PRIVATE KEY-----\nSECRET\n")
         with self.assertRaisesRegex(ValueError, "Private-key"):
             image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def certificate_record(self) -> bytes:
+        ca, operator = self.root / "ca.untracked", self.root / "operator.untracked"
+        for key in (ca, operator):
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(key)],
+                check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
+            )
+        subprocess.run(
+            ["ssh-keygen", "-q", "-s", str(ca), "-I", "do-not-export-fixture-identity",
+             "-n", "hexclave-tv-support", "-V", "-1m:+5m", str(operator) + ".pub"],
+            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
+        )
+        return (self.root / "operator.untracked-cert.pub").read_bytes()
+
+    def test_renamed_certificate_records_are_rejected_on_every_image_filesystem_without_values(self) -> None:
+        certificate = self.certificate_record()
+        for filesystem, label in ((self.rootfs, "root"), (self.state, "state"), (self.boot, "boot")):
+            path = filesystem / "support-material.untracked.txt"
+            path.write_bytes(certificate)
+            with self.subTest(filesystem=label), self.assertRaisesRegex(ValueError, "OpenSSH certificate") as rejected:
+                image_verification.scan_clean_filesystem(filesystem, label, production=True)
+            self.assertNotIn(certificate.split()[1].decode("ascii"), str(rejected.exception))
+            self.assertNotIn("do-not-export-fixture-identity", str(rejected.exception))
+            path.unlink()
+
+    def test_certificate_records_are_detected_across_chunk_boundaries(self) -> None:
+        certificate = self.certificate_record()
+        path = self.boot / "support-material.untracked.txt"
+        for split in (1, 24, 48, 80, 127):
+            path.write_bytes(b"x" * (1024 * 1024 - split - 1) + b"\n" + certificate)
+            with self.subTest(split=split), self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_algorithm_mentions_and_regular_public_ca_keys_remain_allowed(self) -> None:
+        certificate = self.certificate_record()
+        algorithm = certificate.split()[0]
+        path = self.boot / "algorithm-documentation.untracked.txt"
+        path.write_bytes(
+            b"Supported algorithm: " + algorithm + b"\n"
+            + algorithm + b"\n" + algorithm + b" AAAA example\n"
+            + b"\x00" + algorithm + b"\x00" + certificate.split()[1] + b"\x00"
+        )
+        (self.boot / "support-ca.untracked.pub").write_bytes((self.root / "ca.untracked.pub").read_bytes())
+        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        # A retained chunk tail must not reinterpret inline documentation as
+        # a line-start record just because it begins at the overlap boundary.
+        path.write_bytes(b"x" * (1024 * 1024 - 512) + certificate)
+        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
 
     def test_public_test_vector_exception_requires_exact_path_bytes_and_root_filesystem(self) -> None:
         path = self.rootfs / "public-fixture.py"

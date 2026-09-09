@@ -5,7 +5,7 @@ table inet hexclave_tv_box {
     iifname "lo" accept
     ip protocol icmp accept
     ip6 nexthdr ipv6-icmp accept
-    # Local certificate-based fallback is limited to private/link-local
+    # Independent local certificate-based support is limited to private/link-local
     # sources; office support arrives through the outbound relay on loopback.
     # Do not expose device SSH on globally routed Wi-Fi IPv4/IPv6 addresses.
     iifname "wlan0" ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } tcp dport 22 accept

@@ -23,6 +23,7 @@ from .kiosk_supervisor import read_process_table, renderer_health
 from .network_agent import OFFLINE_URL, PRODUCTION_URL, SETUP_URL, parse_test_renderer_origin
 from .policy import ADMIN_CONFIRMATION
 from .relay import relay_diagnostics, relay_enrollment_public_key
+from .relay_metrics import collect_relay_metrics
 from .state import RUNTIME_ROOT, STATE_ROOT, clear_exact_state_directory
 
 SERVICES = (
@@ -42,7 +43,7 @@ SUPPORT_MUTATION_LOCK_PATH = Path("/run/hexclave-tv-box-support.lock")
 MUTATING_COMMANDS = frozenset({
     "restart-kiosk", "restart-network", "reset-network", "reset-pairing", "factory-reset", "reboot", "shutdown",
 })
-READ_ONLY_COMMANDS = frozenset({"diagnostics", "recent-logs", "previous-logs"})
+READ_ONLY_COMMANDS = frozenset({"diagnostics", "recent-logs", "previous-logs", "relay-metrics"})
 KIOSK_HEALTH_PATTERN = re.compile(
     r"(?:starting|stopping|exited|ready|failed-readiness|failed-liveness|degraded|document-loading|document-failed|document-timeout)"
     r"(?: cage=(?:ready|missing),cog=(?:ready|missing),web-process=(?:ready|missing))?"
@@ -462,6 +463,8 @@ def execute(command: str, arguments: list[str], state_root: Path = STATE_ROOT) -
 def _execute(command: str, arguments: list[str], state_root: Path) -> str:
     if command == "diagnostics" and not arguments:
         return diagnostics()
+    if command == "relay-metrics" and not arguments:
+        return collect_relay_metrics()
     if command == "recent-logs" and not arguments:
         return recent_service_logs()
     if command == "previous-logs" and not arguments:
@@ -498,7 +501,7 @@ def main() -> None:
 def forced_command_main() -> None:
     original = os.environ.get("SSH_ORIGINAL_COMMAND", "").strip()
     if original == "":
-        print("Allowed commands: diagnostics, recent-logs, previous-logs, restart-kiosk, restart-network, reset-network, reset-pairing, factory-reset, reboot, shutdown")
+        print("Allowed commands: diagnostics, relay-metrics, recent-logs, previous-logs, restart-kiosk, restart-network, reset-network, reset-pairing, factory-reset, reboot, shutdown")
         return
     # Support commands deliberately use a tiny token grammar; quoting, shell
     # metacharacters and arbitrary paths are never interpreted.

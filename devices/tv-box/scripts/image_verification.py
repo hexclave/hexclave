@@ -17,6 +17,10 @@ from pathlib import Path, PurePosixPath
 
 POLICY = Path(__file__).resolve().parents[1] / "image/qualified-runtime.json"
 PRIVATE_KEY = re.compile(rb"(?:^|\n)-----BEGIN (?:OPENSSH |RSA |EC |DSA |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----\r?\n")
+OPENSSH_CERTIFICATE = re.compile(
+    rb"(?:^|\n)[ \t]*((?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp(?:256|384|521)"
+    rb"|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256))-cert-v01@openssh\.com)[ \t]+([A-Za-z0-9+/]{4,128})"
+)
 PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9+.-]+(?::[a-z0-9-]+)?")
 VERIFICATION_ARTIFACTS = (
     "packages.tsv", "builder-manifest.tsv", "qualified-runtime.json", "image-manifest.txt",
@@ -195,6 +199,23 @@ def builder_packages(path: Path) -> dict[str, str]:
     return packages
 
 
+def contains_certificate_record(content: bytes) -> bool:
+    if b"-cert-v01@openssh.com" not in content:
+        return False
+    for match in OPENSSH_CERTIFICATE.finditer(content):
+        key_type, encoded_prefix = match.groups()
+        # Match the wire-format key type, not just an algorithm name: OpenSSH
+        # binaries and documentation legitimately contain certificate names.
+        # A bounded prefix suffices and does not decode or retain the full cert.
+        prefix = base64.b64decode(encoded_prefix[:len(encoded_prefix) // 4 * 4])
+        if len(prefix) < 4:
+            continue
+        type_size = struct.unpack_from(">I", prefix)[0]
+        if type_size == len(key_type) and prefix[4:4 + type_size] == key_type:
+            return True
+    return False
+
+
 def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
     """Do not follow symlinks or nested mounts while scanning the exact read-only image."""
     root_device = root.stat().st_dev
@@ -221,8 +242,13 @@ def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
                 continue
             with path.open("rb") as source:
                 overlap = b""
+                first_chunk = True
                 while chunk := source.read(1024 * 1024):
                     data = overlap + chunk
+                    # Retained overlap can start in the middle of a line. It
+                    # must not invent a new record boundary in later chunks.
+                    if contains_certificate_record(data if first_chunk else b"\x00" + data):
+                        raise ValueError(f"OpenSSH certificate material rejected: {label}/{relative}")
                     if (b"PRIVATE KEY" in data and PRIVATE_KEY.search(data)) or data.startswith(b"PuTTY-User-Key-File-"):
                         # Debian ships this publicly documented crypto test vector.
                         # The exact path AND immutable bytes must match; neither
@@ -231,7 +257,10 @@ def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
                         if expected_vector is not None and digest(path) == expected_vector["sha256"]:
                             break
                         raise ValueError(f"Private-key material rejected: {label}/{relative}")
-                    overlap = data[-128:]
+                    # Include both the text key type and its base64 wire prefix
+                    # when a certificate record crosses an input chunk boundary.
+                    overlap = data[-512:]
+                    first_chunk = False
 
 
 def begin_output(output: Path, *inputs: Path) -> None:

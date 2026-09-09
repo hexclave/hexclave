@@ -12,12 +12,8 @@ import logging
 import os
 import re
 import secrets
-import selectors
-import signal
 import stat
 import subprocess
-import threading
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -25,16 +21,9 @@ from pathlib import Path
 
 from .state import STATE_ROOT, atomic_write, require_exact_child
 
-RELAY_RUNTIME_ROOT = Path("/run/hexclave-tv-box-relay")
 RELAY_USER = "hexclave-tv-relay"
 MAX_FILE_BYTES = 4096
-MAX_LOG_LINE_BYTES = 2048
-RETRY_MAX_SECONDS = 300
-STARTUP_TIMEOUT_SECONDS = 45
-STABLE_CONNECTION_SECONDS = 300
 LOG = logging.getLogger(__name__)
-STATES = frozenset({"disabled", "connecting", "connected", "retrying", "stopped", "invalid-config"})
-FAILURES = frozenset({"none", "transport", "authentication", "host-key", "listener", "dns", "startup-timeout"})
 
 
 @dataclass(frozen=True)
@@ -124,6 +113,13 @@ def known_hosts_entry(config: RelayConfig) -> str:
 
 
 def load_config(state_root: Path = STATE_ROOT) -> RelayConfig | None:
+    # Missing enrollment is disabled, but missing files in an existing
+    # enrollment are corruption and must not be reported as an unenrolled box.
+    _assert_safe_state_root(state_root)
+    try:
+        (state_root / "relay").lstat()
+    except FileNotFoundError:
+        return None
     directory = _relay_root(state_root)
     try:
         contents = _read_private_file(directory / "enrollment.json")
@@ -244,7 +240,7 @@ def _install_enrollment_locked(source: Path, directory: Path) -> None:
 def ssh_command(config: RelayConfig, state_root: Path = STATE_ROOT) -> list[str]:
     directory = state_root / "relay"
     return [
-        "/usr/bin/ssh", "-F", "/dev/null", "-N", "-T", "-v",
+        "/usr/bin/ssh", "-F", "/dev/null", "-N", "-T", "-q",
         "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
         "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={directory / 'known_hosts'}",
         "-o", "GlobalKnownHostsFile=/dev/null", "-o", "UpdateHostKeys=no", "-o", "VerifyHostKeyDNS=no",
@@ -259,37 +255,6 @@ def ssh_command(config: RelayConfig, state_root: Path = STATE_ROOT) -> list[str]
     ]
 
 
-def retry_delay(failures: int, jitter: float) -> float:
-    if type(failures) is not int or failures < 1 or not 0 <= jitter <= 1:
-        raise ValueError("Relay retry inputs are invalid.")
-    ceiling = min(RETRY_MAX_SECONDS, 5 * 2 ** min(failures - 1, 6))
-    return ceiling * (0.8 + jitter * 0.2)
-
-
-def classify_ssh_line(line: bytes) -> str | None:
-    """Only return fixed labels; raw SSH output may contain private topology."""
-    # Treat only the client's canonical forwarding acknowledgement as a
-    # readiness hint, not incidental banner text mentioning a forward. This
-    # remains diagnostics, never an authorization or host-trust decision.
-    if line.startswith(b"debug1: remote forward success for: listen 127.0.0.1:"):
-        return "connected"
-    if b"REMOTE HOST IDENTIFICATION HAS CHANGED" in line or b"Host key verification failed" in line:
-        return "host-key"
-    if b"Permission denied" in line:
-        return "authentication"
-    if b"remote port forwarding failed" in line:
-        return "listener"
-    if b"Could not resolve hostname" in line:
-        return "dns"
-    return None
-
-
-def _write_status(runtime_root: Path, state: str, failure: str, attempts: int) -> None:
-    if state not in STATES or failure not in FAILURES or type(attempts) is not int or attempts < 0:
-        raise ValueError("Relay status is invalid.")
-    atomic_write(runtime_root / "status", json.dumps({"state": state, "failure": failure, "attempts": attempts}) + "\n")
-
-
 def relay_enrollment_public_key(state_root: Path = STATE_ROOT) -> str:
     try:
         directory = _relay_root(state_root)
@@ -302,105 +267,33 @@ def relay_enrollment_public_key(state_root: Path = STATE_ROOT) -> str:
         return "unavailable"
 
 
-def relay_diagnostics(state_root: Path = STATE_ROOT, runtime_root: Path = RELAY_RUNTIME_ROOT) -> list[str]:
+def relay_diagnostics(state_root: Path = STATE_ROOT) -> list[str]:
+    """Describe configuration only; systemd process state is not tunnel readiness."""
     try:
         config = load_config(state_root)
-    except FileNotFoundError:
-        return ["support-relay=disabled"]
     except (OSError, ValueError, UnicodeError):
         return ["support-relay=invalid-config"]
-    if config is None:
-        return ["support-relay=disabled"]
-    # Runtime status is unprivileged and may never be treated as executable
-    # configuration or authorization. Bound its size and validate every value.
+    return ["support-relay=disabled" if config is None else "support-relay=configured"]
+
+
+def start_transport(state_root: Path = STATE_ROOT) -> None:
+    """Validate once, then replace Python; systemd owns every subsequent retry."""
     try:
-        descriptor = os.open(runtime_root / "status", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ValueError("Invalid relay status file.")
-            payload = os.read(descriptor, MAX_FILE_BYTES + 1)
-        finally:
-            os.close(descriptor)
-        if len(payload) > MAX_FILE_BYTES:
-            raise ValueError("Oversized relay status.")
-        value = json.loads(payload)
-        if not isinstance(value, dict) or set(value) != {"state", "failure", "attempts"}:
-            raise ValueError("Invalid relay status fields.")
-        if value["state"] not in STATES or value["failure"] not in FAILURES or type(value["attempts"]) is not int or not 0 <= value["attempts"] <= 2**53:
-            raise ValueError("Invalid relay status values.")
-        return [f"support-relay={value['state']} failure={value['failure']} attempts={value['attempts']}"]
-    except (OSError, ValueError, TypeError, UnicodeError):
-        return ["support-relay=configured status=unavailable"]
-
-
-def supervise(config: RelayConfig, stop: threading.Event, state_root: Path = STATE_ROOT, runtime_root: Path = RELAY_RUNTIME_ROOT) -> None:
-    failures = 0
-    attempts = 0
-    while not stop.is_set():
-        attempts += 1
-        _write_status(runtime_root, "connecting", "none", attempts)
-        LOG.info("relay-state=connecting attempt=%d", attempts)
-        started = time.monotonic()
-        connected_at: float | None = None
-        failure = "transport"
-        process = subprocess.Popen(
-            ssh_command(config, state_root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE, start_new_session=True,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": "/nonexistent"},
-        )
-        if process.stderr is None:
-            raise RuntimeError("Relay SSH stderr pipe was not created.")
-        pending = b""
-        discarding = False
-        try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stderr, selectors.EVENT_READ)
-                while not stop.is_set() and process.poll() is None:
-                    if connected_at is None and time.monotonic() - started >= STARTUP_TIMEOUT_SECONDS:
-                        failure = "startup-timeout"
-                        break
-                    for key, _mask in selector.select(timeout=0.5):
-                        chunk = os.read(key.fd, MAX_LOG_LINE_BYTES)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        # Bound buffering even if a server banner has no
-                        # newline. Never emit raw SSH output into the journal.
-                        for fragment in chunk.splitlines(keepends=True):
-                            if not discarding:
-                                pending += fragment
-                                if len(pending) > MAX_LOG_LINE_BYTES:
-                                    pending = b""
-                                    discarding = True
-                            if fragment.endswith(b"\n"):
-                                label = None if discarding else classify_ssh_line(pending)
-                                pending, discarding = b"", False
-                                if label == "connected" and connected_at is None:
-                                    connected_at = time.monotonic()
-                                    _write_status(runtime_root, "connected", "none", attempts)
-                                    LOG.info("relay-state=connected elapsed-seconds=%d", connected_at - started)
-                                elif label in FAILURES:
-                                    failure = label
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-            process.stderr.close()
-        if stop.is_set():
-            break
-        if connected_at is not None and time.monotonic() - connected_at >= STABLE_CONNECTION_SECONDS:
-            failures = 0
-        failures += 1
-        delay = retry_delay(failures, secrets.randbelow(1001) / 1000)
-        _write_status(runtime_root, "retrying", failure, attempts)
-        LOG.warning("relay-state=retrying reason=%s exit-code=%d retry-seconds=%d", failure, process.returncode, delay)
-        stop.wait(delay)
-    _write_status(runtime_root, "stopped", "none", attempts)
-    LOG.info("relay-state=stopped")
+        config = load_config(state_root)
+    except (OSError, ValueError, UnicodeError):
+        LOG.error("relay-state=invalid-config")
+        raise SystemExit(78) from None
+    if config is None:
+        # Normally systemd skips an unenrolled unit before invoking Python.
+        # Exit 78 also prevents Restart=always from looping if it is removed
+        # between that condition check and this guarded read.
+        LOG.info("relay-state=disabled")
+        raise SystemExit(78)
+    try:
+        os.execve("/usr/bin/ssh", ssh_command(config, state_root), {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+    except OSError:
+        LOG.error("relay-state=launch-failed")
+        raise SystemExit(78) from None
 
 
 def main() -> None:
@@ -421,18 +314,7 @@ def main() -> None:
         initialize_relay_identity()
         LOG.info("relay-identity=ready")
         return
-    try:
-        config = load_config()
-    except (OSError, ValueError, UnicodeError):
-        LOG.error("relay-state=invalid-config")
-        raise SystemExit(78) from None
-    if config is None:
-        LOG.info("relay-state=disabled")
-        return
-    stop = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda _signum, _frame: stop.set())
-    supervise(config, stop)
+    start_transport()
 
 
 if __name__ == "__main__":

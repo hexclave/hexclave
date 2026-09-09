@@ -111,6 +111,32 @@ class PortalAndSupportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported"):
             execute("shell", ["/bin/sh"])
 
+    def test_relay_metrics_is_a_read_only_fixed_command_without_arguments(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support.collect_relay_metrics", return_value="relay-active-state=inactive") as collect,
+            mock.patch("hexclave_tv_box.support.agent_request") as agent,
+            mock.patch("hexclave_tv_box.support.run") as runner,
+            mock.patch("hexclave_tv_box.support.support_mutation_lock") as lock,
+        ):
+            self.assertEqual(execute("relay-metrics", []), "relay-active-state=inactive")
+            for arguments in (["ssh.service"], ["--restart"], ["/proc/1/environ"]):
+                with self.subTest(arguments=arguments), self.assertRaisesRegex(ValueError, "Unsupported"):
+                    execute("relay-metrics", arguments)
+            collect.assert_called_once_with()
+            agent.assert_not_called()
+            runner.assert_not_called()
+            lock.assert_not_called()
+
+    def test_relay_metrics_uses_the_existing_forced_command_entrypoint(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": "relay-metrics"}),
+            mock.patch("hexclave_tv_box.support.subprocess.run") as runner,
+        ):
+            forced_command_main()
+        runner.assert_called_once_with(
+            ["sudo", "-n", "/usr/lib/hexclave-tv-box/support", "relay-metrics"], check=True,
+        )
+
     def test_support_kiosk_restart_is_owned_by_the_network_agent(self) -> None:
         with (
             mock.patch("hexclave_tv_box.support.run") as runner,
@@ -503,6 +529,7 @@ class PortalAndSupportTests(unittest.TestCase):
             ("restart-kiosk", []), ("restart-network", []), ("reset-network", []),
             ("reset-pairing", [ADMIN_CONFIRMATION]), ("factory-reset", [ADMIN_CONFIRMATION]),
             ("reboot", []), ("shutdown", []), ("diagnostics", []), ("recent-logs", []),
+            ("relay-metrics", []),
         ):
             with (
                 self.subTest(command=command),
@@ -510,7 +537,7 @@ class PortalAndSupportTests(unittest.TestCase):
                 mock.patch("hexclave_tv_box.support._execute", return_value="completed"),
             ):
                 self.assertEqual(execute(command, arguments), "completed")
-                self.assertEqual(lock.call_count, 0 if command in {"diagnostics", "recent-logs"} else 1)
+                self.assertEqual(lock.call_count, 0 if command in {"diagnostics", "recent-logs", "relay-metrics"} else 1)
 
     @unittest.skipUnless(os.geteuid() == 0, "The production support lock requires a root owner.")
     def test_factory_reset_excludes_network_restart_while_diagnostics_remain_accessible(self) -> None:

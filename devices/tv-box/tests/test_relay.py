@@ -10,7 +10,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -40,9 +39,20 @@ class RelayPolicyTests(unittest.TestCase):
             "StrictHostKeyChecking=yes", "IdentitiesOnly=yes", "IdentityAgent=none",
             "GlobalKnownHostsFile=/dev/null", "ExitOnForwardFailure=yes", "ForwardAgent=no",
             "ForwardX11=no", "ControlMaster=no", "PermitLocalCommand=no", "EscapeChar=none",
+            "ConnectTimeout=15", "ConnectionAttempts=1", "ServerAliveInterval=30", "ServerAliveCountMax=3",
         ):
             self.assertIn(option, command)
         self.assertEqual(command[:4], ["/usr/bin/ssh", "-F", "/dev/null", "-N"])
+        self.assertIn("-q", command)
+        self.assertNotIn("-v", command)
+
+    def test_endpoint_is_operator_configured_without_provider_assumptions(self) -> None:
+        for hostname in ("support.example.net", "127.0.0.1", "relay.internal"):
+            with self.subTest(hostname=hostname):
+                config = relay.parse_config({**enrollment(), "host": hostname, "port": 443})
+                command = relay.ssh_command(config)
+                self.assertEqual(command[-1], f"tvbox-example0001@{hostname}")
+                self.assertEqual(command[command.index("-p") + 1], "443")
 
     def test_invalid_enrollment_cannot_inject_ssh_options_or_widen_trust(self) -> None:
         cases = (
@@ -65,37 +75,30 @@ class RelayPolicyTests(unittest.TestCase):
         config = relay.parse_config({**enrollment(), "port": 443})
         self.assertEqual(relay.known_hosts_entry(config), f"[relay.example.invalid]:443 {PUBLIC_KEY}\n")
 
-    def test_backoff_is_positive_bounded_and_grows(self) -> None:
-        self.assertEqual(relay.retry_delay(1, 0), 4)
-        self.assertEqual(relay.retry_delay(1, 1), 5)
-        self.assertEqual(relay.retry_delay(2, 1), 10)
-        self.assertEqual(relay.retry_delay(100000, 1), 300)
-        for failure in range(1, 30):
-            self.assertLessEqual(relay.retry_delay(failure, 0.5), 300)
-        for failures, jitter in ((0, 0.5), (True, 0.5), (1, -1), (1, 1.1)):
-            with self.assertRaises(ValueError):
-                relay.retry_delay(failures, jitter)
-
-    def test_raw_ssh_messages_are_never_returned(self) -> None:
-        self.assertEqual(relay.classify_ssh_line(b"Permission denied (publickey), password=secret"), "authentication")
-        self.assertEqual(relay.classify_ssh_line(b"remote port forwarding failed for listen port 22001"), "listener")
-        self.assertEqual(relay.classify_ssh_line(b"Host key verification failed"), "host-key")
-        self.assertEqual(relay.classify_ssh_line(b"Could not resolve hostname private.example"), "dns")
-        self.assertIsNone(relay.classify_ssh_line(b"PRIVATE_KEY=do-not-log"))
-        self.assertIsNone(relay.classify_ssh_line(b"Welcome banner: remote forward success for: listen 127.0.0.1:22001"))
-        self.assertIsNone(relay.classify_ssh_line(b"Welcome banner: debug1: remote forward success for: listen 127.0.0.1:22001"))
-        self.assertEqual(relay.classify_ssh_line(b"debug1: remote forward success for: listen 127.0.0.1:22001, connect 127.0.0.1:22"), "connected")
-
     def test_service_is_optional_unprivileged_and_cannot_reboot(self) -> None:
         root = Path(__file__).resolve().parents[1]
         unit = (root / "image/rootfs/etc/systemd/system/hexclave-tv-box-relay.service").read_text()
         self.assertIn("User=hexclave-tv-relay", unit)
         self.assertIn("ConditionPathExists=/var/lib/hexclave-tv-box/relay/enrollment.json", unit)
         self.assertIn("RestartPreventExitStatus=78", unit)
+        for setting in (
+            "Type=exec", "Restart=always", "RestartSec=5s", "RestartSteps=6", "RestartMaxDelaySec=5min",
+            "StartLimitIntervalSec=0", "StandardInput=null", "StandardOutput=null", "StandardError=null",
+            "CPUAccounting=yes", "MemoryAccounting=yes", "TasksAccounting=yes",
+        ):
+            self.assertIn(setting, unit)
         self.assertIn("ProtectSystem=strict", unit)
         self.assertIn("KillMode=control-group", unit)
         self.assertNotIn("reboot", unit)
         self.assertNotIn("Requires=hexclave-tv-box-kiosk", unit)
+        self.assertNotIn("RuntimeDirectory=", unit)
+        self.assertNotIn("ReadWritePaths=", unit)
+        self.assertNotIn("network-online.target", unit)
+        for name in ("network", "kiosk", "setup", "setup-display", "firstboot"):
+            critical_unit = (root / f"image/rootfs/etc/systemd/system/hexclave-tv-box-{name}.service").read_text()
+            for line in critical_unit.splitlines():
+                if line.startswith(("Requires=", "Wants=", "After=")):
+                    self.assertNotIn("hexclave-tv-box-relay", line)
         template = (root / "support-relay/sshd_config.template").read_text()
         for boundary in ("MaxSessions 0", "GatewayPorts no", "PermitOpen none", "PermitListen none", "AllowTcpForwarding remote", "AllowTcpForwarding local"):
             self.assertIn(boundary, template)
@@ -104,12 +107,10 @@ class RelayPolicyTests(unittest.TestCase):
 @unittest.skipUnless(os.geteuid() == 0, "Tests enforce actual root-owned enrollment metadata.")
 class RelayStateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(suffix=".untracked")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "state"
         self.root.mkdir(mode=0o700)
-        self.runtime = Path(self.temporary.name) / "runtime"
-        self.runtime.mkdir(mode=0o700)
         relay.initialize_relay_identity(self.root, group_id=os.getgid())
         self.source = Path(self.temporary.name) / "approved.json"
         self.source.write_text(json.dumps(enrollment()))
@@ -117,7 +118,7 @@ class RelayStateTests(unittest.TestCase):
 
     def test_unenrolled_is_disabled_without_connecting(self) -> None:
         self.assertIsNone(relay.load_config(self.root))
-        self.assertEqual(relay.relay_diagnostics(self.root, self.runtime), ["support-relay=disabled"])
+        self.assertEqual(relay.relay_diagnostics(self.root), ["support-relay=disabled"])
         self.assertFalse((self.root / "relay/enrollment.json").exists())
 
     def test_each_unit_identity_is_unique_and_reboot_keeps_key(self) -> None:
@@ -259,60 +260,114 @@ class RelayStateTests(unittest.TestCase):
         self.assertIsNone(relay.load_config(self.root))
         self.assertEqual(sentinel.read_text(), "unrelated")
 
-    def test_diagnostics_never_return_enrollment_or_untrusted_runtime_contents(self) -> None:
+    def test_diagnostics_describe_configuration_without_claiming_connection(self) -> None:
         relay.install_enrollment(self.source, self.root)
-        relay._write_status(self.runtime, "connected", "none", 1)
-        self.assertEqual(relay.relay_diagnostics(self.root, self.runtime), ["support-relay=connected failure=none attempts=1"])
-        for payload in ("secret" * 1000, '{"state":{"secret":"x"},"failure":"none","attempts":1}', '{"state":"PRIVATE_KEY"}'):
-            (self.runtime / "status").write_text(payload)
-            self.assertEqual(relay.relay_diagnostics(self.root, self.runtime), ["support-relay=configured status=unavailable"])
+        self.assertEqual(relay.relay_diagnostics(self.root), ["support-relay=configured"])
+        for name in ("known_hosts", "id_ed25519"):
+            path = self.root / "relay" / name
+            contents = path.read_text()
+            path.unlink()
+            self.assertEqual(relay.relay_diagnostics(self.root), ["support-relay=invalid-config"])
+            path.write_text(contents)
+            path.chmod(0o640)
+        (self.root / "relay/enrollment.json").write_text('{"private-data": "never-export"}')
+        self.assertEqual(relay.relay_diagnostics(self.root), ["support-relay=invalid-config"])
 
-    def test_supervision_reports_connection_and_terminates_without_logging_stderr(self) -> None:
-        config = relay.parse_config(enrollment())
-        stop = threading.Event()
-        original_popen = subprocess.Popen
-        commands: list[list[str]] = []
-        original_write_status = relay._write_status
+    def test_absent_identity_is_disabled_but_linked_identity_is_invalid(self) -> None:
+        empty = Path(self.temporary.name) / "empty"
+        empty.mkdir(mode=0o700)
+        self.assertEqual(relay.relay_diagnostics(empty), ["support-relay=disabled"])
+        (empty / "relay").symlink_to(self.root / "relay")
+        self.assertEqual(relay.relay_diagnostics(empty), ["support-relay=invalid-config"])
 
-        def fake_process(command: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
-            commands.append(command)
-            return original_popen(
-                [sys.executable, "-c", "import sys,time; sys.stderr.write('PRIVATE_KEY=never-log\\ndebug1: remote forward success for: listen 127.0.0.1:22001\\n'); sys.stderr.flush(); time.sleep(30)"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    def test_startup_replaces_python_with_one_ssh_process_and_clean_environment(self) -> None:
+        relay.install_enrollment(self.source, self.root)
+        with (
+            patch.object(relay.os, "execve") as execute,
+            patch.object(relay.subprocess, "Popen") as spawn,
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": "/untrusted/agent", "SSH_ASKPASS": "/untrusted/program"}),
+        ):
+            relay.start_transport(self.root)
+        execute.assert_called_once_with(
+            "/usr/bin/ssh", relay.ssh_command(relay.parse_config(enrollment()), self.root),
+            {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+        spawn.assert_not_called()
+        self.assertFalse((self.root / "relay/status").exists())
+
+    def test_real_exec_handoff_keeps_pid_but_leaves_no_python_supervisor(self) -> None:
+        with socket.socket() as handshake:
+            handshake.bind(("127.0.0.1", 0))
+            handshake.listen()
+            handshake.settimeout(5)
+            self.source.write_text(json.dumps({**enrollment(), "host": "127.0.0.1", "port": handshake.getsockname()[1]}))
+            relay.install_enrollment(self.source, self.root)
+            client = subprocess.Popen(
+                [sys.executable, "-c", "import sys; from pathlib import Path; from hexclave_tv_box.relay import start_transport; start_transport(Path(sys.argv[1]))", str(self.root)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
+            try:
+                # Hold an isolated connection before its SSH handshake. The
+                # executing PID must already be ssh, not a supervising Python
+                # parent; no system account or deployed endpoint is involved.
+                accepted, _address = handshake.accept()
+                with accepted:
+                    self.assertEqual(Path(f"/proc/{client.pid}/comm").read_text().strip(), "ssh")
+                    self.assertEqual(Path(f"/proc/{client.pid}/task/{client.pid}/children").read_text(), "")
+            finally:
+                if client.poll() is None:
+                    client.terminate()
+                try:
+                    output, errors = client.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    output, errors = client.communicate(timeout=5)
+            self.assertEqual(output, b"")
+            self.assertEqual(errors, b"")
 
-        def write_status(runtime: Path, state: str, failure: str, attempts: int) -> None:
-            original_write_status(runtime, state, failure, attempts)
-            if state == "connected":
-                stop.set()
+    def test_missing_or_malformed_config_fails_closed_without_spawning_or_retrying(self) -> None:
+        for contents, label in ((None, "disabled"), ("{", "invalid-config"), ('{"secret":"never-log"}', "invalid-config")):
+            with self.subTest(contents=contents):
+                if contents is not None:
+                    path = self.root / "relay/enrollment.json"
+                    path.write_text(contents)
+                    path.chmod(0o600)
+                with patch.object(relay.os, "execve") as execute, self.assertLogs(relay.LOG, level="INFO") as logs:
+                    with self.assertRaises(SystemExit) as failure:
+                        relay.start_transport(self.root)
+                self.assertEqual(failure.exception.code, 78)
+                self.assertEqual(logs.output, [f"{'INFO' if label == 'disabled' else 'ERROR'}:hexclave_tv_box.relay:relay-state={label}"])
+                execute.assert_not_called()
 
-        with patch.object(relay.subprocess, "Popen", side_effect=fake_process), patch.object(relay, "_write_status", side_effect=write_status), self.assertLogs(relay.LOG, level="INFO") as logs:
-            relay.supervise(config, stop, self.root, self.runtime)
-        self.assertEqual(len(commands), 1)
-        self.assertTrue(any("relay-state=connected" in line for line in logs.output))
-        self.assertNotIn("PRIVATE_KEY", "\n".join(logs.output))
-        self.assertNotIn(config.host, "\n".join(logs.output))
+    def test_missing_pins_keys_or_ssh_executable_are_nonretryable(self) -> None:
+        relay.install_enrollment(self.source, self.root)
+        for name in ("known_hosts", "id_ed25519"):
+            with self.subTest(name=name):
+                path = self.root / "relay" / name
+                contents = path.read_text()
+                path.unlink()
+                with patch.object(relay.os, "execve") as execute, self.assertLogs(relay.LOG, level="ERROR"):
+                    with self.assertRaises(SystemExit) as failure:
+                        relay.start_transport(self.root)
+                self.assertEqual(failure.exception.code, 78)
+                execute.assert_not_called()
+                path.write_text(contents)
+                path.chmod(0o640)
+        with (
+            patch.object(relay.os, "execve", side_effect=OSError("private-error")),
+            self.assertLogs(relay.LOG, level="ERROR") as logs,
+            self.assertRaises(SystemExit) as failure,
+        ):
+            relay.start_transport(self.root)
+        self.assertEqual(failure.exception.code, 78)
+        self.assertEqual(logs.output, ["ERROR:hexclave_tv_box.relay:relay-state=launch-failed"])
 
-    def test_failed_transport_uses_bounded_backoff_and_categorized_logs(self) -> None:
-        stop = threading.Event()
-        original_popen = subprocess.Popen
-
-        def fake_process(_command: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
-            return original_popen(
-                [sys.executable, "-c", "import sys,time; sys.stderr.write('Permission denied private-address secret\\n'); sys.stderr.flush(); time.sleep(.05); sys.exit(255)"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            )
-
-        def stop_after_retry(delay: float) -> bool:
-            self.assertGreaterEqual(delay, 4)
-            self.assertLessEqual(delay, 5)
-            stop.set()
-            return True
-
-        with patch.object(relay.subprocess, "Popen", side_effect=fake_process), patch.object(stop, "wait", side_effect=stop_after_retry), self.assertLogs(relay.LOG, level="INFO") as logs:
-            relay.supervise(relay.parse_config(enrollment()), stop, self.root, self.runtime)
-        self.assertTrue(any("reason=authentication" in line for line in logs.output))
-        self.assertNotIn("private-address", "\n".join(logs.output))
+    def test_identity_and_enrollment_reject_nonroot_callers(self) -> None:
+        with patch.object(relay.os, "geteuid", return_value=65534):
+            with self.assertRaises(PermissionError):
+                relay.initialize_relay_identity(self.root)
+            with self.assertRaises(PermissionError):
+                relay.install_enrollment(self.source, self.root)
 
     @unittest.skipUnless(Path("/usr/sbin/sshd").exists(), "OpenSSH server is unavailable.")
     def test_real_loopback_relay_forward_and_negative_permissions(self) -> None:
@@ -348,6 +403,17 @@ class RelayStateTests(unittest.TestCase):
             f'{relay.relay_enrollment_public_key(self.root)}\n',
         )
         authorized_keys.chmod(0o600)
+        banner = Path(self.temporary.name) / "server-banner"
+        banner.write_text("PRIVATE_SERVER_BANNER_MUST_NOT_REACH_LOGS\n")
+        # Do not connect to or replace the host's real SSH daemon on port 22.
+        # The production target is asserted above; only this isolated client's
+        # target port is redirected to a disposable local protocol fixture.
+        target = socket.socket()
+        self.addCleanup(target.close)
+        target.bind(("127.0.0.1", 0))
+        target.listen()
+        target.settimeout(5)
+        target_port = target.getsockname()[1]
         server_config = Path(self.temporary.name) / "loopback-sshd.conf"
         server_config.write_text("\n".join([
             f"Port {ssh_port}", "ListenAddress 127.0.0.1", f"HostKey {server_key}",
@@ -358,18 +424,16 @@ class RelayStateTests(unittest.TestCase):
             "PubkeyAuthentication yes", "AuthenticationMethods publickey", "UsePAM yes", "AllowUsers root",
             "MaxSessions 0", "PermitTTY no", "AllowAgentForwarding no", "X11Forwarding no",
             "AllowStreamLocalForwarding no", "PermitTunnel no", "GatewayPorts no", "PermitOpen none",
-            f"PermitListen 127.0.0.1:{forwarded_port}", "AllowTcpForwarding remote", "LogLevel VERBOSE", "",
+            f"PermitListen 127.0.0.1:{forwarded_port}", "AllowTcpForwarding remote", "LogLevel VERBOSE", f"Banner {banner}", "",
         ]))
         subprocess.run(["/usr/sbin/sshd", "-t", "-f", str(server_config)], check=True, timeout=10)
         daemon = subprocess.Popen(
             ["/usr/sbin/sshd", "-D", "-e", "-f", str(server_config)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
         )
-        stop = threading.Event()
         if daemon.stderr is not None:
             os.set_blocking(daemon.stderr.fileno(), False)
-        supervisor: threading.Thread | None = None
-        errors: list[BaseException] = []
+        client: subprocess.Popen[bytes] | None = None
         try:
             deadline = time.monotonic() + 5
             while True:
@@ -384,40 +448,32 @@ class RelayStateTests(unittest.TestCase):
             (self.root / "relay/known_hosts").write_text(relay.known_hosts_entry(config))
             (self.root / "relay/known_hosts").chmod(0o600)
 
-            def run_supervisor() -> None:
-                try:
-                    relay.supervise(config, stop, self.root, self.runtime)
-                except BaseException as error:
-                    # Test thread failures must fail the test, not disappear
-                    # into threading's stderr while the parent keeps waiting.
-                    errors.append(error)
-                    stop.set()
-
-            supervisor = threading.Thread(target=run_supervisor)
-            supervisor.start()
+            command = relay.ssh_command(config, self.root)
+            forward_index = command.index("-R")
+            command[forward_index + 1] = f"127.0.0.1:{forwarded_port}:127.0.0.1:{target_port}"
+            client = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
             deadline = time.monotonic() + 10
             while True:
-                status_path = self.runtime / "status"
-                if status_path.exists() and json.loads(status_path.read_text())["state"] == "connected":
+                try:
+                    forwarded = socket.create_connection(("127.0.0.1", forwarded_port), timeout=0.1)
                     break
-                if errors or time.monotonic() >= deadline:
-                    details = daemon.stderr.read(16384) if daemon.stderr is not None else b""
-                    self.fail(f"Real OpenSSH remote-forward acknowledgement was not detected: {details!r}")
-                time.sleep(0.025)
-            # The only allowed destination is the box's ordinary SSH port.
-            # Inspect its protocol banner without attempting authentication.
-            try:
-                with socket.create_connection(("127.0.0.1", 22), timeout=0.2) as local_ssh:
-                    expected_banner = local_ssh.recv(256)
-            except OSError:
-                expected_banner = None
-            if expected_banner is not None:
-                with socket.create_connection(("127.0.0.1", forwarded_port), timeout=2) as forwarded:
-                    self.assertEqual(forwarded.recv(256), expected_banner)
-            command = relay.ssh_command(config, self.root)
+                except OSError:
+                    if client.poll() is not None or time.monotonic() >= deadline:
+                        details = daemon.stderr.read(16384) if daemon.stderr is not None else b""
+                        self.fail(f"Real OpenSSH did not create the exact loopback listener: {details!r}")
+                    time.sleep(0.025)
+            with forwarded:
+                forwarded.settimeout(5)
+                accepted, _address = target.accept()
+                with accepted:
+                    accepted.sendall(b"isolated-target-reached\n")
+                    self.assertEqual(forwarded.recv(256), b"isolated-target-reached\n")
+            self.assertEqual(Path(f"/proc/{client.pid}/comm").read_text().strip(), "ssh")
             # Reuse pinned/authenticated options, removing only the tunnel
             # and no-session switch for explicitly forbidden requests.
-            forward_index = command.index("-R")
             base = command[:forward_index]
             base.remove("-N")
             destination = command[-1]
@@ -436,19 +492,39 @@ class RelayStateTests(unittest.TestCase):
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
             )
             self.assertNotEqual(denied_remote.returncode, 0)
-            self.assertIn(b"remote port forwarding failed", denied_remote.stderr)
             # Public-bind requests cannot satisfy either exact PermitListen.
             denied_public = subprocess.run(
                 [*base, "-N", "-R", f"0.0.0.0:{forwarded_port}:127.0.0.1:22", destination],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
             )
             self.assertNotEqual(denied_public.returncode, 0)
-            self.assertFalse(errors)
+            denied_collision = subprocess.run(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+            )
+            self.assertNotEqual(denied_collision.returncode, 0)
+            unknown_key_command = list(command)
+            unknown_key_command[unknown_key_command.index("-i") + 1] = str(server_key)
+            denied_key = subprocess.run(
+                unknown_key_command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+            )
+            self.assertNotEqual(denied_key.returncode, 0)
+            (self.root / "relay/known_hosts").write_text(f"[127.0.0.1]:{ssh_port} {PUBLIC_KEY}\n")
+            denied_host = subprocess.run(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+            )
+            self.assertNotEqual(denied_host.returncode, 0)
+            for result in (denied_shell, denied_local, denied_remote, denied_public, denied_collision, denied_key, denied_host):
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(result.stderr, b"")
         finally:
-            stop.set()
-            if supervisor is not None:
-                supervisor.join(timeout=15)
-                self.assertFalse(supervisor.is_alive())
+            if client is not None:
+                if client.poll() is None:
+                    client.terminate()
+                try:
+                    output, errors = client.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    output, errors = client.communicate(timeout=5)
             # The group belongs only to the freshly started test daemon and
             # its children, never the host's real SSH service.
             if daemon.poll() is None:
@@ -460,6 +536,8 @@ class RelayStateTests(unittest.TestCase):
                     daemon.wait(timeout=5)
             if daemon.stderr is not None:
                 daemon.stderr.close()
+        self.assertEqual(output, b"")
+        self.assertEqual(errors, b"")
 
 
 if __name__ == "__main__":

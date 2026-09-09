@@ -2,7 +2,6 @@
 Description=Initialize unique optional TV Box relay identity
 Requires=hexclave-tv-box-firstboot.service
 After=hexclave-tv-box-firstboot.service
-Before=hexclave-tv-box-relay.service
 # Deliberately not a dependency of networking or the renderer: corruption of
 # optional support identity must not prevent an otherwise healthy box booting.
 
