@@ -23,7 +23,7 @@ const applyFails = vi.hoisted(() => ({ value: false }));
 
 vi.mock("./config.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./config.js")>(),
-  getConfig: () => ({ envId: "test", parkedImage: "docker.io/hexclave/deployment-parked-page:1", dataEncryptionRootKey: Buffer.alloc(32, 7) }),
+  getConfig: () => ({ envId: "test", parkedImage: "docker.io/bgodil/deployment-parked-page:1", dataEncryptionRootKey: Buffer.alloc(32, 7) }),
 }));
 
 vi.mock("./provider.js", () => ({
@@ -185,7 +185,7 @@ describe("parkService", () => {
     reset();
     const state = await parkService("namespace", "web", "free_plan_24h");
     expect(applies).toHaveLength(1);
-    expect(applies[0].image).toBe("docker.io/hexclave/deployment-parked-page:1");
+    expect(applies[0].image).toBe("docker.io/bgodil/deployment-parked-page:1");
     expect(applies[0].env).toEqual({ PORT: "3000", HEXCLAVE_PARKED_REASON: "free_plan_24h" });
     expect(state.status).toBe("parked");
     expect(state.parked?.reason).toBe("free_plan_24h");

@@ -42,14 +42,21 @@ id off a page the public can see.
 
 ## Publishing
 
-The image is public on Docker Hub so tenant Fly apps can pull it without
-credentials. Fly's own registry repositories are app-scoped, so an image pushed
-to one app's repository is not reliably pullable from another app's machines.
+Published as `docker.io/bgodil/deployment-parked-page`. It must stay PUBLIC: tenant Fly
+machines pull it with no registry credentials, and a private repository would fail every
+park. (Fly's own registry is not an option — its repositories are app-scoped, so an image
+pushed to one app's repository is not reliably pullable from another app's machines.)
+
+After any push, confirm an unauthenticated puller can still reach it:
+
+```sh
+curl -s "https://hub.docker.com/v2/repositories/bgodil/deployment-parked-page/" | grep -o '"is_private":[a-z]*'
+```
 
 ```sh
 cd apps/deployment-gateway/parked-page
-docker buildx build --platform linux/amd64 -t hexclave/deployment-parked-page:1 --push .
-docker buildx imagetools inspect hexclave/deployment-parked-page:1
+docker buildx build --platform linux/amd64 -t bgodil/deployment-parked-page:1 --push .
+docker buildx imagetools inspect bgodil/deployment-parked-page:1
 ```
 
 Take the digest from that last command and set it on Marshal, which deploys on Vercel
@@ -57,8 +64,11 @@ Take the digest from that last command and set it on Marshal, which deploys on V
 
 ```sh
 vercel env add HEXCLAVE_DEPLOYMENT_PARKED_IMAGE production
-# paste: hexclave/deployment-parked-page@sha256:<digest>
+# paste: bgodil/deployment-parked-page@sha256:<digest>
 ```
+
+The digest currently published as `:1` is
+`sha256:0a68fd628127fd031a1e9da3d9b8066eb6a6f86065b7fc316c722a3949693bfe`.
 
 A Vercel environment variable only reaches the running function on the next deployment, so
 redeploy Marshal after setting it. Until then Marshal falls back to the tag in
@@ -67,6 +77,9 @@ DEFAULT_PARKED_IMAGE.
 Pin the digest rather than the tag. Marshal hands this reference to Fly as the
 image a parked machine runs, and a tag that moved under a fleet of already-parked
 services would roll every one of them the next time it reconciled.
+
+For the same reason, treat `:1` as immutable once anything is parked against it: publish
+changes as `:2` and move the pinned digest deliberately, rather than pushing over `:1`.
 
 ## Tests
 
