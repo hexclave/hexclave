@@ -61,6 +61,10 @@ export const GET = createSmartRouteHandler({
       hostname: yupString().defined(),
       is_primary: yupBoolean().defined(),
       verified: yupBoolean().defined(),
+      // Finer-grained than `verified`: "issuing" is the window where the runtime has
+      // accepted the DNS but the certificate authority has not finished, which without this
+      // field is indistinguishable from the user having created no records at all.
+      status: yupString().oneOf(["awaiting_dns", "issuing", "verified"]).defined(),
       // True while the service has never been deployed: the runtime hasn't
       // been told about the domain yet, and the DNS targets (the app's IPs)
       // only exist once it has, so no records can be shown.
@@ -87,6 +91,7 @@ export const GET = createSmartRouteHandler({
           hostname: params.hostname,
           is_primary: domain.isPrimary,
           verified: false,
+          status: "awaiting_dns",
           pending_first_deploy: true,
           dns_records: [],
         },
@@ -121,6 +126,7 @@ export const GET = createSmartRouteHandler({
             hostname: params.hostname,
             is_primary: domain.isPrimary,
             verified: false,
+            status: "awaiting_dns",
             pending_first_deploy: true,
             dns_records: [],
           },
@@ -145,6 +151,7 @@ export const GET = createSmartRouteHandler({
           hostname: params.hostname,
           is_primary: domain.isPrimary,
           verified: false,
+          status: "awaiting_dns",
           pending_first_deploy: true,
           dns_records: [],
         },
@@ -163,6 +170,7 @@ export const GET = createSmartRouteHandler({
         hostname: params.hostname,
         is_primary: domain.isPrimary,
         verified: result.verified,
+        status: result.status,
         pending_first_deploy: false,
         // Once verified there is nothing left for the user to create; while pending, the records
         // include both Hexclave's ownership TXT proof and the shared frontend routing record.

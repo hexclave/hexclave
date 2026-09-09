@@ -73,6 +73,42 @@ export type FlyCertificate = {
   issued: { nodes: { type: string, expiresAt: string }[] },
 };
 
+/**
+ * What Fly itself says a hostname needs, from the Machines REST certificate resource.
+ *
+ * This is the AUTHORITATIVE answer and the only place Fly hands back the `_fly-ownership`
+ * TXT record — the GraphQL certificate type has no field for it. Deriving the record set
+ * from the app's IPs instead (which is what Marshal used to do) silently omits that record,
+ * and a hostname behind a CDN proxy can then never verify: the proxy answers the A/AAAA
+ * with its own addresses and terminates TLS, so neither the AAAA proof nor TLS-ALPN-01
+ * works and the ownership TXT is the only proof left.
+ */
+export type FlyCertificateRequirements = {
+  hostname: string,
+  configured: boolean,
+  // Fly's own wording, mirroring GraphQL's clientStatus: "Awaiting configuration",
+  // "Awaiting certificates", "Ready".
+  status: string,
+  validation: {
+    dns_configured: boolean,
+    alpn_configured: boolean,
+    http_configured: boolean,
+    ownership_txt_configured: boolean,
+  },
+  dns_requirements: {
+    a: string[],
+    aaaa: string[],
+    // Fly's per-app CNAME target (a hashed `<id>.<app>.fly.dev`), not `<app>.fly.dev`.
+    cname: string,
+    acme_challenge: { name: string, target: string },
+    // `app_value` scopes the proof to THIS app; `org_value` scopes it to the whole Fly org.
+    // Only app_value may ever be shown to a tenant — every tenant app lives in one org, so
+    // publishing org_value would let any other tenant's app claim the same hostname.
+    ownership: { name: string, app_value: string, org_value: string },
+  },
+  validation_errors: { code: string, message: string, remediation: string }[],
+};
+
 export type FlyVolume = {
   id: string,
   name: string,
@@ -382,7 +418,22 @@ export class FlyClient {
   }
 
   // -------------------------------------------------------------------------
-  // Certificates (GraphQL)
+  // Certificates
+  //
+  // Split across both APIs on purpose: only GraphQL can add or delete one, and only the
+  // Machines REST resource reports what DNS the hostname actually needs (see
+  // FlyCertificateRequirements).
+
+  /**
+   * The DNS Fly requires for a hostname, and how much of it Fly has already seen.
+   * Null when the app or the certificate does not exist.
+   */
+  async getCertificateRequirements(app: string, hostname: string): Promise<FlyCertificateRequirements | null> {
+    return await this.fetchMachinesApi<FlyCertificateRequirements>(
+      flyPath`/apps/${app}/certificates/${hostname}`,
+      { allow404: true },
+    );
+  }
 
   private static readonly CERTIFICATE_FIELDS = `
     id hostname configured acmeDnsConfigured clientStatus

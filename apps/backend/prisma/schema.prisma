@@ -2075,11 +2075,18 @@ model DeploymentsPlatformConfig {
   // flipping this during an incident needs those more than ever.
   deploymentsEnabled Boolean @default(true)
 
-  // Whether the Free plan's time limit is enforced at all. Default FALSE: parking
-  // stops customers' running services, so it is switched on deliberately by an
-  // operator (from the Deploy Admin page) once the fleet is known to be ready for
-  // it, rather than the moment this column ships.
-  freePlanParkingEnabled Boolean @default(false)
+  // Whether the Free plan's time limit is enforced at all. Default TRUE: the limit
+  // is part of what the Free plan IS, so an instance that has never been
+  // configured enforces it. An operator can still pause it from the Deploy Admin
+  // page — which is the switch to reach for if parking ever misbehaves, because
+  // turning it off stops new parks immediately (already-parked services stay
+  // parked until their projects redeploy or upgrade).
+  //
+  // Note what this default means on the deploy that ships it: every Free-plan
+  // project whose services last deployed more than the window ago is parked by
+  // the first sweep, within ten minutes. That is the intended behaviour, but it
+  // is not a quiet rollout.
+  freePlanParkingEnabled Boolean @default(true)
 
   // How long a Free-plan project's services run after each deploy before they are
   // parked. Configurable because the right number is a pricing decision that will

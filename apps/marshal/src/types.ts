@@ -206,9 +206,19 @@ export type Deployment = {
 
 export type DnsRecord = { type: string, name: string, value: string };
 
+/**
+ * How far along a custom domain is, beyond the verified/not-verified boolean.
+ *
+ * "issuing" is the state a user otherwise cannot distinguish from "nothing has happened":
+ * the runtime has accepted at least one proof of ownership and is waiting on the
+ * certificate authority. Surfacing it is what stops a working setup from looking stuck.
+ */
+export type DomainStatus = "awaiting_dns" | "issuing" | "verified";
+
 export type ServiceDomainState = {
   hostname: string,
   verified: boolean,
+  status: DomainStatus,
   dns_records: DnsRecord[],
   error: string | null,
 };

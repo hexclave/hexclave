@@ -150,7 +150,7 @@ export type MarshalServiceState = {
   revision: string | null,
   target_revision: string | null,
   outputs: Record<string, string | null>,
-  domains: { hostname: string, verified: boolean, dns_records: MarshalDnsRecord[], error: string | null }[],
+  domains: { hostname: string, verified: boolean, status: MarshalDomainStatus, dns_records: MarshalDnsRecord[], error: string | null }[],
   error: string | null,
   // Set while the service runs the platform's parked page instead of its own
   // image. Non-null with a status OTHER than "parked" means a park whose apply
@@ -217,10 +217,16 @@ export type MarshalApplyResult = {
   state: MarshalServiceState,
 };
 
+// How far along a domain is beyond verified/not-verified. "issuing" means the runtime has
+// accepted a proof of ownership and is waiting on the certificate authority — the state that
+// otherwise looks identical to nothing having happened.
+export type MarshalDomainStatus = "awaiting_dns" | "issuing" | "verified";
+
 export type MarshalDomainResult = {
   hostname: string,
   service_key: string,
   verified: boolean,
+  status: MarshalDomainStatus,
   dns_records: MarshalDnsRecord[],
 };
 

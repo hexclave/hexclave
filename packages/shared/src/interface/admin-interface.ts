@@ -202,6 +202,12 @@ export type AdminDeploymentDomainJson = {
   hostname: string,
   is_primary: boolean,
   verified: boolean,
+  /**
+   * Finer-grained than `verified`. "issuing" means the deployment runtime has accepted the
+   * DNS and is waiting on the certificate authority; without it that window looks exactly
+   * like the user having created no records at all.
+   */
+  status: "awaiting_dns" | "issuing" | "verified",
   pending_first_deploy: boolean,
   dns_records: { type: string, name: string, value: string }[],
 };

@@ -23,9 +23,9 @@ describe("getDeploymentsPlatformConfig", () => {
     mockFindFirst.mockResolvedValue(null as never);
     await expect(getDeploymentsPlatformConfig()).resolves.toEqual({
       deploymentsEnabled: true,
-      // Parking is the one default that is OFF: it stops customers' running
-      // services, so it waits for an operator rather than for a migration.
-      freePlanParkingEnabled: false,
+      // Enforced without configuration: the window is part of what the Free plan
+      // is, so a missing row must not read as "no limit".
+      freePlanParkingEnabled: true,
       freePlanParkAfterHours: 24,
     });
   });

@@ -399,6 +399,51 @@ async function handleRequest(req, res) {
     return sendJson(res, 404, { error: "App not found" });
   }
 
+  // Certificate requirements. Real Fly serves these ONLY over the Machines REST API — the
+  // GraphQL certificate type has no ownership field at all — and Marshal reads the DNS a
+  // hostname needs from here, so a mock without this route makes every domain report no
+  // records. Mirrors the real response shape (dns_requirements + validation).
+  const certMatch = /^\/certificates\/([^/]+)$/.exec(subPath);
+  if (certMatch && req.method === "GET") {
+    const hostname = decodeURIComponent(certMatch[1]);
+    const cert = app.certsByHostname.get(hostname);
+    if (!cert) return sendJson(res, 404, { error: "certificate not found" });
+    const json = certJson(cert);
+    const verified = json.clientStatus === "Ready";
+    // Same suffix convention certJson uses for a verified hostname, one step earlier: it
+    // models a hostname whose ownership proof has landed but whose certificate has not
+    // issued, which is the only way to exercise the "issuing" state without a real CA.
+    const issuing = !verified && hostname.endsWith(".issuing.test");
+    return sendJson(res, 200, {
+      hostname,
+      configured: verified,
+      acme_requested: true,
+      status: verified ? "Ready" : "Awaiting configuration",
+      dns_provider: "mockregistry",
+      rate_limited_until: null,
+      certificates: [],
+      validation: {
+        dns_configured: verified,
+        alpn_configured: false,
+        http_configured: false,
+        ownership_txt_configured: issuing,
+      },
+      dns_requirements: {
+        a: app.sharedIpv4 ? [app.sharedIpv4] : [],
+        aaaa: app.dedicatedIps.filter((ip) => ip.type === "v6").map((ip) => ip.address),
+        cname: `mock00.${appName}.fly.dev`,
+        acme_challenge: { name: `_acme-challenge.${hostname}`, target: `${hostname}.mock00.flydns.net.` },
+        ownership: { name: `_fly-ownership.${hostname}`, app_value: `app-mock00`, org_value: `org-mock00` },
+      },
+      validation_errors: verified ? [] : [{
+        code: "IPV6_NOT_FOUND",
+        message: "No AAAA records were found for your domain",
+        remediation: "Add AAAA records pointing to your app's IPv6 addresses, or add a _fly-ownership TXT record to verify domain ownership",
+        timestamp: new Date().toISOString(),
+      }],
+    });
+  }
+
   // Volumes. Real Fly answers a create with 201 (not 200) and rejects a shrink,
   // so the mock does both — those are exactly the behaviours Marshal codes against.
   if (subPath === "/volumes" && req.method === "GET") {

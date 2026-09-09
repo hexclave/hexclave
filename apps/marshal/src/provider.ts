@@ -12,7 +12,7 @@ import type { ReconciliationLeaseGuard } from "./reconciliation-lock.js";
 import { createFlyProvider } from "./fly/provider.js";
 import { createGcpProvider } from "./gcp/provider.js";
 import { resolveNamespaceRuntime, type DeploymentRuntime } from "./runtime.js";
-import type { DnsRecord, LogLine, ServiceDomainState, ServiceKind, StoredDeployment, StoredSpec } from "./types.js";
+import type { DnsRecord, DomainStatus, LogLine, ServiceDomainState, ServiceKind, StoredDeployment, StoredSpec } from "./types.js";
 
 export type RuntimeAddress = {
   // The service's private hostname, when the runtime has one to give. A pure function of
@@ -57,6 +57,7 @@ export type AttachDomainResult = {
   hostname: string,
   service_key: string,
   verified: boolean,
+  status: DomainStatus,
   dns_records: DnsRecord[],
 };
 

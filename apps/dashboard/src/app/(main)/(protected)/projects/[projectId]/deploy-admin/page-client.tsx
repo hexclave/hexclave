@@ -231,8 +231,8 @@ function FreePlanParkingCard(props: { fusebox: FuseboxState, onChange: (patch: P
           <div>
             <Typography type="p" className="text-sm font-medium">Enforce the limit</Typography>
             <Typography type="p" className="text-xs text-muted-foreground">
-              Off on every instance until someone turns it on. Turning it off again leaves already-stopped
-              services stopped until their projects redeploy.
+              On unless someone turns it off. Turning it off pauses new stops; services already stopped
+              stay stopped until their projects redeploy or upgrade.
             </Typography>
           </div>
           <Switch

@@ -109,6 +109,7 @@ describe("custom-domain ownership", () => {
       hostname: "app.example.com",
       service_key: "web",
       verified: false,
+      status: "awaiting_dns",
       dns_records: [
         { type: "TXT", name: "_hexclave-verification.app.example.com", value: "hexclave-domain-verification=tenant-bound-token" },
         { type: "A", name: "app.example.com", value: "203.0.113.10" },

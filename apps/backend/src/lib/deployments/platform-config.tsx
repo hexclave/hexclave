@@ -14,9 +14,10 @@ import { StatusError } from "@hexclave/shared/dist/utils/errors";
 export type DeploymentsPlatformConfig = {
   deploymentsEnabled: boolean,
   // Whether a Free-plan project's services are parked once they pass the limit
-  // below. Off by default and switched on deliberately: this stops services that
-  // are running and serving traffic, which is not something a schema change
-  // should start doing on its own.
+  // below. On by default: the window is part of what the Free plan is, so an
+  // instance nobody has configured enforces it. Turning it off pauses NEW parks
+  // and leaves already-parked services parked, which is what makes it the right
+  // switch to reach for in an incident.
   freePlanParkingEnabled: boolean,
   // How long a Free-plan project's services run after each deploy. Configurable
   // because it is a pricing decision that will move, and because widening it is
@@ -41,7 +42,7 @@ export const MAX_FREE_PLAN_PARK_AFTER_HOURS = 24 * 365;
 // it has to read as "everything on" rather than as an error.
 const defaultConfig: DeploymentsPlatformConfig = {
   deploymentsEnabled: true,
-  freePlanParkingEnabled: false,
+  freePlanParkingEnabled: true,
   freePlanParkAfterHours: 24,
 };
 
