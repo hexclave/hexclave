@@ -34,10 +34,12 @@ function PaymentsLayoutInner({ children }: { children: React.ReactNode }) {
   const paymentsConfig = project.useConfig().payments;
   const updateConfig = useUpdateConfig();
 
-  // Hide banners on the new product page and product-lines onboarding for a cleaner experience
+  // Hide banners on first-run empty surfaces so the illustration isn't
+  // cramped. Promo codes has no list yet, so that route is always empty.
   const isNewProductPage = pathname.endsWith('/products/new');
   const hasAnyProductsOrItems = Object.keys(paymentsConfig.products).length > 0 || Object.keys(paymentsConfig.items).length > 0;
   const isProductLinesOnboarding = pathname.endsWith('/product-lines') && !hasAnyProductsOrItems;
+  const isPromoCodesEmptyState = pathname.endsWith('/promo-codes');
 
   const setupPayments = async () => {
     const { url } = await hexclaveAdminApp.setupPayments();
@@ -100,8 +102,8 @@ function PaymentsLayoutInner({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // On the new product page and product-lines onboarding, skip all banners for a cleaner experience
-  if (isNewProductPage || isProductLinesOnboarding) {
+  // On first-run empty surfaces, skip all banners for a cleaner experience
+  if (isNewProductPage || isProductLinesOnboarding || isPromoCodesEmptyState) {
     return (
       <StripeConnectProvider>
         {children}
