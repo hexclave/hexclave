@@ -50,6 +50,7 @@ mmdebstrap:
     - libwpewebkit-2.0-1
     - network-manager
     - nftables
+    - openssh-client
     - openssh-server
     - python3-minimal
     - sudo
@@ -73,6 +74,8 @@ mmdebstrap:
       find "$1/usr/lib/python3/dist-packages/hexclave_tv_box" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
       install -d -m 0755 "$1/usr/share/hexclave-tv-box/setup-ui"
       cp -a "${SRCROOT}/../setup-ui/." "$1/usr/share/hexclave-tv-box/setup-ui/"
+      python3 -B "${SRCROOT}/../scripts/cursor_asset.py" install "$1"
+      python3 -B "${SRCROOT}/../scripts/image_verification.py" runtime "$1" "${SRCROOT}/qualified-runtime.json"
       install -m 0644 "${IGconf_tvbox_support_ca_key}" "$1/etc/ssh/hexclave-support-ca.pub"
       printf '%s\n' "${IGconf_tvbox_wifi_country}" > "$1/etc/hexclave-tv-box-country"
       case "${IGconf_tvbox_test_image}" in
@@ -114,7 +117,9 @@ mmdebstrap:
       # password method disabled, the support CA remains the only entry path.
       install -d -m 0755 -o root -g root "$1/var/empty/hexclave-support"
       chroot "$1" useradd --system --password '*NP*' --home-dir /var/empty/hexclave-support --shell /bin/sh hexclave-support
-      chmod 0755 "$1/usr/lib/hexclave-tv-box/kiosk-launch" "$1/usr/lib/hexclave-tv-box/forced-support-command" "$1/usr/lib/hexclave-tv-box/support"
+      chroot "$1" groupadd --system hexclave-tv-relay
+      chroot "$1" useradd --system --gid hexclave-tv-relay --groups hexclave-tv-runtime --home-dir /nonexistent --shell /usr/sbin/nologin hexclave-tv-relay
+      chmod 0755 "$1/usr/lib/hexclave-tv-box/kiosk-launch" "$1/usr/lib/hexclave-tv-box/forced-support-command" "$1/usr/lib/hexclave-tv-box/support" "$1/usr/lib/hexclave-tv-box/relay-enroll" "$1/usr/lib/hexclave-tv-box/factory-reset-job"
       chmod 0440 "$1/etc/sudoers.d/hexclave-tv-box-support"
       chroot "$1" systemctl mask \
         getty@tty1.service serial-getty@ttyAMA0.service ssh-hostkeys-generate.service \
@@ -122,7 +127,7 @@ mmdebstrap:
         apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
       # The network agent starts exactly one tty1 owner for the active mode;
       # neither the setup display nor the kiosk starts independently at boot.
-      chroot "$1" systemctl enable hexclave-tv-box-firstboot.service hexclave-tv-box-network.service ssh.service nftables.service zramswap.service systemd-timesyncd.service
+      chroot "$1" systemctl enable hexclave-tv-box-firstboot.service hexclave-tv-box-network.service hexclave-tv-box-relay-identity.service hexclave-tv-box-relay.service ssh.service nftables.service zramswap.service systemd-timesyncd.service
     - |-
       set -eu
       printf '%s\n' 'flush ruleset' 'include "/etc/nftables.d/*.nft"' > "$1/etc/nftables.conf"

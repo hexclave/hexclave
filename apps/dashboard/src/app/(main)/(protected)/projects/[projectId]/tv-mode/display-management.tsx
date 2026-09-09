@@ -122,7 +122,7 @@ export function TvDisplayManagement({
   const [displays, setDisplays] = useState<TvDisplayResource[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [pairingCode, setPairingCode] = useState("");
-  const [displayName, setDisplayName] = useState("Office Display");
+  const [displayName, setDisplayName] = useState("");
   const [profileId, setProfileId] = useState(
     profiles.some((profile) => profile.id === defaultProfileId)
       ? defaultProfileId
@@ -207,6 +207,7 @@ export function TvDisplayManagement({
         expiresAt: approval.expiresAt,
       };
       setPairingCode("");
+      setDisplayName("");
       setAcknowledgeExact(false);
       toast({
         variant: "success",

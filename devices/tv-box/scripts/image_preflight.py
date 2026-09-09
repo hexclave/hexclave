@@ -60,16 +60,16 @@ def only_record(document: dict, key: str) -> dict:
     return values[0]
 
 
-def verify_mount(image: Path, mount: Path, partition: Partition) -> None:
+def verify_mount(image: Path, mount: Path, partition: Partition, filesystem: str = "ext4") -> None:
     resolved_mount = mount.resolve(strict=True)
     metadata = only_record(read_json([
         "findmnt", "--json", "--mountpoint", str(resolved_mount),
         "--output", "SOURCE,TARGET,FSTYPE,OPTIONS,FSROOT",
     ]), "filesystems")
     if (metadata.get("target") != str(resolved_mount) or metadata.get("fsroot") != "/"
-        or metadata.get("fstype") != "ext4"
+        or metadata.get("fstype") != filesystem
         or "ro" not in str(metadata.get("options", "")).split(",")):
-        raise ValueError("Root and state must be complete ext4 filesystems mounted read-only, not directories or subdirectory binds.")
+        raise ValueError("Image partitions must be complete expected filesystems mounted read-only, not directories or subdirectory binds.")
     source = metadata.get("source")
     if not isinstance(source, str):
         raise ValueError("Image mount has no block-device source.")
@@ -97,7 +97,7 @@ def verify_mount(image: Path, mount: Path, partition: Partition) -> None:
         ["blockdev", "--getsize64", source], check=True, text=True, capture_output=True, timeout=15,
     )
     if (loop_offset + partition_offset != partition.offset
-        or int(extent.stdout.strip()) < partition.size
+        or int(extent.stdout.strip()) != partition.size
         or (size_limit != 0 and partition_offset + partition.size > size_limit)):
         raise ValueError("Mount does not identify the expected root/state partition of this image.")
 
@@ -111,10 +111,10 @@ def main() -> None:
     try:
         partitions = raw_image_partitions(arguments.image)
         if arguments.mode == "mounts":
-            if len(arguments.mounts) != 2:
-                raise ValueError("Supply exactly the root and state mounts.")
-            for mount, partition in zip(arguments.mounts, partitions[1:3], strict=True):
-                verify_mount(arguments.image, mount, partition)
+            if len(arguments.mounts) != 3:
+                raise ValueError("Supply exactly the root, state, and boot mounts.")
+            for mount, partition, filesystem in zip(arguments.mounts, (partitions[1], partitions[2], partitions[0]), ("ext4", "ext4", "vfat"), strict=True):
+                verify_mount(arguments.image, mount, partition, filesystem)
         elif arguments.mounts:
             raise ValueError("raw-image accepts no mount arguments.")
     except (OSError, ValueError, subprocess.SubprocessError) as error:

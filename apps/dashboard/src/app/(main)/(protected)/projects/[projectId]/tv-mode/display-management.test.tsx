@@ -52,6 +52,85 @@ afterEach(() => {
 });
 
 describe("TV display pairing feedback", () => {
+  it("starts with placeholders only and requires an entered display name", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+
+    await screen.findByText("No Displays Paired Yet");
+    const nameInput = screen.getByLabelText("Display name");
+    const codeInput = screen.getByLabelText("Pairing code");
+    expect(nameInput).toHaveProperty("value", "");
+    expect(nameInput.getAttribute("placeholder")).toBe("Office Display");
+    expect(codeInput).toHaveProperty("value", "");
+    expect(codeInput.getAttribute("placeholder")).toBe("ABCD-EFGH");
+
+    fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    const pairButton = screen.getByRole("button", { name: "Pair Display" });
+    expect(pairButton.hasAttribute("disabled")).toBe(true);
+    fireEvent.change(nameInput, { target: { value: "   " } });
+    expect(pairButton.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(pairButton);
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(nameInput, { target: { value: "Lobby TV" } });
+    expect(pairButton.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("clears both fields after each approval without reusing the previous display name", async () => {
+    const submittedBodies: unknown[] = [];
+    const adminApp = {
+      [hexclaveAppInternalsSymbol]: {
+        sendRequest: async (_path: string, options: RequestInit) => {
+          if (options.method === "POST") {
+            if (typeof options.body !== "string") throw new Error("Pairing request body must be JSON text.");
+            submittedBodies.push(JSON.parse(options.body));
+            return approvalResponse();
+          }
+          return jsonResponse({ displays: [] });
+        },
+      },
+    };
+    renderManagement(adminApp);
+    await screen.findByText("No Displays Paired Yet");
+
+    const nameInput = screen.getByLabelText("Display name");
+    const codeInput = screen.getByLabelText("Pairing code");
+    const pairButton = screen.getByRole("button", { name: "Pair Display" });
+    for (const [index, name] of ["Lobby TV", "Kitchen TV"].entries()) {
+      fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+      expect(pairButton.hasAttribute("disabled")).toBe(true);
+      fireEvent.change(nameInput, { target: { value: `  ${name}  ` } });
+      fireEvent.click(pairButton);
+
+      await waitFor(() => expect(nameInput).toHaveProperty("value", ""));
+      expect(codeInput).toHaveProperty("value", "");
+      expect(nameInput.getAttribute("placeholder")).toBe("Office Display");
+      expect(submittedBodies).toHaveLength(index + 1);
+      expect(submittedBodies[index]).toMatchObject({ displayName: name });
+    }
+  });
+
+  it("preserves the entered name and code when approval fails", async () => {
+    const adminApp = {
+      [hexclaveAppInternalsSymbol]: {
+        sendRequest: async (_path: string, options: RequestInit) => {
+          if (options.method === "POST") throw new TvProfileRequestError(400);
+          return jsonResponse({ displays: [] });
+        },
+      },
+    };
+    renderManagement(adminApp);
+    await screen.findByText("No Displays Paired Yet");
+    fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Lobby TV" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pair Display" }));
+
+    await screen.findByText("Pairing Code Wasn’t Accepted");
+    expect(screen.getByLabelText("Display name")).toHaveProperty("value", "Lobby TV");
+    expect(screen.getByLabelText("Pairing code")).toHaveProperty("value", "ABCD-EFGH");
+    expect(screen.getByRole("button", { name: "Pair Display" }).hasAttribute("disabled")).toBe(false);
+  });
+
   it("formats typed and pasted pairing codes consistently", () => {
     expect(formatTvDisplayPairingCode("abcd")).toBe("ABCD");
     expect(formatTvDisplayPairingCode("abcde")).toBe("ABCD-E");
@@ -105,6 +184,7 @@ describe("TV display pairing feedback", () => {
 
     await waitFor(() => expect(screen.getByText("No Displays Paired Yet")).toBeTruthy());
     fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "abcd efgh" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Office Display" } });
     expect(screen.getByDisplayValue("ABCD-EFGH")).toBeTruthy();
     const pairButton = screen.getByRole("button", { name: "Pair Display" });
     fireEvent.click(pairButton);
@@ -112,6 +192,7 @@ describe("TV display pairing feedback", () => {
 
     expect(pairButton.hasAttribute("disabled")).toBe(true);
     expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(screen.getByLabelText("Display name")).toHaveProperty("value", "Office Display");
 
     await act(async () => {
       approval.resolve(approvalResponse());
@@ -119,6 +200,8 @@ describe("TV display pairing feedback", () => {
     });
 
     await waitFor(() => expect(screen.getByText("Display Paired")).toBeTruthy());
+    expect(screen.getByLabelText("Display name")).toHaveProperty("value", "");
+    expect(screen.getByLabelText("Pairing code")).toHaveProperty("value", "");
     expect(screen.getAllByText("Office Display").length).toBeGreaterThan(0);
     expect(alert).not.toHaveBeenCalled();
   });
@@ -150,6 +233,7 @@ describe("TV display pairing feedback", () => {
     await screen.findByText("No Displays Paired Yet");
     expect(screen.getByLabelText("Assigned Profile").textContent).toContain("Company Pulse");
     fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Office Display" } });
     fireEvent.click(screen.getByRole("button", { name: "Pair Display" }));
     await waitFor(() => expect(submittedBodies).toHaveLength(1));
     const submittedBody = submittedBodies.at(0);
@@ -177,6 +261,7 @@ describe("TV display pairing feedback", () => {
 
     await screen.findByText("No Displays Paired Yet");
     fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Office Display" } });
     fireEvent.click(screen.getByRole("button", { name: "Pair Display" }));
 
     await waitFor(() => expect(screen.getByLabelText("Display name for Office Display")).toBeTruthy());
@@ -315,6 +400,7 @@ describe("TV display pairing feedback", () => {
 
     await screen.findByText("No Displays Paired Yet");
     fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Office Display" } });
     const pairButton = screen.getByRole("button", { name: "Pair Display" });
     expect(pairButton.hasAttribute("disabled")).toBe(true);
 

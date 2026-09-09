@@ -1,22 +1,28 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 4 ]; then
-  printf 'Usage: %s DISK_IMAGE ROOTFS_MOUNT STATE_MOUNT OUTPUT_DIRECTORY\n' "$0" >&2
+if [ "$#" -ne 6 ]; then
+  printf 'Usage: %s DISK_IMAGE ROOTFS_MOUNT STATE_MOUNT BOOT_MOUNT BUILDER_MANIFEST OUTPUT_DIRECTORY\n' "$0" >&2
   exit 2
 fi
 image=$1
 rootfs=$2
 state=$3
-output=$4
+boot=$4
+manifest=$5
+output=$6
 test -f "$image"
 test -d "$rootfs"
 test -d "$state"
+test -d "$boot"
+test -f "$manifest"
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-python3 -B "$script_directory/image_preflight.py" mounts "$image" "$rootfs" "$state"
+python3 -B "$script_directory/image_verification.py" begin-output "$output" "$image" "$rootfs" "$state" "$boot"
+python3 -B "$script_directory/image_preflight.py" mounts "$image" "$rootfs" "$state" "$boot"
 mkdir -p "$output"
 
-required='usr/lib/hexclave-tv-box/kiosk-launch usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py usr/lib/python3/dist-packages/hexclave_tv_box/network_agent.py usr/lib/python3/dist-packages/hexclave_tv_box/setup_display.py etc/systemd/system/hexclave-tv-box-kiosk.service etc/systemd/system/hexclave-tv-box-network.service etc/systemd/system/hexclave-tv-box-setup-display.service etc/systemd/system/hexclave-tv-box-setup.service etc/pam.d/hexclave-tv-box-kiosk etc/ssh/hexclave-support-ca.pub etc/hexclave-tv-box-release'
+required='usr/lib/hexclave-tv-box/kiosk-launch usr/lib/hexclave-tv-box/relay-enroll usr/lib/hexclave-tv-box/factory-reset-job usr/lib/python3/dist-packages/hexclave_tv_box/relay.py usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py usr/lib/python3/dist-packages/hexclave_tv_box/network_agent.py usr/lib/python3/dist-packages/hexclave_tv_box/setup_display.py etc/systemd/system/hexclave-tv-box-relay.service etc/systemd/system/hexclave-tv-box-relay-identity.service etc/systemd/system/hexclave-tv-box-kiosk.service etc/systemd/system/hexclave-tv-box-network.service etc/systemd/system/hexclave-tv-box-setup-display.service etc/systemd/system/hexclave-tv-box-setup.service etc/pam.d/hexclave-tv-box-kiosk etc/ssh/hexclave-support-ca.pub etc/hexclave-tv-box-release'
+python3 -B "$script_directory/image_verification.py" legacy-inputs "$rootfs" $required
 for path in $required; do
   test -e "$rootfs/$path" || { printf 'Missing image path: %s\n' "$path" >&2; exit 1; }
 done
@@ -72,8 +78,10 @@ if find "$rootfs/usr/lib/python3/dist-packages/hexclave_tv_box" -type f \( -name
   printf '%s\n' 'Image contains generated build-host Python bytecode.' >&2
   exit 1
 fi
-grep -Eq '^ssh-(ed25519|rsa) [A-Za-z0-9+/]+={0,3}( |$)' "$rootfs/etc/ssh/hexclave-support-ca.pub" || {
-  printf '%s\n' 'Image support CA is not an OpenSSH public key.' >&2
+python3 -B "$script_directory/image_verification.py" public-key "$rootfs/etc/ssh/hexclave-support-ca.pub"
+python3 -B "$script_directory/cursor_asset.py" verify "$rootfs"
+grep -qxF 'export XCURSOR_PATH=/usr/share/hexclave-tv-box/cursors' "$rootfs/usr/lib/hexclave-tv-box/kiosk-launch" || {
+  printf '%s\n' 'Image kiosk does not select its private transparent cursor.' >&2
   exit 1
 }
 
@@ -147,6 +155,8 @@ fi
 cp "$rootfs/etc/hexclave-tv-box-release" "$output/image-manifest.txt"
 (cd "$rootfs" && find . -xdev -type f -print0 | sort -z | xargs -0 sha256sum) > "$output/rootfs-sha256.txt"
 (cd "$state" && find . -xdev -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$output/state-sha256.txt"
+(cd "$boot" && find . -xdev -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$output/boot-sha256.txt"
 image_name=$(basename "$image")
 image_hash=$(sha256sum "$image" | cut -d ' ' -f 1)
 printf '%s  %s\n' "$image_hash" "$image_name" > "$output/disk-image-sha256.txt"
+python3 -B "$script_directory/image_verification.py" final "$rootfs" "$state" "$boot" "$manifest" "$output" "$image"

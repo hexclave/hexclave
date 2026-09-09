@@ -7,15 +7,22 @@ import errno
 import fcntl
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
+import sys
+import syslog
+import time
+import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
 from .kiosk_supervisor import read_process_table, renderer_health
+from .network_agent import OFFLINE_URL, PRODUCTION_URL, SETUP_URL, parse_test_renderer_origin
 from .policy import ADMIN_CONFIRMATION
+from .relay import relay_diagnostics, relay_enrollment_public_key
 from .state import RUNTIME_ROOT, STATE_ROOT, clear_exact_state_directory
 
 SERVICES = (
@@ -23,15 +30,60 @@ SERVICES = (
     "hexclave-tv-box-network.service",
     "hexclave-tv-box-setup-display.service",
     "hexclave-tv-box-setup.service",
+    "hexclave-tv-box-relay.service",
 )
 MAX_DIAGNOSTIC_FILE_BYTES = 2_048
 KIOSK_HEALTH_PATH = STATE_ROOT / "browser" / "kiosk-health"
 KIOSK_LOG_IDENTIFIER = "hexclave-tv-box-kiosk"
+SUPPORT_LOG_IDENTIFIER = "hexclave-tv-box-support"
+FACTORY_RESET_JOB_PATH = "/usr/lib/hexclave-tv-box/factory-reset-job"
 SQLITE_HEADER = b"SQLite format 3\x00"
 SUPPORT_MUTATION_LOCK_PATH = Path("/run/hexclave-tv-box-support.lock")
 MUTATING_COMMANDS = frozenset({
     "restart-kiosk", "restart-network", "reset-network", "reset-pairing", "factory-reset", "reboot", "shutdown",
 })
+READ_ONLY_COMMANDS = frozenset({"diagnostics", "recent-logs", "previous-logs"})
+KIOSK_HEALTH_PATTERN = re.compile(
+    r"(?:starting|stopping|exited|ready|failed-readiness|failed-liveness|degraded|document-loading|document-failed|document-timeout)"
+    r"(?: cage=(?:ready|missing),cog=(?:ready|missing),web-process=(?:ready|missing))?"
+)
+
+
+def _support_session_pid() -> int | None:
+    """Correlate with native sshd certificate logs, not client-supplied identity."""
+    try:
+        processes = read_process_table()
+    except OSError:
+        return None
+    pid = os.getppid()
+    # sudo may have a monitor process between the helper and forced command.
+    # Do not log argv or accept an operator name through the SSH environment.
+    for _ in range(8):
+        process = processes.get(pid)
+        if process is None or pid <= 1:
+            return None
+        if process.name in {"sshd", "sshd-session"}:
+            return pid
+        pid = process.parent_pid
+    return None
+
+
+def _audit_event(message: str) -> None:
+    try:
+        syslog.openlog(SUPPORT_LOG_IDENTIFIER, syslog.LOG_PID, syslog.LOG_AUTHPRIV)
+        syslog.syslog(syslog.LOG_INFO, message)
+    except OSError:
+        # Reporting failure after a completed reset must not imply that reset
+        # was rolled back or encourage an automatic duplicate destructive call.
+        print("WARNING: TV Box support audit delivery failed.", file=sys.stderr)
+
+
+def _validate_support_command(command: str, arguments: list[str]) -> None:
+    if command in {"reset-pairing", "factory-reset"}:
+        if arguments != [ADMIN_CONFIRMATION]:
+            raise ValueError("Pairing reset requires dashboard admin-unpair confirmation.")
+    elif command not in READ_ONLY_COMMANDS | MUTATING_COMMANDS or arguments:
+        raise ValueError("Unsupported support command or arguments.")
 
 
 def run(command: Sequence[str]) -> str:
@@ -47,41 +99,110 @@ def run(command: Sequence[str]) -> str:
     return result.stdout.strip()
 
 
+@contextmanager
+def _diagnostic_descriptor(path: Path) -> Iterator[int]:
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("Diagnostic paths must be absolute and confined.")
+    # Walk with directory descriptors: a renamed renderer-owned directory or
+    # an ancestor symlink must not redirect a root support read elsewhere.
+    parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for component in path.parts[1:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("Diagnostic targets must be regular files.")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _diagnostic_text(path: Path) -> str:
+    with _diagnostic_descriptor(path) as descriptor:
+        if os.fstat(descriptor).st_size > MAX_DIAGNOSTIC_FILE_BYTES:
+            raise ValueError("Diagnostic file exceeds the bounded size.")
+        contents = os.read(descriptor, MAX_DIAGNOSTIC_FILE_BYTES + 1)
+    if len(contents) > MAX_DIAGNOSTIC_FILE_BYTES:
+        raise ValueError("Diagnostic file exceeds the bounded size.")
+    return contents.decode("utf-8")
+
+
 def _diagnostic_file_value(path: Path) -> str:
     try:
-        raw_value = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return "unavailable"
-    if len(raw_value.encode("utf-8")) > MAX_DIAGNOSTIC_FILE_BYTES:
+        raw_value = _diagnostic_text(path)
+    except ValueError:
         return "invalid"
+    except OSError as error:
+        return "invalid" if error.errno in {errno.ELOOP, errno.ENOTDIR} else "unavailable"
+    except UnicodeError:
+        return "unavailable"
     lines = raw_value.splitlines()
     if len(lines) != 1 or raw_value not in {lines[0], f"{lines[0]}\n", f"{lines[0]}\r\n"} or not lines[0].isprintable():
         return "invalid"
     return lines[0]
 
 
+def _kiosk_health_diagnostic(path: Path) -> str:
+    value = _diagnostic_file_value(path)
+    if value in {"invalid", "unavailable"} or KIOSK_HEALTH_PATTERN.fullmatch(value):
+        return value
+    return "invalid"
+
+
+def _renderer_url_diagnostic(path: Path) -> str:
+    value = _diagnostic_file_value(path)
+    if value in {"invalid", "unavailable", PRODUCTION_URL, OFFLINE_URL, SETUP_URL}:
+        return value
+    if value.endswith("/tv-box"):
+        try:
+            parse_test_renderer_origin(value[:-len("/tv-box")])
+            return value
+        except ValueError:
+            pass
+    return "invalid"
+
+
+def _release_diagnostic(path: Path) -> str:
+    try:
+        value = _diagnostic_text(path)
+    except FileNotFoundError:
+        return "image-version=unknown"
+    except (OSError, ValueError, UnicodeError):
+        return "image-version=invalid"
+    patterns = {
+        "image-version": r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?",
+        "image-channel": r"(?:test|production)",
+        "renderer-url": re.escape(PRODUCTION_URL),
+        "source-commit": r"[a-f0-9]{40}",
+        "wifi-region": r"[A-Z]{2}",
+    }
+    seen: set[str] = set()
+    for line in value.splitlines():
+        field, separator, item = line.partition("=")
+        if separator != "=" or field in seen or field not in patterns or re.fullmatch(patterns[field], item) is None:
+            return "image-version=invalid"
+        seen.add(field)
+    return value.strip() if seen == set(patterns) else "image-version=invalid"
+
+
 def _sqlite_store_state(path: Path) -> str:
     """Report only structural state; never inspect or expose credential rows."""
-    flags = os.O_RDONLY | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags)
+        with _diagnostic_descriptor(path) as descriptor:
+            if os.fstat(descriptor).st_size == 0:
+                return "empty"
+            header = os.read(descriptor, len(SQLITE_HEADER))
     except FileNotFoundError:
         return "missing"
+    except ValueError:
+        return "invalid"
     except OSError as error:
-        return "invalid" if error.errno == errno.ELOOP else "unavailable"
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            return "invalid"
-        if metadata.st_size == 0:
-            return "empty"
-        header = os.read(descriptor, len(SQLITE_HEADER))
-    except OSError:
-        return "unavailable"
-    finally:
-        os.close(descriptor)
+        return "invalid" if error.errno in {errno.ELOOP, errno.ENOTDIR} else "unavailable"
     return "present" if header == SQLITE_HEADER else "invalid"
 
 
@@ -103,14 +224,16 @@ def agent_request(request: dict[str, object], socket_path: Path = RUNTIME_ROOT /
 def diagnostics() -> str:
     lines = ["Hexclave TV Box diagnostics"]
     release = Path("/etc/hexclave-tv-box-release")
-    lines.append(release.read_text(encoding="utf-8").strip() if release.exists() else "image-version=unknown")
+    lines.append(_release_diagnostic(release))
     device_id = STATE_ROOT / "identity" / "device-id"
-    lines.append(f"device-id={device_id.read_text(encoding='utf-8').strip() if device_id.exists() else 'unknown'}")
+    lines.append(f"device-id={_diagnostic_file_value(device_id)}")
     # This is the root-written public document URL, never a credential or an
     # API token. Reporting the effective value distinguishes production from
     # an explicitly enabled test-image origin without broad shell access.
-    lines.append(f"effective-renderer-url={_diagnostic_file_value(RUNTIME_ROOT / 'kiosk-url')}")
+    lines.append(f"effective-renderer-url={_renderer_url_diagnostic(RUNTIME_ROOT / 'kiosk-url')}")
     lines.append(f"browser-credential-store={_sqlite_store_state(STATE_ROOT / 'browser' / 'cookies.sqlite')}")
+    lines.extend(relay_diagnostics(state_root=STATE_ROOT))
+    lines.append(f"relay-enrollment-public-key={relay_enrollment_public_key(state_root=STATE_ROOT)}")
     checks: tuple[tuple[str, Sequence[str]], ...] = (
         ("uptime", ["uptime", "-p"]),
         ("memory", ["free", "-h"]),
@@ -160,7 +283,7 @@ def diagnostics() -> str:
     lines.append(f"kiosk-process-health={process_health}")
     lines.append(
         "kiosk-health-state="
-        f"{_diagnostic_file_value(KIOSK_HEALTH_PATH)}"
+        f"{_kiosk_health_diagnostic(KIOSK_HEALTH_PATH)}"
     )
     wayland_runtime = Path("/run/hexclave-tv-box-wayland")
     try:
@@ -208,6 +331,7 @@ def _bounded_service_logs(boot: str) -> str:
         "--unit=hexclave-tv-box-setup-display.service",
         "--unit=hexclave-tv-box-setup.service",
         "--unit=hexclave-tv-box-kiosk.service",
+        "--unit=hexclave-tv-box-relay.service",
     ])
     # PAM/logind may associate the renderer process with its interactive
     # session scope instead of the originating system service. The explicit
@@ -219,7 +343,10 @@ def _bounded_service_logs(boot: str) -> str:
         "--output=short-iso",
         f"--boot={boot}",
         "--lines=200",
-        f"--identifier={KIOSK_LOG_IDENTIFIER}",
+        f"SYSLOG_IDENTIFIER={KIOSK_LOG_IDENTIFIER}",
+        "+",
+        f"SYSLOG_IDENTIFIER={SUPPORT_LOG_IDENTIFIER}",
+        "_UID=0",
     ])
     sections = [section for section in (service_logs, renderer_logs) if section != ""]
     return "\n".join(sections)
@@ -242,6 +369,10 @@ def reset_pairing(confirmation: str) -> None:
 def factory_reset(state_root: Path, confirmation: str) -> None:
     if confirmation != ADMIN_CONFIRMATION:
         raise ValueError("Factory reset requires dashboard admin-unpair confirmation.")
+    # Stop the outbound client before erasing its exact per-device identity.
+    # The caller is a systemd-owned job, so closing the support connection
+    # cannot terminate cleanup. Relay-side revocation remains an operator duty.
+    run(["systemctl", "stop", "hexclave-tv-box-relay.service"])
     # NetworkManager owns an in-memory copy of its profiles. Ask the scoped
     # root agent to remove only Hexclave TV Box profiles before stopping it;
     # deleting files underneath a live NetworkManager process is not enough.
@@ -251,9 +382,38 @@ def factory_reset(state_root: Path, confirmation: str) -> None:
     # cleanup. The state helper preserves the bind-mount source directory.
     run(["journalctl", "--rotate"])
     run(["journalctl", "--vacuum-time=1s"])
-    for name in ("browser", "network-connections", "journal", "identity", "ssh", "firstboot-state"):
+    for name in ("browser", "network-connections", "journal", "identity", "ssh", "relay", "firstboot-state"):
         clear_exact_state_directory(state_root, name)
     run(["systemctl", "reboot"])
+
+
+def schedule_factory_reset(confirmation: str) -> None:
+    if confirmation != ADMIN_CONFIRMATION:
+        raise ValueError("Factory reset requires dashboard admin-unpair confirmation.")
+    # A fixed transient timer gives the support response time to leave before
+    # the job closes its relay/Wi-Fi transport. The unit name also rejects a
+    # second pending reset instead of queuing competing destructive jobs.
+    run([
+        "systemd-run", "--quiet", "--collect", "--unit=hexclave-tv-box-factory-reset",
+        "--on-active=2s", "--timer-property=AccuracySec=1s", "--property=Type=oneshot",
+        "--property=User=root", FACTORY_RESET_JOB_PATH,
+    ])
+
+
+def factory_reset_job_main() -> None:
+    if os.geteuid() != 0:
+        raise PermissionError("TV Box factory reset jobs require root.")
+    # This entry point is not in the SSH/sudo command grammar. Only the fixed
+    # root-owned scheduler may call it; the lock covers the actual mutation,
+    # not just the earlier request that scheduled it.
+    _audit_event("factory-reset-job=started")
+    outcome = "failed"
+    try:
+        with support_mutation_lock():
+            factory_reset(STATE_ROOT, ADMIN_CONFIRMATION)
+        outcome = "reboot-scheduled"
+    finally:
+        _audit_event(f"factory-reset-job={outcome}")
 
 
 @contextmanager
@@ -273,10 +433,30 @@ def support_mutation_lock(path: Path = SUPPORT_MUTATION_LOCK_PATH) -> Iterator[N
 
 
 def execute(command: str, arguments: list[str], state_root: Path = STATE_ROOT) -> str:
-    if command in MUTATING_COMMANDS:
-        with support_mutation_lock():
-            return _execute(command, arguments, state_root)
-    return _execute(command, arguments, state_root)
+    # Validate before recording any user input. Only these static command
+    # labels enter the journal; arguments and command output never do.
+    _validate_support_command(command, arguments)
+    operation_id = uuid.uuid4().hex
+    session_pid = _support_session_pid()
+    context = (
+        f"operation={operation_id} command={command} executor-uid={os.geteuid()} "
+        f"ssh-session-pid={session_pid if session_pid is not None else 'none'}"
+    )
+    started_at = time.monotonic()
+    _audit_event(f"support-command=started {context}")
+    outcome = "failed"
+    try:
+        if command in MUTATING_COMMANDS:
+            with support_mutation_lock():
+                result = _execute(command, arguments, state_root)
+        else:
+            result = _execute(command, arguments, state_root)
+        outcome = "scheduled" if command in {"factory-reset", "reboot", "shutdown"} else "complete"
+        return result
+    finally:
+        # No exception text: subprocess errors may contain operational or
+        # customer data. A started event still identifies an interrupted run.
+        _audit_event(f"support-command={outcome} {context} duration-seconds={max(0.0, time.monotonic() - started_at):.1f}")
 
 
 def _execute(command: str, arguments: list[str], state_root: Path) -> str:
@@ -299,7 +479,7 @@ def _execute(command: str, arguments: list[str], state_root: Path) -> str:
         reset_pairing(arguments[0])
         return "Local pairing identity reset."
     if command == "factory-reset" and len(arguments) == 1:
-        factory_reset(state_root, arguments[0])
+        schedule_factory_reset(arguments[0])
         return "Factory reset scheduled."
     if command in {"reboot", "shutdown"} and not arguments:
         run(["systemctl", "poweroff" if command == "shutdown" else "reboot"])

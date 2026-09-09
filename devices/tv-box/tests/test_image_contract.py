@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+from test_cursor_asset import cursor_asset
 from test_image_preflight import make_raw_image, mount_command_environment
+from test_image_verification import make_verification_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +18,24 @@ ROOTFS = ROOT / "image" / "rootfs"
 
 
 class ImageContractTests(unittest.TestCase):
+    def test_local_support_firewall_rejects_globally_routed_sources(self) -> None:
+        firewall = (ROOTFS / "etc/nftables.d/hexclave-tv-box.nft").read_text(encoding="utf-8")
+        support_rules = [line for line in firewall.splitlines() if "tcp dport 22 accept" in line]
+        self.assertEqual(len(support_rules), 2)
+        networks = []
+        for line in support_rules:
+            match = re.fullmatch(r'\s*iifname "wlan0" ip6? saddr \{ ([^}]+) \} tcp dport 22 accept', line)
+            self.assertIsNotNone(match)
+            if match is None:
+                raise AssertionError("SSH support rule lacks an explicit source restriction.")
+            networks.extend(ipaddress.ip_network(value.strip()) for value in match.group(1).split(","))
+        for value in ("192.168.0.10", "172.20.10.2", "10.42.0.2", "169.254.10.2", "fd00::2", "fe80::2"):
+            address = ipaddress.ip_address(value)
+            self.assertTrue(any(address in network for network in networks), value)
+        for value in ("1.1.1.1", "172.32.0.1", "192.169.0.1", "2001:4860:4860::8888"):
+            address = ipaddress.ip_address(value)
+            self.assertFalse(any(address in network for network in networks), value)
+
     def test_setup_portal_only_shows_manual_network_fields_for_manual_entry(self) -> None:
         setup_ui = ROOT / "setup-ui"
         html = (setup_ui / "index.html").read_text(encoding="utf-8")
@@ -121,6 +143,9 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn("bluetooth.service hciuart.service", layer)
         self.assertIn("apt-daily.timer apt-daily-upgrade.timer", layer)
         self.assertIn("dtoverlay=disable-bt", layer)
+        self.assertIn('scripts/image_verification.py" runtime "$1" "${SRCROOT}/qualified-runtime.json"', layer)
+        self.assertIn("groupadd --system hexclave-tv-relay", layer)
+        self.assertIn("--gid hexclave-tv-relay --groups hexclave-tv-runtime", layer)
         self.assertIn('rm -f "$1/var/lib/dbus/machine-id" "$1/var/lib/systemd/random-seed"', layer)
         self.assertIn("ln -s /var/lib/hexclave-tv-box/network-connections", layer)
         self.assertIn("--home-dir /var/empty/hexclave-support", layer)
@@ -128,6 +153,8 @@ class ImageContractTests(unittest.TestCase):
         enable_line = next(line for line in layer.splitlines() if "systemctl enable" in line)
         self.assertNotIn("hexclave-tv-box-kiosk.service", enable_line)
         self.assertIn("hexclave-tv-box-network.service", enable_line)
+        self.assertIn("hexclave-tv-box-relay.service", enable_line)
+        self.assertIn("hexclave-tv-box-relay-identity.service", enable_line)
         build = (ROOT / "scripts/build-image.sh").read_text(encoding="utf-8")
         self.assertIn("status --porcelain --untracked-files=all", build)
         self.assertIn("HEXCLAVE_TV_BOX_TEST_IMAGE=${HEXCLAVE_TV_BOX_TEST_IMAGE:-false}", build)
@@ -229,6 +256,7 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn("PermitTTY no", ssh)
         self.assertIn("DisableForwarding yes", ssh)
         self.assertIn("PermitUserRC no", ssh)
+        self.assertIn("LogLevel VERBOSE", ssh)
         layer = (ROOT / "image/layer/hexclave-tv-box-pilot.yaml").read_text(encoding="utf-8")
         self.assertIn("useradd --system --password '*NP*'", layer)
         firewall = (ROOTFS / "etc/nftables.d/hexclave-tv-box.nft").read_text(encoding="utf-8")
@@ -236,6 +264,10 @@ class ImageContractTests(unittest.TestCase):
         self.assertNotIn("8102", firewall)
         self.assertIn("chain forward", firewall)
         self.assertIn("policy drop", firewall)
+        self.assertNotIn('iifname "wlan0" tcp dport 22 accept', firewall)
+        self.assertIn('ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } tcp dport 22 accept', firewall)
+        self.assertIn('ip6 saddr { fc00::/7, fe80::/10 } tcp dport 22 accept', firewall)
+        self.assertIn('iifname "lo" accept', firewall)
         network_service = (ROOTFS / "etc/systemd/system/hexclave-tv-box-network.service").read_text(encoding="utf-8")
         for directive in (
             "NoNewPrivileges=yes",
@@ -251,14 +283,22 @@ class ImageContractTests(unittest.TestCase):
             image = temporary_root / "tv-box.img"
             rootfs = temporary_root / "rootfs"
             state = temporary_root / "state"
+            boot = temporary_root / "boot"
+            manifest = temporary_root / "builder-manifest.tsv"
             output = temporary_root / "verification"
+            boot.mkdir()
             make_raw_image(image)
             for path in (
                 "usr/lib/hexclave-tv-box/kiosk-launch",
+                "usr/lib/hexclave-tv-box/relay-enroll",
+                "usr/lib/hexclave-tv-box/factory-reset-job",
+                "usr/lib/python3/dist-packages/hexclave_tv_box/relay.py",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/network_agent.py",
                 "usr/lib/python3/dist-packages/hexclave_tv_box/setup_display.py",
                 "etc/systemd/system/hexclave-tv-box-kiosk.service",
+                "etc/systemd/system/hexclave-tv-box-relay.service",
+                "etc/systemd/system/hexclave-tv-box-relay-identity.service",
                 "etc/systemd/system/hexclave-tv-box-network.service",
                 "etc/systemd/system/hexclave-tv-box-setup-display.service",
                 "etc/systemd/system/hexclave-tv-box-setup.service",
@@ -275,6 +315,7 @@ class ImageContractTests(unittest.TestCase):
                             "wayland_runtime_dir=/run/hexclave-tv-box-wayland\n"
                             'export XDG_RUNTIME_DIR="$wayland_runtime_dir"\n'
                             "unset DBUS_SESSION_BUS_ADDRESS\n"
+                            "export XCURSOR_PATH=/usr/share/hexclave-tv-box/cursors\n"
                             "hexclave_tv_box.kiosk_supervisor\n"
                         )
                         if path == "usr/lib/hexclave-tv-box/kiosk-launch"
@@ -296,12 +337,8 @@ class ImageContractTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-            support_ca = rootfs / "etc/ssh/hexclave-support-ca.pub"
-            support_ca.parent.mkdir(parents=True, exist_ok=True)
-            support_ca.write_text(
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPilotPublicKeyMaterial fixture\n",
-                encoding="utf-8",
-            )
+            make_verification_fixture(rootfs, manifest)
+            cursor_asset.install_cursor(rootfs)
             (rootfs / "etc/machine-id").write_text("", encoding="utf-8")
             (rootfs / "var/lib/hexclave-tv-box/network-connections").mkdir(parents=True)
             (rootfs / "etc/NetworkManager").mkdir(parents=True)
@@ -313,8 +350,8 @@ class ImageContractTests(unittest.TestCase):
             (state / "lost+found").mkdir()
             (state / "network-connections").mkdir()
 
-            command = [str(ROOT / "scripts/verify-image.sh"), str(image), str(rootfs), str(state), str(output)]
-            environment = mount_command_environment(image, rootfs, state, temporary_root)
+            command = [str(ROOT / "scripts/verify-image.sh"), str(image), str(rootfs), str(state), str(boot), str(manifest), str(output)]
+            environment = mount_command_environment(image, rootfs, state, temporary_root, boot=boot)
 
             def run_verifier() -> subprocess.CompletedProcess[str]:
                 return subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -331,7 +368,7 @@ class ImageContractTests(unittest.TestCase):
             self.assertIn("Production image contains", rejected_production_marker.stdout)
             marker.unlink()
 
-            (rootfs / "etc/hexclave-tv-box-release").write_text("image-channel=test\n", encoding="utf-8")
+            make_verification_fixture(rootfs, manifest, channel="test")
             rejected_missing_test_marker = run_verifier()
             self.assertNotEqual(rejected_missing_test_marker.returncode, 0)
             self.assertIn("missing its build-time", rejected_missing_test_marker.stdout)
@@ -356,7 +393,7 @@ class ImageContractTests(unittest.TestCase):
             accepted = run_verifier()
             self.assertEqual(accepted.returncode, 0, accepted.stdout)
             marker.unlink()
-            (rootfs / "etc/hexclave-tv-box-release").write_text("image-channel=production\n", encoding="utf-8")
+            make_verification_fixture(rootfs, manifest)
             for service in (
                 "hexclave-tv-box-kiosk.service",
                 "hexclave-tv-box-network.service",

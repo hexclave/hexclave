@@ -1,16 +1,18 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 2 ]; then
-  printf 'Usage: %s IMAGE BLOCK_DEVICE\n' "$0" >&2
+if [ "$#" -ne 3 ]; then
+  printf 'Usage: %s IMAGE BLOCK_DEVICE VERIFICATION_DIRECTORY\n' "$0" >&2
   exit 2
 fi
 image=$1
 device=$2
+verification=$3
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Validate the artifact before even inspecting the destructive target. In
 # particular, dd cannot decompress the .xz/.zst artifacts produced for download.
 python3 -B "$script_directory/image_preflight.py" raw-image "$image"
+python3 -B "$script_directory/image_verification.py" receipt "$image" "$verification"
 case "$device" in
   /dev/mmcblk[0-9]|/dev/sd[a-z]) ;;
   *) printf 'Refusing unsupported manufacturing target: %s\n' "$device" >&2; exit 1 ;;
@@ -29,6 +31,7 @@ if lsblk -nr -o MOUNTPOINT "$device" | grep -Eq '[^[:space:]]'; then
 fi
 image_bytes=$(stat -c %s "$image")
 device_bytes=$(blockdev --getsize64 "$device")
+device_identity=$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device")
 if [ "$image_bytes" -gt "$device_bytes" ]; then
   printf '%s\n' 'Image is larger than the selected manufacturing device.' >&2
   exit 1
@@ -38,6 +41,19 @@ printf 'About to overwrite %s with %s. Type the exact block device to continue: 
 read -r confirmation
 test "$confirmation" = "$device" || { printf '%s\n' 'Cancelled.' >&2; exit 1; }
 
+# Confirmation can take minutes. A remount or a replaced USB reader must not
+# turn the previously inspected path into a different destructive target.
+if [ "$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device")" != "$device_identity" ] ||
+   lsblk -nr -o MOUNTPOINT "$device" | grep -Eq '[^[:space:]]'; then
+  printf '%s\n' 'Manufacturing target changed or became mounted after confirmation.' >&2
+  exit 1
+fi
+python3 -B "$script_directory/image_verification.py" receipt "$image" "$verification"
+
 dd if="$image" of="$device" bs=8M conv=fsync status=progress
 sync
-printf '%s\n' 'Flash complete. Boot once, verify unique host identity and unpaired state, then shut down cleanly.'
+# Invalidate the host's block cache before the bounded read-back; otherwise a
+# cached read could "verify" bytes that never reached the physical SD card.
+blockdev --flushbufs "$device"
+python3 -B "$script_directory/image_verification.py" readback "$image" "$device"
+printf '%s\n' 'Flash and full image-extent read-back verified. Boot once, verify unique host identity and unpaired state, then shut down cleanly.'

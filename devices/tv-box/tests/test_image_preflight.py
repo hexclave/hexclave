@@ -25,7 +25,7 @@ def make_raw_image(image: Path) -> None:
     image.write_bytes(header + bytes(80 * 512 - len(header)))
 
 
-def mount_command_environment(image: Path, rootfs: Path, state: Path, temporary_root: Path) -> dict[str, str]:
+def mount_command_environment(image: Path, rootfs: Path, state: Path, temporary_root: Path, boot: Path | None = None) -> dict[str, str]:
     """Fake only read-only kernel inspection; the real preflight/verifier still run."""
     tools = temporary_root / "inspection-tools"
     tools.mkdir()
@@ -39,10 +39,11 @@ def mount_command_environment(image: Path, rootfs: Path, state: Path, temporary_
         "if name == 'findmnt':\n"
         "    target = sys.argv[sys.argv.index('--mountpoint') + 1]\n"
         "    root = target == os.environ['TVBOX_FIXTURE_ROOT']\n"
-        "    print(json.dumps({'filesystems': [{'source': '/dev/loop980' if root else '/dev/loop981', 'target': target, 'fstype': 'ext4', 'options': 'ro', 'fsroot': '/'}]}))\n"
+        "    boot = target == os.environ.get('TVBOX_FIXTURE_BOOT')\n"
+        "    print(json.dumps({'filesystems': [{'source': '/dev/loop982' if boot else '/dev/loop980' if root else '/dev/loop981', 'target': target, 'fstype': 'vfat' if boot else 'ext4', 'options': 'ro', 'fsroot': '/'}]}))\n"
         "elif name == 'losetup':\n"
         "    stat = image.stat()\n"
-        "    print(json.dumps({'loopdevices': [{'name': sys.argv[-1], 'back-ino': stat.st_ino, 'back-maj:min': f'{os.major(stat.st_dev)}:{os.minor(stat.st_dev)}', 'offset': 16384 if sys.argv[-1] == '/dev/loop980' else 24576, 'ro': True, 'sizelimit': 8192}]}))\n"
+        "    print(json.dumps({'loopdevices': [{'name': sys.argv[-1], 'back-ino': stat.st_ino, 'back-maj:min': f'{os.major(stat.st_dev)}:{os.minor(stat.st_dev)}', 'offset': 8192 if sys.argv[-1] == '/dev/loop982' else 16384 if sys.argv[-1] == '/dev/loop980' else 24576, 'ro': True, 'sizelimit': 8192}]}))\n"
         "elif name == 'blockdev':\n"
         "    print(8192)\n"
         "else:\n"
@@ -57,10 +58,42 @@ def mount_command_environment(image: Path, rootfs: Path, state: Path, temporary_
         "PATH": f"{tools}:{os.environ['PATH']}",
         "TVBOX_FIXTURE_IMAGE": str(image),
         "TVBOX_FIXTURE_ROOT": str(rootfs),
+        "TVBOX_FIXTURE_BOOT": str(boot) if boot is not None else "",
     }
 
 
 class ImagePreflightTests(unittest.TestCase):
+    def test_complete_mount_preflight_requires_boot_from_the_same_readonly_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "image.img"
+            make_raw_image(image)
+            rootfs, state, boot = (root / name for name in ("rootfs", "state", "boot"))
+            for path in (rootfs, state, boot):
+                path.mkdir()
+            environment = mount_command_environment(image, rootfs, state, root, boot)
+            command = [sys.executable, "-B", str(ROOT / "scripts/image_preflight.py"), "mounts", str(image), str(rootfs), str(state), str(boot)]
+            accepted = subprocess.run(command, env=environment, text=True, capture_output=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            for change in ("missing-boot", "root-used-as-boot"):
+                with self.subTest(change=change):
+                    rejected_command = command[:-1] if change == "missing-boot" else [*command[:-1], str(rootfs)]
+                    rejected = subprocess.run(rejected_command, env=environment, text=True, capture_output=True)
+                    self.assertNotEqual(rejected.returncode, 0)
+
+    def test_manufacturing_requires_complete_receipt_before_inspecting_any_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "image.img"
+            make_raw_image(image)
+            rejected = subprocess.run(
+                ["sh", str(ROOT / "scripts/manufacture.sh"), str(image), "/dev/not-a-real-device", str(root / "verification")],
+                text=True, capture_output=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("Image verification failed", rejected.stderr)
+            self.assertNotIn("unsupported manufacturing target", rejected.stderr)
+
     def test_raw_image_layout_and_compression_are_checked_before_any_device_access(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "image.img"
@@ -69,7 +102,7 @@ class ImagePreflightTests(unittest.TestCase):
             for magic in (b"\xfd7zXZ\x00", b"\x28\xb5\x2f\xfd", b"\x1f\x8b", b"PK\x03\x04"):
                 image.write_bytes(magic + bytes(512))
                 rejected = subprocess.run(
-                    ["sh", str(ROOT / "scripts/manufacture.sh"), str(image), "/dev/not-a-real-device"],
+                    ["sh", str(ROOT / "scripts/manufacture.sh"), str(image), "/dev/not-a-real-device", str(Path(directory) / "verification")],
                     text=True, capture_output=True, check=False,
                 )
                 self.assertNotEqual(rejected.returncode, 0)
@@ -132,11 +165,14 @@ class ImagePreflightTests(unittest.TestCase):
             root = Path(directory)
             image = root / "image.img"
             make_raw_image(image)
-            rootfs, state = root / "rootfs", root / "state"
+            rootfs, state, boot = root / "rootfs", root / "state", root / "boot"
             rootfs.mkdir()
             state.mkdir()
+            boot.mkdir()
+            manifest = root / "manifest"
+            manifest.write_text("fixture\t1\n", encoding="utf-8")
             result = subprocess.run(
-                ["sh", str(ROOT / "scripts/verify-image.sh"), str(image), str(rootfs), str(state), str(root / "verification")],
+                ["sh", str(ROOT / "scripts/verify-image.sh"), str(image), str(rootfs), str(state), str(boot), str(manifest), str(root / "verification")],
                 text=True, capture_output=True, check=False,
             )
             self.assertNotEqual(result.returncode, 0)

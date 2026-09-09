@@ -1,0 +1,31 @@
+[Unit]
+Description=Initialize unique optional TV Box relay identity
+Requires=hexclave-tv-box-firstboot.service
+After=hexclave-tv-box-firstboot.service
+Before=hexclave-tv-box-relay.service
+# Deliberately not a dependency of networking or the renderer: corruption of
+# optional support identity must not prevent an otherwise healthy box booting.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -m hexclave_tv_box.relay --initialize
+Environment=PYTHONDONTWRITEBYTECODE=1
+RemainAfterExit=yes
+TimeoutStartSec=30
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/hexclave-tv-box
+
+[Install]
+WantedBy=multi-user.target

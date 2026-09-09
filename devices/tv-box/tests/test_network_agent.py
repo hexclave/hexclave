@@ -19,8 +19,10 @@ from hexclave_tv_box.network_agent import (
     TEST_SETUP_PASSWORD_LENGTH,
     TvBoxNetworkAgent,
     _generate_setup_password,
+    _failure_code,
     parse_test_renderer_origin,
     resolve_renderer_url,
+    serve,
     split_nmcli_line,
     validate_wifi_request,
 )
@@ -247,6 +249,127 @@ class NetworkAgentTests(unittest.TestCase):
             self.assertTrue(any("passwd-file" in command for command in commands))
             secret_root = root / "run" / "secrets"
             self.assertEqual(list(secret_root.iterdir()), [])
+
+    def test_timezone_validation_requires_decodable_installed_timezone_data(self) -> None:
+        for timezone in ("UTC", "America/Los_Angeles", "Asia/Kolkata"):
+            with self.subTest(timezone=timezone):
+                result = validate_wifi_request({"ssid": "Office", "security": "open", "timezone": timezone})
+                self.assertEqual(result[-1], timezone)
+        for timezone in ("zone.tab", "zone1970.tab", "iso3166.tab", "tzdata.zi", "", "/etc/localtime", "../UTC", "Mars/Olympus"):
+            with self.subTest(timezone=timezone), self.assertRaisesRegex(ValueError, "Time zone"):
+                validate_wifi_request({"ssid": "Office", "security": "open", "timezone": timezone})
+
+    def test_timezone_validation_does_not_write_os_or_application_state(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.network_agent.atomic_write") as writer,
+            mock.patch("hexclave_tv_box.network_agent._run") as runner,
+            mock.patch("pathlib.Path.write_text") as path_writer,
+        ):
+            validate_wifi_request({"ssid": "Office", "security": "open", "timezone": "UTC"})
+        writer.assert_not_called()
+        runner.assert_not_called()
+        path_writer.assert_not_called()
+
+    def test_failure_codes_never_contain_command_output_or_arguments(self) -> None:
+        command = ["nmcli", "private-network", "private-password"]
+        self.assertEqual(_failure_code(subprocess.CalledProcessError(4, command, output="private-password")), "exit-4")
+        self.assertEqual(_failure_code(subprocess.TimeoutExpired(command, 30, output="private-password")), "timeout")
+        self.assertEqual(_failure_code(ValueError("private-password")), "invalid-request")
+
+    def test_network_transition_logs_are_bounded_and_include_recovery_timing(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            controller = FakeController(saved=True, connected=True)
+            services = FakeServices()
+            now = [0.0]
+            agent = TvBoxNetworkAgent(
+                controller, runtime_root=Path(directory), service_runner=services,
+                frontend_probe=lambda *_: True, monotonic=lambda: now[0],
+            )
+            with self.assertLogs("hexclave-tv-box-network", level="INFO") as logs:
+                agent.tick()
+                initial_count = len(logs.output)
+                for value in range(1, 10):
+                    now[0] = float(value)
+                    agent.tick()
+                self.assertEqual(len(logs.output), initial_count)
+                now[0] = 10.0
+                controller.is_connected = False
+                agent.tick()
+                now[0] = 35.0
+                controller.is_connected = True
+                agent.tick()
+            output = "\n".join(logs.output)
+            self.assertIn("reason=wifi-lost", output)
+            self.assertIn("reason=wifi-restored", output)
+            self.assertIn("outage-seconds=25.0", output)
+            self.assertNotIn("temporary-password", output)
+            self.assertNotIn("hexclave-tv-network-test", output)
+
+    def test_wifi_submission_failure_logs_have_only_safe_reason_and_duration(self) -> None:
+        controller = FakeController(saved=False, connected=False)
+        agent = TvBoxNetworkAgent(controller, service_runner=FakeServices(), monotonic=lambda: 20.0)
+        error = subprocess.CalledProcessError(10, ["nmcli", "private-network"], output="private-password")
+        with (
+            mock.patch.object(controller, "connect", side_effect=error),
+            self.assertLogs("hexclave-tv-box-network", level="INFO") as logs,
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            agent.handle_request({"command": "connect", "ssid": "private-network", "password": "private-password"})
+        output = "\n".join(logs.output)
+        self.assertIn("wifi-submission=failed reason=exit-10 duration-seconds=0.0", output)
+        self.assertNotIn("private-network", output)
+        self.assertNotIn("private-password", output)
+
+    def test_frontend_probe_logs_only_state_edges_not_every_success_or_failure(self) -> None:
+        results = iter([False, False, True, True])
+        now = [0.0]
+        agent = TvBoxNetworkAgent(
+            FakeController(saved=True, connected=True), service_runner=FakeServices(),
+            frontend_probe=lambda *_: next(results), monotonic=lambda: now[0],
+        )
+        with self.assertLogs("hexclave-tv-box-network", level="INFO") as logs:
+            for minute in range(4):
+                now[0] = float(minute * 60)
+                agent._probe_frontend_recovery()
+        self.assertEqual(len(logs.output), 2)
+        self.assertIn("frontend-probe=unreachable", logs.output[0])
+        self.assertIn("frontend-probe=reachable observed-outage-seconds=120.0", logs.output[1])
+
+    def test_repeated_policy_failures_are_coalesced_and_recovery_is_logged(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            socket_path = Path(directory) / "control.sock"
+            server = mock.Mock()
+            agent = mock.Mock()
+            agent.tick.side_effect = [OSError(5, "private-details")] * 3 + [None, subprocess.TimeoutExpired(["private-command"], 45)]
+            now = [0.0]
+
+            def create_server(_path: str, _agent: object) -> mock.Mock:
+                socket_path.touch()
+                return server
+
+            def sleep(_seconds: float) -> None:
+                now[0] += 5
+                if now[0] == 25:
+                    raise KeyboardInterrupt
+
+            with (
+                mock.patch("hexclave_tv_box.network_agent.AgentServer", side_effect=create_server),
+                mock.patch("hexclave_tv_box.network_agent.grp.getgrnam", return_value=mock.Mock(gr_gid=0)),
+                mock.patch("hexclave_tv_box.network_agent.os.chown"),
+                mock.patch("hexclave_tv_box.network_agent.time.monotonic", side_effect=lambda: now[0]),
+                mock.patch("hexclave_tv_box.network_agent.time.sleep", side_effect=sleep),
+                self.assertLogs("hexclave-tv-box-network", level="INFO") as logs,
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                serve(agent, socket_path, "test-group")
+            self.assertEqual(len(logs.output), 3)
+            self.assertIn("network-tick-failed=os-error-5", logs.output[0])
+            self.assertIn("network-tick-recovered previous-reason=os-error-5 suppressed-failures=2", logs.output[1])
+            self.assertIn("network-tick-failed=timeout", logs.output[2])
+            self.assertNotIn("private", "\n".join(logs.output))
+            server.shutdown.assert_called_once_with()
+            server.server_close.assert_called_once_with()
+            self.assertFalse(socket_path.exists())
 
     def test_connected_state_uses_one_bounded_networkmanager_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

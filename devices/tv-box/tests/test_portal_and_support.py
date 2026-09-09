@@ -5,6 +5,7 @@ import threading
 import unittest
 import json
 import os
+import subprocess
 from contextlib import nullcontext
 from http.client import HTTPConnection
 from pathlib import Path
@@ -15,13 +16,21 @@ from hexclave_tv_box.kiosk_supervisor import ProcessInfo
 from hexclave_tv_box.support import (
     ADMIN_CONFIRMATION,
     _sqlite_store_state,
+    _audit_event,
+    _diagnostic_file_value,
+    _kiosk_health_diagnostic,
+    _release_diagnostic,
+    _renderer_url_diagnostic,
+    _support_session_pid,
     diagnostics,
     execute,
     factory_reset,
+    factory_reset_job_main,
     forced_command_main,
     previous_service_logs,
     recent_service_logs,
     reset_pairing,
+    schedule_factory_reset,
     support_mutation_lock,
 )
 
@@ -31,6 +40,9 @@ class PortalAndSupportTests(unittest.TestCase):
         self.lock_patch = mock.patch("hexclave_tv_box.support.support_mutation_lock", return_value=nullcontext())
         self.lock_patch.start()
         self.addCleanup(self.lock_patch.stop)
+        self.audit_patch = mock.patch("hexclave_tv_box.support._audit_event")
+        self.audit_mock = self.audit_patch.start()
+        self.addCleanup(self.audit_patch.stop)
         ui_root = Path(__file__).resolve().parents[1] / "setup-ui"
         self.server = SetupPortalServer(("127.0.0.1", 0), ui_root=ui_root, agent_socket=Path("/unused"))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -123,7 +135,10 @@ class PortalAndSupportTests(unittest.TestCase):
             )
             self.assertIn("--lines=200", renderer_command)
             self.assertIn("--boot=0", renderer_command)
-            self.assertIn("--identifier=hexclave-tv-box-kiosk", renderer_command)
+            self.assertIn("SYSLOG_IDENTIFIER=hexclave-tv-box-kiosk", renderer_command)
+            self.assertIn("SYSLOG_IDENTIFIER=hexclave-tv-box-support", renderer_command)
+            self.assertEqual(renderer_command[-4:], ["SYSLOG_IDENTIFIER=hexclave-tv-box-kiosk", "+", "SYSLOG_IDENTIFIER=hexclave-tv-box-support", "_UID=0"])
+            self.assertIn("--unit=hexclave-tv-box-relay.service", service_command)
             self.assertFalse(any(value.startswith("--unit=") for value in renderer_command))
 
     def test_previous_logs_use_the_same_bounded_tv_box_scope(self) -> None:
@@ -138,7 +153,7 @@ class PortalAndSupportTests(unittest.TestCase):
                 self.assertNotIn("NetworkManager.service", command)
                 self.assertTrue(
                     any(value.startswith("--unit=hexclave-tv-box-") for value in command)
-                    or "--identifier=hexclave-tv-box-kiosk" in command
+                    or "SYSLOG_IDENTIFIER=hexclave-tv-box-kiosk" in command
                 )
 
     def test_diagnostics_exposes_only_the_public_device_identifier(self) -> None:
@@ -175,6 +190,69 @@ class PortalAndSupportTests(unittest.TestCase):
             store.unlink()
             store.symlink_to(target)
             self.assertEqual(_sqlite_store_state(store), "invalid")
+
+    def test_diagnostic_reads_reject_linked_targets_ancestors_fifo_and_oversize(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            root = Path(directory)
+            browser = root / "browser"
+            browser.mkdir()
+            path = browser / "kiosk-health"
+            secret = root / "private-file"
+            secret.write_text("private-value", encoding="utf-8")
+            path.symlink_to(secret)
+            self.assertEqual(_diagnostic_file_value(path), "invalid")
+            self.assertEqual(_sqlite_store_state(path), "invalid")
+            path.unlink()
+            os.mkfifo(path, 0o600)
+            self.assertEqual(_diagnostic_file_value(path), "invalid")
+            self.assertEqual(_sqlite_store_state(path), "invalid")
+            path.unlink()
+            path.write_text("x" * 2049, encoding="utf-8")
+            self.assertEqual(_diagnostic_file_value(path), "invalid")
+            path.write_text("starting\n", encoding="utf-8")
+            linked_browser = root / "linked-browser"
+            linked_browser.symlink_to(browser)
+            self.assertEqual(_diagnostic_file_value(linked_browser / "kiosk-health"), "invalid")
+            self.assertEqual(_sqlite_store_state(linked_browser / "kiosk-health"), "invalid")
+            self.assertEqual(secret.read_text(encoding="utf-8"), "private-value")
+
+    def test_health_diagnostic_exports_only_known_state_and_presence_tokens(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            path = Path(directory) / "kiosk-health"
+            for value in (
+                "starting", "stopping", "exited",
+                "ready cage=ready,cog=ready,web-process=ready",
+                "failed-readiness cage=ready,cog=missing,web-process=missing",
+                "document-timeout cage=ready,cog=ready,web-process=ready",
+            ):
+                path.write_text(value + "\n", encoding="utf-8")
+                self.assertEqual(_kiosk_health_diagnostic(path), value)
+            for value in ("private-value", "ready token=private", "ready cage=private,cog=ready,web-process=ready"):
+                path.write_text(value + "\n", encoding="utf-8")
+                self.assertEqual(_kiosk_health_diagnostic(path), "invalid")
+
+    def test_release_and_renderer_url_diagnostics_reject_unexpected_text(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            path = Path(directory) / "release"
+            release = "\n".join((
+                "image-version=0.1.0-pilot", "image-channel=test",
+                "renderer-url=https://app.hexclave.com/tv-box", "source-commit=" + "a" * 40,
+                "wifi-region=US",
+            ))
+            path.write_text(release + "\n", encoding="utf-8")
+            self.assertEqual(_release_diagnostic(path), release)
+            for invalid in (release + "\npassword=private", release + "\nimage-version=private", "image-version=private"):
+                path.write_text(invalid, encoding="utf-8")
+                self.assertEqual(_release_diagnostic(path), "image-version=invalid")
+            for url in (
+                "https://app.hexclave.com/tv-box", "https://pilot-box.trycloudflare.com/tv-box",
+                "file:///usr/share/hexclave-tv-box/setup-ui/offline.html", "http://127.0.0.1/display",
+            ):
+                path.write_text(url + "\n", encoding="utf-8")
+                self.assertEqual(_renderer_url_diagnostic(path), url)
+            for url in ("https://app.hexclave.com/tv-box?token=private", "https://user:private@example.com/tv-box", "https://private.example/tv-box"):
+                path.write_text(url + "\n", encoding="utf-8")
+                self.assertEqual(_renderer_url_diagnostic(path), "invalid")
 
     def test_diagnostics_rejects_multiline_runtime_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -250,7 +328,7 @@ class PortalAndSupportTests(unittest.TestCase):
     def test_factory_reset_removes_networkmanager_state_before_local_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "state"
-            for name in ("browser", "network-connections", "journal", "identity", "ssh", "firstboot-state"):
+            for name in ("browser", "network-connections", "journal", "identity", "ssh", "relay", "firstboot-state"):
                 (root / name).mkdir(parents=True)
                 (root / name / "value").write_text("remove", encoding="utf-8")
             calls: list[tuple[str, object]] = []
@@ -259,7 +337,8 @@ class PortalAndSupportTests(unittest.TestCase):
                 mock.patch("hexclave_tv_box.support.run", side_effect=lambda command: calls.append(("run", command)) or ""),
             ):
                 factory_reset(root, ADMIN_CONFIRMATION)
-            self.assertEqual(calls[0], ("agent", {"command": "prepare-factory-reset", "confirmation": ADMIN_CONFIRMATION}))
+            self.assertEqual(calls[0], ("run", ["systemctl", "stop", "hexclave-tv-box-relay.service"]))
+            self.assertEqual(calls[1], ("agent", {"command": "prepare-factory-reset", "confirmation": ADMIN_CONFIRMATION}))
             self.assertIn(("run", [
                 "systemctl", "stop",
                 "hexclave-tv-box-network.service",
@@ -267,8 +346,119 @@ class PortalAndSupportTests(unittest.TestCase):
             self.assertIn(("run", ["journalctl", "--rotate"]), calls)
             self.assertIn(("run", ["journalctl", "--vacuum-time=1s"]), calls)
             self.assertEqual(calls[-1], ("run", ["systemctl", "reboot"]))
-            for name in ("browser", "network-connections", "journal", "identity", "ssh", "firstboot-state"):
+            for name in ("browser", "network-connections", "journal", "identity", "ssh", "relay", "firstboot-state"):
                 self.assertEqual(list((root / name).iterdir()), [])
+
+    def test_factory_reset_rejects_relay_stop_failure_before_any_deletion(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support.run", side_effect=OSError("stop-failed")),
+            mock.patch("hexclave_tv_box.support.agent_request") as agent,
+            mock.patch("hexclave_tv_box.support.clear_exact_state_directory") as clear,
+            self.assertRaises(OSError),
+        ):
+            factory_reset(Path("/unused"), ADMIN_CONFIRMATION)
+        agent.assert_not_called()
+        clear.assert_not_called()
+
+    def test_factory_reset_schedules_only_the_fixed_root_owned_job(self) -> None:
+        with mock.patch("hexclave_tv_box.support.run", return_value="") as runner:
+            self.assertEqual(execute("factory-reset", [ADMIN_CONFIRMATION]), "Factory reset scheduled.")
+        runner.assert_called_once_with([
+            "systemd-run", "--quiet", "--collect", "--unit=hexclave-tv-box-factory-reset",
+            "--on-active=2s", "--timer-property=AccuracySec=1s", "--property=Type=oneshot",
+            "--property=User=root", "/usr/lib/hexclave-tv-box/factory-reset-job",
+        ])
+        self.assertIn("support-command=scheduled", self.audit_mock.call_args.args[0])
+        with mock.patch("hexclave_tv_box.support.run") as runner:
+            for arguments in ([], ["NO"], [ADMIN_CONFIRMATION, "/tmp/arbitrary"]):
+                with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                    execute("factory-reset", arguments)
+            with self.assertRaisesRegex(ValueError, "admin-unpair"):
+                schedule_factory_reset("NO")
+            for command in ("factory-reset-job", "internal-factory-reset"):
+                with self.subTest(command=command), self.assertRaises(ValueError):
+                    execute(command, [])
+            runner.assert_not_called()
+
+    def test_duplicate_or_failed_factory_reset_schedule_does_not_claim_success(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support.run", side_effect=subprocess.CalledProcessError(1, ["systemd-run"], output="unit already exists")),
+            mock.patch("hexclave_tv_box.support.factory_reset") as reset,
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            execute("factory-reset", [ADMIN_CONFIRMATION])
+        reset.assert_not_called()
+        self.assertIn("support-command=failed", self.audit_mock.call_args.args[0])
+        self.assertNotIn("unit already exists", self.audit_mock.call_args.args[0])
+
+    def test_factory_reset_job_rejects_unprivileged_execution(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support.os.geteuid", return_value=989),
+            mock.patch("hexclave_tv_box.support.factory_reset") as reset,
+            self.assertRaises(PermissionError),
+        ):
+            factory_reset_job_main()
+        reset.assert_not_called()
+
+    def test_factory_reset_job_needs_no_callers_session_or_arguments(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support.os.geteuid", return_value=0),
+            mock.patch("hexclave_tv_box.support.factory_reset") as reset,
+            mock.patch("hexclave_tv_box.support.support_mutation_lock", return_value=nullcontext()) as lock,
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            factory_reset_job_main()
+        lock.assert_called_once_with()
+        reset.assert_called_once_with(mock.ANY, ADMIN_CONFIRMATION)
+
+    def test_support_audit_has_only_validated_command_metadata_not_payload_or_error(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support._execute", return_value="private-output"),
+            mock.patch("hexclave_tv_box.support._support_session_pid", return_value=123),
+            mock.patch("hexclave_tv_box.support.time.monotonic", side_effect=[10.0, 12.0]),
+        ):
+            self.assertEqual(execute("diagnostics", []), "private-output")
+        self.assertEqual(self.audit_mock.call_count, 2)
+        output = "\n".join(call.args[0] for call in self.audit_mock.call_args_list)
+        self.assertIn("support-command=started", output)
+        self.assertIn("support-command=complete", output)
+        self.assertIn("ssh-session-pid=123", output)
+        self.assertIn("duration-seconds=2.0", output)
+        self.assertNotIn("private-output", output)
+        self.audit_mock.reset_mock()
+        with self.assertRaises(ValueError):
+            execute("untrusted-secret-input", [])
+        self.audit_mock.assert_not_called()
+        with (
+            mock.patch("hexclave_tv_box.support._execute", side_effect=OSError("private-exception-content")),
+            self.assertRaises(OSError),
+        ):
+            execute("diagnostics", [])
+        output = "\n".join(call.args[0] for call in self.audit_mock.call_args_list)
+        self.assertIn("support-command=failed", output)
+        self.assertNotIn("private-exception-content", output)
+
+    def test_support_audit_delivery_failure_is_visible_without_reversing_completed_action(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support.syslog.syslog", side_effect=OSError("private-error")),
+            mock.patch("hexclave_tv_box.support.syslog.openlog"),
+            mock.patch("hexclave_tv_box.support.print") as printer,
+        ):
+            _audit_event("support-command=complete")
+        self.assertIn("audit delivery failed", printer.call_args.args[0])
+        self.assertNotIn("private-error", printer.call_args.args[0])
+
+    def test_support_audit_session_correlation_uses_process_tree_not_client_environment(self) -> None:
+        with (
+            mock.patch("hexclave_tv_box.support.os.getppid", return_value=100),
+            mock.patch("hexclave_tv_box.support.read_process_table", return_value={
+                100: ProcessInfo(99, "sudo"),
+                99: ProcessInfo(98, "python3"),
+                98: ProcessInfo(1, "sshd-session"),
+            }),
+            mock.patch.dict(os.environ, {"SSH_USER_AUTH": "/tmp/untrusted", "OPERATOR_ID": "spoofed"}),
+        ):
+            self.assertEqual(_support_session_pid(), 98)
 
     @unittest.skipUnless(os.geteuid() == 0, "The production support lock requires a root owner.")
     def test_support_mutation_lock_serializes_independent_sessions(self) -> None:
@@ -327,7 +517,7 @@ class PortalAndSupportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
             root = Path(directory) / "state"
             root.mkdir()
-            for name in ("browser", "network-connections", "journal", "identity", "ssh", "firstboot-state"):
+            for name in ("browser", "network-connections", "journal", "identity", "ssh", "relay", "firstboot-state"):
                 (root / name).mkdir()
                 (root / name / "simulated-state").write_text("remove", encoding="utf-8")
             lock_path = Path(directory) / "support.lock"
@@ -350,7 +540,7 @@ class PortalAndSupportTests(unittest.TestCase):
 
             def reset_session() -> None:
                 try:
-                    execute("factory-reset", [ADMIN_CONFIRMATION], root)
+                    factory_reset_job_main()
                 except (OSError, ValueError, RuntimeError) as error:
                     failures.append(error)
 
@@ -363,6 +553,7 @@ class PortalAndSupportTests(unittest.TestCase):
 
             with (
                 mock.patch("hexclave_tv_box.support.support_mutation_lock", side_effect=lambda: support_mutation_lock(lock_path)),
+                mock.patch("hexclave_tv_box.support.STATE_ROOT", root),
                 mock.patch("hexclave_tv_box.support.agent_request", return_value={"prepared": True}),
                 mock.patch("hexclave_tv_box.support.run", side_effect=runner),
                 mock.patch("hexclave_tv_box.support.diagnostics", return_value="diagnostics remain available"),

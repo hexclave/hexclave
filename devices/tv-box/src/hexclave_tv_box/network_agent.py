@@ -23,6 +23,7 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .policy import ADMIN_CONFIRMATION, FRONTEND_RECOVERY_PROBE_SECONDS, NETWORK_POLL_SECONDS, SETUP_PORTAL_READY_TIMEOUT_SECONDS, NetworkMode, NetworkPolicy, NetworkState, advance_network_state, initial_network_state
 from .state import RUNTIME_ROOT, STATE_ROOT, atomic_write, clear_exact_state_directory
@@ -41,6 +42,19 @@ MAX_AGENT_REQUEST_BYTES = 16_384
 MAX_KIOSK_HEALTH_BYTES = 256
 TEST_SETUP_PASSWORD_LENGTH = 8
 TEST_SETUP_PASSWORD_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+
+def _failure_code(error: BaseException) -> str:
+    """Describe a command failure without its argv, output, or Wi-Fi secrets."""
+    if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+        return "timeout"
+    if isinstance(error, subprocess.CalledProcessError):
+        return f"exit-{error.returncode}"
+    if isinstance(error, OSError):
+        return f"os-error-{error.errno}" if error.errno is not None else "os-error"
+    if isinstance(error, ValueError):
+        return "invalid-request"
+    return "unexpected-error"
 
 
 def parse_test_renderer_origin(raw_value: str) -> str:
@@ -196,6 +210,13 @@ def validate_wifi_request(request: dict[str, Any]) -> tuple[str, str, str | None
     zone_path = Path("/usr/share/zoneinfo") / timezone
     if not zone_path.is_file():
         raise ValueError("Time zone is not installed on this device.")
+    try:
+        # zoneinfo also contains metadata files (for example zone.tab).
+        # Existence alone does not establish that Cog can use this timezone.
+        # This reads installed TZif data; it never changes the OS timezone.
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise ValueError("Time zone is not usable on this device.") from error
     return ssid, security, normalized_password, hidden, timezone
 
 
@@ -251,11 +272,13 @@ class NetworkManagerController:
         return state.startswith("100") and any(address != "" for address in addresses) and connection != SETUP_CONNECTION_NAME
 
     def activate_saved_connections(self) -> None:
-        for name in self.saved_connections():
+        for attempt, name in enumerate(self.saved_connections(), start=1):
             try:
                 self._nmcli("connection", "up", "id", name, "ifname", WIFI_INTERFACE, timeout=30)
+                LOGGER.info("saved-network-profile-attempt=%d outcome=connected", attempt)
                 return
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                LOGGER.warning("saved-network-profile-attempt=%d outcome=failed reason=%s", attempt, _failure_code(error))
                 continue
 
     def setup_active(self) -> bool:
@@ -438,6 +461,11 @@ class TvBoxNetworkAgent:
         self.applied_mode: NetworkMode | None = None
         self.frontend_reachable: bool | None = None
         self.next_frontend_probe_at = 0.0
+        self.last_applied_at = self.monotonic()
+        self.outage_started_at: float | None = None if self.state.mode is NetworkMode.CONNECTED else self.last_applied_at
+        self.frontend_outage_started_at: float | None = None
+        self.saved_network_attempts = 0
+        self.pending_transition_reason: str | None = None
 
     def _service(self, action: str, name: str) -> None:
         self.service_runner(["systemctl", action, name], 30)
@@ -535,14 +563,19 @@ class TvBoxNetworkAgent:
             if self.state.mode is self.applied_mode:
                 self._reconcile_services()
                 return
+            previous_mode = self.applied_mode
+            reason = self.pending_transition_reason
             if self.state.mode in {NetworkMode.STATION_INITIAL, NetworkMode.STATION_RETRY}:
                 # NetworkManager's explicit activation is synchronous. Recheck
                 # immediately so a normal saved-network boot launches the live
                 # renderer once instead of launching the offline renderer and
                 # tearing the complete Cage/Cog stack down five seconds later.
+                self.saved_network_attempts += 1
+                LOGGER.info("saved-network-attempt=%d mode=%s", self.saved_network_attempts, self.state.mode.value)
                 self.controller.activate_saved_connections()
                 if self.controller.connected():
                     self.state = NetworkState(NetworkMode.CONNECTED, self.monotonic())
+                    reason = "saved-network-connected"
             if self.state.mode is NetworkMode.SETUP:
                 # Setup credentials must remain available even when WebKit
                 # cannot start. The console service owns tty1 in this mode;
@@ -565,8 +598,33 @@ class TvBoxNetworkAgent:
                 self._service("stop", "hexclave-tv-box-setup.service")
                 self._set_kiosk_url(OFFLINE_URL)
                 self._restart_kiosk()
+            now = self.monotonic()
+            if reason is None:
+                if previous_mode is None:
+                    reason = "boot"
+                elif self.state.mode is NetworkMode.CONNECTED:
+                    reason = "wifi-restored"
+                elif previous_mode is NetworkMode.CONNECTED:
+                    reason = "wifi-lost"
+                elif self.state.mode is NetworkMode.SETUP:
+                    reason = "saved-network-window-exhausted"
+                else:
+                    reason = "setup-window-exhausted"
+            LOGGER.info(
+                "network-state=%s previous=%s reason=%s previous-duration-seconds=%.1f",
+                self.state.mode.value, previous_mode.value if previous_mode is not None else "none",
+                reason, max(0.0, now - self.last_applied_at),
+            )
+            if self.state.mode is NetworkMode.CONNECTED:
+                if self.outage_started_at is not None:
+                    LOGGER.info("wifi-recovery-complete outage-seconds=%.1f saved-network-attempts=%d", max(0.0, now - self.outage_started_at), self.saved_network_attempts)
+                self.outage_started_at = None
+                self.saved_network_attempts = 0
+            elif self.outage_started_at is None:
+                self.outage_started_at = now
             self.applied_mode = self.state.mode
-            LOGGER.info("network-state=%s", self.state.mode.value)
+            self.last_applied_at = now
+            self.pending_transition_reason = None
 
     def tick(self) -> None:
         with self.lock:
@@ -587,12 +645,21 @@ class TvBoxNetworkAgent:
     def _probe_frontend_recovery(self) -> None:
         if self.state.mode is not NetworkMode.CONNECTED:
             self.frontend_reachable = None
+            self.frontend_outage_started_at = None
             self.next_frontend_probe_at = 0.0
             return
         now = self.monotonic()
         if now < self.next_frontend_probe_at:
             return
         reachable = self.frontend_probe(self.renderer_url, 10)
+        if reachable != self.frontend_reachable:
+            if reachable:
+                outage_seconds = 0.0 if self.frontend_outage_started_at is None else max(0.0, now - self.frontend_outage_started_at)
+                LOGGER.info("frontend-probe=reachable observed-outage-seconds=%.1f", outage_seconds)
+                self.frontend_outage_started_at = None
+            else:
+                LOGGER.warning("frontend-probe=unreachable reason=transport-or-http-failure")
+                self.frontend_outage_started_at = now
         recovered = self.frontend_reachable is False and reachable
         if recovered and self._document_recovery_requested():
             # This is a fast path for observed origin outages. The kiosk
@@ -628,6 +695,7 @@ class TvBoxNetworkAgent:
                 if command in {"reset-pairing", "prepare-factory-reset"} and request.get("confirmation") != ADMIN_CONFIRMATION:
                     raise ValueError("TV Box reset requires dashboard admin-unpair confirmation.")
             if command == "restart-kiosk":
+                LOGGER.info("support-request=restart-kiosk network-mode=%s", self.state.mode.value)
                 # Only an explicit root support operation resets a consumed
                 # systemd failure budget; periodic reconciliation never does.
                 if self.state.mode is NetworkMode.SETUP:
@@ -664,15 +732,21 @@ class TvBoxNetworkAgent:
                 if self.state.mode is not NetworkMode.SETUP:
                     raise ValueError("Wi-Fi can be changed only during setup.")
                 self.portal_submission_active = True
+                started_at = self.monotonic()
+                LOGGER.info("wifi-submission=started")
                 try:
                     self.controller.connect(request)
                     self.has_saved_network = True
                     self.state = initial_network_state(has_saved_network=True, connected=True, now=self.monotonic())
                     self.applied_mode = None
-                except (OSError, subprocess.SubprocessError, ValueError):
+                    self.pending_transition_reason = "wifi-submission-complete"
+                    LOGGER.info("wifi-submission=complete duration-seconds=%.1f", max(0.0, self.monotonic() - started_at))
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    LOGGER.warning("wifi-submission=failed reason=%s duration-seconds=%.1f", _failure_code(error), max(0.0, self.monotonic() - started_at))
                     self.state = initial_network_state(has_saved_network=True, connected=False, now=self.monotonic())
                     self.state = NetworkState(NetworkMode.SETUP, self.monotonic())
                     self.applied_mode = None
+                    self.pending_transition_reason = "wifi-submission-failed"
                     self.controller.start_setup()
                     raise
                 finally:
@@ -685,6 +759,7 @@ class TvBoxNetworkAgent:
                 self.has_saved_network = False
                 self.state = initial_network_state(has_saved_network=False, connected=False, now=self.monotonic())
                 self.applied_mode = None
+                self.pending_transition_reason = "support-network-reset"
                 self.apply_mode()
                 return {"reset": True}
         raise ValueError("Unsupported TV Box agent command.")
@@ -708,7 +783,7 @@ class AgentRequestHandler(socketserver.StreamRequestHandler):
                 _pid, user_id, _group_id = struct.unpack("3i", credentials)
                 response = {"ok": True, "result": self.server.agent.handle_request(request, privileged=user_id == 0)}
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, OSError, subprocess.SubprocessError) as error:
-            LOGGER.warning("agent-request-failed=%s", type(error).__name__)
+            LOGGER.warning("agent-request-failed=%s", _failure_code(error))
             response = {"ok": False, "error": "request-failed"}
         self.wfile.write(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
 
@@ -732,11 +807,26 @@ def serve(agent: TvBoxNetworkAgent, socket_path: Path, socket_group: str) -> Non
         socket_path.chmod(0o660)
         thread = threading.Thread(target=server.serve_forever, name="tv-box-agent-socket", daemon=True)
         thread.start()
+        last_failure: str | None = None
+        next_failure_log_at = 0.0
+        suppressed_failures = 0
         while True:
             try:
                 agent.tick()
+                if last_failure is not None:
+                    LOGGER.info("network-tick-recovered previous-reason=%s suppressed-failures=%d", last_failure, suppressed_failures)
+                    last_failure = None
+                    suppressed_failures = 0
             except (OSError, subprocess.SubprocessError) as error:
-                LOGGER.warning("network-tick-failed=%s", type(error).__name__)
+                reason = _failure_code(error)
+                now = time.monotonic()
+                if reason != last_failure or now >= next_failure_log_at:
+                    LOGGER.warning("network-tick-failed=%s suppressed-failures=%d", reason, suppressed_failures)
+                    next_failure_log_at = now + 60
+                    suppressed_failures = 0
+                else:
+                    suppressed_failures += 1
+                last_failure = reason
             time.sleep(NETWORK_POLL_SECONDS)
     finally:
         server.shutdown()

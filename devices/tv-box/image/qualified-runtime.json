@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "image_builder_commit": "3f2c916086ad70197945bfc50ef953c1f6035f10",
+  "os": {"ID": "raspbian", "VERSION_ID": "13", "VERSION_CODENAME": "trixie"},
+  "architecture": "armhf",
+  "packages": {
+    "base-files": "13.8+rpi1+deb13u6",
+    "bubblewrap": "0.12.0-1~deb13u1",
+    "ca-certificates": "20250419",
+    "cage": "0.2.0-2+rpt1+b1",
+    "cog": "0.18.4-1",
+    "dnsmasq-base": "2.91-1+deb13u1",
+    "libdrm2": "2.4.134-3~bpo13+1+rpt1",
+    "libegl-mesa0": "26.2.1-2~bpo13+0~rpt1",
+    "libegl1": "1.7.0-1",
+    "libgbm1": "26.2.1-2~bpo13+0~rpt1",
+    "libgl1-mesa-dri": "26.2.1-2~bpo13+0~rpt1",
+    "libgles2": "1.7.0-1",
+    "libglib2.0-0t64": "2.84.4-3~deb13u3",
+    "libsoup-3.0-0": "3.6.5-3",
+    "libwayland-client0": "1.24.0-2~bpo13+1~rpt1",
+    "libwayland-cursor0": "1.24.0-2~bpo13+1~rpt1",
+    "libwayland-server0": "1.24.0-2~bpo13+1~rpt1",
+    "libwlroots-0.18": "0.18.2-3+rpt4+b1",
+    "libwpe-1.0-1": "1.16.2-1",
+    "libwpebackend-fdo-1.0-1": "1.16.0-1",
+    "libwpewebkit-2.0-1": "2.48.1-2+rpi1",
+    "linux-image-rpi-v7": "1:6.18.39-1+rpt1",
+    "mesa-libgallium": "26.2.1-2~bpo13+0~rpt1",
+    "network-manager": "1.52.1-1+rpt4",
+    "nftables": "1.1.3-1",
+    "openssh-client": "1:10.0p1-7+deb13u4",
+    "openssh-server": "1:10.0p1-7+deb13u4",
+    "python3-minimal": "3.13.5-1",
+    "python3-pycryptodome": "3.20.0+dfsg-3",
+    "systemd": "257.9-1~deb13u1+rpi1",
+    "systemd-timesyncd": "257.9-1~deb13u1+rpi1",
+    "tzdata": "2026b-0+deb13u1",
+    "wpasupplicant": "2:2.10-24",
+    "zram-tools": "0.3.7-1"
+  },
+  "public_test_vectors": {
+    "usr/lib/python3/dist-packages/Cryptodome/SelfTest/PublicKey/test_import_DSA.py": {
+      "package": "python3-pycryptodome",
+      "sha256": "e9f2e62884d2a0fd7976568a66ad5db77f201e952c8e663a678811d07e417247",
+      "upstream": "https://github.com/Legrandin/pycryptodome/blob/v3.20.0/lib/Crypto/SelfTest/PublicKey/test_import_DSA.py"
+    }
+  }
+}

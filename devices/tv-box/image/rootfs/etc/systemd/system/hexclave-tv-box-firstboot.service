@@ -1,7 +1,7 @@
 [Unit]
 Description=Initialize unique Hexclave TV Box state
 RequiresMountsFor=/var/lib/hexclave-tv-box
-Before=NetworkManager.service ssh.service hexclave-tv-box-network.service
+Before=NetworkManager.service ssh.service hexclave-tv-box-network.service hexclave-tv-box-relay.service
 
 [Service]
 Type=oneshot

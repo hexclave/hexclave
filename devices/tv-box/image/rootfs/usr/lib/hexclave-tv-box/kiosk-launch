@@ -46,6 +46,14 @@ if [ -s "$timezone_file" ]; then
 fi
 
 export COG_PLATFORM_WL_VIEW_FULLSCREEN=1
+# Both the compositor and Cog's Wayland backend select default/left_ptr.
+# Scope the private transparent theme to this process tree, including the
+# native startup cursor, without modifying desktop cursors or hosted /tv.
+export XCURSOR_PATH=/usr/share/hexclave-tv-box/cursors
+if [ ! -r "$XCURSOR_PATH/default/cursors/left_ptr" ] || [ ! -s "$XCURSOR_PATH/default/cursors/left_ptr" ]; then
+  printf '%s\n' 'TV Box transparent cursor asset is unavailable.' >&2
+  exit 1
+fi
 # PAM establishes the renderer's logind session after systemd applies the
 # service environment. Reassert the systemd-owned private directory here so
 # Cage never inherits a cleared or replaced XDG_RUNTIME_DIR from PAM.
