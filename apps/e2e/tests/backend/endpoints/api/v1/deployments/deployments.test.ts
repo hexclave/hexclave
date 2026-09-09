@@ -291,6 +291,11 @@ describe("definition sync", () => {
       max_instances: 3,
       root_directory: "api",
       provisioned: false,
+      // Never parked before it has ever run. Reported as its own field rather
+      // than as a status, because a parked service still has a last deploy that
+      // succeeded or failed on its own terms.
+      parked_at: null,
+      parked_reason: null,
       status: "not_deployed",
       has_successful_deploy: false,
       url: null,

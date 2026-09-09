@@ -9,9 +9,14 @@
 // startup, so a Marshal serving only Fly starts without any GCP configuration at all.
 
 import { assertDataEncryptionKeyIsSafe, parseDataEncryptionRootKey } from "./spec-crypto.js";
+import { validateImageRef } from "./image-ref.js";
 import type { ServiceKind } from "./types.js";
 
 export const MOCK_FLY_TOKEN = "mock_hexclave_fly_key";
+
+// The published parked page. A tag by default so a dev or test Marshal needs no
+// configuration; production pins the digest (see apps/deployment-parked-page/README.md).
+export const DEFAULT_PARKED_IMAGE = "hexclave/deployment-parked-page:1";
 
 export type FlyConfig = {
   token: string,
@@ -63,6 +68,11 @@ export type MarshalConfig = {
   // "real" starts an ephemeral BuildKit machine on the namespace's runtime; "mock" completes
   // in-process with a fake digest (dev/e2e; non-prod only).
   builderKind: "real" | "mock",
+  // The image a PARKED service runs instead of the tenant's own — see
+  // apps/deployment-parked-page. Public (tenant machines pull it with no registry
+  // credentials) and, in production, pinned to a digest: a tag that moved under a
+  // fleet of already-parked services would roll every one of them.
+  parkedImage: string,
   s3: {
     endpoint: string,
     region: string,
@@ -201,6 +211,17 @@ export function getConfig(): MarshalConfig {
   }
   const anyMock = fly?.token === MOCK_FLY_TOKEN || gcp?.mockUrl !== null && gcp !== null;
 
+  // Validated at startup rather than at park time: a malformed reference here
+  // would otherwise surface as a failed apply on a customer's service, at the one
+  // moment nobody is watching this Marshal.
+  const parkedImageRaw = env("HEXCLAVE_DEPLOYMENT_PARKED_IMAGE", DEFAULT_PARKED_IMAGE);
+  let parkedImage: string;
+  try {
+    parkedImage = validateImageRef(parkedImageRaw, "HEXCLAVE_DEPLOYMENT_PARKED_IMAGE").canonical;
+  } catch (error) {
+    throw new Error(`marshal refuses to start: HEXCLAVE_DEPLOYMENT_PARKED_IMAGE is not a valid image reference (got ${JSON.stringify(parkedImageRaw)})`, { cause: error });
+  }
+
   const apiKey = env("MARSHAL_API_KEY");
   const dataEncryptionKey = env("HEXCLAVE_MARSHAL_DATA_ENCRYPTION_KEY");
   assertDataEncryptionKeyIsSafe(dataEncryptionKey, process.env.MARSHAL_ALLOW_MOCKS === "1");
@@ -215,6 +236,7 @@ export function getConfig(): MarshalConfig {
     fly,
     gcp,
     builderKind,
+    parkedImage,
     s3: {
       // The localhost default is the dev s3mock and is only offered in mock mode: silently
       // pointing a real deployment at localhost would fail every spec, upload and build with

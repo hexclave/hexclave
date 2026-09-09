@@ -29,8 +29,11 @@ import {
   getServiceState,
   listServices,
   maybeFinalizeStaleDeployment,
+  parkService,
   startSourceDeployment,
+  unparkService,
   validateNamespace,
+  validateParkReason,
   validateServiceKey,
   validateServiceSpec,
   validateSourceId,
@@ -271,6 +274,24 @@ export function createMarshalApp() {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
       return await getServiceState(ns, key) as unknown as Record<string, unknown>;
+    }))
+
+    // Parking stops a service and puts the platform's parked page in its place,
+    // keeping its app, ports, IPs, certificates and disks. POST rather than PUT
+    // because it acts on the service rather than replacing it, and because the
+    // spec the caller would have to send to say "same service, but stopped" is
+    // exactly the spec parking must not overwrite.
+    .post("/v1/namespaces/:ns/services/:key/park", ({ params, body }) => handle(async () => {
+      const ns = validateNamespace(params.ns);
+      const key = validateServiceKey(params.key);
+      const reason = validateParkReason((body as Record<string, unknown> | null)?.reason);
+      return await parkService(ns, key, reason) as unknown as Record<string, unknown>;
+    }))
+
+    .post("/v1/namespaces/:ns/services/:key/unpark", ({ params }) => handle(async () => {
+      const ns = validateNamespace(params.ns);
+      const key = validateServiceKey(params.key);
+      return await unparkService(ns, key) as unknown as Record<string, unknown>;
     }))
 
     .delete("/v1/namespaces/:ns/services/:key", ({ params }) => handle(async () => {

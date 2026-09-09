@@ -13,17 +13,36 @@ import { StatusError } from "@hexclave/shared/dist/utils/errors";
 
 export type DeploymentsPlatformConfig = {
   deploymentsEnabled: boolean,
+  // Whether a Free-plan project's services are parked once they pass the limit
+  // below. Off by default and switched on deliberately: this stops services that
+  // are running and serving traffic, which is not something a schema change
+  // should start doing on its own.
+  freePlanParkingEnabled: boolean,
+  // How long a Free-plan project's services run after each deploy. Configurable
+  // because it is a pricing decision that will move, and because widening it is
+  // the first thing an operator would want during an incident.
+  freePlanParkAfterHours: number,
 };
 
 const configSelect = {
   deploymentsEnabled: true,
+  freePlanParkingEnabled: true,
+  freePlanParkAfterHours: true,
 } as const;
+
+// A guard on the operator's own input, not on the column: an hour count of zero
+// (or a negative one) would park every Free-plan service the instant it deployed,
+// which is not a limit anybody means to set from a text field.
+export const MIN_FREE_PLAN_PARK_AFTER_HOURS = 1;
+export const MAX_FREE_PLAN_PARK_AFTER_HOURS = 24 * 365;
 
 // Matches the Prisma schema defaults, which are today's behaviour. A missing row
 // is the normal state on an instance where nobody has ever flipped a switch, so
 // it has to read as "everything on" rather than as an error.
 const defaultConfig: DeploymentsPlatformConfig = {
   deploymentsEnabled: true,
+  freePlanParkingEnabled: false,
+  freePlanParkAfterHours: 24,
 };
 
 export async function getDeploymentsPlatformConfig(): Promise<DeploymentsPlatformConfig> {
@@ -35,6 +54,13 @@ export async function getDeploymentsPlatformConfig(): Promise<DeploymentsPlatfor
 }
 
 export async function updateDeploymentsPlatformConfig(updates: DeploymentsPlatformConfig): Promise<DeploymentsPlatformConfig> {
+  if (
+    !Number.isInteger(updates.freePlanParkAfterHours)
+    || updates.freePlanParkAfterHours < MIN_FREE_PLAN_PARK_AFTER_HOURS
+    || updates.freePlanParkAfterHours > MAX_FREE_PLAN_PARK_AFTER_HOURS
+  ) {
+    throw new StatusError(400, `The Free plan deployment limit must be a whole number of hours between ${MIN_FREE_PLAN_PARK_AFTER_HOURS} and ${MAX_FREE_PLAN_PARK_AFTER_HOURS}.`);
+  }
   // Upsert rather than update: the row is created by the first operator who
   // flips something, not by the migration (which must not be able to turn
   // deploys off). Writes are rare and manual, so the upsert's cost is irrelevant.

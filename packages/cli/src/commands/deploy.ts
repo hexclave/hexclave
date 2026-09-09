@@ -707,6 +707,20 @@ export function registerDeployCommand(program: Command) {
       const deploymentId = deploymentResponse.id;
       console.error(`Deployment #${deploymentResponse.number} started. ${buildsFromSource ? "Waiting for the remote build..." : "Nothing to build — waiting for the services to come up..."}`);
 
+      // Anything the API wants the author to know about this deploy that is not
+      // a failure — today, that a Free-plan deployment stops after the plan's
+      // window. Printed HERE, at the start, rather than with the URLs at the end:
+      // a limit is only fair if it is read before it bites, and the end of a
+      // deploy is where the reader has already stopped paying attention.
+      //
+      // Tolerated as missing: an older API returns no such field, and a deploy
+      // must not fail over a message.
+      for (const notice of Array.isArray(deploymentResponse.notices) ? deploymentResponse.notices : []) {
+        if (typeof notice !== "string") continue;
+        console.error("");
+        console.error(notice);
+      }
+
       // Stream the remote build's output into this terminal while it runs. A
       // deploy is mostly one long remote build, and until now the only way to
       // see what it was doing was to open the dashboard — which is no help at

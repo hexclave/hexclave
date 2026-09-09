@@ -21,12 +21,22 @@ describe("getDeploymentsPlatformConfig", () => {
     // The normal state of an instance where nobody has ever flipped a switch:
     // the migration writes no row, so this must not read as "off".
     mockFindFirst.mockResolvedValue(null as never);
-    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({ deploymentsEnabled: true });
+    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({
+      deploymentsEnabled: true,
+      // Parking is the one default that is OFF: it stops customers' running
+      // services, so it waits for an operator rather than for a migration.
+      freePlanParkingEnabled: false,
+      freePlanParkAfterHours: 24,
+    });
   });
 
   it("reads the stored row when one exists", async () => {
-    mockFindFirst.mockResolvedValue({ deploymentsEnabled: false } as never);
-    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({ deploymentsEnabled: false });
+    mockFindFirst.mockResolvedValue({ deploymentsEnabled: false, freePlanParkingEnabled: true, freePlanParkAfterHours: 48 } as never);
+    await expect(getDeploymentsPlatformConfig()).resolves.toEqual({
+      deploymentsEnabled: false,
+      freePlanParkingEnabled: true,
+      freePlanParkAfterHours: 48,
+    });
   });
 });
 

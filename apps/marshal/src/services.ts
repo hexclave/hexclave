@@ -1,4 +1,5 @@
 import { buildEnvByteLength, buildTimeEnv, computeWebhookToken, type Builder } from "./builds.js";
+import { getConfig } from "./config.js";
 import { BASE_IMAGE, BUILDER_MACHINE_BY_MEMORY_MB, BUILD_TIMEOUT_SECONDS, MAX_BUILD_ENV_BYTES, MAX_COMMAND_LENGTH, MAX_INSTANCES_CAP, MAX_PERSISTENT_VOLUMES_PER_SERVICE, MAX_PORTS_PER_SERVICE, MAX_UPLOAD_BYTES, MAX_VOLUME_ID_LENGTH, MAX_VOLUME_SIZE_GB, MIN_REDACTED_ENV_VALUE_LENGTH, MIN_VOLUME_SIZE_GB, UNREDACTED_ENV_KEY_REGEX, VOLUME_ID_REGEX, defaultMemoryMbFor, memorySizesFor } from "./config.js";
 import { applyErrorMessage } from "./apply-error.js";
 import { resolveEnv, type KnownTarget } from "./env-resolution.js";
@@ -9,11 +10,11 @@ import { ReconciliationLeaseLostError, withReconciliationLease, type Reconciliat
 import { redactBuildLogLines, redactBuildLogText } from "./redact-build-log.js";
 import { computeRevision } from "./revision.js";
 import { DEFAULT_RUNTIME, type DeploymentRuntime } from "./runtime.js";
-import { assertServiceCanHoldADomain, standardPortsHolderFor } from "./spec-helpers.js";
+import { assertServiceCanHoldADomain, specIsPublic, standardPortsHolderFor } from "./spec-helpers.js";
 import { createDeployment, deleteSpecConditionally, deleteUpload, deleteValidatedUpload, listDomainClaimsForService, listSpecKeys, readDeployment, readDeploymentVersioned, readDomainClaimVersioned, readSpec, readSpecVersioned, readUpload, replaceDeployment, statUpload, writeDeploymentLog, writeSpec, writeValidatedUpload } from "./store.js";
 import { loadAndValidateSourceArchive } from "./source-archive.js";
 import { validateImageRef } from "./image-ref.js";
-import { portEntries, targetIsBuilt, targetUsesGeneratedDockerfile, type Deployment, type DeploymentServiceState, type DeploymentTarget, type EnvValue, type PortsConfig, type ServiceSpec, type ServiceState, type StoredDeployment, type StoredSpec, type VolumeConfig } from "./types.js";
+import { portEntries, targetIsBuilt, targetUsesGeneratedDockerfile, type Deployment, type DeploymentServiceState, type DeploymentTarget, type EnvValue, type ParkState, type PortsConfig, type ServiceSpec, type ServiceState, type StoredDeployment, type StoredSpec, type VolumeConfig } from "./types.js";
 import { ulid } from "./ulid.js";
 
 // The pure spec helpers and the env resolver moved to their own modules so the providers can
@@ -346,6 +347,11 @@ async function claimDesiredSpec(ns: string, key: string, spec: ServiceSpec, revi
       created_at_millis: previous?.created_at_millis ?? now,
       updated_at_millis: Date.now(),
       last_apply_error: changed ? null : previous.last_apply_error,
+      // Applying a spec is applying the TENANT's image, so it is also an unpark:
+      // this is the one path a deploy takes, and a deploy of a parked service is
+      // the author asking for their own code back. parkService writes this field
+      // on its own path, which deliberately does not come through here.
+      parked: null,
     };
     const etag = await writeSpec(stored, previousVersion === null ? { ifNoneMatch: true } : { ifMatch: previousVersion.etag });
     if (etag !== null) return { stored, changed, etag };
@@ -453,6 +459,194 @@ async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, 
     stored.last_apply_error = `deploy failed: ${applyErrorMessage(error)}`;
   }
   return { revision, changed, state: await stateAfterSpecWrite(provider, ns, key, stored, ownedSpecEtag, knownTargets), imageRef };
+}
+
+// ---------------------------------------------------------------------------
+// Parking: running the platform's parked page instead of the tenant's image.
+//
+// A parked service keeps EVERYTHING except what it runs: the same Fly app, ports,
+// public IPs, certificates, custom domains, disks and stored spec. Only the image
+// and the env handed to the machines change. Three things follow from that, and
+// they are the whole reason parking is shaped this way rather than as a scale-to-
+// zero or a gateway rule:
+//
+//   - The explanation reaches every hostname the service holds — its platform
+//     URL, its `.fly.dev` name, and any custom domain — because it is served by
+//     the service itself rather than by something in front of it.
+//   - Unparking is `applyServiceSpec` with the spec that was already stored. No
+//     state has to be reconstructed, and a deploy unparks for free (see
+//     claimDesiredSpec).
+//   - Nothing is destroyed, so nothing can be lost by parking. Disks stay
+//     mounted, certificates stay issued, and the machine is UPDATED rather than
+//     recreated, which is why the parked spec below keeps the port set, the
+//     volumes and `max_instances` exactly as they were.
+//
+// Marshal does not decide WHEN to park. The backend's sweeper does (see
+// parkExpiredFreePlanServices), and `reason` is passed through opaquely.
+
+/**
+ * A stored spec's park state.
+ *
+ * Specs written before parking existed have no such field, and its absence means
+ * "running" rather than "unknown" — which is what makes this readable on every
+ * spec in the bucket without a migration.
+ */
+export function parkStateFromStored(stored: StoredSpec): ParkState | null {
+  return stored.parked ?? null;
+}
+
+// Kept to what can be an env var value and a filename-safe token: the reason is
+// handed to the parked page as HEXCLAVE_PARKED_REASON and echoed in a response
+// header, so it must survive both without quoting.
+const PARK_REASON_REGEX = /^[a-z][a-z0-9_]{0,63}$/;
+
+export function validateParkReason(value: unknown): string {
+  if (typeof value !== "string" || !PARK_REASON_REGEX.test(value)) {
+    throw badRequest("reason must be lowercase letters, digits and underscores, start with a letter, and be at most 64 characters");
+  }
+  return value;
+}
+
+/**
+ * The port the parked page listens on: the one Fly maps 80/443 onto, so a
+ * browser reaching the service's URL reaches the page.
+ *
+ * Falls back to the lowest declared port, and then to 8080, for the services that
+ * have no standard-ports holder at all (several HTTP ports, or none). Those
+ * cannot show the page on their public URL anyway — there is nothing to show it
+ * ON — but they still park, because parking is also how the service stops.
+ */
+export function parkedPortFor(spec: ServiceSpec): number {
+  const holder = standardPortsHolderFor(spec.config.ports, specIsPublic(spec));
+  if (holder !== null) return holder;
+  const entries = portEntries(spec.config.ports);
+  return entries.length === 0 ? 8080 : entries[0].port;
+}
+
+/**
+ * The parked page's whole environment. Deliberately NOT the service's own env:
+ * the page needs none of it, and handing a tenant's resolved secrets to an image
+ * that has no use for them would put them in a machine config for no reason.
+ */
+export function parkedEnvFor(spec: ServiceSpec, reason: string): Record<string, string> {
+  return { PORT: String(parkedPortFor(spec)), HEXCLAVE_PARKED_REASON: reason };
+}
+
+/**
+ * The spec a parked service is applied with. Never stored — the real spec stays
+ * in the bucket, which is what unparking re-applies.
+ *
+ * Three changes, each with a reason:
+ *
+ *   - `min_instances: 0`, so no machine is pinned. A pinned machine never
+ *     autostops, and a parked service that kept one would burn a machine around
+ *     the clock to serve a static page — the exact cost parking exists to stop.
+ *   - `type: "serverless"` ON FLY ONLY. Fly pins by TYPE (a `server` is always
+ *     one non-autostopping machine, see pinnedMachineCount), so a parked server
+ *     has to present as serverless to be allowed to sleep; it wakes on the next
+ *     request like any other. On GCP the type selects the RESOURCE KIND rather
+ *     than a scaling policy — serverless is Cloud Run, a server is a Compute
+ *     Engine VM — so changing it there would build the wrong thing and orphan the
+ *     VM still running the tenant's image. GCP servers are therefore parked onto
+ *     the page WITHOUT being stopped. Nothing reaches that today (a `server` is
+ *     refused outright on the Free plan on GCP, which is the only thing that
+ *     parks), and closing it needs a VM stop the provider does not expose yet.
+ *   - No `start_command`. It becomes the machine's `init.exec` and replaces the
+ *     image's entrypoint, so leaving it would run the tenant's command against
+ *     the parked page's filesystem and the machine would never come up.
+ *
+ * Everything else is kept deliberately: the ports (the proxy has to keep routing
+ * to it), `max_instances` (so every slot is UPDATED in place rather than
+ * destroyed and recreated on the way in and out of parking), the volumes (a
+ * mount change is the one edit Fly cannot make in place), `public`, and the
+ * memory (a machine that is asleep costs nothing whatever guest it would boot on).
+ */
+export function parkedSpecFor(spec: ServiceSpec, runtime: DeploymentRuntime): ServiceSpec {
+  const { start_command: _startCommand, ...config } = spec.config;
+  return {
+    ...spec,
+    config: {
+      ...config,
+      ...(runtime === "fly" ? { type: "serverless" as const } : {}),
+      min_instances: 0,
+    },
+  };
+}
+
+/**
+ * Stops a service and puts the parked page in its place.
+ *
+ * Idempotent, because the caller is a sweeper that retries: parking a service
+ * already parked for the same reason and with no failed apply behind it does
+ * nothing at all. A DIFFERENT reason re-applies (the page's copy comes from it)
+ * while keeping the original `since_millis`, since the service has been
+ * continuously parked.
+ *
+ * The park state is written BEFORE the apply, deliberately. A crash between the
+ * two leaves a service marked parked that is still serving the tenant's app: the
+ * next sweep parks it for real. The other order would leave a service showing the
+ * parked page with nothing anywhere recording why, which no later call would fix.
+ */
+export async function parkService(ns: string, key: string, reason: string): Promise<ServiceState> {
+  const provider = await providerForNamespace(ns);
+  return await withReconciliationLease(ns, key, async (lease) => {
+    const versioned = await readSpecVersioned(ns, key);
+    if (versioned === null) throw notFound(`service ${JSON.stringify(key)} not found in namespace ${JSON.stringify(ns)}`);
+    const stored = versioned.value;
+    const existing = parkStateFromStored(stored);
+    // A failed apply is exactly the case a retry must NOT short-circuit: the
+    // state says parked while the machines still run the tenant's image.
+    if (existing !== null && existing.reason === reason && stored.last_apply_error === null) {
+      return await serviceStateWith(provider, ns, key, stored);
+    }
+    const next: StoredSpec = {
+      ...stored,
+      parked: { reason, since_millis: existing?.since_millis ?? Date.now() },
+      updated_at_millis: Date.now(),
+    };
+    const etag = await writeSpec(next, { ifMatch: versioned.etag });
+    if (etag === null) throw conflict(`service ${JSON.stringify(key)} was updated concurrently; retry the request`);
+
+    const domainClaims = await currentDomainClaimsForService(ns, key);
+    try {
+      await provider.applyService(
+        // The parked spec is passed to the provider and never written: the stored
+        // spec has to keep naming the tenant's image, which is what unpark applies.
+        { ...next, spec: parkedSpecFor(stored.spec, provider.kind) },
+        getConfig().parkedImage,
+        parkedEnvFor(stored.spec, reason),
+        lease,
+        domainClaims.length > 0,
+      );
+      next.last_apply_error = null;
+    } catch (error) {
+      if (isReconciliationFencingError(error)) throw error;
+      // Same reason applyServiceSpecWithLease logs here: last_apply_error is
+      // served to the caller, so it carries our wording and never the provider's.
+      console.error(`park failed for service ${next.ns}/${next.key}`, error);
+      next.last_apply_error = `park failed: ${applyErrorMessage(error)}`;
+    }
+    return await stateAfterSpecWrite(provider, ns, key, next, etag);
+  });
+}
+
+/**
+ * Puts the service's own image back.
+ *
+ * Literally a re-apply of the spec that was stored all along — claimDesiredSpec
+ * clears the park state, and the machine config hash then differs from the parked
+ * one, so every slot rolls back. Nothing here has to know what the service was
+ * running before it was parked, because nothing ever stopped recording it.
+ *
+ * A service that is not parked is left completely alone rather than re-applied:
+ * the sweeper unparks on every pass over an upgraded project, and re-rolling a
+ * running service each time would be a redeploy nobody asked for.
+ */
+export async function unparkService(ns: string, key: string): Promise<ServiceState> {
+  const stored = await readSpec(ns, key);
+  if (stored === null) throw notFound(`service ${JSON.stringify(key)} not found in namespace ${JSON.stringify(ns)}`);
+  if (parkStateFromStored(stored) === null) return await getServiceState(ns, key, stored);
+  return (await applyServiceSpec(ns, key, stored.spec)).state;
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,6 +1431,7 @@ async function serviceStateWith(provider: RuntimeProvider, ns: string, key: stri
     provider.domains.statesFor(ns, key, stored),
   ]);
 
+  const parked = parkStateFromStored(stored);
   const status: ServiceState["status"] = !resolved.ok
     ? "blocked"
     // Checked BEFORE the no-runtime branch: an apply that failed before it created anything
@@ -1244,13 +1439,21 @@ async function serviceStateWith(provider: RuntimeProvider, ns: string, key: stri
     // tells callers to keep waiting for a deploy that is already over.
     : stored.last_apply_error !== null
       ? observation.instances > 0 ? "degraded" : "failed"
-      : !observation.exists
-        ? "pending"
-        : !observation.atTarget
-          ? "deploying"
-          : observation.instances === 0
-            ? stored.spec.config.min_instances === 0 ? "idle" : "stopped"
-            : observation.ready ? "running" : "degraded";
+      // AFTER the error branch, and only there: a park whose apply failed is a
+      // service still running the tenant's image, and calling that "parked" would
+      // report a stop that never happened. Before every branch below it because
+      // those read the RUNTIME, where a parked service is indistinguishable from
+      // an idle one — it is asleep at zero instances either way, and only the
+      // stored park state says which.
+      : parked !== null
+        ? "parked"
+        : !observation.exists
+          ? "pending"
+          : !observation.atTarget
+            ? "deploying"
+            : observation.instances === 0
+              ? stored.spec.config.min_instances === 0 ? "idle" : "stopped"
+              : observation.ready ? "running" : "degraded";
   return {
     key,
     // Echo back the type the caller actually stored.
@@ -1271,6 +1474,9 @@ async function serviceStateWith(provider: RuntimeProvider, ns: string, key: stri
     error: !resolved.ok
       ? `blocked on unresolved refs: ${resolved.blockedRefs.join(", ")}`
       : stored.last_apply_error ?? observation.error,
+    // Reported even when the status is not "parked" (a park whose apply failed),
+    // so the caller can tell "not parked" from "parking did not take".
+    parked,
     observed_at_millis: Date.now(),
   };
 }

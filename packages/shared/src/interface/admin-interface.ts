@@ -174,6 +174,15 @@ export type AdminDeploymentServiceJson = {
   // hand-maintained duplicates, so they must be edited together.
   persistent_volumes: Record<string, { path: string, size_gb: number }> | null,
   provisioned: boolean,
+  // Set while the service is PARKED: stopped by the platform, with an
+  // explanation served in its place on every hostname it holds. Separate from
+  // `status`, which goes on describing how the last DEPLOY ended — a parked
+  // service was deployed successfully, and stopped afterwards.
+  //
+  // `parked_reason` decides the wording shown to the project's team;
+  // "free_plan_24h" (the Free plan's deployment window) is the only value today.
+  parked_at: string | null,
+  parked_reason: string | null,
   status: "not_deployed" | "queued" | "building" | "deploying" | "deployed" | "failed" | "canceled",
   has_successful_deploy: boolean,
   url: string | null,

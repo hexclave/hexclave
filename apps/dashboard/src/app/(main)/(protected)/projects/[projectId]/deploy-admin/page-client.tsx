@@ -21,6 +21,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Input,
   Skeleton,
   Switch,
   Table,
@@ -74,8 +75,16 @@ type Stats = {
   recent_window_days: number,
 };
 
+// Every platform-wide switch this page writes. Sent as a whole object, so it is
+// one type rather than a parameter list that has to be kept in step.
+type FuseboxState = {
+  deployments_enabled: boolean,
+  free_plan_parking_enabled: boolean,
+  free_plan_park_after_hours: number,
+};
+
 type Overview = {
-  fusebox: { deployments_enabled: boolean },
+  fusebox: FuseboxState,
   stats: Stats,
   deployments: DeploymentRow[],
   deployments_limit: number,
@@ -176,6 +185,90 @@ function StatTiles(props: { stats: Stats }) {
         danger={successRate !== null && successRate < 80}
       />
     </div>
+  );
+}
+
+function FreePlanParkingCard(props: { fusebox: FuseboxState, onChange: (patch: Partial<FuseboxState>) => Promise<void> }) {
+  const [saving, setSaving] = useState(false);
+  // Local, because the number is typed a digit at a time: writing on every
+  // keystroke would send "2" on the way to "24" and briefly park the fleet.
+  const [hours, setHours] = useState(String(props.fusebox.free_plan_park_after_hours));
+  useEffect(() => {
+    setHours(String(props.fusebox.free_plan_park_after_hours));
+  }, [props.fusebox.free_plan_park_after_hours]);
+
+  const save = useCallback(async (patch: Partial<FuseboxState>) => {
+    setSaving(true);
+    try {
+      await props.onChange(patch);
+    } finally {
+      setSaving(false);
+    }
+  }, [props]);
+
+  const parsedHours = Number(hours);
+  const hoursValid = Number.isInteger(parsedHours) && parsedHours >= 1 && parsedHours <= 24 * 365;
+  const hoursChanged = hoursValid && parsedHours !== props.fusebox.free_plan_park_after_hours;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-3">
+          Free plan deployment window
+          <Badge variant={props.fusebox.free_plan_parking_enabled ? "success" : "outline"}>
+            {props.fusebox.free_plan_parking_enabled ? "Enforced" : "Off"}
+          </Badge>
+        </CardTitle>
+        <CardDescription>
+          While this is on, a Free-plan project&apos;s services are stopped once they have run for the window
+          below since their last deploy, and visitors see a page explaining the site is unavailable. Upgrading
+          the project starts them again within a few minutes. Nothing is deleted: the services keep their
+          domains, certificates and disks, and a redeploy brings them straight back.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between gap-6">
+          <div>
+            <Typography type="p" className="text-sm font-medium">Enforce the limit</Typography>
+            <Typography type="p" className="text-xs text-muted-foreground">
+              Off on every instance until someone turns it on. Turning it off again leaves already-stopped
+              services stopped until their projects redeploy.
+            </Typography>
+          </div>
+          <Switch
+            checked={props.fusebox.free_plan_parking_enabled}
+            disabled={saving}
+            onCheckedChange={(checked) => runAsynchronously(save({ free_plan_parking_enabled: checked }))}
+          />
+        </div>
+        <div className="flex items-end justify-between gap-6">
+          <div>
+            <Typography type="p" className="text-sm font-medium">Hours after each deploy</Typography>
+            <Typography type="p" className="text-xs text-muted-foreground">
+              Between 1 and 8760. Widening this is the safe direction: it un-stops nothing, but it stops less.
+            </Typography>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Input
+              type="number"
+              min={1}
+              max={24 * 365}
+              className="w-24"
+              value={hours}
+              disabled={saving}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) => setHours(event.target.value)}
+            />
+            <Button
+              variant="secondary"
+              disabled={!hoursChanged || saving}
+              onClick={() => runAsynchronously(save({ free_plan_park_after_hours: parsedHours }))}
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -329,14 +422,18 @@ export default function PageClient() {
     runAsynchronously(load);
   }, [load]);
 
-  const setFusebox = useCallback(async (enabled: boolean) => {
+  // One writer for every switch on this page: the route takes the whole fusebox
+  // object, so a patch is merged onto what was last read rather than sent alone —
+  // otherwise flipping one switch would reset the others to whatever this
+  // component happened to think they were.
+  const saveFusebox = useCallback(async (current: FuseboxState, patch: Partial<FuseboxState>) => {
     const response = await sendInternalUserRequest(app, ENDPOINT, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deployments_enabled: enabled }),
+      body: JSON.stringify({ ...current, ...patch }),
     });
     if (!response.ok) {
-      setState({ status: "error", message: `Failed to update the fusebox (${response.status})` });
+      setState({ status: "error", message: `Failed to update the platform settings (${response.status})` });
       return;
     }
     // Re-read rather than patching local state: the write is the moment the
@@ -378,7 +475,15 @@ export default function PageClient() {
 
       {state.status === "ok" && (
         <div className="space-y-6">
-          <FuseboxCard enabled={state.data.fusebox.deployments_enabled} onChange={setFusebox} />
+          <FuseboxCard
+            enabled={state.data.fusebox.deployments_enabled}
+            onChange={async (enabled) => await saveFusebox(state.data.fusebox, { deployments_enabled: enabled })}
+          />
+
+          <FreePlanParkingCard
+            fusebox={state.data.fusebox}
+            onChange={async (patch) => await saveFusebox(state.data.fusebox, patch)}
+          />
 
           <Card>
             <CardHeader>

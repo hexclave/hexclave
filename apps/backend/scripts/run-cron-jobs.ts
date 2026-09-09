@@ -9,6 +9,10 @@ const endpoints: { path: string, intervalMs: number, target?: Target }[] = [
   { path: "/api/latest/internal/external-db-sync/sequencer", intervalMs: 1000 },
   { path: "/api/latest/internal/external-db-sync/poller", intervalMs: 1000 },
   { path: "/api/latest/internal/workflow-engine-step", intervalMs: 1000 },
+  // The Free plan's deployment window. Ten minutes hosted (see vercel.json); the
+  // same cadence here, because a sweep that ran every second locally would call
+  // Marshal on every tick for a limit measured in hours.
+  { path: "/api/latest/internal/deployments-parking-sweep", intervalMs: 10 * 60_000 },
   // Marshal's tenant GCP project pool. Its provisioning is a resumable state machine advanced
   // by a cron rather than background work, because the hosted deployment is frozen at response
   // time — see apps/marshal/src/project-pool.ts and apps/marshal/vercel.json, which schedule

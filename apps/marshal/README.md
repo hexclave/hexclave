@@ -119,6 +119,31 @@ services receive no generated platform URL. GCP routing is unchanged. The whole
 There is no per-service DNS record, certificate issuance, or routing database, and no
 automatic fallback to `.fly.dev` during a gateway outage.
 
+## Parking
+
+`POST /v1/namespaces/:ns/services/:key/park` stops a service and runs the platform's
+parked page in its place; `POST .../unpark` puts the service's own image back. The backend
+calls both from its Free-plan sweeper (`apps/backend/src/lib/deployments/parking.tsx`); the
+page itself lives in [apps/deployment-parked-page](../deployment-parked-page/README.md).
+
+Parking swaps the image and the environment the machines run with, and nothing else. The
+Fly app, ports, public IPs, certificates, custom domains, volumes and the stored spec all
+survive, so the explanation answers on the platform hostname, on the `.fly.dev` name and on
+every custom domain, and unparking is a re-apply of the spec that was stored all along. The
+parked spec sets `min_instances: 0` and, on Fly, presents the service as `serverless`, so
+the machine sleeps and Fly Proxy wakes it on the next request: a parked service costs
+nothing to keep parked.
+
+Park is idempotent (a service already parked for the same reason with no failed apply
+behind it is left alone), and any ordinary apply unparks — which is what makes a redeploy
+the other way back. `GET /v1/namespaces/:ns/services/:key` reports `status: "parked"` and a
+`parked` object; a non-null `parked` with some other status is a park whose apply failed,
+meaning the tenant's image is still serving.
+
+A GCP `server` is the one gap: there the service type selects the resource kind rather than
+a scaling policy, so its VM keeps running the parked page rather than stopping. Nothing
+reaches it today, because a `server` is refused outright on the Free plan on GCP.
+
 ## Local GCP simulator
 
 Development and provider-dependent backend E2E tests use `docker/dependencies/gcp-mock`. It implements only the Google REST resources Marshal owns; tests that do not cross the provider boundary continue to use focused `GcpClient` fakes. Set `HEXCLAVE_MARSHAL_GCP_MOCK_URL=local` to derive the simulator address from `NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX`, or provide an explicit URL. Both forms require `MARSHAL_ALLOW_MOCKS=1`, and the introspection API also requires `HEXCLAVE_MARSHAL_GCP_MOCK_TOKEN` because it exposes resolved container environment values.

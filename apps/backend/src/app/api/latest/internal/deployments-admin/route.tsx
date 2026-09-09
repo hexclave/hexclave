@@ -57,6 +57,11 @@ const statsSchema = yupObject({
 
 const fuseboxSchema = yupObject({
   deployments_enabled: yupBoolean().defined(),
+  // The Free plan's deployment window. Alongside the fusebox rather than in a
+  // section of its own: both are platform-wide switches an operator flips here,
+  // and the page writes the whole object at once.
+  free_plan_parking_enabled: yupBoolean().defined(),
+  free_plan_park_after_hours: yupNumber().defined(),
 }).defined();
 
 const overviewResponseSchema = yupObject({
@@ -111,7 +116,11 @@ export const GET = createSmartRouteHandler({
       statusCode: 200,
       bodyType: "json" as const,
       body: {
-        fusebox: { deployments_enabled: config.deploymentsEnabled },
+        fusebox: {
+          deployments_enabled: config.deploymentsEnabled,
+          free_plan_parking_enabled: config.freePlanParkingEnabled,
+          free_plan_park_after_hours: config.freePlanParkAfterHours,
+        },
         stats: {
           projects_with_provisioned_services: stats.projectsWithProvisionedServices,
           provisioned_services: stats.provisionedServices,
@@ -141,7 +150,7 @@ export const GET = createSmartRouteHandler({
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Update the deployments platform fusebox",
-    description: "Turns the creation of new deployments on or off across this whole Hexclave instance. Internal, platform-admin only.",
+    description: "Turns the creation of new deployments on or off across this whole Hexclave instance, and configures the Free plan's deployment window. Internal, platform-admin only.",
     tags: ["Deploy"],
     hidden: true,
   },
@@ -149,6 +158,8 @@ export const POST = createSmartRouteHandler({
     auth: authSchema,
     body: yupObject({
       deployments_enabled: yupBoolean().defined(),
+      free_plan_parking_enabled: yupBoolean().defined(),
+      free_plan_park_after_hours: yupNumber().defined(),
     }).defined(),
     method: yupString().oneOf(["POST"]).defined(),
   }),
@@ -161,11 +172,17 @@ export const POST = createSmartRouteHandler({
     await ensureInternalPlatformAdmin(auth);
     const config = await updateDeploymentsPlatformConfig({
       deploymentsEnabled: body.deployments_enabled,
+      freePlanParkingEnabled: body.free_plan_parking_enabled,
+      freePlanParkAfterHours: body.free_plan_park_after_hours,
     });
     return {
       statusCode: 200,
       bodyType: "json" as const,
-      body: { deployments_enabled: config.deploymentsEnabled },
+      body: {
+        deployments_enabled: config.deploymentsEnabled,
+        free_plan_parking_enabled: config.freePlanParkingEnabled,
+        free_plan_park_after_hours: config.freePlanParkAfterHours,
+      },
     };
   },
 });
