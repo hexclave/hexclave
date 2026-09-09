@@ -4,11 +4,20 @@ import { MutationOutcomeUnknownError } from "./mutation-safety.js";
 
 let stored: { value: ReconciliationLease, etag: string } | null = null;
 let nextEtag = 1;
+let loseCreateOnce = false;
 
 vi.mock("./store.js", () => ({
   readReconciliationLease: vi.fn(async () => stored),
   createReconciliationLease: vi.fn(async (_ns: string, _key: string, lease: ReconciliationLease) => {
     if (stored !== null) return null;
+    if (loseCreateOnce) {
+      loseCreateOnce = false;
+      stored = {
+        value: { owner_id: "racer", expires_at_millis: Date.now() + 200 },
+        etag: String(nextEtag++),
+      };
+      return null;
+    }
     const etag = String(nextEtag++);
     stored = { value: lease, etag };
     return etag;
@@ -34,6 +43,7 @@ describe("service reconciliation lease", () => {
     vi.clearAllMocks();
     stored = null;
     nextEtag = 1;
+    loseCreateOnce = false;
   });
 
   it("serializes concurrent work for the same service", async () => {
@@ -119,12 +129,54 @@ describe("service reconciliation lease", () => {
       value: { owner_id: "live-owner", expires_at_millis: Date.now() + 60_000 },
       etag: String(nextEtag++),
     };
-    await expect(withReconciliationLease("ns", "web", async () => "never runs", {
+    const promise = withReconciliationLease("ns", "web", async () => "never runs", {
       durationMs: 1000,
       renewIntervalMs: 500,
       contendedPollMs: 2,
       takeoverGraceMs: 10,
       acquireTimeoutMs: 30,
-    })).rejects.toThrow(ReconciliationLeaseLostError);
+    });
+    await expect(promise).rejects.toBeInstanceOf(ReconciliationLeaseLostError);
+    await expect(promise).rejects.toThrow(/holder live-owner/);
+  });
+
+  it("logs when a contended lease is acquired after the owner expires", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    stored = {
+      value: { owner_id: "expiring-owner", expires_at_millis: Date.now() + 200 },
+      etag: String(nextEtag++),
+    };
+    try {
+      await withReconciliationLease("ns", "web", async () => {}, {
+        durationMs: 1000,
+        renewIntervalMs: 500,
+        contendedPollMs: 2,
+        takeoverGraceMs: 0,
+        acquireTimeoutMs: 2000,
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/contended/));
+      expect(warn.mock.calls.some(([message]) => typeof message === "string" && /acquired .* after \d+ms/.test(message))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("logs when a conditional lease create is lost before acquisition", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    loseCreateOnce = true;
+    try {
+      await withReconciliationLease("ns", "web", async () => {}, {
+        durationMs: 1000,
+        renewIntervalMs: 500,
+        contendedPollMs: 2,
+        takeoverGraceMs: 0,
+        acquireTimeoutMs: 2000,
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/lost conditional lease write/));
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/contended .* holder racer/));
+      expect(warn.mock.calls.some(([message]) => typeof message === "string" && /acquired .* after \d+ms/.test(message))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

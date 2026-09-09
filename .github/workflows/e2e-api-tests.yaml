@@ -182,7 +182,14 @@ jobs:
       - name: Start marshal in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
         with:
-          run: NODE_ENV=test pnpm run start:marshal &
+          run: |
+            marshal_log="$RUNNER_TEMP/hexclave-marshal.untracked.log"
+            (
+              set +e
+              # Keep service output correlatable with the surrounding GitHub Actions logs.
+              NODE_ENV=test pnpm run start:marshal 2>&1 | TZ=UTC awk '{ print strftime("%Y-%m-%dT%H:%M:%SZ"), $0; fflush() }' >"$marshal_log"
+              echo "${PIPESTATUS[0]}" > "$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt"
+            ) &
           wait-on: |
             http://localhost:8147/health
           tail: true
@@ -449,12 +456,30 @@ jobs:
           fi
           tail -n 2000 "$RUNNER_TEMP/hexclave-bulldozer.untracked.log"
 
+      - name: Print marshal diagnostics
+        if: ${{ failure() }}
+        run: |
+          if [[ -f "$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt" ]]; then
+            echo "Marshal command exited with code $(<"$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt")"
+          else
+            echo "Marshal command is still running; a child process may have exited"
+          fi
+          tail -n 2000 "$RUNNER_TEMP/hexclave-marshal.untracked.log"
+
       - name: Upload bulldozer-js logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-api-bulldozer
           path: ${{ runner.temp }}/hexclave-bulldozer.untracked.log
+          if-no-files-found: warn
+
+      - name: Upload marshal logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-api-marshal
+          path: ${{ runner.temp }}/hexclave-marshal.untracked.log
           if-no-files-found: warn
 
       - name: Capture bulldozer-js diagnostics

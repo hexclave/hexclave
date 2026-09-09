@@ -55,6 +55,7 @@ const DEPLOYMENT_ADVANCE_TIMINGS = {
   takeoverGraceMs: RECONCILIATION_TAKEOVER_GRACE_MS,
   acquireTimeoutMs: 1000,
 };
+const SLOW_APPLY_LOG_MS = 10_000;
 const NAMESPACE_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 // upload_id flows into an S3 object key (uploads/<ns>/<id>.tar.gz); validate it so a
 // path-traversal id can't escape the prefix. The backend mints these as randomUUIDs.
@@ -388,14 +389,22 @@ async function currentDomainClaimsForService(ns: string, key: string): Promise<s
  * deployment path, where the deployment has already pinned it.
  */
 export async function applyServiceSpec(ns: string, key: string, spec: ServiceSpec, options?: { knownTargets?: Map<string, KnownTarget>, lease?: ReconciliationLeaseGuard, runtime?: DeploymentRuntime }): Promise<ApplyResult> {
-  const provider = await providerForNamespace(ns, options?.runtime);
-  // A deployment already holds the lease for its whole source, so it passes its
-  // own rather than taking a second one per service — the lease is not
-  // re-entrant, and waiting on itself is a deadlock.
-  if (options?.lease !== undefined) {
-    return await applyServiceSpecWithLease(provider, ns, key, spec, options.lease, options.knownTargets);
+  const startedAt = performance.now();
+  try {
+    const provider = await providerForNamespace(ns, options?.runtime);
+    // A deployment already holds the lease for its whole source, so it passes its
+    // own rather than taking a second one per service — the lease is not
+    // re-entrant, and waiting on itself is a deadlock.
+    if (options?.lease !== undefined) {
+      return await applyServiceSpecWithLease(provider, ns, key, spec, options.lease, options.knownTargets);
+    }
+    return await withReconciliationLease(ns, key, async (lease) => await applyServiceSpecWithLease(provider, ns, key, spec, lease, options?.knownTargets));
+  } finally {
+    const elapsed = performance.now() - startedAt;
+    if (elapsed > SLOW_APPLY_LOG_MS) {
+      console.warn(`applying service ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)} took ${Math.round(elapsed)}ms`);
+    }
   }
-  return await withReconciliationLease(ns, key, async (lease) => await applyServiceSpecWithLease(provider, ns, key, spec, lease, options?.knownTargets));
 }
 
 async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, key: string, spec: ServiceSpec, lease: ReconciliationLeaseGuard, knownTargets?: Map<string, KnownTarget>): Promise<ApplyResult> {

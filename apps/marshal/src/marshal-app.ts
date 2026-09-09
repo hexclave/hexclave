@@ -47,6 +47,9 @@ import type { LogLine } from "./types.js";
 // (which writes the record first); past that, a missing object means the drain was empty or
 // failed and no further lines are ever coming.
 const DURABLE_LOG_GRACE_MS = 30 * 1000;
+// Requests are read-driven (a deployment GET applies a service), so the server log must say
+// which request stalled and for how long; the backend only sees its own client timeout.
+const SLOW_REQUEST_LOG_MS = 10_000;
 
 // Derived from the path the builder is actually given (buildCompletionPath) so the
 // pre-handler auth gate and the route can never disagree — a mismatch rejects every real
@@ -90,11 +93,17 @@ function errorResponse(error: unknown): Response {
   return jsonResponse(500, { error: "internal_error", message: "internal error" });
 }
 
-async function handle(fn: () => Promise<Response | Record<string, unknown>>): Promise<Response | Record<string, unknown>> {
+async function handle(request: Request, fn: () => Promise<Response | Record<string, unknown>>): Promise<Response | Record<string, unknown>> {
+  const startedAt = performance.now();
   try {
     return await fn();
   } catch (error) {
     return errorResponse(error);
+  } finally {
+    const elapsed = performance.now() - startedAt;
+    if (elapsed > SLOW_REQUEST_LOG_MS) {
+      console.warn(`slow marshal request: ${request.method} ${new URL(request.url).pathname} took ${Math.round(elapsed)}ms`);
+    }
   }
 }
 
@@ -214,7 +223,7 @@ export function createMarshalApp() {
     // its source is, which is the only thing that decides whether a multipart
     // slot is worth starting. An older client sends no body and gets exactly the
     // response it always got.
-    .post("/v1/namespaces/:ns/uploads", ({ params, body }) => handle(async () => {
+    .post("/v1/namespaces/:ns/uploads", ({ params, body, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const id = randomUUID();
       const slot = await createUploadSlot(ns, id);
@@ -249,18 +258,18 @@ export function createMarshalApp() {
     // GET because that is what Vercel Cron issues. Both are idempotent in the sense that
     // matters: each is a single leased pass over durable state, safe to repeat and safe to
     // overlap (contention is reported as skipped, not as an error).
-    .get(`${MAINTENANCE_PATH_PREFIX}project-pool/step`, () => handle(async () => await stepProjectPool()))
+    .get(`${MAINTENANCE_PATH_PREFIX}project-pool/step`, ({ request }) => handle(request, async () => await stepProjectPool()))
 
-    .get(`${MAINTENANCE_PATH_PREFIX}project-pool/reap`, () => handle(async () => await reapProjectPool()))
+    .get(`${MAINTENANCE_PATH_PREFIX}project-pool/reap`, ({ request }) => handle(request, async () => await reapProjectPool()))
 
-    .get("/v1/namespaces/:ns", ({ params }) => handle(async () => {
+    .get("/v1/namespaces/:ns", ({ params, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       return { services: await listServices(ns) };
     }))
 
     // The body may name the `runtime` the caller wants this namespace on; see runtime.ts for
     // how that is reconciled with the namespace's pin. Absent means whatever it already is.
-    .put("/v1/namespaces/:ns/services/:key", ({ params, body }) => handle(async () => {
+    .put("/v1/namespaces/:ns/services/:key", ({ params, body, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
       const runtime = validateRequestedRuntime((body as Record<string, unknown> | null)?.runtime);
@@ -270,7 +279,7 @@ export function createMarshalApp() {
       return { revision: result.revision, changed: result.changed, state: result.state };
     }))
 
-    .get("/v1/namespaces/:ns/services/:key", ({ params }) => handle(async () => {
+    .get("/v1/namespaces/:ns/services/:key", ({ params, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
       return await getServiceState(ns, key) as unknown as Record<string, unknown>;
@@ -281,20 +290,20 @@ export function createMarshalApp() {
     // because it acts on the service rather than replacing it, and because the
     // spec the caller would have to send to say "same service, but stopped" is
     // exactly the spec parking must not overwrite.
-    .post("/v1/namespaces/:ns/services/:key/park", ({ params, body }) => handle(async () => {
+    .post("/v1/namespaces/:ns/services/:key/park", ({ params, body, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
       const reason = validateParkReason((body as Record<string, unknown> | null)?.reason);
       return await parkService(ns, key, reason) as unknown as Record<string, unknown>;
     }))
 
-    .post("/v1/namespaces/:ns/services/:key/unpark", ({ params }) => handle(async () => {
+    .post("/v1/namespaces/:ns/services/:key/unpark", ({ params, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
       return await unparkService(ns, key) as unknown as Record<string, unknown>;
     }))
 
-    .delete("/v1/namespaces/:ns/services/:key", ({ params }) => handle(async () => {
+    .delete("/v1/namespaces/:ns/services/:key", ({ params, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
       await deleteService(ns, key);
@@ -303,7 +312,7 @@ export function createMarshalApp() {
 
     // One `hexclave deploy` of one deployment source: build every target in one
     // machine, then apply them in the given dependency order.
-    .post("/v1/namespaces/:ns/sources/:sourceId/deployments", ({ params, body }) => handle(async () => {
+    .post("/v1/namespaces/:ns/sources/:sourceId/deployments", ({ params, body, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const sourceId = validateSourceId(params.sourceId);
       const runtime = validateRequestedRuntime((body as Record<string, unknown> | null)?.runtime);
@@ -313,13 +322,13 @@ export function createMarshalApp() {
     // Reading a deployment is also what ADVANCES it: there is no background
     // worker here, so each poll applies at most one more service (see
     // advanceDeployment).
-    .get("/v1/namespaces/:ns/deployments/:id", ({ params }) => handle(async () => {
+    .get("/v1/namespaces/:ns/deployments/:id", ({ params, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       if (!BUILD_ID_REGEX.test(params.id)) throw new MarshalError(400, "bad_request", "deployment id must be a ULID");
       return await advanceDeployment(ns, params.id) as unknown as Record<string, unknown>;
     }))
 
-    .get("/v1/namespaces/:ns/deployments/:id/logs", ({ params, query }) => handle(async () => {
+    .get("/v1/namespaces/:ns/deployments/:id/logs", ({ params, query, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       // Validate the id: it flows into an S3 object key, so a traversal id must not escape
       // the deployments/ prefix (defense in depth — the only caller passes a stored ULID).
@@ -375,7 +384,7 @@ export function createMarshalApp() {
       return { lines: page.lines, next_since_millis: page.nextSinceMillis, complete: liveIsFinal };
     }))
 
-    .get("/v1/namespaces/:ns/services/:key/logs", ({ params, query }) => handle(async () => {
+    .get("/v1/namespaces/:ns/services/:key/logs", ({ params, query, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const key = validateServiceKey(params.key);
       const stored = await readSpec(ns, key);
@@ -387,13 +396,13 @@ export function createMarshalApp() {
 
     // Read-only: the "re-check verification now" primitive. A PUT would repoint the hostname,
     // so callers that only want current state must use this.
-    .get("/v1/namespaces/:ns/domains/:hostname", ({ params }) => handle(async () => {
+    .get("/v1/namespaces/:ns/domains/:hostname", ({ params, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const hostname = normalizeHostnameOrThrow(params.hostname);
       return await readDomain(ns, hostname) as unknown as Record<string, unknown>;
     }))
 
-    .put("/v1/namespaces/:ns/domains/:hostname", ({ params, body }) => handle(async () => {
+    .put("/v1/namespaces/:ns/domains/:hostname", ({ params, body, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const hostname = normalizeHostnameOrThrow(params.hostname);
       const serviceKey = (body as Record<string, unknown> | null)?.service_key;
@@ -401,7 +410,7 @@ export function createMarshalApp() {
       return await attachDomain(ns, hostname, validateServiceKey(serviceKey)) as unknown as Record<string, unknown>;
     }))
 
-    .delete("/v1/namespaces/:ns/domains/:hostname", ({ params, query }) => handle(async () => {
+    .delete("/v1/namespaces/:ns/domains/:hostname", ({ params, query, request }) => handle(request, async () => {
       const ns = validateNamespace(params.ns);
       const hostname = normalizeHostnameOrThrow(params.hostname);
       // Optional ownership fence — see detachDomain. Absent = detach whoever holds it.
@@ -417,7 +426,7 @@ export function createMarshalApp() {
     // `parse: "text"` so a malformed/empty JSON body still reaches the handler (Elysia's
     // default JSON parser would 400 before it, making the registry-HEAD digest fallback
     // unreachable) — the handler parses defensively.
-    .post(`${INTERNAL_COMPLETE_PATH_PREFIX}:deploymentId/complete`, ({ params, query, body, request }) => handle(async () => {
+    .post(`${INTERNAL_COMPLETE_PATH_PREFIX}:deploymentId/complete`, ({ params, query, body, request }) => handle(request, async () => {
       const ns = typeof query.ns === "string" ? query.ns : "";
       const status = query.status === "succeeded" ? "succeeded" : query.status === "failed" ? "failed" : null;
       const token = (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");

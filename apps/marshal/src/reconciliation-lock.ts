@@ -46,6 +46,14 @@ async function acquireLease(ns: string, key: string, ownerId: string, timings: L
   // backend's own APPLY_TIMEOUT_MS abort is invisible from here, and every retry against the
   // same stuck lease stacks another loop in the process. Failing with the error app.ts already
   // maps to a retryable 409 turns contention into an answer the caller can act on.
+  const startedAt = performance.now();
+  let lostWriteLogged = false;
+  let holderLogged = false;
+  const logAcquiredAfterContention = (): void => {
+    if (lostWriteLogged || holderLogged) {
+      console.warn(`marshal lease acquired for ${JSON.stringify(key)} after ${Math.round(performance.now() - startedAt)}ms following contention`);
+    }
+  };
   const deadline = Date.now() + timings.acquireTimeoutMs;
   for (;;) {
     const now = Date.now();
@@ -53,16 +61,38 @@ async function acquireLease(ns: string, key: string, ownerId: string, timings: L
     const current = await readReconciliationLease(ns, key);
     if (current === null) {
       const etag = await createReconciliationLease(ns, key, desired);
-      if (etag !== null) return { etag, value: desired };
+      if (etag !== null) {
+        logAcquiredAfterContention();
+        return { etag, value: desired };
+      }
+      if (!lostWriteLogged) {
+        console.warn(`lost conditional lease write for ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)}: another marshal replica created the lease first`);
+        lostWriteLogged = true;
+      }
     } else if (current.value.expires_at_millis + timings.takeoverGraceMs <= now) {
       // Conditional replacement is the distributed arbiter: exactly one Marshal replica can
       // take over an expired lease. The grace period also drains every bounded provider write the
       // previous owner could have started immediately before its last confirmed expiry.
       const etag = await replaceReconciliationLease(ns, key, desired, current.etag);
-      if (etag !== null) return { etag, value: desired };
+      if (etag !== null) {
+        logAcquiredAfterContention();
+        return { etag, value: desired };
+      }
+      if (!lostWriteLogged) {
+        console.warn(`lost conditional lease write for ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)}: the lease changed before this marshal replica could take it over`);
+        lostWriteLogged = true;
+      }
+    } else if (!holderLogged) {
+      console.warn(`contended marshal lease for ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)}: holder ${current.value.owner_id}, expires in ${current.value.expires_at_millis - now}ms; takeover grace ${timings.takeoverGraceMs}ms`);
+      holderLogged = true;
     }
     if (Date.now() >= deadline) {
-      throw new ReconciliationLeaseLostError(`another reconciliation of ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)} held the lease for longer than ${timings.acquireTimeoutMs}ms; retry`);
+      const elapsed = Math.round(performance.now() - startedAt);
+      // This detail is only for the server log; errorResponse maps the error to a generic 409 body.
+      const holder = current === null
+        ? "holder unknown (conditional write kept losing)"
+        : `holder ${current.value.owner_id}, expires in ${current.value.expires_at_millis - Date.now()}ms`;
+      throw new ReconciliationLeaseLostError(`another reconciliation of ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)} held the lease for longer than ${timings.acquireTimeoutMs}ms (waited ${elapsed}ms; ${holder}); retry`);
     }
     await delay(timings.contendedPollMs);
   }
