@@ -61,28 +61,32 @@ type CandidateRow = {
 };
 
 /**
- * When a service's window started.
+ * When a service's window started, or null when it has none and is never parked.
  *
- * `runningSince` is written by every successful deploy. It is null on rows that
- * were already deployed when the column shipped, and those fall back to
- * `provisionedAt` — the moment the service first reached the runtime. That
- * fallback is what makes a backfill unnecessary: without it, existing rows would
- * either be exempt forever (null sorts as "no limit") or parked on the very first
- * tick, and both are wrong.
+ * `runningSince` is written by every successful deploy, and ONLY by a deploy. It
+ * is null on every row that was already deployed when the column shipped, and
+ * that null is deliberately load-bearing: those services are grandfathered.
  *
- * Null from BOTH — a row that was never provisioned — is not a candidate at all;
- * the query already excludes it, and this returning null keeps that true if the
- * query ever loosens.
+ * This is what makes the limit apply to deployments made from here on rather than
+ * retroactively. Turning it on otherwise would stop, within one sweep, every Free
+ * -plan service whose last deploy was more than a day ago — which is most of
+ * them, none of whose authors were ever told about a window.
+ *
+ * A grandfathered service opts in the moment it is redeployed, because that is
+ * when `runningSince` is first written. So the exempt set only shrinks, and the
+ * author who opts in is the one who just saw the deploy-time notice explaining
+ * the limit. A project that never deploys again keeps running, which is the
+ * accepted cost of not applying a new rule to work that predates it.
  */
-export function windowStartedAt(row: Pick<CandidateRow, "runningSince" | "provisionedAt">): Date | null {
-  return row.runningSince ?? row.provisionedAt ?? null;
+export function windowStartedAt(row: Pick<CandidateRow, "runningSince">): Date | null {
+  return row.runningSince ?? null;
 }
 
 /**
  * Which candidate rows have outlived the limit. Pure, so the rule is testable
  * without a database, a plan, or a runtime.
  */
-export function servicesPastFreePlanLimit<T extends Pick<CandidateRow, "runningSince" | "provisionedAt">>(
+export function servicesPastFreePlanLimit<T extends Pick<CandidateRow, "runningSince">>(
   rows: T[],
   options: { now: Date, parkAfterHours: number },
 ): T[] {
@@ -175,11 +179,14 @@ export async function sweepFreePlanParking(options?: { now?: Date }): Promise<Pa
  */
 async function parkExpiredFreePlanServices(options: { now: Date, parkAfterHours: number }): Promise<{ acted: number, failed: number }> {
   const candidates = await globalPrismaClient.deploymentService.findMany({
-    where: { provisionedAt: { not: null }, parkedAt: null },
+    // `runningSince: { not: null }` is the grandfathering, done in the query so
+    // pre-existing rows are not even fetched: see windowStartedAt for why a null
+    // there means this service has no window rather than an unknown one.
+    where: { provisionedAt: { not: null }, parkedAt: null, runningSince: { not: null } },
     select: { tenancyId: true, serviceId: true, runningSince: true, provisionedAt: true },
     // Oldest window first, so a backlog drains in the order it built up rather
     // than starving whichever project happens to sort last.
-    orderBy: [{ runningSince: { sort: "asc", nulls: "first" } }, { provisionedAt: "asc" }],
+    orderBy: { runningSince: "asc" },
     // Read more than a tick will act on: most candidates are filtered out here by
     // the clock, and taking exactly MAX_SERVICES_PER_SWEEP rows would let a page
     // of not-yet-expired services hide the expired ones behind them.

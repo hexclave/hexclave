@@ -17,7 +17,7 @@ export const MOCK_FLY_TOKEN = "mock_hexclave_fly_key";
 // The published parked page. A tag by default so a dev or test Marshal needs no
 // configuration; production pins the digest (see
 // apps/deployment-gateway/parked-page/README.md).
-export const DEFAULT_PARKED_IMAGE = "bgodil/deployment-parked-page:1";
+export const DEFAULT_PARKED_IMAGE = "bgodil/deployment-parked-page:2";
 
 export type FlyConfig = {
   token: string,

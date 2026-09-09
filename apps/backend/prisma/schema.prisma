@@ -1723,14 +1723,19 @@ model DeploymentService {
 
   // When this service last STARTED running the tenant's own image, which is what
   // the Free plan's 24-hour limit is measured from. Set on every successful
-  // deploy, so a redeploy buys another 24 hours; cleared to null by nothing.
+  // deploy, so a redeploy buys another 24 hours.
+  //
+  // NULL MEANS NO LIMIT, not "unknown". Every row that existed before this column
+  // shipped has null here and is grandfathered: the limit applies to deployments
+  // made after it, not retroactively to work whose authors were never told about
+  // a window. The first redeploy writes this and opts that service in, so the
+  // exempt set only ever shrinks. See windowStartedAt in
+  // apps/backend/src/lib/deployments/parking.tsx.
   //
   // A column of its own rather than `updatedAt`, which any edit to the row bumps
   // (a definition sync, a domain change), and rather than the newest Deployment
   // row, which would make the sweeper's candidate query a join over a table it
-  // otherwise never touches. Null on every row deployed before this existed;
-  // parkExpiredFreePlanServices falls back to provisionedAt there, so nothing
-  // needs a backfill.
+  // otherwise never touches.
   runningSince DateTime?
 
   // Set while the service is PARKED: stopped, with the platform's parked page

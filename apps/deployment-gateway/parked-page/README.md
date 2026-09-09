@@ -55,8 +55,8 @@ curl -s "https://hub.docker.com/v2/repositories/bgodil/deployment-parked-page/" 
 
 ```sh
 cd apps/deployment-gateway/parked-page
-docker buildx build --platform linux/amd64 -t bgodil/deployment-parked-page:1 --push .
-docker buildx imagetools inspect bgodil/deployment-parked-page:1
+docker buildx build --platform linux/amd64 -t bgodil/deployment-parked-page:2 --push .
+docker buildx imagetools inspect bgodil/deployment-parked-page:2
 ```
 
 Take the digest from that last command and set it on Marshal, which deploys on Vercel
@@ -67,8 +67,11 @@ vercel env add HEXCLAVE_DEPLOYMENT_PARKED_IMAGE production
 # paste: bgodil/deployment-parked-page@sha256:<digest>
 ```
 
-The digest currently published as `:1` is
-`sha256:0a68fd628127fd031a1e9da3d9b8066eb6a6f86065b7fc316c722a3949693bfe`.
+The digest currently published as `:2` is
+`sha256:0ce015355b8f411367c6db5741fca6efe1e9c7475480f41a73642aeeae06d702`.
+
+`:1` is superseded and must not be used: it ran as a non-root user and could not bind a
+privileged port, so any service declaring port 80 crash-looped instead of showing the page.
 
 A Vercel environment variable only reaches the running function on the next deployment, so
 redeploy Marshal after setting it. Until then Marshal falls back to the tag in
@@ -78,8 +81,9 @@ Pin the digest rather than the tag. Marshal hands this reference to Fly as the
 image a parked machine runs, and a tag that moved under a fleet of already-parked
 services would roll every one of them the next time it reconciled.
 
-For the same reason, treat `:1` as immutable once anything is parked against it: publish
-changes as `:2` and move the pinned digest deliberately, rather than pushing over `:1`.
+For the same reason, treat a published tag as immutable once anything is parked against
+it: publish changes under the next tag and move the pinned digest deliberately, rather than
+pushing over one already in use.
 
 ## Tests
 

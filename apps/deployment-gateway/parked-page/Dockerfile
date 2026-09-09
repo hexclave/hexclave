@@ -12,5 +12,15 @@ COPY server.mjs ./
 ENV NODE_ENV=production \
     PORT=8080
 EXPOSE 8080
-USER node
+
+# Runs as root, deliberately. This image has to listen on whatever port the
+# service it replaces declared, and a service may legitimately declare 80 — a
+# privileged port a non-root process cannot bind, which fails as
+# `listen EACCES` and crash-loops the machine. (Docker hides this locally by
+# setting net.ipv4.ip_unprivileged_port_start=0; Fly does not, so it only shows
+# up on a real machine.) The alternative, `setcap cap_net_bind_service` on the
+# node binary, keeps the non-root user but depends on file capabilities
+# surviving the registry and the runtime — more to go wrong than it is worth for
+# a process that serves one constant string, writes nothing, and reads nothing
+# from a request but its Accept header.
 CMD ["node", "server.mjs"]

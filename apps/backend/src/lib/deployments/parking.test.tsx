@@ -19,7 +19,10 @@ vi.mock("@/prisma-client", () => ({
     deploymentService: {
       findMany: vi.fn(async (args: { where: Record<string, unknown> }) => {
         const wantsParked = "parkedReason" in args.where;
-        return serviceRows.value.filter((row) => wantsParked ? row.parkedAt != null : row.parkedAt == null);
+        if (wantsParked) return serviceRows.value.filter((row) => row.parkedAt != null);
+        // Mirrors the real query's grandfathering filter, so a test row with no
+        // runningSince is invisible to the park sweep exactly as it would be.
+        return serviceRows.value.filter((row) => row.parkedAt == null && row.runningSince != null);
       }),
     },
   },
@@ -92,38 +95,33 @@ beforeEach(() => {
 
 describe("when a service's window started", () => {
   it("measures from the last deploy", () => {
-    expect(windowStartedAt({ runningSince: hoursAgo(2), provisionedAt: hoursAgo(200) })).toEqual(hoursAgo(2));
+    expect(windowStartedAt({ runningSince: hoursAgo(2) })).toEqual(hoursAgo(2));
   });
 
-  it("falls back to provisioning for rows that predate the column", () => {
-    // Without the fallback these rows would be either exempt forever or parked on
-    // the first tick, and no backfill would make both cases right.
-    expect(windowStartedAt({ runningSince: null, provisionedAt: hoursAgo(5) })).toEqual(hoursAgo(5));
-  });
-
-  it("has no window at all when the service never ran", () => {
-    expect(windowStartedAt({ runningSince: null, provisionedAt: null })).toBeNull();
+  it("gives no window to a service deployed before the limit existed", () => {
+    // The grandfathering, and the reason nothing is backfilled: a null here means
+    // "not subject to the limit", never "unknown, assume the worst". Reading it
+    // the other way would stop every long-running Free deployment on the first
+    // sweep after this shipped.
+    expect(windowStartedAt({ runningSince: null })).toBeNull();
   });
 });
 
 describe("servicesPastFreePlanLimit", () => {
   it("keeps a service that has not reached the limit", () => {
-    const rows = [{ runningSince: hoursAgo(23), provisionedAt: null }];
-    expect(servicesPastFreePlanLimit(rows, { now: NOW, parkAfterHours: 24 })).toEqual([]);
+    expect(servicesPastFreePlanLimit([{ runningSince: hoursAgo(23) }], { now: NOW, parkAfterHours: 24 })).toEqual([]);
   });
 
   it("takes a service exactly at the limit", () => {
-    const rows = [{ runningSince: hoursAgo(24), provisionedAt: null }];
-    expect(servicesPastFreePlanLimit(rows, { now: NOW, parkAfterHours: 24 })).toHaveLength(1);
+    expect(servicesPastFreePlanLimit([{ runningSince: hoursAgo(24) }], { now: NOW, parkAfterHours: 24 })).toHaveLength(1);
   });
 
   it("honours a limit an operator has widened", () => {
-    const rows = [{ runningSince: hoursAgo(30), provisionedAt: null }];
-    expect(servicesPastFreePlanLimit(rows, { now: NOW, parkAfterHours: 48 })).toEqual([]);
+    expect(servicesPastFreePlanLimit([{ runningSince: hoursAgo(30) }], { now: NOW, parkAfterHours: 48 })).toEqual([]);
   });
 
-  it("never takes a service that has never run", () => {
-    expect(servicesPastFreePlanLimit([{ runningSince: null, provisionedAt: null }], { now: NOW, parkAfterHours: 24 })).toEqual([]);
+  it("never takes a grandfathered service, however long it has been running", () => {
+    expect(servicesPastFreePlanLimit([{ runningSince: null }], { now: NOW, parkAfterHours: 24 })).toEqual([]);
   });
 });
 
@@ -200,6 +198,19 @@ describe("parking a Free-plan project", () => {
     serviceRows.value = [row()];
     await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 0, failed: 1 });
     expect(rowWrites).toEqual([]);
+  });
+
+  it("never parks a service deployed before the limit existed", async () => {
+    // Grandfathering, end to end: the row is a Free-plan service that has been
+    // running for days, and it is left alone because it has no window.
+    serviceRows.value = [row({ runningSince: null, provisionedAt: hoursAgo(500) })];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 0, failed: 0 });
+    expect(marshalCalls).toEqual([]);
+  });
+
+  it("parks it once it redeploys, which is what sets its window", async () => {
+    serviceRows.value = [row({ runningSince: hoursAgo(25), provisionedAt: hoursAgo(500) })];
+    await expect(sweepFreePlanParking({ now: NOW })).resolves.toMatchObject({ parked: 1 });
   });
 
   it("skips a tenancy that no longer exists", async () => {
