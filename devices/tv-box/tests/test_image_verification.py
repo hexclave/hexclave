@@ -75,6 +75,16 @@ class ImageVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty"):
             image_verification.installed_packages(self.rootfs)
 
+    def test_dpkg_rejects_duplicate_fields(self) -> None:
+        path = self.rootfs / "var/lib/dpkg/status"
+        path.write_text(
+            "Package: cog\nStatus: install ok installed\nArchitecture: armhf\n"
+            "Version: 1\nVersion: 2\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "Duplicate dpkg field Version"):
+            image_verification.installed_packages(self.rootfs)
+
     def test_image_absolute_symlinks_resolve_inside_image_and_cycles_fail(self) -> None:
         release = self.rootfs / "etc/os-release"
         target = self.rootfs / "usr/lib/os-release"
@@ -148,11 +158,31 @@ class ImageVerificationTests(unittest.TestCase):
         (outside / "key").write_bytes(b"-----BEGIN PRIVATE KEY-----\nSECRET\n")
         (self.boot / "external").symlink_to(outside, target_is_directory=True)
         (self.boot / "public-ca.pub").write_text(fixture_public_key(), encoding="ascii")
-        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        with self.assertRaisesRegex(ValueError, "Nested mount or symlinked directory"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        (self.boot / "external").unlink()
         path = self.boot / "hidden"
         path.write_bytes(b"x" * (1024 * 1024 - 8) + b"\n-----BEGIN PRIVATE KEY-----\nSECRET\n")
         with self.assertRaisesRegex(ValueError, "Private-key"):
             image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_secret_scan_rejects_symlinked_directories(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.boot / "external").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "Nested mount or symlinked directory"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_authorized_keys_options_do_not_hide_certificates(self) -> None:
+        key_type = b"ssh-ed25519-cert-v01@openssh.com"
+        payload = struct.pack(">I", len(key_type)) + key_type + b"\x00" * 32
+        certificate = (
+            b'restrict,command="echo hi",from="10.0.0.0/8" '
+            b"ssh-ed25519-cert-v01@openssh.com "
+            + base64.b64encode(payload)
+        )
+        self.assertTrue(image_verification.contains_certificate_record(certificate))
+        self.assertFalse(image_verification.contains_certificate_record(b"ssh-ed25519 AAAA\n"))
 
     def certificate_record(self) -> bytes:
         ca, operator = self.root / "ca.untracked", self.root / "operator.untracked"
@@ -250,7 +280,8 @@ class ImageVerificationTests(unittest.TestCase):
         output, image = self.root / "verification", self.root / "image.img"
         output.mkdir()
         image.write_bytes(b"fixture-raw-image")
-        for name in ("image-manifest.txt", "rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+        (output / "image-manifest.txt").write_text("image-channel=production\nsource-commit=" + "a" * 40 + "\n", encoding="ascii")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
             (output / name).write_text("fixture\n", encoding="ascii")
         image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
         image_verification.verify_receipt(image, output)
@@ -274,6 +305,24 @@ class ImageVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "receipt"):
             image_verification.verify_receipt(image, output)
 
+    def test_receipt_rejects_channel_mismatch_with_archived_manifest(self) -> None:
+        output, image = self.root / "verification", self.root / "image.img"
+        output.mkdir()
+        image.write_bytes(b"fixture-raw-image")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+            (output / name).write_text("fixture\n", encoding="ascii")
+        (output / "image-manifest.txt").write_text(
+            "image-channel=test\nsource-commit=" + "a" * 40 + "\n",
+            encoding="ascii",
+        )
+        image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
+        (output / "image-manifest.txt").write_text(
+            "image-channel=test\nsource-commit=" + "a" * 40 + "\n",
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(ValueError, "production"):
+            image_verification.verify_receipt(image, output)
+
     def test_inventory_mismatch_prevents_receipt_creation(self) -> None:
         output, image = self.root / "verification", self.root / "image.img"
         image.write_bytes(b"fixture")
@@ -287,7 +336,8 @@ class ImageVerificationTests(unittest.TestCase):
         image.write_bytes(b"qualified-image")
         output = self.root / "verification"
         output.mkdir()
-        for name in ("image-manifest.txt", "rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+        (output / "image-manifest.txt").write_text("image-channel=production\nsource-commit=" + "a" * 40 + "\n", encoding="ascii")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
             (output / name).write_text("fixture\n", encoding="ascii")
         image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
         target.write_bytes(image.read_bytes() + b"unused-card-space")
@@ -307,7 +357,8 @@ class ImageVerificationTests(unittest.TestCase):
         swapped = b"swapped-image!"
         image.write_bytes(original)
         output.mkdir()
-        for name in ("image-manifest.txt", "rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+        (output / "image-manifest.txt").write_text("image-channel=production\nsource-commit=" + "a" * 40 + "\n", encoding="ascii")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
             (output / name).write_text("fixture\n", encoding="ascii")
         image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
         target.write_bytes(original + b"unused-card-space")

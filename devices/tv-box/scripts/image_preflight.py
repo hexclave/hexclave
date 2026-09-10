@@ -66,9 +66,16 @@ def verify_mount(image: Path, mount: Path, partition: Partition, filesystem: str
         "findmnt", "--json", "--mountpoint", str(resolved_mount),
         "--output", "SOURCE,TARGET,FSTYPE,OPTIONS,FSROOT",
     ]), "filesystems")
+    options = set(str(metadata.get("options", "")).split(","))
+    required_options = {"ro"}
+    if filesystem == "ext4":
+        required_options.add("noload")
+    missing_options = required_options - options
     if (metadata.get("target") != str(resolved_mount) or metadata.get("fsroot") != "/"
-        or metadata.get("fstype") != filesystem
-        or "ro" not in str(metadata.get("options", "")).split(",")):
+        or metadata.get("fstype") != filesystem or missing_options):
+        if missing_options:
+            missing = ", ".join(sorted(missing_options))
+            raise ValueError(f"Image mount is missing required option: {missing}.")
         raise ValueError("Image partitions must be complete expected filesystems mounted read-only, not directories or subdirectory binds.")
     source = metadata.get("source")
     if not isinstance(source, str):

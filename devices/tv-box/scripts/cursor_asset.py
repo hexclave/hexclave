@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import struct
 from pathlib import Path
 
@@ -37,7 +38,11 @@ def install_cursor(rootfs: Path) -> None:
             break
         if parent.is_symlink():
             raise ValueError("TV Box cursor path must not contain symlinks.")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(target.parent, mode=0o755, exist_ok=True)
+    current = rootfs
+    for component in CURSOR_PATH.parts[:-1]:
+        current /= component
+        os.chmod(current, 0o755)
     if target.exists():
         verify_cursor(target)
         return

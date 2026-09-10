@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import struct
 import tempfile
 import unittest
@@ -47,6 +48,19 @@ class CursorAssetTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cursor_asset.install_cursor(root)
             self.assertEqual(list(outside.iterdir()), [])
+
+    def test_install_directories_are_0755_under_restrictive_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous = os.umask(0o077)
+            try:
+                cursor_asset.install_cursor(root)
+            finally:
+                os.umask(previous)
+            current = root
+            for component in cursor_asset.CURSOR_PATH.parts[:-1]:
+                current /= component
+                self.assertEqual(current.stat().st_mode & 0o777, 0o755)
 
     def test_private_cursor_policy_only_applies_to_appliance_launcher(self) -> None:
         tv_root = SCRIPT.parents[1]

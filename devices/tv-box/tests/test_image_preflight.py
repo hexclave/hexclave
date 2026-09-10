@@ -40,7 +40,7 @@ def mount_command_environment(image: Path, rootfs: Path, state: Path, temporary_
         "    target = sys.argv[sys.argv.index('--mountpoint') + 1]\n"
         "    root = target == os.environ['TVBOX_FIXTURE_ROOT']\n"
         "    boot = target == os.environ.get('TVBOX_FIXTURE_BOOT')\n"
-        "    print(json.dumps({'filesystems': [{'source': '/dev/loop982' if boot else '/dev/loop980' if root else '/dev/loop981', 'target': target, 'fstype': 'vfat' if boot else 'ext4', 'options': 'ro', 'fsroot': '/'}]}))\n"
+        "    print(json.dumps({'filesystems': [{'source': '/dev/loop982' if boot else '/dev/loop980' if root else '/dev/loop981', 'target': target, 'fstype': 'vfat' if boot else 'ext4', 'options': 'ro,noload' if not boot else 'ro', 'fsroot': '/'}]}))\n"
         "elif name == 'losetup':\n"
         "    stat = image.stat()\n"
         "    print(json.dumps({'loopdevices': [{'name': sys.argv[-1], 'back-ino': stat.st_ino, 'back-maj:min': f'{os.major(stat.st_dev)}:{os.minor(stat.st_dev)}', 'offset': 8192 if sys.argv[-1] == '/dev/loop982' else 16384 if sys.argv[-1] == '/dev/loop980' else 24576, 'ro': True, 'sizelimit': 8192}]}))\n"
@@ -142,7 +142,7 @@ class ImagePreflightTests(unittest.TestCase):
             mount = root / "rootfs"
             mount.mkdir()
             stat = image.stat()
-            filesystem = {"source": "/dev/loop980", "target": str(mount), "fstype": "ext4", "options": "ro,relatime", "fsroot": "/"}
+            filesystem = {"source": "/dev/loop980", "target": str(mount), "fstype": "ext4", "options": "ro,noload,relatime", "fsroot": "/"}
             loop = {"name": "/dev/loop980", "back-ino": stat.st_ino, "back-maj:min": f"{os.major(stat.st_dev)}:{os.minor(stat.st_dev)}", "offset": 16384, "ro": True, "sizelimit": 8192}
             expected = image_preflight.Partition(16384, 8192)
 
@@ -154,7 +154,8 @@ class ImagePreflightTests(unittest.TestCase):
 
             verify(filesystem, loop)
             for location, field, value in (
-                ("fs", "options", "rw,relatime"), ("fs", "fsroot", "/subdir"),
+                ("fs", "options", "rw,relatime"), ("fs", "options", "ro,relatime"),
+                ("fs", "fsroot", "/subdir"),
                 ("fs", "fstype", "vfat"), ("fs", "target", str(root)),
                 ("fs", "source", "/dev/sda2"),
                 ("loop", "ro", False), ("loop", "back-ino", stat.st_ino + 1),

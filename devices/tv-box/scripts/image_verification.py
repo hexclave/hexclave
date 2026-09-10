@@ -18,8 +18,7 @@ from pathlib import Path, PurePosixPath
 POLICY = Path(__file__).resolve().parents[1] / "image/qualified-runtime.json"
 PRIVATE_KEY = re.compile(rb"(?:^|\n)-----BEGIN (?:OPENSSH |RSA |EC |DSA |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----\r?\n")
 OPENSSH_CERTIFICATE = re.compile(
-    rb"(?:^|\n)[ \t]*((?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-nistp(?:256|384|521)"
-    rb"|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256))-cert-v01@openssh\.com)[ \t]+([A-Za-z0-9+/]{4,128})"
+    r"^(?:sk-)?(?:ssh|ecdsa)-[A-Za-z0-9@.-]*-cert-v01@openssh\.com$"
 )
 PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9+.-]+(?::[a-z0-9-]+)?")
 VERIFICATION_ARTIFACTS = (
@@ -116,7 +115,14 @@ def installed_packages(root: Path) -> dict[str, tuple[str, str]]:
     records = image_path(root, "var/lib/dpkg/status").read_text(encoding="utf-8").split("\n\n")
     packages: dict[str, tuple[str, str]] = {}
     for record in records:
-        fields = dict(line.split(": ", 1) for line in record.splitlines() if ": " in line and not line.startswith(" "))
+        fields: dict[str, str] = {}
+        for line in record.splitlines():
+            if ": " not in line or line.startswith(" "):
+                continue
+            key, value = line.split(": ", 1)
+            if key in fields:
+                raise ValueError(f"Duplicate dpkg field {key}.")
+            fields[key] = value
         if fields.get("Status") != "install ok installed":
             continue
         name, version, architecture = fields.get("Package"), fields.get("Version"), fields.get("Architecture")
@@ -202,17 +208,28 @@ def builder_packages(path: Path) -> dict[str, str]:
 def contains_certificate_record(content: bytes) -> bool:
     if b"-cert-v01@openssh.com" not in content:
         return False
-    for match in OPENSSH_CERTIFICATE.finditer(content):
-        key_type, encoded_prefix = match.groups()
-        # Match the wire-format key type, not just an algorithm name: OpenSSH
-        # binaries and documentation legitimately contain certificate names.
-        # A bounded prefix suffices and does not decode or retain the full cert.
-        prefix = base64.b64decode(encoded_prefix[:len(encoded_prefix) // 4 * 4])
-        if len(prefix) < 4:
+    for raw_line in content.splitlines():
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line or line.startswith("#"):
             continue
-        type_size = struct.unpack_from(">I", prefix)[0]
-        if type_size == len(key_type) and prefix[4:4 + type_size] == key_type:
-            return True
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            continue
+        for index, token in enumerate(tokens):
+            if not OPENSSH_CERTIFICATE.fullmatch(token):
+                continue
+            if index + 1 >= len(tokens):
+                continue
+            try:
+                prefix = base64.b64decode(tokens[index + 1], validate=True)
+            except (ValueError, base64.binascii.Error):
+                continue
+            if len(prefix) < 4:
+                continue
+            type_size = struct.unpack_from(">I", prefix)[0]
+            if type_size == len(token) and prefix[4:4 + type_size].decode("ascii", errors="ignore") == token:
+                return True
     return False
 
 
@@ -224,7 +241,7 @@ def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
         for name in list(directories):
             path = Path(directory) / name
             if path.is_symlink() or path.lstat().st_dev != root_device:
-                directories.remove(name)
+                raise ValueError(f"Nested mount or symlinked directory inside image filesystem: {path}")
         for name in files:
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
@@ -321,7 +338,11 @@ def verify_receipt(image: Path, output: Path) -> None:
     if (receipt.get("schema_version") != 1 or receipt.get("result") != "passed"
         or receipt.get("image_bytes") != image.stat().st_size or receipt.get("image_sha256") != digest(image)):
         raise ValueError("Image does not match a completed verification receipt.")
-    if receipt.get("image_channel") != "production":
+    try:
+        manifest = read_fields(output / "image-manifest.txt")
+    except OSError as error:
+        raise ValueError("Verification receipt is missing the archived image manifest.") from error
+    if receipt.get("image_channel") != manifest.get("image-channel") or receipt.get("image_channel") != "production":
         raise ValueError("Manufacturing requires a production-channel image; test images must never be shipped.")
     required = set(VERIFICATION_ARTIFACTS)
     artifacts = receipt.get("artifacts")
