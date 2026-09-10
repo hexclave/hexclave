@@ -132,9 +132,14 @@ def _run(command: Sequence[str], timeout: int = 45) -> str:
 def _frontend_reachable(url: str, timeout: int = 10) -> bool:
     request = urllib_request.Request(url, method="GET", headers={"User-Agent": "Hexclave-TV-Box-Recovery/1"})
     try:
+        class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+            def redirect_request(self, _request, _response, _code, _msg, _headers):
+                return None
+
         # The caller supplies the fixed local setup URL or a validated
         # public document URL, never credentials or a customer-selected URL.
-        with urllib_request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        opener = urllib_request.build_opener(NoRedirectHandler)
+        with opener.open(request, timeout=timeout) as response:  # noqa: S310
             response.read(1)
             return 200 <= response.status < 400
     except (TimeoutError, OSError, urllib_error.URLError):
@@ -263,13 +268,17 @@ class NetworkManagerController:
 
     def connected(self) -> bool:
         values = self._nmcli(
-            "--get-values", "GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS",
+            "--get-values", "GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS,IP6.ADDRESS",
             "device", "show", WIFI_INTERFACE,
         ).splitlines()
         if len(values) < 2:
             return False
         state, connection, *addresses = values
-        return state.startswith("100") and any(address != "" for address in addresses) and connection != SETUP_CONNECTION_NAME
+        return (
+            state.startswith("100")
+            and any(address and not address.lower().startswith("fe80:") for address in addresses)
+            and connection != SETUP_CONNECTION_NAME
+        )
 
     def activate_saved_connections(self) -> None:
         for attempt, name in enumerate(self.saved_connections(), start=1):
@@ -465,6 +474,7 @@ class TvBoxNetworkAgent:
         self.outage_started_at: float | None = None if self.state.mode is NetworkMode.CONNECTED else self.last_applied_at
         self.frontend_outage_started_at: float | None = None
         self.saved_network_attempts = 0
+        self._last_saved_activation: float | None = None
         self.pending_transition_reason: str | None = None
 
     def _service(self, action: str, name: str) -> None:
@@ -514,6 +524,9 @@ class TvBoxNetworkAgent:
     def _set_kiosk_url(self, url: str) -> None:
         atomic_write(self.runtime_root / "kiosk-url", f"{url}\n", 0o644)
 
+    def _kiosk_url_for_mode(self, mode: NetworkMode) -> str:
+        return self.renderer_url if mode is NetworkMode.CONNECTED else OFFLINE_URL
+
     def _restart_kiosk(self, *, reset_healthy_budget: bool = True) -> None:
         if reset_healthy_budget and self._kiosk_health_state() is not None:
             properties = self._service_properties("hexclave-tv-box-kiosk.service")
@@ -561,6 +574,17 @@ class TvBoxNetworkAgent:
             if self.maintenance_active:
                 return
             if self.state.mode is self.applied_mode:
+                if (
+                    self.state.mode in {NetworkMode.STATION_INITIAL, NetworkMode.STATION_RETRY}
+                    and self.has_saved_network
+                    and not self.controller.connected()
+                    and (
+                        self._last_saved_activation is None
+                        or self.monotonic() - self._last_saved_activation >= 30
+                    )
+                ):
+                    self.controller.activate_saved_connections()
+                    self._last_saved_activation = self.monotonic()
                 self._reconcile_services()
                 return
             previous_mode = self.applied_mode
@@ -573,6 +597,7 @@ class TvBoxNetworkAgent:
                 self.saved_network_attempts += 1
                 LOGGER.info("saved-network-attempt=%d mode=%s", self.saved_network_attempts, self.state.mode.value)
                 self.controller.activate_saved_connections()
+                self._last_saved_activation = self.monotonic()
                 if self.controller.connected():
                     self.state = NetworkState(NetworkMode.CONNECTED, self.monotonic())
                     reason = "saved-network-connected"
@@ -590,13 +615,13 @@ class TvBoxNetworkAgent:
                 self._service("stop", "hexclave-tv-box-setup-display.service")
                 self.controller.stop_setup()
                 self._service("stop", "hexclave-tv-box-setup.service")
-                self._set_kiosk_url(self.renderer_url)
+                self._set_kiosk_url(self._kiosk_url_for_mode(self.state.mode))
                 self._restart_kiosk()
             else:
                 self._service("stop", "hexclave-tv-box-setup-display.service")
                 self.controller.stop_setup()
                 self._service("stop", "hexclave-tv-box-setup.service")
-                self._set_kiosk_url(OFFLINE_URL)
+                self._set_kiosk_url(self._kiosk_url_for_mode(self.state.mode))
                 self._restart_kiosk()
             now = self.monotonic()
             if reason is None:
@@ -704,6 +729,7 @@ class TvBoxNetworkAgent:
                     self._reconcile_services()
                 else:
                     self._service("reset-failed", "hexclave-tv-box-kiosk.service")
+                    self._set_kiosk_url(self._kiosk_url_for_mode(self.state.mode))
                     self._restart_kiosk(reset_healthy_budget=False)
                 return {"restarted": True}
             if command == "reset-pairing":

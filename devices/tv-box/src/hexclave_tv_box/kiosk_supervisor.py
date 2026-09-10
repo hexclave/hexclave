@@ -30,10 +30,17 @@ DOCUMENT_LOAD_TIMEOUT_SECONDS = 120
 DOCUMENT_RETRY_SECONDS = 240
 MAX_RENDERER_DIAGNOSTIC_LINES = 64
 MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS = 512
-SENSITIVE_RENDERER_VALUE_PATTERN = re.compile(
-    r"(?i)(?:authorization|proxy-authorization|set-cookie|password|passwd|client-secret|"
-    r"access-token|refresh-token|pairing[-_ ]?code)\s*[:=]"
+REDACTED_RENDERER_OUTPUT = "<redacted renderer output>"
+SAFE_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
+    r"^(?:"
+    r"(?:\([^)]*\): )?(?:GLib|WebKit|WebKitNetworkProcess|Cog|Cog-Core|Wayland|wlroots)"
+    r"|Unable to create the wlroots backend"
+    r"|https?://"
+    r"|kiosk-renderer-[a-z0-9-]+"
+    r"|renderer-[a-z0-9-]+"
+    r")"
 )
+URL_USERINFO_PATTERN = re.compile(r"(https?://)(?:[^/\s@]+@)([^/\s?#]+)")
 URL_QUERY_PATTERN = re.compile(r"(https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?")
 
 
@@ -74,11 +81,12 @@ def _sanitize_renderer_output(raw_line: bytes) -> str | None:
     line = raw_line.decode("utf-8", errors="replace").strip()
     if line == "":
         return None
-    if SENSITIVE_RENDERER_VALUE_PATTERN.search(line) is not None:
-        return "[sensitive renderer diagnostic suppressed]"
+    if SAFE_RENDERER_DIAGNOSTIC_PATTERN.match(line) is None and re.search(r"https?://", line) is None:
+        return REDACTED_RENDERER_OUTPUT
     # Renderer failures occasionally contain the document URL. Query strings
     # and fragments are unnecessary for diagnosing Cage/Cog and may contain
     # application state, so retain only the public URL path.
+    line = URL_USERINFO_PATTERN.sub(r"\1\2", line)
     line = URL_QUERY_PATTERN.sub(r"\1", line)
     return line[:MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS]
 
@@ -98,6 +106,7 @@ class _RendererOutputTail:
             return self.document_state, self.document_generation
 
     def consume(self, stream: BinaryIO) -> None:
+        redacted_burst = False
         for raw_line in iter(stream.readline, b""):
             # Cog's native load callbacks are independent of page console
             # forwarding. Never forward these URL-bearing progress messages.
@@ -122,9 +131,17 @@ class _RendererOutputTail:
                 if progress:
                     continue
             line = _sanitize_renderer_output(raw_line)
-            if line is not None:
-                with self._lock:
-                    self._lines.append(line)
+            if line is None:
+                redacted_burst = False
+                continue
+            if line == REDACTED_RENDERER_OUTPUT:
+                if redacted_burst:
+                    continue
+                redacted_burst = True
+            else:
+                redacted_burst = False
+            with self._lock:
+                self._lines.append(line)
 
     def snapshot(self) -> tuple[str, ...]:
         with self._lock:

@@ -61,6 +61,16 @@ class PortalAndSupportTests(unittest.TestCase):
         self.assertTrue(limiter.allow("10.42.0.3", 10))
         self.assertTrue(limiter.allow("10.42.0.2", 71))
 
+    def test_portal_rejects_connections_when_concurrency_limit_is_full(self) -> None:
+        self.server._connection_limit = threading.BoundedSemaphore(0)
+        request = mock.Mock()
+        with mock.patch.object(self.server, "shutdown_request") as shutdown, mock.patch.object(
+            self.server, "process_request_thread"
+        ) as dispatch:
+            self.server.process_request(request, ("127.0.0.1", 1))
+        shutdown.assert_called_once_with(request)
+        dispatch.assert_not_called()
+
     def test_portal_requires_session_csrf_before_forwarding_wifi_secret(self) -> None:
         port = self.server.server_address[1]
         forwarded: list[dict[str, object]] = []

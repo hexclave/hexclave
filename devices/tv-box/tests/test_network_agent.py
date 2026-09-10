@@ -15,6 +15,7 @@ from hexclave_tv_box.network_agent import (
     AgentRequestHandler,
     NetworkManagerController,
     NetworkMode,
+    OFFLINE_URL,
     PRODUCTION_URL,
     TEST_SETUP_PASSWORD_ALPHABET,
     TEST_SETUP_PASSWORD_LENGTH,
@@ -203,6 +204,7 @@ class NetworkAgentTests(unittest.TestCase):
             marker = root / "test-image"
             marker.write_text("test\n", encoding="utf-8")
             origin_file = root / "hexclave-tv-box-test-origin.txt"
+            origin_file.write_text("https://pilot-box.trycloudflare.com\n", encoding="utf-8")
             if os.geteuid() == 0:
                 class UnreadablePath(type(origin_file)):
                     def read_text(self, *args, **kwargs):
@@ -210,12 +212,31 @@ class NetworkAgentTests(unittest.TestCase):
 
                 origin_file = UnreadablePath(origin_file)
             else:
-                origin_file.write_text("https://pilot-box.trycloudflare.com\n", encoding="utf-8")
                 origin_file.chmod(0)
             self.assertEqual(
                 resolve_renderer_url(test_image_marker=marker, test_origin_file=origin_file),
                 PRODUCTION_URL,
             )
+
+    def test_frontend_probe_does_not_follow_redirects(self) -> None:
+        opener = mock.Mock()
+        opener.open.side_effect = OSError("redirect rejected")
+        commands = []
+        with mock.patch("hexclave_tv_box.network_agent.urllib_request.build_opener", return_value=opener) as build:
+            from hexclave_tv_box.network_agent import _frontend_reachable
+            self.assertFalse(_frontend_reachable("https://example.com"))
+        build.assert_called_once()
+        opener.open.assert_called_once()
+
+    def test_connected_accepts_global_ipv6_but_not_link_local_only(self) -> None:
+        responses = iter(("100 (connected)\nOffice\n\n2001:db8::1/64\n", "100 (connected)\nOffice\n\nfe80::1/64\n"))
+        commands: list[list[str]] = []
+        controller = NetworkManagerController(
+            runner=lambda command, _timeout: commands.append(command) or next(responses),
+        )
+        self.assertTrue(controller.connected())
+        self.assertFalse(controller.connected())
+        self.assertTrue(any("IP6.ADDRESS" in command for command in commands[0]))
 
     def test_nmcli_escape_parser_preserves_colons_and_backslashes(self) -> None:
         self.assertEqual(split_nmcli_line(r"Office\:West:WPA2:72"), ["Office:West", "WPA2", "72"])
@@ -407,7 +428,7 @@ class NetworkAgentTests(unittest.TestCase):
             )
             self.assertTrue(controller.connected())
             self.assertEqual(len(commands), 1)
-            self.assertIn("GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS", commands[0])
+            self.assertIn("GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS,IP6.ADDRESS", commands[0])
 
     def test_controller_removes_only_stale_ephemeral_secret_files_on_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -483,6 +504,42 @@ class NetworkAgentTests(unittest.TestCase):
             self.assertIn(("systemctl", "start", "hexclave-tv-box-setup-display.service"), services)
             self.assertIn(("systemctl", "start", "hexclave-tv-box-setup.service"), services)
             self.assertNotIn("http://127.0.0.1", (Path(directory) / "kiosk-url").read_text(encoding="utf-8"))
+
+    def test_saved_profile_activation_retries_at_most_every_thirty_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = [0.0]
+            controller = FakeController(saved=True, connected=False)
+            agent = TvBoxNetworkAgent(
+                controller,
+                runtime_root=Path(directory),
+                policy=NetworkPolicy(initial_retry_seconds=100, setup_window_seconds=100, retry_window_seconds=100),
+                service_runner=FakeServices(),
+                frontend_probe=lambda _url, _timeout: True,
+                setup_portal_waiter=lambda _url, _timeout: True,
+                monotonic=lambda: now[0],
+            )
+            agent.tick()
+            self.assertEqual(controller.calls.count("activate-saved"), 1)
+            now[0] = 5
+            agent.tick()
+            self.assertEqual(controller.calls.count("activate-saved"), 1)
+            now[0] = 30
+            agent.tick()
+            self.assertEqual(controller.calls.count("activate-saved"), 2)
+
+    def test_privileged_restart_sets_offline_url_for_station_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = FakeController(saved=True, connected=False)
+            agent = TvBoxNetworkAgent(
+                controller,
+                runtime_root=Path(directory),
+                service_runner=lambda _command, _timeout: "",
+                setup_portal_waiter=lambda _url, _timeout: True,
+            )
+            agent.state = agent.state.__class__(NetworkMode.STATION_RETRY, 0)
+            agent.applied_mode = NetworkMode.STATION_RETRY
+            agent.handle_request({"command": "restart-kiosk"}, privileged=True)
+            self.assertEqual((Path(directory) / "kiosk-url").read_text(encoding="utf-8"), f"{OFFLINE_URL}\n")
 
     def test_saved_network_activation_avoids_offline_kiosk_restart_when_it_connects(self) -> None:
         class ConnectingController(FakeController):

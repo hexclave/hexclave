@@ -8,6 +8,7 @@ import json
 import logging
 import secrets
 import socket
+import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,14 +29,20 @@ CAPTIVE_PATHS = {
     "/connecttest.txt",
     "/redirect",
 }
+MAX_PORTAL_CONNECTIONS = 8
 
 
-def send_agent_request(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
+def send_agent_request(
+    socket_path: Path,
+    request: dict[str, Any],
+    *,
+    timeout: float = 50,
+) -> dict[str, Any]:
     encoded = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(encoded) > 16_384:
         raise ValueError("TV Box agent request is too large.")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(50)
+        connection.settimeout(timeout)
         connection.connect(str(socket_path))
         connection.sendall(encoded)
         response = bytearray()
@@ -176,7 +183,24 @@ class SetupPortalServer(ThreadingHTTPServer):
         self.agent_socket = agent_socket
         self.csrf_token = secrets.token_urlsafe(32)
         self.limiter = SubmissionLimiter()
+        self._connection_limit = threading.BoundedSemaphore(MAX_PORTAL_CONNECTIONS)
         super().__init__(address, SetupPortalHandler)
+
+    def process_request(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        if not self._connection_limit.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_limit.release()
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_limit.release()
 
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         request, client_address = super().get_request()

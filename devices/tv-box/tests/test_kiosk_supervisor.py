@@ -99,8 +99,16 @@ class KioskSupervisorTests(unittest.TestCase):
             "failed URL https://example.com/tv-box",
         )
         self.assertEqual(
-            _sanitize_renderer_output(b"Authorization: Bearer secret\n"),
-            "[sensitive renderer diagnostic suppressed]",
+            _sanitize_renderer_output(b"Cookie: session=abc\n"),
+            "<redacted renderer output>",
+        )
+        self.assertEqual(
+            _sanitize_renderer_output(b"https://u:p@host/x?token=1\n"),
+            "https://host/x",
+        )
+        self.assertEqual(
+            _sanitize_renderer_output(b"(WebKitNetworkProcess:123): WebKit-WARNING **: warning\n"),
+            "(WebKitNetworkProcess:123): WebKit-WARNING **: warning",
         )
         self.assertEqual(_sanitize_renderer_output(b"\n"), None)
 
@@ -355,7 +363,7 @@ finally:
             self.assertEqual(result, 1)
             output = "\n".join(logs.output)
             self.assertIn("Unable to create the wlroots backend", output)
-            self.assertIn("sensitive renderer diagnostic suppressed", output)
+            self.assertIn("<redacted renderer output>", output)
             self.assertNotIn("must-not-appear", output)
             self.assertEqual(health_file.read_text(encoding="utf-8"), "exited\n")
 

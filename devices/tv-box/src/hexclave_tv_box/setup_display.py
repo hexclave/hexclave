@@ -46,7 +46,11 @@ def wait_for_setup_status(socket_path: Path, timeout: int) -> Mapping[str, objec
     deadline = time.monotonic() + timeout
     while True:
         try:
-            status = send_agent_request(socket_path, {"command": "status"})
+            status = send_agent_request(
+                socket_path,
+                {"command": "status"},
+                timeout=min(50, max(0.1, deadline - time.monotonic())),
+            )
             format_setup_screen(status)
             return status
         except (ConnectionError, OSError, RuntimeError, ValueError):

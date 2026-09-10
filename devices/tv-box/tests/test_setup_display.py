@@ -69,6 +69,19 @@ class SetupDisplayTests(unittest.TestCase):
         self.assertNotIn("password-before", "\n".join(logs.output))
         self.assertNotIn("password-after", "\n".join(logs.output))
 
+    def test_setup_status_request_uses_remaining_deadline(self) -> None:
+        from pathlib import Path
+        from hexclave_tv_box.setup_display import wait_for_setup_status
+
+        status = {"mode": "setup", "setupSsid": "ssid", "setupPassword": "password"}
+        with (
+            mock.patch("hexclave_tv_box.setup_display.time.monotonic", return_value=0.0),
+            mock.patch("hexclave_tv_box.setup_display.send_agent_request", side_effect=[ConnectionError(), status]) as request,
+            mock.patch("hexclave_tv_box.setup_display.time.sleep"),
+        ):
+            wait_for_setup_status(Path("/unused"), 2)
+        self.assertLessEqual(request.call_args_list[0].kwargs["timeout"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
