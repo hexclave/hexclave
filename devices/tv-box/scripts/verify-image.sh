@@ -165,9 +165,25 @@ if [ -n "$host_key_artifact" ]; then
 fi
 
 cp "$rootfs/etc/hexclave-tv-box-release" "$output/image-manifest.txt"
-(cd "$rootfs" && find . -xdev -type f -exec sha256sum {} +) > "$output/rootfs-sha256.txt"
-(cd "$state" && find . -xdev -type f -exec sha256sum {} +) > "$output/state-sha256.txt"
-(cd "$boot" && find . -xdev -type f -exec sha256sum {} +) > "$output/boot-sha256.txt"
+write_sha256_manifest() {
+  tree=$1
+  destination=$2
+  list=$(mktemp)
+  if ! (cd "$tree" && find . -xdev -type f -print0 > "$list"); then
+    rm -f "$list"
+    printf '%s\n' 'Unable to enumerate image files.' >&2
+    exit 1
+  fi
+  if ! (cd "$tree" && LC_ALL=C sort -z "$list" | xargs -0 -r sha256sum > "$destination"); then
+    rm -f "$list"
+    printf '%s\n' 'Unable to hash image files.' >&2
+    exit 1
+  fi
+  rm -f "$list"
+}
+write_sha256_manifest "$rootfs" "$output/rootfs-sha256.txt"
+write_sha256_manifest "$state" "$output/state-sha256.txt"
+write_sha256_manifest "$boot" "$output/boot-sha256.txt"
 image_name=$(basename "$image")
 image_hash=$(sha256sum "$image" | cut -d ' ' -f 1)
 printf '%s  %s\n' "$image_hash" "$image_name" > "$output/disk-image-sha256.txt"

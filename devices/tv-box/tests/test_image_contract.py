@@ -44,6 +44,7 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn('id="manual-name" hidden', html)
         self.assertIn('id="manual-security" hidden', html)
         self.assertIn('manualOption.textContent = "Enter another network…"', script)
+        self.assertIn('networkSelect.value = firstSupportedNetwork >= 0 ? String(firstSupportedNetwork) : "manual";', script)
         self.assertIn("manualName.hidden = !manual", script)
         self.assertIn("[hidden] { display: none !important; }", styles)
 
@@ -173,8 +174,10 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn('[ ! -f "$rootfs/etc/hexclave-tv-box-test-image" ]', verifier)
         self.assertIn("find \"$rootfs/etc/ssh\" -maxdepth 1", verifier)
         self.assertIn("hexclave-support-ca.pub", verifier)
-        self.assertIn("find . -xdev -type f -exec sha256sum {} +", verifier)
-        self.assertNotIn("xargs -0 sha256sum", verifier)
+        self.assertIn('find . -xdev -type f -print0 > "$list"', verifier)
+        self.assertIn('if ! (cd "$tree" && find . -xdev -type f -print0 > "$list"); then', verifier)
+        self.assertIn("LC_ALL=C sort -z \"$list\" | xargs -0 -r sha256sum", verifier)
+        self.assertIn("Unable to enumerate image files.", verifier)
 
     def test_build_image_requires_clean_builder_and_absolute_support_ca(self) -> None:
         build = (ROOT / "scripts/build-image.sh").read_text(encoding="utf-8")
@@ -406,7 +409,10 @@ class ImageContractTests(unittest.TestCase):
             accepted = run_verifier()
             self.assertEqual(accepted.returncode, 0, accepted.stdout)
             self.assertIn("tv-box.img", (output / "disk-image-sha256.txt").read_text(encoding="utf-8"))
-            self.assertTrue((output / "state-sha256.txt").exists())
+            for manifest_name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt"):
+                manifest_lines = (output / manifest_name).read_text(encoding="utf-8").splitlines()
+                manifest_paths = [line.split("  ", maxsplit=1)[1] for line in manifest_lines]
+                self.assertEqual(manifest_paths, sorted(manifest_paths), manifest_name)
 
             marker = rootfs / "etc/hexclave-tv-box-test-image"
             marker.write_text("test\n", encoding="utf-8")
