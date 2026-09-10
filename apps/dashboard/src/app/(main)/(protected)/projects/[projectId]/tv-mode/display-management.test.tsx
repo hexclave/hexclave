@@ -150,6 +150,28 @@ describe("TV display pairing feedback", () => {
     expect(codeInput.selectionEnd).toBe(3);
   });
 
+  it("deletes the character before the pairing-code separator", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+    const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
+    fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(codeInput, { target: { value: "ABCDEFGH", selectionStart: 4, selectionEnd: 4 } });
+    expect(codeInput).toHaveProperty("value", "ABCE-FGH");
+    expect(codeInput.selectionStart).toBe(3);
+    expect(codeInput.selectionEnd).toBe(3);
+  });
+
+  it("preserves normal pairing-code character deletion", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+    const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
+    fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(codeInput, { target: { value: "ABC-EFGH", selectionStart: 3, selectionEnd: 3 } });
+    expect(codeInput).toHaveProperty("value", "ABCE-FGH");
+    expect(codeInput.selectionStart).toBe(3);
+    expect(codeInput.selectionEnd).toBe(3);
+  });
+
   it("recognizes a retried rate-limit failure without exposing its diagnostics", () => {
     const notice = getPairingFailureNotice(new AggregateError([
       new Error("Rate limited, no retry-after header received"),

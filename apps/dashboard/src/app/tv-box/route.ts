@@ -1,7 +1,9 @@
 import { getPublicEnvVar } from "@/lib/env";
+import { connection } from "next/server";
 import { createTvBoxDocument, resolveTvBoxApiConfiguration } from "./document";
 
-export function GET(): Response {
+export async function GET(): Promise<Response> {
+  await connection();
   const api = resolveTvBoxApiConfiguration({
     configuredApiUrl: getPublicEnvVar("NEXT_PUBLIC_STACK_API_URL"),
     configuredBrowserApiUrl: getPublicEnvVar("NEXT_PUBLIC_BROWSER_STACK_API_URL"),

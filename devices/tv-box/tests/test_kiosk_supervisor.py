@@ -157,6 +157,12 @@ class KioskSupervisorTests(unittest.TestCase):
             "pairing-code=example-sensitive-value",
             "pairing_code=example-sensitive-value",
             "pairing code=example-sensitive-value",
+            "token=example-sensitive-value",
+            "api-key=example-sensitive-value",
+            "session=example-sensitive-value",
+            "secret=example-sensitive-value",
+            "credential=example-sensitive-value",
+            "credentials: example-sensitive-value",
             "{'password': 'example-sensitive-value', 'snapshot': 'example-display-title'}",
         )
         for prefix in prefixes:
@@ -166,6 +172,10 @@ class KioskSupervisorTests(unittest.TestCase):
                     raw_line = (prefix + field + "\n").encode()
                     tail.consume(io.BytesIO(raw_line + raw_line))
                     self.assertEqual(tail.snapshot(), ("<redacted renderer output>",))
+        self.assertEqual(
+            _sanitize_renderer_output(b"(cog:12): Cog-WARNING **: tokenizer ready\n"),
+            "(cog:12): Cog-WARNING **: tokenizer ready",
+        )
 
     def test_renderer_tail_preserves_useful_diagnostics_and_existing_redaction(self) -> None:
         tail = _RendererOutputTail()

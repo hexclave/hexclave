@@ -12,7 +12,7 @@ for tool in git grep mkswap realpath truncate python3; do
 done
 
 case "$HEXCLAVE_TV_BOX_WIFI_COUNTRY" in
-  [A-Z][A-Z]) ;;
+  [ABCDEFGHIJKLMNOPQRSTUVWXYZ][ABCDEFGHIJKLMNOPQRSTUVWXYZ]) ;;
   *) printf '%s\n' 'HEXCLAVE_TV_BOX_WIFI_COUNTRY must be two uppercase letters.' >&2; exit 1 ;;
 esac
 case "$HEXCLAVE_TV_BOX_TEST_IMAGE" in

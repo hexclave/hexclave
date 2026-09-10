@@ -43,7 +43,8 @@ TOKEN_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
 )
 SENSITIVE_RENDERER_VALUE_PATTERN = re.compile(
     r"(?i)(?:authorization|proxy[-_ ]?authorization|(?:set[-_ ]?)?cookie|password|passwd|"
-    r"client[-_ ]?secret|(?:access|refresh)[-_ ]?token|pairing[-_ ]?code)[\"']?\s*[:=]"
+    r"client[-_ ]?secret|(?:access|refresh)[-_ ]?token|token|api[-_ ]?key|session|secret|"
+    r"credential(?:s)?|pairing[-_ ]?code)[\"']?\s*[:=]"
 )
 URL_USERINFO_PATTERN = re.compile(r"(https?://)(?:[^/\s@]+@)([^/\s?#]+)")
 URL_QUERY_PATTERN = re.compile(r"(https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?")

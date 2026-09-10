@@ -85,17 +85,33 @@ describe("TV Box document bootstrap recovery", () => {
     await vi.advanceTimersByTimeAsync(299_999);
     expect(navigationErrors).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
+    expect(navigationErrors).toEqual([]);
+    await vi.advanceTimersByTimeAsync(300_000);
     expect(navigationErrors).toEqual(["Not implemented: navigation (except hash changes)"]);
   });
 
-  it("still reloads if persisting the next retry count fails", async () => {
+  it("defers recovery if persisting the next retry count fails", async () => {
     openBrowser((window) => {
       window.Storage.prototype.setItem = () => {
         throw new window.DOMException("Storage is full", "QuotaExceededError");
       };
     });
     await vi.advanceTimersByTimeAsync(30_000);
+    expect(navigationErrors).toEqual([]);
+    await vi.advanceTimersByTimeAsync(300_000);
     expect(navigationErrors).toEqual(["Not implemented: navigation (except hash changes)"]);
+  });
+
+  it("cancels deferred recovery after storage persistence fails", async () => {
+    openBrowser((window) => {
+      window.Storage.prototype.setItem = () => {
+        throw new window.DOMException("Storage is full", "QuotaExceededError");
+      };
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    browser.window.dispatchEvent(new browser.window.Event("hexclave-tv-box-ready"));
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(navigationErrors).toEqual([]);
   });
 
   it("stops retrying after initialization even if removing stored state fails", async () => {

@@ -174,7 +174,11 @@ class AgentServerTests(unittest.TestCase):
         self.clients.append(client)
         client.settimeout(1)
         client.connect(str(self.socket_path))
-        client.sendall(contents)
+        try:
+            client.sendall(contents)
+        except (BrokenPipeError, ConnectionResetError):
+            # An overloaded server replies and closes without reading the request.
+            pass
         return client
 
     def response(self, client: socket.socket) -> object:

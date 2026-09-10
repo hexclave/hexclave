@@ -277,12 +277,17 @@ export function TvDisplayManagement({
                 aria-label="Pairing code"
                 value={pairingCode}
                 onChange={(event) => {
-                  const caret = event.target.selectionStart ?? event.target.value.length;
-                  pendingPairingCaret.current = event.target.value
+                  let nextValue = event.target.value;
+                  let caret = event.target.selectionStart ?? nextValue.length;
+                  if (caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
+                    nextValue = nextValue.slice(0, caret - 1) + nextValue.slice(caret);
+                    caret -= 1;
+                  }
+                  pendingPairingCaret.current = nextValue
                     .slice(0, caret)
                     .replaceAll(/[^0-9A-Z]/gi, "")
                     .length;
-                  setPairingCode(formatTvDisplayPairingCode(event.target.value));
+                  setPairingCode(formatTvDisplayPairingCode(nextValue));
                 }}
                 placeholder="ABCD-EFGH"
                 size="lg"

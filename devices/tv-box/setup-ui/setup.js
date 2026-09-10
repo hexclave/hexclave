@@ -34,6 +34,7 @@ function updateFields() {
   const security = network?.security ?? document.querySelector("#security").value;
   passwordRow.hidden = security === "open";
   passwordInput.required = security !== "open";
+  passwordInput.disabled = security === "open";
 }
 
 async function loadNetworks() {
@@ -71,21 +72,29 @@ form?.addEventListener("submit", async (event) => {
   const ssid = network?.ssid ?? document.querySelector("#ssid").value;
   const security = network?.security ?? document.querySelector("#security").value;
   const password = security === "open" ? null : document.querySelector("#password").value;
+  let response;
   try {
-    const response = await fetch("/api/wifi", {
+    response = await fetch("/api/wifi", {
       method: "POST",
       cache: "no-store",
       headers: { "Content-Type": "application/json", "X-Hexclave-CSRF": csrfToken },
       body: JSON.stringify({ ssid, security, password, hidden, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC" }),
     });
-    if (!response.ok) throw new Error("The TV Box could not join that network.");
-    statusElement.textContent = "Connected. TV Mode will open on the display shortly.";
   } catch {
     // The Zero 2 W has one radio, so a successful join drops the temporary
     // setup network before the HTTP response can always reach this device.
     statusElement.textContent = "The TV Box is switching networks. Check the TV display; reconnect to the setup network if it asks you to try again.";
     button.disabled = false;
+    return;
   }
+  if (response.ok) {
+    statusElement.textContent = "Connected. TV Mode will open on the display shortly.";
+    return;
+  }
+  statusElement.textContent = response.status === 429
+    ? "Too many attempts. Wait a minute and try again."
+    : "The TV Box could not join that network. Check the details and try again.";
+  button.disabled = false;
 });
 
 loadStatus()

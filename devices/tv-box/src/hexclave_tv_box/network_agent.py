@@ -789,7 +789,6 @@ class TvBoxNetworkAgent:
                     LOGGER.info("wifi-submission=complete duration-seconds=%.1f", max(0.0, self.monotonic() - started_at))
                 except (OSError, subprocess.SubprocessError, ValueError) as error:
                     LOGGER.warning("wifi-submission=failed reason=%s duration-seconds=%.1f", _failure_code(error), max(0.0, self.monotonic() - started_at))
-                    self.state = initial_network_state(has_saved_network=True, connected=False, now=self.monotonic())
                     self.state = NetworkState(NetworkMode.SETUP, self.monotonic())
                     self.applied_mode = None
                     self.pending_transition_reason = "wifi-submission-failed"

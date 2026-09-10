@@ -162,6 +162,8 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn("HEXCLAVE_TV_BOX_TEST_IMAGE=${HEXCLAVE_TV_BOX_TEST_IMAGE:-false}", build)
         self.assertIn("true) tv_box_image_name=hexclave-tv-box-test", build)
         self.assertIn("false) tv_box_image_name=hexclave-tv-box-pilot", build)
+        self.assertNotIn("[A-Z][A-Z]", build)
+        self.assertIn("[ABCDEFGHIJKLMNOPQRSTUVWXYZ][ABCDEFGHIJKLMNOPQRSTUVWXYZ]", build)
         self.assertIn('"IGconf_image_name=$tv_box_image_name"', build)
         self.assertIn('"IGconf_tvbox_test_image=$HEXCLAVE_TV_BOX_TEST_IMAGE"', build)
         self.assertIn("# X-Env-Var-test_image-Valid: keywords:true,false", layer)

@@ -77,11 +77,13 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
         }
         if (!Number.isSafeInteger(reloadCount) || reloadCount < 0) reloadCount = maximumBackoffStep;
         reloadCount = Math.min(reloadCount, maximumBackoffStep);
-        const timeout = window.setTimeout(() => {
+        let timeout = window.setTimeout(() => {
           try {
             window.sessionStorage.setItem(reloadKey, String(Math.min(reloadCount + 1, maximumBackoffStep)));
           } catch (error) {
             allowUnavailableStorage(error);
+            timeout = window.setTimeout(() => window.location.reload(), 300000);
+            return;
           }
           window.location.reload();
         }, Math.min(300000, 30000 * 2 ** reloadCount));

@@ -272,6 +272,9 @@ class ImageVerificationTests(unittest.TestCase):
             with self.subTest(prefix_length=len(prefix), record_length=len(record)):
                 path.write_bytes(prefix + record)
                 image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        path.write_bytes(b"x" * (1024 * 1024 - 514 - 1) + b"\n" + algorithm + b" " + encoded + b"\n")
+        with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
 
     def test_certificate_scanner_is_independent_of_read_size(self) -> None:
         certificate = self.certificate_record()

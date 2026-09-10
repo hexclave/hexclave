@@ -53,6 +53,13 @@ class PortalAndSupportTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
 
+    def test_setup_ui_distinguishes_open_network_validation_from_transport_failure(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "setup-ui/setup.js").read_text(encoding="utf-8")
+        self.assertIn('passwordInput.disabled = security === "open";', script)
+        self.assertIn("The TV Box is switching networks.", script)
+        self.assertIn("The TV Box could not join that network.", script)
+        self.assertIn("Too many attempts. Wait a minute and try again.", script)
+
     def test_submission_limiter_is_bounded_per_client(self) -> None:
         limiter = SubmissionLimiter()
         for _ in range(5):
