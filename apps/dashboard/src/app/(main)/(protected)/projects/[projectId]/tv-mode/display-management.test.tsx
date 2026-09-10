@@ -163,10 +163,25 @@ describe("TV display pairing feedback", () => {
     renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
     const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
     fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    codeInput.setSelectionRange(5, 5);
+    fireEvent.keyDown(codeInput, { key: "Backspace" });
     dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentBackward");
     expect(codeInput).toHaveProperty("value", "ABCE-FGH");
     expect(codeInput.selectionStart).toBe(3);
     expect(codeInput.selectionEnd).toBe(3);
+  });
+
+  it("deletes only the selected separator range on backspace without eating the preceding character", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+    const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
+    fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    codeInput.setSelectionRange(4, 5);
+    fireEvent.keyDown(codeInput, { key: "Backspace" });
+    dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentBackward");
+    expect(codeInput).toHaveProperty("value", "ABCD-EFGH");
+    expect(codeInput.selectionStart).toBe(5);
+    expect(codeInput.selectionEnd).toBe(5);
   });
 
   it("preserves normal pairing-code character deletion", async () => {

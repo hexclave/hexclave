@@ -143,6 +143,8 @@ export function TvDisplayManagement({
   const pairingInFlight = useRef(false);
   const refreshInFlight = useRef(false);
   const pairingCodeInput = useRef<HTMLInputElement>(null);
+  // Track selection at keydown because React does not fire onBeforeInput for backward deletion, and select does not fire for collapsed carets.
+  const pairingSelectionBeforeEdit = useRef<{ start: number, end: number } | null>(null);
   // Kept in state as a fresh object per edit (not a ref) so the caret layout effect also runs
   // when formatting yields the same code as before, e.g. forward-deleting the separator: React
   // then restores the controlled value, which moves the caret to the end unless we reposition it.
@@ -278,11 +280,21 @@ export function TvDisplayManagement({
                 ref={pairingCodeInput}
                 id="new-tv-display-code"
                 aria-label="Pairing code"
+                onKeyDown={(event) => {
+                  if (event.key === "Backspace") {
+                    pairingSelectionBeforeEdit.current = {
+                      start: event.currentTarget.selectionStart ?? 0,
+                      end: event.currentTarget.selectionEnd ?? 0,
+                    };
+                  }
+                }}
                 value={pairingCode}
                 onChange={(event) => {
+                  const selectionBeforeEdit = pairingSelectionBeforeEdit.current;
+                  pairingSelectionBeforeEdit.current = null;
                   let nextValue = event.target.value;
                   let caret = event.target.selectionStart ?? nextValue.length;
-                  if (event.nativeEvent instanceof InputEvent && event.nativeEvent.inputType === "deleteContentBackward" && caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
+                  if (event.nativeEvent instanceof InputEvent && event.nativeEvent.inputType === "deleteContentBackward" && (selectionBeforeEdit == null || selectionBeforeEdit.start === selectionBeforeEdit.end) && caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
                     nextValue = nextValue.slice(0, caret - 1) + nextValue.slice(caret);
                     caret -= 1;
                   }
