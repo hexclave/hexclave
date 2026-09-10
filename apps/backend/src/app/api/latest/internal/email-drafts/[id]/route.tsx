@@ -1,7 +1,8 @@
 import { templateThemeIdToThemeMode, themeModeToTemplateThemeId } from "@/lib/email-drafts";
+import { buildCreatedFieldsAuditMetadata, buildUpdatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { templateThemeIdSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { adaptSchema, templateThemeIdSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
 
 export const GET = createSmartRouteHandler({
@@ -50,6 +51,7 @@ export const PATCH = createSmartRouteHandler({
     auth: yupObject({
       type: yupString().oneOf(["admin"]).defined(),
       tenancy: yupObject({}).defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     params: yupObject({ id: yupString().uuid().defined() }).defined(),
     body: yupObject({
@@ -63,8 +65,19 @@ export const PATCH = createSmartRouteHandler({
     bodyType: yupString().oneOf(["json"]).defined(),
     body: yupObject({ ok: yupString().oneOf(["ok"]).defined() }).defined(),
   }),
-  async handler({ auth: { tenancy }, params, body }) {
+  async handler({ auth, params, body }) {
+    const { tenancy } = auth;
     const prisma = await getPrismaClientForTenancy(tenancy);
+    const existing = await prisma.emailDraft.findFirst({ where: { tenancyId: tenancy.id, id: params.id } });
+    if (!existing) {
+      throw new StatusError(StatusError.NotFound, "No draft found with given id");
+    }
+    const themeIdBefore = themeModeToTemplateThemeId(existing.themeMode, existing.themeId);
+    const displayNameChanged = body.display_name !== undefined && body.display_name !== existing.displayName;
+    const themeChanged = body.theme_id !== undefined && body.theme_id !== themeIdBefore;
+    const sourceChanged = body.tsx_source !== undefined && body.tsx_source !== existing.tsxSource;
+    const hasEffectiveChange = displayNameChanged || themeChanged || sourceChanged;
+
     await prisma.emailDraft.update({
       where: { tenancyId_id: { tenancyId: tenancy.id, id: params.id } },
       data: {
@@ -74,6 +87,48 @@ export const PATCH = createSmartRouteHandler({
         tsxSource: body.tsx_source,
       },
     });
+
+    // Dashboard-only via recordAuditEvent. Never persist TSX source.
+    // The dashboard re-sends the current source on theme/name transitions; skip
+    // a no-op PATCH so we don't mint a false `email.draft.updated` row.
+    if (hasEffectiveChange) {
+      const patch: Record<string, unknown> = {};
+      const beforeRoot: Record<string, unknown> = {};
+      const afterRoot: Record<string, unknown> = {};
+      if (displayNameChanged) {
+        patch.display_name = body.display_name;
+        beforeRoot.display_name = existing.displayName;
+        afterRoot.display_name = body.display_name;
+      }
+      if (themeChanged) {
+        patch.theme_id = body.theme_id;
+        beforeRoot.theme_id = themeIdBefore;
+        afterRoot.theme_id = body.theme_id;
+      }
+      if (sourceChanged) {
+        patch.tsx_source_updated = true;
+        beforeRoot.tsx_source_updated = false;
+        afterRoot.tsx_source_updated = true;
+      }
+      const metadata = buildUpdatedFieldsAuditMetadata({
+        source: "email_drafts.update",
+        patch,
+        beforeRoot,
+        afterRoot,
+      }) ?? {
+          source: "email_drafts.update",
+        };
+      await recordAuditEvent({
+        tenancy,
+        auth,
+        action: "email.draft.updated",
+        metadata: {
+          ...metadata,
+          draft_id: params.id,
+        },
+      });
+    }
+
     return {
       statusCode: 200,
       bodyType: "json",
@@ -88,6 +143,7 @@ export const DELETE = createSmartRouteHandler({
     auth: yupObject({
       type: yupString().oneOf(["admin"]).defined(),
       tenancy: yupObject({}).defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     params: yupObject({ id: yupString().uuid().defined() }).defined(),
   }),
@@ -96,7 +152,8 @@ export const DELETE = createSmartRouteHandler({
     bodyType: yupString().oneOf(["json"]).defined(),
     body: yupObject({ ok: yupString().oneOf(["ok"]).defined() }).defined(),
   }),
-  async handler({ auth: { tenancy }, params }) {
+  async handler({ auth, params }) {
+    const { tenancy } = auth;
     const prisma = await getPrismaClientForTenancy(tenancy);
     const existing = await prisma.emailDraft.findFirst({ where: { tenancyId: tenancy.id, id: params.id } });
     if (!existing) {
@@ -105,6 +162,24 @@ export const DELETE = createSmartRouteHandler({
     await prisma.emailDraft.delete({
       where: { tenancyId_id: { tenancyId: tenancy.id, id: params.id } },
     });
+
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "email_drafts.delete",
+      fields: {
+        draft_id: existing.id,
+        display_name: existing.displayName,
+      },
+    }) ?? {
+        source: "email_drafts.delete",
+        draft_id: existing.id,
+      };
+    await recordAuditEvent({
+      tenancy,
+      auth,
+      action: "email.draft.deleted",
+      metadata,
+    });
+
     return {
       statusCode: 200,
       bodyType: "json",

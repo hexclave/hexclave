@@ -1,5 +1,5 @@
 import { Prisma } from "@/generated/prisma/client";
-import { globalPrismaClient } from "@/prisma-client";
+import { globalPrismaClient, retryTransaction } from "@/prisma-client";
 import type * as PrismaRuntime from "@prisma/client/runtime/client";
 import { CrudSchema, CrudTypeOf } from "@hexclave/shared/dist/crud";
 import { typedAssign } from "@hexclave/shared/dist/utils/objects";
@@ -89,6 +89,11 @@ export function createPrismaCrudHandlers<
       prismaToCrud: (prisma: PRead<PrismaModelName, W & B, I>, context: Context<false, PS, QS>) => Promise<CRead<CrudTypeOf<S>>>,
       notFoundToCrud: (context: Context<false, PS, QS>) => Promise<CRead<CrudTypeOf<S>> | never>,
       onCreate?: (prisma: PRead<PrismaModelName, W & B, I>, context: Context<false, PS, QS>) => Promise<void>,
+      onUpdate?: (
+        prisma: PRead<PrismaModelName, W & B, I>,
+        context: Context<true, PS, QS>,
+        extras: { previous: PRead<PrismaModelName, W & B, I> },
+      ) => Promise<void>,
     },
 ): CrudHandlersFromCrudType<CrudTypeOf<S>, PS, QS> & ExtraDataFromCrudType<S, PrismaModelName, PS, QS, W, I, B> {
   const wrapper = <AllParams extends boolean, T>(allParams: AllParams, func: (data: any, context: Context<AllParams, PS, QS>) => Promise<T>): (opts: Context<AllParams, PS, QS> & { data?: unknown }) => Promise<T> => {
@@ -168,18 +173,27 @@ export function createPrismaCrudHandlers<
           ...await options.whereUnique?.(context),
         },
       };
-      const prismaRead = await (globalPrismaClient[prismaModelName].findUnique as any)({
-        ...baseQuery,
-      });
-      if (prismaRead === null) {
-        return await prismaOrNullToCrud(null, context);
-      } else {
-        const prisma = await (globalPrismaClient[prismaModelName].update as any)({
+      // Snapshot and update must be the same row. A concurrent PATCH between
+      // findUnique and update would make API-key (and similar) audit
+      // before-values describe a state that was already overwritten.
+      const { prismaRead, prisma } = await retryTransaction(globalPrismaClient, async (tx) => {
+        const previous = await (tx[prismaModelName].findUnique as any)({
+          ...baseQuery,
+        });
+        if (previous === null) {
+          return { prismaRead: null, prisma: null };
+        }
+        const updated = await (tx[prismaModelName].update as any)({
           ...baseQuery,
           data: await crudToPrisma(data, { ...context, type: 'update' }),
         });
-        return await prismaOrNullToCrud(prisma, context);
+        return { prismaRead: previous, prisma: updated };
+      });
+      if (prismaRead === null || prisma === null) {
+        return await prismaOrNullToCrud(null, context);
       }
+      await options.onUpdate?.(prisma, context, { previous: prismaRead });
+      return await prismaOrNullToCrud(prisma, context);
     }),
     onDelete: wrapper(true, async (data, context) => {
       const baseQuery: any = {

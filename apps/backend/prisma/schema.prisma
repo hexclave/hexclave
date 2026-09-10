@@ -86,6 +86,7 @@ model Tenancy {
   workflowRuns WorkflowRun[]
   workflowEvents WorkflowEvent[]
   workflowScheduleCursors WorkflowScheduleCursor[]
+  auditLogEvents AuditLogEvent[]
 
   // Email capacity boost - when set and in the future, email capacity is multiplied by 4
   emailCapacityBoostExpiresAt DateTime?
@@ -1445,6 +1446,32 @@ model DataVaultEntry {
   @@id([tenancyId, id])
   @@unique([tenancyId, storeId, hashedKey])
   @@index([tenancyId, storeId])
+}
+
+// Append-only admin audit trail for the opt-in Audit Log app. Writes are gated
+// on apps.installed.audit-log.enabled in application code so uninstalling the
+// app stops new events without requiring a schema change.
+model AuditLogEvent {
+  tenancyId String  @db.Uuid
+  id        String  @default(uuid()) @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  action String
+
+  actorType   String
+  actorUserId String? @db.Uuid
+  actorLabel  String
+
+  // Null for project-scoped events (e.g. settings changes) that aren't about a user.
+  targetUserId String? @db.Uuid
+  reason       String?
+  metadata     Json?
+
+  @@id([tenancyId, id])
+  @@index([tenancyId, createdAt(sort: Desc)])
+  @@index([tenancyId, action, createdAt(sort: Desc)])
 }
 
 model CacheEntry {

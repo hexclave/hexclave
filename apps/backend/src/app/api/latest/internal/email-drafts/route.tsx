@@ -1,8 +1,9 @@
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { templateThemeIdSchema, yupArray, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { adaptSchema, templateThemeIdSchema, yupArray, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { deindent } from "@hexclave/shared/dist/utils/strings";
 import { templateThemeIdToThemeMode, themeModeToTemplateThemeId } from "@/lib/email-drafts";
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 
 
 export const GET = createSmartRouteHandler({
@@ -71,6 +72,7 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: yupString().oneOf(["admin"]).defined(),
       tenancy: yupObject({}).defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       display_name: yupString().defined(),
@@ -83,7 +85,8 @@ export const POST = createSmartRouteHandler({
     bodyType: yupString().oneOf(["json"]).defined(),
     body: yupObject({ id: yupString().uuid().defined() }).defined(),
   }),
-  async handler({ body, auth: { tenancy } }) {
+  async handler({ body, auth }) {
+    const { tenancy } = auth;
     const prisma = await getPrismaClientForTenancy(tenancy);
 
     const draft = await prisma.emailDraft.create({
@@ -94,6 +97,25 @@ export const POST = createSmartRouteHandler({
         themeId: body.theme_id === false ? undefined : body.theme_id,
         tsxSource: body.tsx_source ?? defaultDraftSource,
       },
+    });
+
+    // Dashboard-only via recordAuditEvent. Never persist TSX source.
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "email_drafts.create",
+      fields: {
+        draft_id: draft.id,
+        display_name: body.display_name,
+        theme_id: body.theme_id === false ? false : body.theme_id,
+      },
+    }) ?? {
+        source: "email_drafts.create",
+        draft_id: draft.id,
+      };
+    await recordAuditEvent({
+      tenancy,
+      auth,
+      action: "email.draft.created",
+      metadata,
     });
 
     return {

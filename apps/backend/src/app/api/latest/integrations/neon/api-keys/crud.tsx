@@ -1,3 +1,4 @@
+import { buildUpdatedFieldsAuditMetadata, recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { createCrudHandlers } from "@/route-handlers/crud-handler";
 import { CrudTypeOf, createCrud } from "@hexclave/shared/dist/crud";
 import { yupBoolean, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
@@ -77,11 +78,51 @@ export const apiKeyCrudHandlers = createLazyProxy(() => createCrudHandlers(apiKe
     api_key_id: yupString().defined(),
   }),
   onUpdate: async ({ auth, data, params }) => {
-    return await internalApiKeyCrudHandlers.adminUpdate({
+    const previous = await internalApiKeyCrudHandlers.adminRead({
+      tenancy: auth.tenancy,
+      api_key_id: params.api_key_id,
+    });
+    const updated = await internalApiKeyCrudHandlers.adminUpdate({
       data,
       tenancy: auth.tenancy,
       api_key_id: params.api_key_id,
     });
+    // Nested adminUpdate is programmatic (no dashboard audit). Record here
+    // with the originating HTTP auth so Neon dashboard key changes are traced.
+    if (shouldRecordAdminAudit(auth)) {
+      if (previous.manually_revoked_at_millis == null && updated.manually_revoked_at_millis != null) {
+        await recordAuditEvent({
+          tenancy: auth.tenancy,
+          auth,
+          action: "project_api_key.revoked",
+          metadata: {
+            source: "integrations.neon.api_keys.update",
+            api_key_id: updated.id,
+            description: updated.description,
+          },
+        });
+      }
+      if (previous.description !== updated.description) {
+        const metadata = buildUpdatedFieldsAuditMetadata({
+          source: "integrations.neon.api_keys.update",
+          patch: { description: updated.description },
+          beforeRoot: { description: previous.description },
+          afterRoot: { description: updated.description },
+        });
+        if (metadata != null) {
+          await recordAuditEvent({
+            tenancy: auth.tenancy,
+            auth,
+            action: "project_api_key.updated",
+            metadata: {
+              ...metadata,
+              api_key_id: updated.id,
+            },
+          });
+        }
+      }
+    }
+    return updated;
   },
   onDelete: async ({ auth, params }) => {
     return await internalApiKeyCrudHandlers.adminDelete({

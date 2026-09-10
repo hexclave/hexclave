@@ -97,11 +97,17 @@ type CreateBrowserActionOptions = {
   }
 );
 
-export async function createBrowserAction(options: CreateBrowserActionOptions): Promise<{ id: string, url: string, expiresAtMillis: number }> {
+export async function createBrowserAction(options: CreateBrowserActionOptions): Promise<{
+  id: string,
+  url: string,
+  expiresAtMillis: number,
+  refreshTokenId?: string,
+}> {
   const expiresInMillis = validateBrowserActionTtl(options.expiresInMillis);
   const origin = validateTrustedOrigin(options.tenancy, options.origin);
   const expiresAtMillis = Date.now() + expiresInMillis;
   let data: BrowserActionData;
+  let refreshTokenId: string | undefined;
 
   if (options.type === "impersonation") {
     const sessionExpiresInMillis = options.sessionExpiresInMillis ?? DEFAULT_IMPERSONATION_SESSION_TTL_MS;
@@ -114,16 +120,17 @@ export async function createBrowserAction(options: CreateBrowserActionOptions): 
       tenancy: options.tenancy,
       allowedErrorTypes: [KnownErrors.UserNotFound],
     });
-    const { refreshToken } = await createImpersonationAuthTokens({
+    const tokens = await createImpersonationAuthTokens({
       tenancy: options.tenancy,
       projectUserId: user.id,
       expiresInMillis: sessionExpiresInMillis,
       apiUrl: options.apiUrl,
     });
+    refreshTokenId = tokens.refreshTokenId;
     data = {
       type: "impersonation",
       origin,
-      refresh_token: refreshToken,
+      refresh_token: tokens.refreshToken,
       expires_at_millis: Date.now() + sessionExpiresInMillis,
     };
   } else {
@@ -159,6 +166,7 @@ export async function createBrowserAction(options: CreateBrowserActionOptions): 
     id: code.code,
     url: actionUrl.toString(),
     expiresAtMillis,
+    refreshTokenId,
   };
 }
 

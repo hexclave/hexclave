@@ -449,7 +449,11 @@ export async function createAuthTokens(options: CreateAuthTokensOptions) {
     apiUrl: options.apiUrl,
   }) ?? throwErr("Newly generated refresh token is not valid; this should never happen!", { refreshTokenObj });
 
-  return { refreshToken: refreshTokenObj.refreshToken, accessToken };
+  return {
+    refreshTokenId: refreshTokenObj.id,
+    refreshToken: refreshTokenObj.refreshToken,
+    accessToken,
+  };
 }
 
 export async function createImpersonationAuthTokens(options: {

@@ -6,10 +6,12 @@ import {
   DesignCard,
   DesignInput,
 } from "@/components/design-components";
+import { AuditLogTable, type AuditLogEvent } from "@/components/data-table/audit-log-table";
 import { Skeleton, Typography } from "@/components/ui";
 import { Card, CardContent } from "@/components/ui/card";
 import { hexclaveAppInternalsSymbol } from "@/lib/hexclave-app-internals";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import {
   ArrowLeftIcon,
@@ -33,7 +35,18 @@ import {
 import { ChartCard } from "../(overview)/line-chart";
 import { AppEnabledGuard } from "../app-enabled-guard";
 import { PageLayout } from "../page-layout";
-import { useAdminApp } from "../use-admin-app";
+import { useAdminApp, useProjectId } from "../use-admin-app";
+
+type ComplianceTab = "overview" | "events" | "access" | "restricted" | "posture" | "admin-audit";
+
+const COMPLIANCE_TABS = [
+  ["overview", "Overview"],
+  ["events", "Sign-in & denials"],
+  ["access", "Access review"],
+  ["restricted", "Restricted users"],
+  ["posture", "Security posture"],
+  ["admin-audit", "Admin audit"],
+] as const;
 
 type SecurityEvent = {
   event_at: string,
@@ -181,7 +194,7 @@ function downloadEvidence(data: ComplianceData): void {
 export default function PageClient() {
   return (
     <AppEnabledGuard appId="compliance">
-      <PageLayout title="Compliance Center" description="Review access, denials, and compliance posture">
+      <PageLayout title="Compliance Center" description="Review access, denials, admin actions, and compliance posture">
         <ComplianceContent />
       </PageLayout>
     </AppEnabledGuard>
@@ -192,12 +205,17 @@ function ComplianceContent() {
   const app = useAdminApp();
   const internals = useMemo(() => getAppInternals(app), [app]);
   const range = useMemo(defaultRange, []);
+  const [tab, setTab] = useState<ComplianceTab>("overview");
   const [from, setFrom] = useState(range.from);
   const [to, setTo] = useState(range.to);
   const [reloadKey, setReloadKey] = useState(0);
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const showDateRange = tab !== "admin-audit";
 
   useEffect(() => {
+    if (tab === "admin-audit") {
+      return;
+    }
     if (!isValidDateInput(from) || !isValidDateInput(to) || from > to) {
       setState({
         status: "invalid",
@@ -233,20 +251,167 @@ function ComplianceContent() {
     return () => {
       cancelled = true;
     };
-  }, [from, internals, reloadKey, to]);
+  }, [from, internals, reloadKey, tab, to]);
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-        <div className="flex flex-wrap items-end gap-3">
-          <DateField label="From" value={from} onChange={setFrom} />
-          <DateField label="To" value={to} onChange={setTo} />
-        </div>
+      <div role="tablist" aria-label="Compliance sections" className="flex flex-wrap gap-1 border-b border-border/50">
+        {COMPLIANCE_TABS.map(([id, label]) => (
+          <button
+            key={id}
+            id={`tab-${id}`}
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls={`panel-${id}`}
+            type="button"
+            className={`px-3 py-2 text-sm transition-colors hover:transition-none ${tab === id ? "border-b-2 border-foreground font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            onClick={() => setTab(id)}
+          >
+            {label}
+          </button>
+        ))}
       </div>
-      {state.status === "loading" && <ComplianceLoading />}
-      {state.status === "invalid" && <Card><CardContent className="py-8 text-center"><Typography variant="secondary">{state.message}</Typography></CardContent></Card>}
-      {state.status === "error" && <Card><CardContent className="flex flex-col items-center gap-3 py-10 text-center"><Typography variant="secondary">Could not load compliance data. Please try again.</Typography><DesignButton size="sm" variant="secondary" onClick={() => setReloadKey(value => value + 1)}>Retry</DesignButton></CardContent></Card>}
-      {state.status === "ok" && <ComplianceDashboard data={state.data} onExport={() => downloadEvidence(state.data)} />}
+      {showDateRange ? (
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+          <div className="flex flex-wrap items-end gap-3">
+            <DateField label="From" value={from} onChange={setFrom} />
+            <DateField label="To" value={to} onChange={setTo} />
+          </div>
+        </div>
+      ) : null}
+      {tab === "admin-audit" ? (
+        <div id="panel-admin-audit" role="tabpanel" aria-labelledby="tab-admin-audit">
+          <AdminAuditPanel internals={internals} />
+        </div>
+      ) : (
+        <>
+          {state.status === "loading" && <ComplianceLoading />}
+          {state.status === "invalid" && <Card><CardContent className="py-8 text-center"><Typography variant="secondary">{state.message}</Typography></CardContent></Card>}
+          {state.status === "error" && <Card><CardContent className="flex flex-col items-center gap-3 py-10 text-center"><Typography variant="secondary">Could not load compliance data. Please try again.</Typography><DesignButton size="sm" variant="secondary" onClick={() => setReloadKey(value => value + 1)}>Retry</DesignButton></CardContent></Card>}
+          {state.status === "ok" && (
+            <ComplianceDashboard
+              tab={tab}
+              data={state.data}
+              onExport={() => downloadEvidence(state.data)}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+type AdminAuditLoadState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ok", events: AuditLogEvent[], nextCursor: string | null, loadingMore: boolean };
+
+const AUDIT_LOG_PAGE_SIZE = 200;
+
+function AdminAuditPanel({ internals }: { internals: AppInternals }) {
+  const projectId = useProjectId();
+  const [state, setState] = useState<AdminAuditLoadState>({ status: "loading" });
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    runAsynchronously(async () => {
+      setState({ status: "loading" });
+      try {
+        const response = await internals.sendRequest(
+          urlString`/internal/audit-log?limit=${AUDIT_LOG_PAGE_SIZE}`,
+          { method: "GET" },
+          "admin",
+        );
+        if (!response.ok) {
+          throw new Error(`Failed to load admin audit log: ${response.status}`);
+        }
+        const body = await response.json() as {
+          items: AuditLogEvent[],
+          pagination?: { next_cursor: string | null },
+        };
+        if (!cancelled) {
+          setState({
+            status: "ok",
+            events: body.items,
+            nextCursor: body.pagination?.next_cursor ?? null,
+            loadingMore: false,
+          });
+        }
+      } catch (error) {
+        if (cancelled) return;
+        captureError("compliance-admin-audit-load", error);
+        setState({ status: "error" });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [internals, reloadKey]);
+
+  async function loadMore() {
+    if (state.status !== "ok" || state.nextCursor == null || state.loadingMore) {
+      return;
+    }
+    setState({ ...state, loadingMore: true });
+    try {
+      const response = await internals.sendRequest(
+        urlString`/internal/audit-log?limit=${AUDIT_LOG_PAGE_SIZE}&cursor=${state.nextCursor}`,
+        { method: "GET" },
+        "admin",
+      );
+      if (!response.ok) {
+        throw new Error(`Failed to load more admin audit log: ${response.status}`);
+      }
+      const body = await response.json() as {
+        items: AuditLogEvent[],
+        pagination?: { next_cursor: string | null },
+      };
+      setState({
+        status: "ok",
+        events: [...state.events, ...body.items],
+        nextCursor: body.pagination?.next_cursor ?? null,
+        loadingMore: false,
+      });
+    } catch (error) {
+      captureError("compliance-admin-audit-load-more", error);
+      setState({ ...state, loadingMore: false });
+    }
+  }
+
+  if (state.status === "error") {
+    return (
+      <Card>
+        <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+          <Typography variant="secondary">Could not load the admin audit log. Please try again.</Typography>
+          <DesignButton size="sm" variant="secondary" onClick={() => setReloadKey(value => value + 1)}>Retry</DesignButton>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <Typography variant="secondary" className="text-sm">
+        Timeline of sensitive admin actions such as impersonation and project settings changes.
+      </Typography>
+      <AuditLogTable
+        events={state.status === "ok" ? state.events : []}
+        projectId={projectId}
+        isLoading={state.status === "loading"}
+      />
+      {state.status === "ok" && state.nextCursor != null && (
+        <div className="flex justify-center">
+          <DesignButton
+            size="sm"
+            variant="secondary"
+            disabled={state.loadingMore}
+            onClick={async () => { await loadMore(); }}
+          >
+            {state.loadingMore ? "Loading…" : "Load more"}
+          </DesignButton>
+        </div>
+      )}
     </div>
   );
 }
@@ -255,17 +420,20 @@ function ComplianceLoading() {
   return <div className="flex flex-col gap-4"><div className="grid grid-cols-2 gap-3 sm:grid-cols-5">{Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-20 rounded-xl" />)}</div><Skeleton className="h-72 rounded-xl" /><Skeleton className="h-96 rounded-xl" /></div>;
 }
 
-function ComplianceDashboard({ data, onExport }: { data: ComplianceData, onExport: () => void }) {
-  const [tab, setTab] = useState<"overview" | "events" | "access" | "restricted" | "posture">("overview");
+function ComplianceDashboard({
+  tab,
+  data,
+  onExport,
+}: {
+  tab: Exclude<ComplianceTab, "admin-audit">,
+  data: ComplianceData,
+  onExport: () => void,
+}) {
   const controlsEnabled = data.posture.controls.filter(control => control.enabled).length;
-  const summary = data.securityEvents.summary;
   return (
     <div className="flex flex-col gap-4">
       <div className="flex justify-end"><DesignButton size="sm" variant="secondary" onClick={async () => onExport()}><DownloadSimpleIcon className="h-4 w-4" />Export compliance data</DesignButton></div>
       {data.securityEvents.capped && <div role="alert" className="rounded-md border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-sm text-orange-700 dark:text-orange-300">The security event detail list is truncated to 5000 rows; summaries cover the full selected range.</div>}
-      <div role="tablist" aria-label="Compliance sections" className="flex flex-wrap gap-1 border-b border-border/50">
-        {([["overview", "Overview"], ["events", "Sign-in & denials"], ["access", "Access review"], ["restricted", "Restricted users"], ["posture", "Security posture"]] as const).map(([id, label]) => <button key={id} id={`tab-${id}`} role="tab" aria-selected={tab === id} aria-controls={`panel-${id}`} type="button" className={`px-3 py-2 text-sm transition-colors hover:transition-none ${tab === id ? "border-b-2 border-foreground font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`} onClick={() => setTab(id)}>{label}</button>)}
-      </div>
       {tab === "overview" && <div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview"><Overview data={data} controlsEnabled={controlsEnabled} /></div>}
       {tab === "events" && <div id="panel-events" role="tabpanel" aria-labelledby="tab-events"><Events data={data.securityEvents} /></div>}
       {tab === "access" && <div id="panel-access" role="tabpanel" aria-labelledby="tab-access"><AccessReview data={data.accessReview} /></div>}

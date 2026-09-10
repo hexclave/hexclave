@@ -286,6 +286,9 @@ export async function updatePermissionDefinition(
   if (!existingPermission) {
     throw new KnownErrors.PermissionNotFound(options.oldId);
   }
+  if (existingPermission.scope !== options.scope) {
+    throw new KnownErrors.PermissionScopeMismatch(options.oldId, options.scope, existingPermission.scope ?? null);
+  }
 
   // check if the target new id already exists
   if (newId !== options.oldId && oldConfig.rbac.permissions[newId] as any !== undefined) {

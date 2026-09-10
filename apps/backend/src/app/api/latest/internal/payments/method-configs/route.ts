@@ -1,3 +1,4 @@
+import { buildUpdatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { isPreviewModeEnabled } from "@/lib/preview-mode";
 import { getHexclaveStripe } from "@/lib/stripe";
 import { globalPrismaClient } from "@/prisma-client";
@@ -11,6 +12,22 @@ import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 const METADATA_FIELDS = new Set([
   'id', 'object', 'active', 'application', 'is_default', 'livemode', 'name', 'parent'
 ]);
+
+function paymentMethodAuditFields(config: object, methodIds: string[]): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  const configRecord = config as Record<string, unknown>;
+  for (const methodId of methodIds) {
+    const method = configRecord[methodId];
+    if (method == null || typeof method !== "object" || Array.isArray(method) || !("display_preference" in method)) {
+      continue;
+    }
+    const preference = (method as { display_preference?: { preference?: string, value?: string, overridable?: boolean } }).display_preference;
+    fields[`methods.${methodId}.preference`] = preference?.preference ?? null;
+    fields[`methods.${methodId}.effective`] = preference?.value ?? null;
+    fields[`methods.${methodId}.overridable`] = preference?.overridable ?? null;
+  }
+  return fields;
+}
 
 export const GET = createSmartRouteHandler({
   metadata: {
@@ -117,6 +134,7 @@ export const PATCH = createSmartRouteHandler({
       type: adminAuthTypeSchema.defined(),
       project: adaptSchema.defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       config_id: yupString().defined(),
@@ -156,11 +174,43 @@ export const PATCH = createSmartRouteHandler({
     }
 
     const stripe = getHexclaveStripe();
-    await stripe.paymentMethodConfigurations.update(
+    const beforeConfig = await stripe.paymentMethodConfigurations.retrieve(
+      body.config_id,
+      {},
+      { stripeAccount: project.stripeAccountId },
+    );
+    const afterConfig = await stripe.paymentMethodConfigurations.update(
       body.config_id,
       stripeUpdates,
       { stripeAccount: project.stripeAccountId }
     );
+
+    // Stripe PMC toggles are not Hexclave config — dedicated Compliance event.
+    // Record requested preference plus Stripe's effective display_preference.value
+    // (they diverge when the method is not overridable).
+    const methodIds = Object.keys(body.updates);
+    const beforeRoot = paymentMethodAuditFields(beforeConfig, methodIds);
+    const afterRoot = paymentMethodAuditFields(afterConfig, methodIds);
+    for (const [methodId, preference] of Object.entries(body.updates)) {
+      afterRoot[`methods.${methodId}.preference`] ??= preference;
+    }
+    const metadata = buildUpdatedFieldsAuditMetadata({
+      source: "payments.method_configs.update",
+      patch: afterRoot,
+      beforeRoot,
+      afterRoot,
+    }) ?? {
+        source: "payments.method_configs.update",
+      };
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "payment.method_config.updated",
+      metadata: {
+        ...metadata,
+        config_id: body.config_id,
+      },
+    });
 
     return {
       statusCode: 200,

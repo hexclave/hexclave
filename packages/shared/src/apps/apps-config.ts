@@ -218,7 +218,7 @@ export const ALL_APPS = {
   },
   "compliance": {
     displayName: "Compliance Center",
-    subtitle: "Review access, denials, and compliance posture",
+    subtitle: "Review access, denials, admin actions, and compliance posture",
     tags: ["auth", "security", "operations"],
     stage: "alpha",
     softRequirements: ["authentication", "analytics"],

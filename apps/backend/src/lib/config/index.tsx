@@ -432,17 +432,49 @@ export async function setBranchConfigOverrideSource(options: {
 
 /**
  * Unlinks the branch config source, setting it to "unlinked".
- * This is a convenience function that calls setBranchConfigOverrideSource with { type: "unlinked" }.
+ * Compare-and-set so concurrent DELETEs only one of them records the transition.
  */
 export async function unlinkBranchConfigOverrideSource(options: {
   projectId: string,
   branchId: string,
-}): Promise<void> {
-  await setBranchConfigOverrideSource({
-    projectId: options.projectId,
-    branchId: options.branchId,
-    source: { type: "unlinked" },
-  });
+}): Promise<{ didUnlink: boolean, beforeSource: BranchConfigSourceApi }> {
+  return await retryTransaction(globalPrismaClient, async (tx) => {
+    const result = await tx.branchConfigOverride.findUnique({
+      where: {
+        projectId_branchId: {
+          projectId: options.projectId,
+          branchId: options.branchId,
+        },
+      },
+      select: {
+        source: true,
+      },
+    });
+    const beforeSource = (!result?.source)
+      ? { type: "unlinked" as const }
+      : result.source as BranchConfigSourceApi;
+    if (beforeSource.type === "unlinked") {
+      return { didUnlink: false, beforeSource };
+    }
+    await tx.branchConfigOverride.upsert({
+      where: {
+        projectId_branchId: {
+          projectId: options.projectId,
+          branchId: options.branchId,
+        },
+      },
+      update: {
+        source: { type: "unlinked" } as any,
+      },
+      create: {
+        projectId: options.projectId,
+        branchId: options.branchId,
+        config: {},
+        source: { type: "unlinked" } as any,
+      },
+    });
+    return { didUnlink: true, beforeSource };
+  }, { level: "serializable" });
 }
 
 export type GithubConfigSource = Extract<BranchConfigSourceApi, { type: "pushed-from-github" }>;

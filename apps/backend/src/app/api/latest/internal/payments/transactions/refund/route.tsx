@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Prisma } from "@/generated/prisma/client";
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { fetchBulldozerServerJson } from "@/lib/bulldozer-server-client";
 import { bulldozerWriteOneTimePurchase, bulldozerWriteSubscription, persistRefundManualTransaction } from "@/lib/payments/bulldozer-dual-write";
 import { ensureFreePlanForBillingTeam } from "@/lib/payments/ensure-free-plan";
@@ -330,6 +331,7 @@ export const POST = createSmartRouteHandler({
       type: adminAuthTypeSchema.defined(),
       project: adaptSchema.defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       type: yupString().oneOf(["subscription", "one-time-purchase"]).defined(),
@@ -372,39 +374,74 @@ export const POST = createSmartRouteHandler({
       throw new KnownErrors.SchemaError("Refund amount cannot be negative.");
     }
 
-    if (body.type === "one-time-purchase") {
-      if (body.invoice_id !== undefined) {
-        throw new KnownErrors.SchemaError("invoice_id is not applicable to one-time purchases.");
-      }
-      if (endAction === "at-period-end") {
-        throw new KnownErrors.SchemaError("end_action='at-period-end' is only valid for subscriptions; one-time purchases have no period.");
-      }
-      if (amountStripeUnits === 0 && endAction === undefined) {
-        throw new KnownErrors.SchemaError("Refund must do something: specify a non-zero amount or set end_action='now'.");
-      }
-      return await handleOneTimePurchaseRefund({
-        prisma,
-        tenancy: auth.tenancy,
-        purchaseId: body.id,
-        amountUsd,
-        amountStripeUnits,
-        endNow: endAction === "now",
-      });
-    }
+    const result = body.type === "one-time-purchase"
+      ? await (async () => {
+        if (body.invoice_id !== undefined) {
+          throw new KnownErrors.SchemaError("invoice_id is not applicable to one-time purchases.");
+        }
+        if (endAction === "at-period-end") {
+          throw new KnownErrors.SchemaError("end_action='at-period-end' is only valid for subscriptions; one-time purchases have no period.");
+        }
+        if (amountStripeUnits === 0 && endAction === undefined) {
+          throw new KnownErrors.SchemaError("Refund must do something: specify a non-zero amount or set end_action='now'.");
+        }
+        return await handleOneTimePurchaseRefund({
+          prisma,
+          tenancy: auth.tenancy,
+          purchaseId: body.id,
+          amountUsd,
+          amountStripeUnits,
+          endNow: endAction === "now",
+        });
+      })()
+      : await (async () => {
+        // subscription path
+        if (amountStripeUnits === 0 && endAction === undefined) {
+          throw new KnownErrors.SchemaError("Refund must do something: specify a non-zero amount or set end_action.");
+        }
+        return await handleSubscriptionRefund({
+          prisma,
+          tenancy: auth.tenancy,
+          subscriptionId: body.id,
+          invoiceId: body.invoice_id,
+          amountUsd,
+          amountStripeUnits,
+          endAction,
+        });
+      })();
 
-    // subscription path
-    if (amountStripeUnits === 0 && endAction === undefined) {
-      throw new KnownErrors.SchemaError("Refund must do something: specify a non-zero amount or set end_action.");
-    }
-    return await handleSubscriptionRefund({
-      prisma,
+    // Dashboard-only via recordAuditEvent. Never persist Stripe payment-intent IDs.
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "payments.transactions.refund",
+      fields: {
+        purchase_type: body.type,
+        purchase_id: body.id,
+        amount_usd: amountUsd,
+        refund_transaction_id: result.body.refund_transaction_id,
+        ...(body.invoice_id != null ? { invoice_id: body.invoice_id } : {}),
+        ...(endAction != null ? { end_action: endAction } : {}),
+        customer_type: result.audit.customerType,
+        customer_id: result.audit.customerId,
+      },
+    }) ?? {
+        source: "payments.transactions.refund",
+        purchase_type: body.type,
+        purchase_id: body.id,
+        refund_transaction_id: result.body.refund_transaction_id,
+      };
+    await recordAuditEvent({
       tenancy: auth.tenancy,
-      subscriptionId: body.id,
-      invoiceId: body.invoice_id,
-      amountUsd,
-      amountStripeUnits,
-      endAction,
+      auth,
+      action: "payment.refund.created",
+      targetUserId: result.audit.customerType === "user" ? result.audit.customerId : null,
+      metadata,
     });
+
+    return {
+      statusCode: result.statusCode,
+      bodyType: result.bodyType,
+      body: result.body,
+    };
   },
 });
 
@@ -832,6 +869,10 @@ async function handleSubscriptionRefund(options: {
     statusCode: 200 as const,
     bodyType: "json" as const,
     body: { success: true, refund_transaction_id: refundTxnId },
+    audit: {
+      customerType,
+      customerId: subscription.customerId,
+    },
   };
 }
 
@@ -1002,6 +1043,10 @@ async function handleOneTimePurchaseRefund(options: {
     statusCode: 200 as const,
     bodyType: "json" as const,
     body: { success: true, refund_transaction_id: refundTxnId },
+    audit: {
+      customerType,
+      customerId: purchase.customerId,
+    },
   };
 }
 

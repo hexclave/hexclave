@@ -7610,6 +7610,12 @@
                   },
                   "is_impersonation": {
                     "type": "boolean"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [

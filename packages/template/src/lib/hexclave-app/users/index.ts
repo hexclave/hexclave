@@ -415,7 +415,7 @@ export type ServerBaseUser = {
   /**
    * Creates a new session object with a refresh token for this user. Can be used to impersonate them.
    */
-  createSession(options?: { expiresInMillis?: number, isImpersonation?: boolean }): Promise<{
+  createSession(options?: { expiresInMillis?: number, isImpersonation?: boolean, reason?: string | null }): Promise<{
     getTokens(): Promise<{ accessToken: string | null, refreshToken: string | null }>,
   }>,
 }

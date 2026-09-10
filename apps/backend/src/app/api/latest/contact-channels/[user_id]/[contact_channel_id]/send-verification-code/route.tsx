@@ -1,4 +1,5 @@
 import { usersCrudHandlers } from "@/app/api/latest/users/crud";
+import { recordAuditEvent, shouldRecordAdminAudit } from "@/lib/audit-log";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared";
@@ -21,6 +22,7 @@ export const POST = createSmartRouteHandler({
       type: clientOrHigherAuthTypeSchema,
       tenancy: adaptSchema.defined(),
       user: adaptSchema.optional(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       callback_url: emailVerificationCallbackUrlSchema.defined(),
@@ -89,6 +91,20 @@ export const POST = createSmartRouteHandler({
       user,
       shouldSkipDeliverabilityCheck: true,
     });
+
+    if (shouldRecordAdminAudit(auth)) {
+      await recordAuditEvent({
+        tenancy: auth.tenancy,
+        auth,
+        action: "contact_channel.verification.sent",
+        targetUserId: user.id,
+        metadata: {
+          source: "contact_channels.send_verification_code",
+          contact_channel_id: contactChannel.id,
+          type: "email",
+        },
+      });
+    }
 
     return {
       statusCode: 200,

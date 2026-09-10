@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { setupManagedEmailProvider } from "@/lib/managed-email-onboarding";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, adminAuthTypeSchema, yupArray, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
@@ -10,6 +11,7 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: adminAuthTypeSchema.defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       subdomain: yupString().defined(),
@@ -33,6 +35,26 @@ export const POST = createSmartRouteHandler({
       subdomain: body.subdomain,
       senderLocalPart: body.sender_local_part,
       tenancy: auth.tenancy,
+    });
+
+    // Dashboard-only via recordAuditEvent. Never persist provider secrets.
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "emails.managed_onboarding.setup",
+      fields: {
+        domain_id: setupResult.domainId,
+        subdomain: setupResult.subdomain,
+        sender_local_part: setupResult.senderLocalPart,
+        status: setupResult.status,
+      },
+    }) ?? {
+        source: "emails.managed_onboarding.setup",
+        domain_id: setupResult.domainId,
+      };
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "email.managed_domain.setup_started",
+      metadata,
     });
 
     return {

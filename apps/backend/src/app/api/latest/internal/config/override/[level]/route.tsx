@@ -12,15 +12,45 @@ import {
   validateBranchConfigOverride,
   validateEnvironmentConfigOverride,
 } from "@/lib/config";
+import { buildProjectSettingsAuditMetadata, collectConfigPaths, recordAuditEvent, type AuditActorSource } from "@/lib/audit-log";
 import { assertConfigOverrideWriteAllowed } from "@/lib/development-environment";
 import { enqueueExternalDbSync } from "@/lib/external-db-sync-queue";
 import { globalPrismaClient, rawQuery } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
+import type { Tenancy } from "@/lib/tenancies";
 import { branchConfigSchema, environmentConfigSchema, getConfigOverrideErrors, migrateConfigOverride, projectConfigSchema } from "@hexclave/shared/dist/config/schema";
 import { adaptSchema, branchConfigSourceSchema, serverOrHigherAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
 import * as yup from "yup";
 type BranchConfigSourceApi = yup.InferType<typeof branchConfigSourceSchema>;
+
+async function recordProjectSettingsConfigAudit(options: {
+  tenancy: Tenancy,
+  auth: AuditActorSource,
+  level: "project" | "branch" | "environment",
+  writeMode: "merge" | "replace",
+  config: unknown,
+  beforeConfig: unknown,
+  source: "config.override.patch" | "config.override.put",
+}) {
+  const metadata = buildProjectSettingsAuditMetadata({
+    source: options.source,
+    writeMode: options.writeMode,
+    level: options.level,
+    changedPaths: options.writeMode === "replace"
+      ? [...new Set([...collectConfigPaths(options.beforeConfig), ...collectConfigPaths(options.config)])]
+      : collectConfigPaths(options.config),
+    beforeRoot: options.beforeConfig,
+    afterRoot: options.config,
+  });
+  if (metadata == null) return;
+  await recordAuditEvent({
+    tenancy: options.tenancy,
+    auth: options.auth,
+    action: "project_settings.updated",
+    metadata,
+  });
+}
 
 const levelSchema = yupString().oneOf(["project", "branch", "environment"]).defined();
 
@@ -256,6 +286,7 @@ export const PUT = createSmartRouteHandler({
     auth: yupObject({
       type: serverOrHigherAuthTypeSchema,
       tenancy: adaptSchema,
+      adminUser: adaptSchema,
     }).defined(),
     params: yupObject({
       level: levelSchema,
@@ -279,6 +310,11 @@ export const PUT = createSmartRouteHandler({
       throw new StatusError(StatusError.BadRequest, 'source is required for branch level config');
     }
 
+    const beforeConfig = await levelConfig.get({
+      projectId: req.auth.tenancy.project.id,
+      branchId: req.auth.tenancy.branchId,
+    });
+
     await levelConfig.set({
       projectId: req.auth.tenancy.project.id,
       branchId: req.auth.tenancy.branchId,
@@ -295,6 +331,16 @@ export const PUT = createSmartRouteHandler({
     if (req.params.level === "environment" && shouldEnqueueExternalDbSync(parsedConfig)) {
       await enqueueExternalDbSync(req.auth.tenancy.id);
     }
+
+    await recordProjectSettingsConfigAudit({
+      tenancy: req.auth.tenancy,
+      auth: req.auth,
+      level: req.params.level,
+      writeMode: "replace",
+      config: parsedConfig,
+      beforeConfig,
+      source: "config.override.put",
+    });
 
     return {
       statusCode: 200 as const,
@@ -314,6 +360,7 @@ export const PATCH = createSmartRouteHandler({
     auth: yupObject({
       type: serverOrHigherAuthTypeSchema,
       tenancy: adaptSchema,
+      adminUser: adaptSchema,
     }).defined(),
     params: yupObject({
       level: levelSchema,
@@ -330,6 +377,11 @@ export const PATCH = createSmartRouteHandler({
     const levelConfig = levelConfigs[req.params.level];
     const parsedConfig = await parseAndValidateConfig(req.body.config_override_string, levelConfig);
 
+    const beforeConfig = await levelConfig.get({
+      projectId: req.auth.tenancy.project.id,
+      branchId: req.auth.tenancy.branchId,
+    });
+
     const newConfig = await levelConfig.override({
       projectId: req.auth.tenancy.project.id,
       branchId: req.auth.tenancy.branchId,
@@ -345,6 +397,18 @@ export const PATCH = createSmartRouteHandler({
     if (req.params.level === "environment" && shouldEnqueueExternalDbSync(parsedConfig)) {
       await enqueueExternalDbSync(req.auth.tenancy.id);
     }
+
+    // Audit the patch keys (not the full merged config) so metadata reflects
+    // what this request changed. Non-sensitive leaf values get before/after.
+    await recordProjectSettingsConfigAudit({
+      tenancy: req.auth.tenancy,
+      auth: req.auth,
+      level: req.params.level,
+      writeMode: "merge",
+      config: parsedConfig,
+      beforeConfig,
+      source: "config.override.patch",
+    });
 
     return {
       statusCode: 200 as const,

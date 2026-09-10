@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { overrideEnvironmentConfigOverride } from "@/lib/config";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { defaultNewTemplateSource } from "@hexclave/shared/dist/helpers/emails";
@@ -53,6 +54,7 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: yupString().oneOf(["admin"]).defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       display_name: yupString().defined(),
@@ -65,7 +67,8 @@ export const POST = createSmartRouteHandler({
       id: yupString().defined(),
     }).defined(),
   }),
-  async handler({ body, auth: { tenancy } }) {
+  async handler({ body, auth }) {
+    const { tenancy } = auth;
     if (tenancy.config.emails.server.isShared) {
       throw new KnownErrors.RequiresCustomEmailServer();
     }
@@ -83,6 +86,25 @@ export const POST = createSmartRouteHandler({
         },
       },
     });
+
+    // Dashboard-only via recordAuditEvent. Never persist TSX source.
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "email_templates.create",
+      fields: {
+        template_id: id,
+        display_name: body.display_name,
+      },
+    }) ?? {
+        source: "email_templates.create",
+        template_id: id,
+      };
+    await recordAuditEvent({
+      tenancy,
+      auth,
+      action: "email.template.created",
+      metadata,
+    });
+
     return {
       statusCode: 200,
       bodyType: "json",

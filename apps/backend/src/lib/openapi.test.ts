@@ -10,6 +10,7 @@ describe("parseWebhookOpenAPI", () => {
         schema: yupObject({
           display_name: yupString().nullable().defined(),
           status: yupString().oneOf(["active"]).nullable().defined(),
+          reason: yupString().max(500).nullable().optional(),
           restricted_reason: yupObject({
             type: yupString().defined(),
           }).nullable().defined(),
@@ -39,6 +40,9 @@ describe("parseWebhookOpenAPI", () => {
                           },
                           status: {
                             enum: ["active", null],
+                            type: ["string", "null"],
+                          },
+                          reason: {
                             type: ["string", "null"],
                           },
                           restricted_reason: {

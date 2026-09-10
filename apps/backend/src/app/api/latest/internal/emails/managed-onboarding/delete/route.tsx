@@ -1,3 +1,4 @@
+import { buildCreatedFieldsAuditMetadata, recordAuditEvent } from "@/lib/audit-log";
 import { deleteManagedEmailProvider } from "@/lib/managed-email-onboarding";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, adminAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
@@ -10,6 +11,7 @@ export const POST = createSmartRouteHandler({
     auth: yupObject({
       type: adminAuthTypeSchema.defined(),
       tenancy: adaptSchema.defined(),
+      adminUser: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
       resend_domain_id: yupString().defined(),
@@ -27,6 +29,22 @@ export const POST = createSmartRouteHandler({
     const result = await deleteManagedEmailProvider({
       tenancy: auth.tenancy,
       resendDomainId: body.resend_domain_id,
+    });
+
+    const metadata = buildCreatedFieldsAuditMetadata({
+      source: "emails.managed_onboarding.delete",
+      fields: {
+        domain_id: body.resend_domain_id,
+      },
+    }) ?? {
+        source: "emails.managed_onboarding.delete",
+        domain_id: body.resend_domain_id,
+      };
+    await recordAuditEvent({
+      tenancy: auth.tenancy,
+      auth,
+      action: "email.managed_domain.deleted",
+      metadata,
     });
 
     return {

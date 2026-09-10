@@ -662,9 +662,14 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
         await app._refreshUsers();
         return res;
       },
-      async createSession(options: { expiresInMillis?: number, isImpersonation?: boolean }) {
+      async createSession(options: { expiresInMillis?: number, isImpersonation?: boolean, reason?: string | null }) {
         // TODO this should also refresh the access token when it expires (like InternalSession)
-        const tokens = await app._interface.createServerUserSession(crud.id, options.expiresInMillis ?? 1000 * 60 * 60 * 24 * 365, options.isImpersonation ?? false);
+        const tokens = await app._interface.createServerUserSession(
+          crud.id,
+          options.expiresInMillis ?? 1000 * 60 * 60 * 24 * 365,
+          options.isImpersonation ?? false,
+          options.reason,
+        );
         return {
           async getTokens() {
             return tokens;

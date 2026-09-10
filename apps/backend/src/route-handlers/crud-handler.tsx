@@ -276,6 +276,9 @@ export function createCrudHandlers<
                         branchId: branchId,
                         tenancy: tenancy,
                         type: accessType,
+                        // Synthetic auth for internal callers — must not look like
+                        // a dashboard/admin HTTP request for audit logging.
+                        isProgrammaticInvocation: true,
                       },
                     });
                   });

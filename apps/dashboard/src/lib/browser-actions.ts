@@ -40,6 +40,7 @@ export async function createBrowserAction(
     userId?: string,
     expiresInMillis?: number,
     sessionExpiresInMillis?: number,
+    reason?: string,
   },
 ): Promise<BrowserActionResponse> {
   const response = await sendInternalAdminRequest(adminApp, "/browser-actions", {
@@ -53,6 +54,7 @@ export async function createBrowserAction(
       expires_in_millis: options.expiresInMillis,
       session_expires_in_millis: options.sessionExpiresInMillis,
       user_id: options.userId,
+      reason: options.reason,
     }),
   });
   if (!response.ok) {
