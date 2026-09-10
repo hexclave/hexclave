@@ -7,6 +7,7 @@ After=hexclave-tv-box-firstboot.service
 
 [Service]
 Type=oneshot
+ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g hexclave-tv-relay /var/lib/hexclave-tv-box/relay
 ExecStart=/usr/bin/python3 -m hexclave_tv_box.relay --initialize
 Environment=PYTHONDONTWRITEBYTECODE=1
 RemainAfterExit=yes
@@ -24,7 +25,7 @@ RestrictAddressFamilies=AF_UNIX
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ReadWritePaths=/var/lib/hexclave-tv-box
+ReadWritePaths=/var/lib/hexclave-tv-box/relay
 
 [Install]
 WantedBy=multi-user.target

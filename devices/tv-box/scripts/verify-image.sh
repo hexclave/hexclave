@@ -24,7 +24,7 @@ mkdir -p "$output"
 required='usr/lib/hexclave-tv-box/kiosk-launch usr/lib/hexclave-tv-box/relay-enroll usr/lib/hexclave-tv-box/factory-reset-job usr/lib/python3/dist-packages/hexclave_tv_box/relay.py usr/lib/python3/dist-packages/hexclave_tv_box/relay_metrics.py usr/lib/python3/dist-packages/hexclave_tv_box/kiosk_supervisor.py usr/lib/python3/dist-packages/hexclave_tv_box/network_agent.py usr/lib/python3/dist-packages/hexclave_tv_box/setup_display.py etc/systemd/system/hexclave-tv-box-relay.service etc/systemd/system/hexclave-tv-box-relay-identity.service etc/systemd/system/hexclave-tv-box-kiosk.service etc/systemd/system/hexclave-tv-box-network.service etc/systemd/system/hexclave-tv-box-setup-display.service etc/systemd/system/hexclave-tv-box-setup.service etc/pam.d/hexclave-tv-box-kiosk etc/ssh/hexclave-support-ca.pub etc/hexclave-tv-box-release'
 python3 -B "$script_directory/image_verification.py" legacy-inputs "$rootfs" $required
 for path in $required; do
-  test -e "$rootfs/$path" || { printf 'Missing image path: %s\n' "$path" >&2; exit 1; }
+  test -f "$rootfs/$path" || { printf 'Missing image path: %s\n' "$path" >&2; exit 1; }
 done
 grep -qxF 'Environment=WLR_LIBINPUT_NO_DEVICES=1' "$rootfs/etc/systemd/system/hexclave-tv-box-kiosk.service" || {
   printf '%s\n' 'Image kiosk does not declare no-input Cage operation.' >&2
@@ -96,7 +96,7 @@ case "$image_channel" in
     expected_start_limit_action=reboot
     ;;
   test)
-    if [ "$(cat "$rootfs/etc/hexclave-tv-box-test-image" 2>/dev/null || true)" != test ]; then
+    if [ ! -f "$rootfs/etc/hexclave-tv-box-test-image" ] || [ "$(cat "$rootfs/etc/hexclave-tv-box-test-image")" != test ]; then
       printf '%s\n' 'Test image is missing its build-time TV Box test-image marker.' >&2
       exit 1
     fi
@@ -147,15 +147,27 @@ if [ -e "$rootfs/var/lib/systemd/random-seed" ]; then
   printf '%s\n' 'Image contains a pre-generated random seed.' >&2
   exit 1
 fi
-if find "$rootfs/etc/ssh" -maxdepth 1 -name 'ssh_host_*_key' -print -quit | grep -q .; then
+host_key_artifact=$(find "$rootfs/etc/ssh" -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit) || {
+  printf '%s\n' 'Unable to inspect image SSH host keys.' >&2
+  exit 1
+}
+if [ -n "$host_key_artifact" ]; then
   printf '%s\n' 'Image contains pre-generated SSH host keys.' >&2
+  exit 1
+fi
+host_key_artifact=$(find "$rootfs/etc/ssh" -maxdepth 1 -name '*.pub' ! -name 'hexclave-support-ca.pub' -print -quit) || {
+  printf '%s\n' 'Unable to inspect image SSH public-key artifacts.' >&2
+  exit 1
+}
+if [ -n "$host_key_artifact" ]; then
+  printf '%s\n' 'Image contains an unexpected SSH public-key artifact.' >&2
   exit 1
 fi
 
 cp "$rootfs/etc/hexclave-tv-box-release" "$output/image-manifest.txt"
-(cd "$rootfs" && find . -xdev -type f -print0 | sort -z | xargs -0 sha256sum) > "$output/rootfs-sha256.txt"
-(cd "$state" && find . -xdev -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$output/state-sha256.txt"
-(cd "$boot" && find . -xdev -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$output/boot-sha256.txt"
+(cd "$rootfs" && find . -xdev -type f -exec sha256sum {} +) > "$output/rootfs-sha256.txt"
+(cd "$state" && find . -xdev -type f -exec sha256sum {} +) > "$output/state-sha256.txt"
+(cd "$boot" && find . -xdev -type f -exec sha256sum {} +) > "$output/boot-sha256.txt"
 image_name=$(basename "$image")
 image_hash=$(sha256sum "$image" | cut -d ' ' -f 1)
 printf '%s  %s\n' "$image_hash" "$image_name" > "$output/disk-image-sha256.txt"

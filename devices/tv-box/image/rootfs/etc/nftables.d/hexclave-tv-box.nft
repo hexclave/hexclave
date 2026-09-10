@@ -4,7 +4,7 @@ table inet hexclave_tv_box {
     ct state established,related accept
     iifname "lo" accept
     ip protocol icmp accept
-    ip6 nexthdr ipv6-icmp accept
+    meta l4proto ipv6-icmp accept
     # Independent local certificate-based support is limited to private/link-local
     # sources; office support arrives through the outbound relay on loopback.
     # Do not expose device SSH on globally routed Wi-Fi IPv4/IPv6 addresses.
@@ -12,6 +12,7 @@ table inet hexclave_tv_box {
     iifname "wlan0" ip6 saddr { fc00::/7, fe80::/10 } tcp dport 22 accept
     iifname "wlan0" udp dport 67 accept
     iifname "wlan0" udp sport 67 udp dport 68 accept
+    iifname "wlan0" udp sport 547 udp dport 546 accept
     iifname "wlan0" ip saddr 10.42.0.0/24 udp dport 53 accept
     iifname "wlan0" ip saddr 10.42.0.0/24 tcp dport { 53, 80 } accept
   }

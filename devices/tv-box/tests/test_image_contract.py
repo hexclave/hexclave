@@ -166,6 +166,52 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn('printf \'%s\\n\' \'test\' > "$1/etc/hexclave-tv-box-test-image"', layer)
         self.assertIn("sed -i 's/^StartLimitAction=reboot$/StartLimitAction=none/'", layer)
 
+    def test_verify_image_rejects_non_regular_inputs_and_propagates_find_failures(self) -> None:
+        verifier = (ROOT / "scripts/verify-image.sh").read_text(encoding="utf-8")
+        self.assertIn('test -f "$rootfs/$path"', verifier)
+        self.assertNotIn('test -e "$rootfs/$path"', verifier)
+        self.assertIn('[ ! -f "$rootfs/etc/hexclave-tv-box-test-image" ]', verifier)
+        self.assertIn("find \"$rootfs/etc/ssh\" -maxdepth 1", verifier)
+        self.assertIn("hexclave-support-ca.pub", verifier)
+        self.assertIn("find . -xdev -type f -exec sha256sum {} +", verifier)
+        self.assertNotIn("xargs -0 sha256sum", verifier)
+
+    def test_build_image_requires_clean_builder_and_absolute_support_ca(self) -> None:
+        build = (ROOT / "scripts/build-image.sh").read_text(encoding="utf-8")
+        self.assertIn('git -C "$RPI_IMAGE_GEN_DIR" status --porcelain --untracked-files=all', build)
+        self.assertRegex(build, r"(realpath|CDPATH=.*dirname.*pwd).*HEXCLAVE_TV_BOX_SUPPORT_CA")
+
+    def test_image_layer_validates_support_ca_before_installing(self) -> None:
+        layer = (ROOT / "image/layer/hexclave-tv-box-pilot.yaml").read_text(encoding="utf-8")
+        validation = 'image_verification.py" public-key "${IGconf_tvbox_support_ca_key}"'
+        self.assertIn(validation, layer)
+        self.assertLess(layer.index(validation), layer.index('install -m 0644 "${IGconf_tvbox_support_ca_key}"'))
+
+    def test_network_firewall_accepts_dhcpv6_and_extension_header_icmpv6(self) -> None:
+        firewall = (ROOTFS / "etc/nftables.d/hexclave-tv-box.nft").read_text(encoding="utf-8")
+        self.assertIn("udp sport 547 udp dport 546 accept", firewall)
+        self.assertIn("meta l4proto ipv6-icmp accept", firewall)
+        self.assertNotIn("ip6 nexthdr ipv6-icmp", firewall)
+
+    def test_network_service_restarts_with_networkmanager(self) -> None:
+        service = (ROOTFS / "etc/systemd/system/hexclave-tv-box-network.service").read_text(encoding="utf-8")
+        self.assertIn("PartOf=NetworkManager.service", service)
+        self.assertIn("Requires=NetworkManager.service", service)
+        self.assertIn("After=NetworkManager.service", service)
+
+    def test_relay_identity_service_only_writes_relay_directory(self) -> None:
+        service = (ROOTFS / "etc/systemd/system/hexclave-tv-box-relay-identity.service").read_text(encoding="utf-8")
+        self.assertIn("ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g hexclave-tv-relay", service)
+        self.assertIn("ReadWritePaths=/var/lib/hexclave-tv-box/relay", service)
+        self.assertNotIn("ReadWritePaths=/var/lib/hexclave-tv-box\n", service)
+
+    def test_swap_source_has_distinct_name_from_genimage_output(self) -> None:
+        config = (ROOT / "image/image/hexclave-tv-box-image/genimage.cfg.in.ext4").read_text(encoding="utf-8")
+        pre_image = (ROOT / "image/image/hexclave-tv-box-image/pre-image.sh").read_text(encoding="utf-8")
+        self.assertIn('name = "tvbox.swap.source"', config)
+        self.assertIn('swap_image="${genimage_input}/tvbox.swap.source"', pre_image)
+        self.assertNotIn('swap_image="${IGconf_image_outputdir}/tvbox.swap"', pre_image)
+
     def test_pi_zero_image_prebuilds_bounded_state_and_swap_without_runtime_repartitioning(self) -> None:
         device = (ROOT / "image/layer/hexclave-rpizero2w-armhf.yaml").read_text(encoding="utf-8")
         self.assertIn("X-Env-Layer-Requires: linux-base,rpi-device-base,rpi-linux-v7", device)
@@ -182,7 +228,7 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn("image state.ext4.sparse", image)
         self.assertIn("image tvbox.swap.sparse", image)
         self.assertIn("image tvbox.swap {", image)
-        self.assertIn('name = "tvbox.swap"', image)
+        self.assertIn('name = "tvbox.swap.source"', image)
         setup = (ROOT / "image/image/hexclave-tv-box-image/setup.sh").read_text(encoding="utf-8")
         self.assertIn("/var/lib/hexclave-tv-box/journal /var/log/journal", setup)
         self.assertFalse((ROOTFS / "etc/systemd/system/hexclave-tv-box-storage.service").exists())
@@ -241,7 +287,7 @@ class ImageContractTests(unittest.TestCase):
             self.assertIn("root=LABEL=ROOT", (filesystem / "boot/firmware/cmdline.txt").read_text(encoding="utf-8"))
             self.assertIn("partition-table-type = \"mbr\"", (genimage_input / "genimage.cfg").read_text(encoding="utf-8"))
             swap_type = subprocess.check_output(
-                ["blkid", "-p", "-s", "TYPE", "-o", "value", str(output / "tvbox.swap")],
+                ["blkid", "-p", "-s", "TYPE", "-o", "value", str(genimage_input / "tvbox.swap.source")],
                 text=True,
             ).strip()
             self.assertEqual(swap_type, "swap")

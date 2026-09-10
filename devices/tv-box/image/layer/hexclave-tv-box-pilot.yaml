@@ -76,6 +76,7 @@ mmdebstrap:
       cp -a "${SRCROOT}/../setup-ui/." "$1/usr/share/hexclave-tv-box/setup-ui/"
       python3 -B "${SRCROOT}/../scripts/cursor_asset.py" install "$1"
       python3 -B "${SRCROOT}/../scripts/image_verification.py" runtime "$1" "${SRCROOT}/qualified-runtime.json"
+      python3 -B "${SRCROOT}/../scripts/image_verification.py" public-key "${IGconf_tvbox_support_ca_key}"
       install -m 0644 "${IGconf_tvbox_support_ca_key}" "$1/etc/ssh/hexclave-support-ca.pub"
       printf '%s\n' "${IGconf_tvbox_wifi_country}" > "$1/etc/hexclave-tv-box-country"
       case "${IGconf_tvbox_test_image}" in

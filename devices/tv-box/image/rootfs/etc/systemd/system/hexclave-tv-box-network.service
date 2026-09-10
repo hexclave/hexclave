@@ -2,6 +2,7 @@
 Description=Hexclave TV Box network recovery agent
 Requires=NetworkManager.service hexclave-tv-box-firstboot.service
 After=NetworkManager.service hexclave-tv-box-firstboot.service
+PartOf=NetworkManager.service
 Before=hexclave-tv-box-kiosk.service
 StartLimitIntervalSec=60
 StartLimitBurst=10

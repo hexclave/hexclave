@@ -7,7 +7,7 @@ RPI_IMAGE_GEN_COMMIT=3f2c916086ad70197945bfc50ef953c1f6035f10
 : "${HEXCLAVE_TV_BOX_SUPPORT_CA_PUBLIC_KEY_FILE:?Set the offline support CA public-key path}"
 HEXCLAVE_TV_BOX_TEST_IMAGE=${HEXCLAVE_TV_BOX_TEST_IMAGE:-false}
 
-for tool in git grep mkswap truncate python3; do
+for tool in git grep mkswap realpath truncate python3; do
   command -v "$tool" >/dev/null 2>&1 || { printf 'Missing TV Box image-build tool: %s\n' "$tool" >&2; exit 1; }
 done
 
@@ -21,6 +21,7 @@ case "$HEXCLAVE_TV_BOX_TEST_IMAGE" in
   *) printf '%s\n' 'HEXCLAVE_TV_BOX_TEST_IMAGE must be exactly true or false.' >&2; exit 1 ;;
 esac
 test -f "$HEXCLAVE_TV_BOX_SUPPORT_CA_PUBLIC_KEY_FILE"
+HEXCLAVE_TV_BOX_SUPPORT_CA_PUBLIC_KEY_FILE=$(realpath -- "$HEXCLAVE_TV_BOX_SUPPORT_CA_PUBLIC_KEY_FILE")
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python3 -B "$script_directory/image_verification.py" public-key "$HEXCLAVE_TV_BOX_SUPPORT_CA_PUBLIC_KEY_FILE"
 policy_commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_builder_commit"])' "$script_directory/../image/qualified-runtime.json")
@@ -32,6 +33,10 @@ fi
 actual_commit=$(git -C "$RPI_IMAGE_GEN_DIR" rev-parse HEAD)
 if [ "$actual_commit" != "$RPI_IMAGE_GEN_COMMIT" ]; then
   printf 'Expected rpi-image-gen %s, found %s.\n' "$RPI_IMAGE_GEN_COMMIT" "$actual_commit" >&2
+  exit 1
+fi
+if [ -n "$(git -C "$RPI_IMAGE_GEN_DIR" status --porcelain --untracked-files=all)" ]; then
+  printf '%s\n' 'rpi-image-gen checkout must be clean before producing an image.' >&2
   exit 1
 fi
 

@@ -96,6 +96,6 @@ image state.ext4 {
 
 image tvbox.swap {
   file {
-    name = "tvbox.swap"
+    name = "tvbox.swap.source"
   }
 }

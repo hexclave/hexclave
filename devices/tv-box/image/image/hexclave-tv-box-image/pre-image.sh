@@ -4,7 +4,7 @@ set -eu
 genimage_input=$2
 . "${IGconf_image_outputdir}/tvbox_image_uuids"
 
-swap_image="${IGconf_image_outputdir}/tvbox.swap"
+swap_image="${genimage_input}/tvbox.swap.source"
 truncate -s "$IGconf_image_swap_part_size" "$swap_image"
 chmod 0600 "$swap_image"
 mkswap --label TVBOX_SWAP "$swap_image" >/dev/null
