@@ -109,8 +109,10 @@ Cloud Run has no equivalent of Fly's request-triggered VM suspend/resume for a p
 
 ## Fly deployment platform domains
 
-Public HTTP services advertise `https://<suffix>.deploy.built-with-hexclave.com`, where
-`hxc-<suffix>` is the existing Fly app name. The name remains stable across redeploys.
+Public HTTP services advertise `https://<suffix>-<mac>.deploy.built-with-hexclave.com`, where
+`hxc-<suffix>` is the existing Fly app name and `<mac>` signs it under
+`HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY`, shared with the gateway, so the gateway routes only names
+this Marshal minted. The name remains stable across redeploys.
 The dedicated Fly gateway in [apps/deployment-gateway](../deployment-gateway/README.md)
 proxies HTTP, streaming, and WebSockets to the existing `.fly.dev` origin. Provision its
 wildcard DNS/TLS before deploying this Marshal version. Hosted components remain on Vercel.

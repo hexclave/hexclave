@@ -23,7 +23,7 @@ const domain = process.env.HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN ?? 'deploy.built-
 const key = 'a1b2c3d4e5f60718293a4b5c6d7e8f9000112233445566778899aabbccddeeff';
 // Mirrors apps/marshal/src/platform-domain-names.ts platformHostnameMac.
 function mac(appSuffix, signingKey = key, signedDomain = domain) {
-  return createHmac('sha256', Buffer.from(signingKey, 'hex')).update(`hexclave-deployment-hostname/v1\0${signedDomain}\0${appSuffix}`).digest('hex').slice(0, 12);
+  return createHmac('sha256', Buffer.from(signingKey, 'hex')).update(`hexclave-deployment-hostname/v1\0${signedDomain}\0${appSuffix}`).digest('hex').slice(0, 16);
 }
 // Marshal-shaped app suffixes (hxc-<env 1>-<ns 1-2>-<key 1-2>-<hex 18>, minus hxc-); the
 // gateway only ever routes these. `wrong` aliases the `test` origin, whose certificate does
@@ -46,12 +46,17 @@ beforeAll(async () => {
   command('docker', ['build', '-t', image, root]);
   imageCreated = true;
   for (const invalid of ['', '*.example.net', 'Example.net', 'example.net\n', '-bad.example.net', 'a'.repeat(64) + '.net']) {
-    expect(() => command('docker', ['run', '--rm', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${invalid}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${key}`, image, 'nginx', '-t'])).toThrow();
+    expect(() => command('docker', ['run', '--rm', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${invalid}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${key}`, '-e', 'HEXCLAVE_GATEWAY_ALLOW_DEVELOPMENT_KEY=1', image, 'nginx', '-t'])).toThrow();
   }
   for (const invalid of ['', 'short', 'g'.repeat(64), '0'.repeat(63), `${key}\n`]) {
-    expect(() => command('docker', ['run', '--rm', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${domain}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${invalid}`, image, 'nginx', '-t'])).toThrow();
+    expect(() => command('docker', ['run', '--rm', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${domain}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${invalid}`, '-e', 'HEXCLAVE_GATEWAY_ALLOW_DEVELOPMENT_KEY=1', image, 'nginx', '-t'])).toThrow();
   }
   expect(() => command('docker', ['run', '--rm', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${domain}`, image, 'nginx', '-t'])).toThrow();
+  // The public development key is refused unless explicitly allowed, in either case.
+  for (const dev of [key, key.toUpperCase()]) {
+    expect(() => command('docker', ['run', '--rm', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${domain}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${dev}`, image, 'nginx', '-t'])).toThrow();
+  }
+  command('docker', ['run', '--rm', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${domain}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${'0'.repeat(64)}`, image, 'nginx', '-t']);
   command('docker', ['network', 'create', network]);
   networkCreated = true;
   for (const name of ['test', 'second']) {
@@ -65,7 +70,7 @@ beforeAll(async () => {
     created.push(container);
   }
   command('docker', ['run', '-d', '--name', gateway, '--network', network, '-p', `127.0.0.1:${port}:8080`,
-    '-e', 'HEXCLAVE_GATEWAY_RESOLVER=127.0.0.11', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${domain}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${key}`, '-v', `${join(temp, 'cert.pem')}:/etc/ssl/certs/ca-certificates.crt:ro`, image]);
+    '-e', 'HEXCLAVE_GATEWAY_RESOLVER=127.0.0.11', '-e', `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=${domain}`, '-e', `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=${key}`, '-e', 'HEXCLAVE_GATEWAY_ALLOW_DEVELOPMENT_KEY=1', '-v', `${join(temp, 'cert.pem')}:/etc/ssl/certs/ca-certificates.crt:ro`, image]);
   created.push(gateway);
   command('docker', ['exec', gateway, 'nginx', '-t']);
   for (let i = 0; i < 30; i++) {
@@ -95,7 +100,7 @@ test('rejects unrelated/malformed hosts and keeps health checks off application 
 test('routes only hostnames signed with the gateway key', async () => {
   // Pinned alongside apps/marshal/src/platform-domain-names.test.ts so the two constructions
   // cannot drift apart unnoticed.
-  expect(mac('t-ns-ke-0123456789abcdef01', key, 'deploy.built-with-hexclave.com')).toBe('b8e6cf5af5b3');
+  expect(mac('t-ns-ke-0123456789abcdef01', key, 'deploy.built-with-hexclave.com')).toBe('b8e6cf5af5b36a08');
   expect((await probe('/')).status).toBe(200);
   const suffix = apps.test;
   const signed = mac(suffix);
@@ -104,8 +109,8 @@ test('routes only hostnames signed with the gateway key', async () => {
     `${suffix}.${domain}`,
     // Off by one character, an all-zero signature, and a signature that is not hex.
     `${suffix}-${signed.slice(0, -1)}${signed.endsWith('0') ? '1' : '0'}.${domain}`,
-    `${suffix}-${'0'.repeat(12)}.${domain}`,
-    `${suffix}-${'g'.repeat(12)}.${domain}`,
+    `${suffix}-${'0'.repeat(16)}.${domain}`,
+    `${suffix}-${'g'.repeat(16)}.${domain}`,
     // Signed under a different key, over a different domain, or for a different app.
     `${suffix}-${mac(suffix, '0'.repeat(64))}.${domain}`,
     `${suffix}-${mac(suffix, key, `x${domain}`)}.${domain}`,

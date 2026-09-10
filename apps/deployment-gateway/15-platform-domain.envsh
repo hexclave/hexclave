@@ -19,3 +19,10 @@ if [ "${#key}" -ne 64 ]; then
     echo 'HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY must be exactly 64 hexadecimal characters (32 bytes), the key Marshal signs platform hostnames with' >&2
     exit 1
 fi
+# The public key from apps/marshal/.env.development: anyone can sign with it, so a gateway
+# holding it routes to any hxc-* app. Marshal refuses it outside mock mode; so does this.
+if [ "$(printf '%s' "$key" | tr 'A-F' 'a-f')" = "a1b2c3d4e5f60718293a4b5c6d7e8f9000112233445566778899aabbccddeeff" ] \
+    && [ "${HEXCLAVE_GATEWAY_ALLOW_DEVELOPMENT_KEY:-}" != "1" ]; then
+    echo 'HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY is the public development key; it requires HEXCLAVE_GATEWAY_ALLOW_DEVELOPMENT_KEY=1 (never in production)' >&2
+    exit 1
+fi

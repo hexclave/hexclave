@@ -35,7 +35,7 @@ describe("live test setup (no provider calls)", () => {
     expect(() => parseLiveRun(run, { ...settings, MARSHAL_S3_BUCKET: "other-bucket" })).toThrow("different Fly");
     vi.stubEnv("HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY", credentials.GATEWAY_HOSTNAME_KEY);
     const identity = liveRunIdentity(run);
-    expect(identity.hostname).toMatch(/^[a-z0-9-]+-[0-9a-f]{12}\.deploy\.built-with-hexclave\.com$/);
+    expect(identity.hostname).toMatch(/^[a-z0-9-]+-[0-9a-f]{16}\.deploy\.built-with-hexclave\.com$/);
     expect(liveRunIdentity(newLiveRun(settings))).not.toEqual(identity);
   });
 

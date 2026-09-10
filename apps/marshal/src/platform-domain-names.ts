@@ -6,13 +6,15 @@ const DEFAULT_PLATFORM_DOMAIN = "deploy.built-with-hexclave.com";
 // Public, development-only key shared with the local gateway test. Marshal refuses it
 // unless MARSHAL_ALLOW_MOCKS=1 (see config.ts), like the development data-encryption key.
 export const DEVELOPMENT_PLATFORM_HOSTNAME_KEY = "a1b2c3d4e5f60718293a4b5c6d7e8f9000112233445566778899aabbccddeeff";
-// 48 bits: a stranger's chance per guess is 2^-48, and every guess is a full HTTPS request
-// the gateway answers with 421. Keeps the label well under the 63-character DNS limit.
-export const PLATFORM_HOSTNAME_MAC_HEX_LENGTH = 12;
+// 64 bits: every guess is a full HTTPS request the gateway answers with 421, and an attacker
+// holding K registered hxc-* apps only gets a K-fold speedup. The label stays at 43
+// characters, well under the 63-character DNS limit.
+export const PLATFORM_HOSTNAME_MAC_HEX_LENGTH = 16;
 const PLATFORM_HOSTNAME_MAC_CONTEXT = "hexclave-deployment-hostname/v1";
 
 export function platformDomain(): string {
-  const domain = process.env.HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN ?? DEFAULT_PLATFORM_DOMAIN;
+  // `||`, not `??`: the documented placeholder in .env loads as an empty string.
+  const domain = process.env.HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN || DEFAULT_PLATFORM_DOMAIN;
   if (domain.length > 190 || /[^a-z0-9.-]/.test(domain) || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) {
     throw new Error("HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN must be a lowercase DNS domain of at most 190 characters");
   }

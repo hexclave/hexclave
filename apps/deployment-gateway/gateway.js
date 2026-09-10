@@ -2,7 +2,7 @@
 //
 // A platform hostname is <suffix>-<mac>.<platform domain>, where hxc-<suffix> is the Fly app
 // Marshal created (apps/marshal/src/fly/naming.ts appNameForService) and <mac> is the first
-// 12 hex characters of HMAC-SHA256 over the domain and suffix under a key only Marshal and
+// 16 hex characters of HMAC-SHA256 over the domain and suffix under a key only Marshal and
 // this gateway hold (apps/marshal/src/platform-domain-names.ts platformHostnameMac — keep the
 // two byte for byte identical). Fly app names are global across every Fly org, so anyone can
 // register a shape-conforming hxc-* app; without the key they cannot produce a hostname this
@@ -11,10 +11,10 @@
 import crypto from 'crypto';
 
 const MAC_CONTEXT = 'hexclave-deployment-hostname/v1';
-const MAC_LENGTH = 12;
+const MAC_LENGTH = 16;
 // <env 1>-<ns 1-2>-<key 1-2>-<sha256 hex 18>, then the mac. Nothing else — a looser shape
 // would only widen what a leaked key could sign.
-const LABEL = /^([a-z0-9]-[a-z0-9]{1,2}-[a-z0-9]{1,2}-[0-9a-f]{18})-([0-9a-f]{12})$/;
+const LABEL = /^([a-z0-9]-[a-z0-9]{1,2}-[a-z0-9]{1,2}-[0-9a-f]{18})-([0-9a-f]{16})$/;
 
 function constantTimeEqual(expected, provided) {
   if (expected.length !== provided.length) return false;

@@ -17,7 +17,12 @@ describe("Fly proxy hostnames", () => {
     expect(isPlatformHostname("app.deploy.built-with-hexclave.com")).toBe(false);
   });
 
-  it.each(["", "*.example.net", "Example.net", "-bad.example.net", "example.net/", "example.net\n", "a".repeat(64) + ".net", "a.".repeat(96) + "net"])("rejects invalid domain %j", (domain) => {
+  it("treats an empty domain override as unset, since the .env placeholder loads as empty", () => {
+    vi.stubEnv("HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN", "");
+    expect(platformDomain()).toBe("deploy.built-with-hexclave.com");
+  });
+
+  it.each(["*.example.net", "Example.net", "-bad.example.net", "example.net/", "example.net\n", "a".repeat(64) + ".net", "a.".repeat(96) + "net"])("rejects invalid domain %j", (domain) => {
     vi.stubEnv("HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN", domain);
     expect(() => platformDomain()).toThrow("lowercase DNS domain");
   });
@@ -25,7 +30,7 @@ describe("Fly proxy hostnames", () => {
   it("reuses the complete Fly app identity without a DNS lookup or certificate", () => {
     const hostname = platformHostname("prod", "project", "web");
     const [label] = hostname.split(".");
-    const appSuffix = label.slice(0, -13);
+    const appSuffix = label.slice(0, -17);
     expect(`hxc-${appSuffix}`).toBe(appNameForService("prod", "project", "web"));
     expect(label.length).toBeLessThanOrEqual(63);
     expect(platformHostname("prod", "project", "api")).not.toBe(hostname);
@@ -36,9 +41,9 @@ describe("Fly proxy hostnames", () => {
   it("signs the hostname so only a key holder can mint one the gateway routes", () => {
     const hostname = platformHostname("prod", "project", "web");
     const [label] = hostname.split(".");
-    const appSuffix = label.slice(0, -13);
-    const mac = label.slice(-12);
-    expect(mac).toMatch(/^[0-9a-f]{12}$/);
+    const appSuffix = label.slice(0, -17);
+    const mac = label.slice(-16);
+    expect(mac).toMatch(/^[0-9a-f]{16}$/);
     expect(mac).toBe(platformHostnameMac("deploy.built-with-hexclave.com", appSuffix, platformHostnameKey()));
     // A different key, a different domain, or a different app each yield a different mac.
     expect(platformHostnameMac("deploy.built-with-hexclave.com", appSuffix, Buffer.alloc(32, 1))).not.toBe(mac);
@@ -52,7 +57,7 @@ describe("Fly proxy hostnames", () => {
   // Pinned so a change to the mac construction cannot go unnoticed: the gateway's own test
   // (apps/deployment-gateway/gateway.test.mjs) routes this exact hostname.
   it("matches the gateway's construction of the mac", () => {
-    expect(platformHostnameMac("deploy.built-with-hexclave.com", "t-ns-ke-0123456789abcdef01", Buffer.from(DEVELOPMENT_PLATFORM_HOSTNAME_KEY, "hex"))).toBe("b8e6cf5af5b3");
+    expect(platformHostnameMac("deploy.built-with-hexclave.com", "t-ns-ke-0123456789abcdef01", Buffer.from(DEVELOPMENT_PLATFORM_HOSTNAME_KEY, "hex"))).toBe("b8e6cf5af5b36a08");
   });
 
   it.each(["", "short", "g".repeat(64), "0".repeat(63), "0".repeat(65)])("rejects invalid key %j", (key) => {
