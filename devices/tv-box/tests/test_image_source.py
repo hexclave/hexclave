@@ -110,47 +110,49 @@ class ImageSourceTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 image_source.verify_ignored_payload_inputs(self.repository)
 
+    @unittest.skipUnless(shutil.which("git"), "git is required for this test.")
     def test_real_git_worktree_checks_ignored_directories_links_and_special_files(self) -> None:
-        # Use the existing repository's index read-only with an isolated work
-        # tree. No git init/add/commit or modifications to the real worktree.
-        git_directory = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--absolute-git-dir"],
-            check=True, text=True, capture_output=True,
-        ).stdout.strip()
+        # Use a self-contained temporary repository so this test does not depend on the surrounding checkout.
+        git_environment = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "HOME": str(self.repository),
+        }
+        subprocess.run(["git", "init", "-q", str(self.repository)], check=True, env=git_environment)
         (self.repository / ".gitignore").write_text("*.untracked\n*.untracked.*\n__pycache__/\n*.pyc\n", encoding="utf-8")
-        with patch.dict(os.environ, {"GIT_DIR": git_directory, "GIT_WORK_TREE": str(self.repository)}):
-            outside = self.repository / "reference.untracked.md"
-            outside.write_text("external-fixture", encoding="utf-8")
-            image_source.verify_ignored_payload_inputs(self.repository)
-            for source, name, kind in (
-                (image_source.PAYLOAD_SOURCES[0], "scratch.untracked", "directory"),
-                (image_source.PAYLOAD_SOURCES[0], "nested.untracked", "populated-directory"),
-                (image_source.PAYLOAD_SOURCES[2], "link.untracked", "link"),
-                (image_source.RUNTIME_SOURCE, "fifo.pyc", "fifo"),
-                (image_source.RUNTIME_SOURCE, "socket.pyc", "socket"),
-            ):
-                path = self.repository / source / name
-                if kind == "directory":
-                    path.mkdir()
-                elif kind == "populated-directory":
-                    path.mkdir()
-                    (path / "nested.txt").write_text("local-fixture", encoding="utf-8")
-                elif kind == "link":
-                    path.symlink_to(outside)
-                elif kind == "fifo":
-                    os.mkfifo(path)
-                else:
-                    with socket.socket(socket.AF_UNIX) as listener:
-                        listener.bind(str(path))
-                reason = "special file" if kind in ("fifo", "socket") else "Ignored local image input"
-                with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, reason):
-                    image_source.verify_ignored_payload_inputs(self.repository)
-                if kind == "populated-directory":
-                    (path / "nested.txt").unlink()
-                if kind in ("directory", "populated-directory"):
-                    path.rmdir()
-                else:
-                    path.unlink()
+        outside = self.repository / "reference.untracked.md"
+        outside.write_text("external-fixture", encoding="utf-8")
+        image_source.verify_ignored_payload_inputs(self.repository)
+        for source, name, kind in (
+            (image_source.PAYLOAD_SOURCES[0], "scratch.untracked", "directory"),
+            (image_source.PAYLOAD_SOURCES[0], "nested.untracked", "populated-directory"),
+            (image_source.PAYLOAD_SOURCES[2], "link.untracked", "link"),
+            (image_source.RUNTIME_SOURCE, "fifo.pyc", "fifo"),
+            (image_source.RUNTIME_SOURCE, "socket.pyc", "socket"),
+        ):
+            path = self.repository / source / name
+            if kind == "directory":
+                path.mkdir()
+            elif kind == "populated-directory":
+                path.mkdir()
+                (path / "nested.txt").write_text("local-fixture", encoding="utf-8")
+            elif kind == "link":
+                path.symlink_to(outside)
+            elif kind == "fifo":
+                os.mkfifo(path)
+            else:
+                with socket.socket(socket.AF_UNIX) as listener:
+                    listener.bind(str(path))
+            reason = "special file" if kind in ("fifo", "socket") else "Ignored local image input"
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, reason):
+                image_source.verify_ignored_payload_inputs(self.repository)
+            if kind == "populated-directory":
+                (path / "nested.txt").unlink()
+            if kind in ("directory", "populated-directory"):
+                path.rmdir()
+            else:
+                path.unlink()
 
     def test_source_root_links_and_unexpected_git_paths_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "outside the image payload"):

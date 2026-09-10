@@ -235,6 +235,8 @@ class FirstBootTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "unexpected owner"):
                         initialize_device(state_root, lambda _command: None, "a" * 32)
 
+    def test_simulated_initialization_accepts_kiosk_owned_browser(self) -> None:
+        kiosk_user = pwd.struct_passwd(("hexclave-tv", "x", 12345, 12345, "", "/nonexistent", "/usr/sbin/nologin"))
         with tempfile.TemporaryDirectory(suffix=".untracked") as directory, SimulatedRootOwnership(Path(directory)):
             state_root = Path(directory) / "state"
             browser = state_root / "browser"
