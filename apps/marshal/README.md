@@ -167,7 +167,8 @@ its assertion (`https://vercel.com/<team-slug>` on Vercel; the provider's `--all
 value, which `bootstrap-gcp.sh` prints). It is a different value from the STS audience: the
 exchange is addressed to the provider resource, but the assertion is addressed to the team URL,
 and Marshal filters incoming assertion headers by the latter. Left unset it defaults to the
-provider resource, matching a provider created without `--allowed-audiences`. Marshal
+provider resource, with or without the `https:` scheme, matching a provider created without
+`--allowed-audiences`. Marshal
 exchanges the host's OIDC assertion for a federated token and impersonates the service account
 with it, so no long-lived key exists anywhere. This matters more here than it usually does: the
 controller identity can create, bill, and delete every tenant project, so a static key for it

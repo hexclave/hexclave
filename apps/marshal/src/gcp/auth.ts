@@ -36,7 +36,7 @@ type AccessToken = {
 // itself, so when nothing is configured the two coincide.
 type WorkloadIdentityConfig = {
   audience: string,
-  assertionAudience: string,
+  assertionAudiences: string[],
   serviceAccountEmail: string,
   tokenEnvVar: string,
 };
@@ -148,8 +148,8 @@ function assertionMatchesConfiguredAudience(assertion: string): boolean {
   if (!isRecord(claims)) return false;
   const audience = claims.aud;
   return typeof audience === "string"
-    ? audience === config.assertionAudience
-    : Array.isArray(audience) && audience.includes(config.assertionAudience);
+    ? config.assertionAudiences.includes(audience)
+    : Array.isArray(audience) && audience.some((value) => config.assertionAudiences.includes(value));
 }
 
 function hostIdentityAssertion(tokenEnvVar: string): string {
@@ -166,11 +166,13 @@ function workloadIdentityConfig(): WorkloadIdentityConfig | null {
   if (audience === "" || serviceAccountEmail === "") {
     throw new Error("workload identity federation needs both HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_AUDIENCE and HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT");
   }
+  const assertionAudience = (process.env.HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE || "").trim();
   return {
     audience,
     // Unset means the provider was created without --allowed-audiences, in which case Google
-    // expects the assertion's `aud` to be the provider resource itself.
-    assertionAudience: (process.env.HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE || "").trim() || audience,
+    // expects the assertion's `aud` to be the provider resource itself — accepted with or
+    // without the https: scheme, so both spellings are matched here too.
+    assertionAudiences: assertionAudience !== "" ? [assertionAudience] : [audience, audience.replace(/^\/\//, "https://")],
     serviceAccountEmail,
     tokenEnvVar: (process.env.HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_TOKEN_ENV || "").trim() || DEFAULT_OIDC_TOKEN_ENV_VAR,
   };

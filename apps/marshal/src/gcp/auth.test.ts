@@ -161,6 +161,22 @@ describe("workload identity federation", () => {
     expect(new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body)).get("subject_token")).toBe(assertion({ sub: "sts-shaped", aud: AUDIENCE }));
   });
 
+  it("accepts the https: spelling of the provider resource when no assertion audience is configured", async () => {
+    // Google's default allowed audience is the provider resource with or without the scheme, and
+    // most hosts that mint one use the https: form. Marshal's own STS audience is the bare form.
+    stubFederationEnv();
+    vi.stubEnv("HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE", "");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "");
+    const fetchMock = stubExchange();
+
+    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ sub: "https-shaped", aud: `https:${AUDIENCE}` }) }));
+
+    await expect(googleAccessToken()).resolves.toBe("impersonated-token");
+    const exchange = new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body));
+    expect(exchange.get("subject_token")).toBe(assertion({ sub: "https-shaped", aud: `https:${AUDIENCE}` }));
+    expect(exchange.get("audience")).toBe(AUDIENCE);
+  });
+
   it("reads the assertion from the env var the host is configured to use", async () => {
     stubFederationEnv();
     vi.stubEnv("HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_TOKEN_ENV", "SOME_OTHER_HOST_OIDC_TOKEN");
