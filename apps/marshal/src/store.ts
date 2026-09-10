@@ -144,17 +144,33 @@ function authenticatedControlPlaneState(key: string, value: unknown): Authentica
   };
 }
 
+function isAuthenticatedControlPlaneState(stored: unknown): stored is AuthenticatedControlPlaneState {
+  return isRecord(stored)
+    && stored.authentication_version === 1
+    && "value" in stored
+    && typeof stored.mac_base64 === "string";
+}
+
 function readAuthenticatedControlPlaneState(key: string, stored: unknown): unknown {
-  if (!isRecord(stored)
-    || stored.authentication_version !== 1
-    || !("value" in stored)
-    || typeof stored.mac_base64 !== "string") {
-    // TODO(operations): provide an offline migration command that authenticates a trusted
-    // snapshot before rollout. Doing this automatically at runtime would turn attacker-written
-    // unsigned state into authoritative state, so this path must continue to fail closed.
-    // Deliberately no legacy fallback: accepting an unsigned object once and signing it would
-    // authenticate an attacker's forged claim or project assignment after a bucket compromise.
-    throw new Error(`authoritative state ${JSON.stringify(key)} is unsigned; migrate it before starting this Marshal version`);
+  if (!isAuthenticatedControlPlaneState(stored)) {
+    // TRANSITIONAL: an UNSIGNED object is trusted as-is, exactly as every Marshal before
+    // signing existed trusted it. Production's bucket predates the signature (its Fly-era
+    // `domains/*.json` are bare claims), and signing them in place needs the data encryption
+    // key in hand for `scripts/sign-control-plane-state.ts`, which at the time of writing it is
+    // not. Failing closed here would instead break every deploy, park and teardown of a
+    // service that holds a custom domain the moment this version boots.
+    //
+    // What this gives up, and only this: tamper-evidence on records nobody has rewritten yet.
+    // A record that IS signed is still verified below, so a forged edit to a signed claim is
+    // still refused, and every write signs (see authenticatedControlPlaneState), so the bucket
+    // converges on its own for anything rewritten. Deliberately NOT signed on read: accepting an
+    // unsigned object and then signing it would authenticate whatever was in the bucket at that
+    // moment, forged claim included — which is why the migration is an offline script run
+    // against a bucket someone has decided to trust.
+    //
+    // TODO(security): once sign-control-plane-state.ts has been run against production
+    // (`unsigned: 0` in its report), make this branch throw again so unsigned state fails closed.
+    return stored;
   }
   const serialized = JSON.stringify(stored.value);
   if (!verifyControlPlaneStateAuthentication(serialized, storageKey(key), stored.mac_base64, getConfig().dataEncryptionRootKey)) {

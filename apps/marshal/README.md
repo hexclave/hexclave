@@ -40,14 +40,16 @@ Source uploads never pass through the function: `POST /v1/namespaces/:ns/uploads
 presigned bucket URL that the CLI uploads the tarball to directly.
 
 Domain claims, project-pool entries and its creation ledger, and namespace records are authenticated with
-`HEXCLAVE_MARSHAL_DATA_ENCRYPTION_KEY`, with their object key bound into the MAC. Marshal fails
-closed on the older unsigned shape: before rolling this version into an environment that already
-has `domains/*.json`, `gcp-project-pool/*.json`, `gcp-project-pool-ledger.json`, or
-`tenants/*.json`, migrate or recreate those records from a trusted
-snapshot — `scripts/sign-control-plane-state.ts` signs a bucket's unsigned records in place
-(run it against the production bucket before the first deploy of this version: Fly-era
-`domains/*.json` are unsigned). Automatically trusting and rewriting an unsigned object would authenticate exactly the
-forgery this boundary is intended to detect.
+`HEXCLAVE_MARSHAL_DATA_ENCRYPTION_KEY`, with their object key bound into the MAC. Every write is
+signed and a signed record that fails verification is refused. An UNSIGNED record — the shape every
+Marshal before signing wrote — is currently still read as-is (see `readAuthenticatedControlPlaneState`
+in `src/store.ts`): production's bucket predates the signature, and signing it in place needs the
+key in hand, so this version boots on an unsigned bucket rather than failing closed. That leaves
+records nobody has rewritten without tamper-evidence until `scripts/sign-control-plane-state.ts`
+has been run against the bucket (Fly-era `domains/*.json` are the ones that exist); once it reports
+`unsigned: 0`, the read path should be made to fail closed again. Automatically trusting AND
+rewriting an unsigned object at read time would authenticate exactly the forgery this boundary is
+intended to detect, which is why the script is offline and deliberate.
 
 ## Runtimes
 

@@ -1,13 +1,14 @@
-// Signs a bucket's unsigned control-plane records in place, so a Marshal that fails closed on
-// unsigned state (see readAuthenticatedControlPlaneState in src/store.ts) can be rolled into
-// an environment whose bucket predates the signing.
+// Signs a bucket's unsigned control-plane records in place, for an environment whose bucket
+// predates the signing. Marshal currently still READS unsigned records as-is (see
+// readAuthenticatedControlPlaneState in src/store.ts, and the TODO there): this script is what
+// closes that gap, and once it reports `unsigned: 0` against production the read path can be
+// made to fail closed.
 //
 // Why offline and not at read time: accepting an unsigned object once and signing it would
 // authenticate whatever was in the bucket at that moment — including a forged claim written
-// after a bucket compromise. Run this deliberately, against a bucket you trust, BEFORE the
-// first deploy of the version that requires signatures. Idempotent: an already-signed object
-// is verified and left alone; a signed object that fails verification is reported and left
-// alone too, never re-signed.
+// after a bucket compromise. Run this deliberately, against a bucket you trust. Idempotent: an
+// already-signed object is verified and left alone; a signed object that fails verification is
+// reported and left alone too, never re-signed.
 //
 // Covers every authenticated prefix: domains/*.json (the one prefix a Fly-era bucket holds),
 // tenants/*.json, gcp-project-pool/*.json, and the pool ledger.

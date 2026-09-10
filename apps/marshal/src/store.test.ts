@@ -106,7 +106,22 @@ describe("authoritative state authentication", () => {
     await expect(readDomainClaimVersioned(claim.hostname)).rejects.toThrow("failed authentication");
   });
 
-  it("authenticates tenant project assignments and rejects unsigned legacy objects", async () => {
+  // TRANSITIONAL — see readAuthenticatedControlPlaneState. A bucket that predates signing holds
+  // bare claims, and until sign-control-plane-state.ts has been run against it those must read
+  // exactly as they always did. When that branch is made to fail closed again, this test flips
+  // to `rejects.toThrow("is unsigned")`.
+  it("still reads a legacy unsigned domain claim as-is", async () => {
+    const claim = {
+      hostname: "app.example.com",
+      ns: "tenant-a",
+      service_key: "web",
+      claimed_at_millis: 1,
+    } satisfies DomainClaim;
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => JSON.stringify(claim) }, ETag: "legacy-etag" });
+    await expect(readDomainClaimVersioned(claim.hostname)).resolves.toEqual({ value: claim, etag: "legacy-etag" });
+  });
+
+  it("authenticates tenant project assignments and still reads unsigned legacy objects", async () => {
     // The assignment reads the namespace record first (none yet), then writes it.
     send.mockRejectedValueOnce(Object.assign(new Error("no such key"), { name: "NoSuchKey" }));
     send.mockResolvedValueOnce({ ETag: "assignment-etag" });
@@ -117,8 +132,9 @@ describe("authoritative state authentication", () => {
     send.mockResolvedValueOnce({ ETag: "assignment-etag", Body: { transformToString: async () => body } });
     await expect(readTenantProjectAssignment("tenant-a")).resolves.toBe("hxc-tenant-a");
 
+    // TRANSITIONAL: unsigned records are trusted as-is until the bucket has been signed offline.
     send.mockResolvedValueOnce({ ETag: "legacy-etag", Body: { transformToString: async () => JSON.stringify({ project_id: "hxc-tenant-b" }) } });
-    await expect(readTenantProjectAssignment("tenant-a")).rejects.toThrow("is unsigned");
+    await expect(readTenantProjectAssignment("tenant-a")).resolves.toBe("hxc-tenant-b");
   });
 
   it("authenticates the project creation-rate ledger", async () => {
@@ -132,8 +148,9 @@ describe("authoritative state authentication", () => {
     send.mockResolvedValueOnce({ ETag: '"v1"', Body: { transformToString: async () => body } });
     await expect(readPoolCreationLedgerVersioned()).resolves.toEqual({ etag: '"v1"', createdAtMillis: [100, 200] });
 
+    // TRANSITIONAL: unsigned records are trusted as-is until the bucket has been signed offline.
     send.mockResolvedValueOnce({ ETag: '"v1"', Body: { transformToString: async () => JSON.stringify({ created_at_millis: [100, 200] }) } });
-    await expect(readPoolCreationLedgerVersioned()).rejects.toThrow("is unsigned");
+    await expect(readPoolCreationLedgerVersioned()).resolves.toEqual({ etag: '"v1"', createdAtMillis: [100, 200] });
   });
 
   it("does not let an unsigned ready-pool record become a signed tenant assignment", async () => {
@@ -155,8 +172,14 @@ describe("authoritative state authentication", () => {
     send.mockResolvedValueOnce({ Body: { transformToString: async () => body }, ETag: "pool-etag" });
     await expect(readPoolProject("hxc-pool-project")).resolves.toEqual({ value: entry, etag: "pool-etag" });
 
-    send.mockResolvedValueOnce({ Body: { transformToString: async () => JSON.stringify(entry) }, ETag: "forged-etag" });
-    await expect(readPoolProject("hxc-pool-project")).rejects.toThrow("is unsigned");
+    // The MAC binds the object key, so a validly signed record copied under another key is
+    // refused — which is what stops a pool entry from being replayed as some other project's.
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => body }, ETag: "moved-etag" });
+    await expect(readPoolProject("hxc-other-project")).rejects.toThrow("failed authentication");
+
+    // TRANSITIONAL: an unsigned record is trusted as-is until the bucket has been signed offline.
+    send.mockResolvedValueOnce({ Body: { transformToString: async () => JSON.stringify(entry) }, ETag: "legacy-etag" });
+    await expect(readPoolProject("hxc-pool-project")).resolves.toEqual({ value: entry, etag: "legacy-etag" });
   });
 });
 
