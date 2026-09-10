@@ -1,5 +1,4 @@
 /** @vitest-environment jsdom */
-import { CookieJar } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTvBoxDocument } from "./src/app/tv-box/document.ts";
 import { createTvFixtureSnapshot, getTvProfileFixture } from "./src/lib/tv-mode/fixtures.ts";
@@ -153,24 +152,20 @@ describe("TV Box actual renderer orchestration", () => {
   it("restores the received cookie after a consumed pairing body stalls, without overlapping recovery", async () => {
     const stalled = deferredBody();
     const restored = deferredBody();
-    const cookieJar = new CookieJar();
     const cookie = "hexclave-tv-display-refresh=example-refresh-token; Path=/api/latest/tv-displays; HttpOnly; Secure";
     stalled.response.headers.set("set-cookie", cookie);
     fetchMock
       .mockResolvedValueOnce(jsonResponse(null, 401))
       .mockResolvedValueOnce(jsonResponse(challenge))
-      .mockImplementationOnce(async (url, options) => {
-        // Fetch delivers headers, and the browser stores HttpOnly cookies,
-        // before the JSON body completes. A body timeout does not undo that.
+      .mockImplementationOnce(async (_url, options) => {
+        // The browser stores the HttpOnly refresh cookie from the response headers before the JSON body completes, so a body timeout must not discard it; the app never sees the cookie, it only has to retry auth/refresh with credentials included.
         expect(options.credentials).toBe("include");
-        cookieJar.setCookieSync(cookie, url);
         return stalled.response;
       })
       .mockResolvedValueOnce(jsonResponse({ status: "used" }))
       .mockImplementationOnce(async (url, options) => {
         expect(new URL(url).pathname).toBe("/api/latest/tv-displays/auth/refresh");
         expect(options.credentials).toBe("include");
-        expect(cookieJar.getCookieStringSync(url)).toBe("hexclave-tv-display-refresh=example-refresh-token");
         return restored.response;
       })
       .mockResolvedValueOnce(jsonResponse(snapshot));
