@@ -13,6 +13,78 @@ from hexclave_tv_box.relay import initialize_relay_identity
 from hexclave_tv_box.state import atomic_write, clear_exact_state_directory, require_exact_child
 
 
+class SimulatedRootOwnership:
+    def __init__(self, scope: Path) -> None:
+        self.scope = scope.resolve()
+        self.owners: dict[tuple[int, int], tuple[int, int]] = {}
+        self.chowns: list[tuple[Path, int, int]] = []
+        self._real_lstat = os.lstat
+        self._real_stat = os.stat
+        self._patches = []
+
+    def __enter__(self) -> SimulatedRootOwnership:
+        self._patches = [
+            mock.patch.object(os, "geteuid", return_value=0),
+            mock.patch.object(os, "lstat", side_effect=self._lstat),
+            mock.patch.object(os, "stat", side_effect=self._stat),
+            mock.patch.object(os, "chown", side_effect=self._chown),
+        ]
+        for patch in self._patches:
+            patch.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        for patch in reversed(self._patches):
+            patch.stop()
+
+    def _scoped_path(self, path: object) -> Path | None:
+        try:
+            absolute = Path(os.path.abspath(os.fsdecode(os.fspath(path))))
+        except (TypeError, ValueError):
+            return None
+        try:
+            absolute.relative_to(self.scope)
+        except ValueError:
+            return None
+        return absolute
+
+    def _metadata_with_owner(self, path: object, metadata: os.stat_result) -> os.stat_result:
+        if self._scoped_path(path) is None:
+            return metadata
+        uid, gid = self.owners.get((metadata.st_dev, metadata.st_ino), (0, 0))
+        return os.stat_result((
+            metadata.st_mode,
+            metadata.st_ino,
+            metadata.st_dev,
+            metadata.st_nlink,
+            uid,
+            gid,
+            metadata.st_size,
+            metadata.st_atime,
+            metadata.st_mtime,
+            metadata.st_ctime,
+        ))
+
+    def _lstat(self, path: object, *args: object, **kwargs: object) -> os.stat_result:
+        return self._metadata_with_owner(path, self._real_lstat(path, *args, **kwargs))
+
+    def _stat(self, path: object, *args: object, **kwargs: object) -> os.stat_result:
+        return self._metadata_with_owner(path, self._real_stat(path, *args, **kwargs))
+
+    def _chown(self, path: object, uid: int, gid: int, **kwargs: object) -> None:
+        scoped_path = self._scoped_path(path)
+        if scoped_path is None:
+            raise AssertionError(f"Simulated chown escaped fixture scope: {path}")
+        metadata = self._real_lstat(path)
+        self.chowns.append((Path(os.fspath(path)), uid, gid))
+        self.owners[(metadata.st_dev, metadata.st_ino)] = (uid, gid)
+
+    def owner_of(self, path: Path) -> tuple[int, int]:
+        metadata = self._real_lstat(path)
+        default_owner = (0, 0) if self._scoped_path(path) is not None else (metadata.st_uid, metadata.st_gid)
+        return self.owners.get((metadata.st_dev, metadata.st_ino), default_owner)
+
+
 class FirstBootTests(unittest.TestCase):
     def test_initialization_is_unique_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -76,6 +148,68 @@ class FirstBootTests(unittest.TestCase):
                         persisted,
                     )
 
+    def test_simulated_reboot_transitions_browser_from_root_to_kiosk_and_preserves_state(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory, SimulatedRootOwnership(Path(directory)) as simulator:
+            state_root = Path(directory) / "state"
+            kiosk_user = pwd.struct_passwd(("hexclave-tv", "x", 12345, 12345, "", "/nonexistent", "/usr/sbin/nologin"))
+            groups = {
+                name: grp.struct_group((name, "x", group_id, []))
+                for name, group_id in (("hexclave-tv-runtime", 12346), ("systemd-journal", 12347))
+            }
+
+            def fake_keygen(command: list[str]) -> None:
+                key_path = Path(command[command.index("-f") + 1])
+                key_path.write_text("private", encoding="utf-8")
+                Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+            with (
+                mock.patch("hexclave_tv_box.firstboot.pwd.getpwnam", return_value=kiosk_user),
+                mock.patch("hexclave_tv_box.firstboot.grp.getgrnam", side_effect=groups.__getitem__),
+            ):
+                first = initialize_device(state_root, fake_keygen, "a" * 32)
+                browser = state_root / "browser"
+                self.assertEqual(simulator.owner_of(browser), (0, 0))
+                apply_device_permissions(state_root)
+                browser_inode = browser.stat().st_ino
+                self.assertEqual(simulator.owner_of(browser), (12345, 12345))
+                self.assertEqual(
+                    simulator.chowns,
+                    [
+                        (state_root, 0, 12346),
+                        (state_root / "identity", 0, 12346),
+                        (state_root / "browser", 12345, 12345),
+                        (state_root / "journal", 0, 12347),
+                    ],
+                )
+                cookies = browser / "cookies.sqlite"
+                cookies.write_bytes(b"browser-session-fixture")
+                os.chown(cookies, kiosk_user.pw_uid, kiosk_user.pw_gid)
+                wifi = state_root / "network-connections" / "saved.nmconnection"
+                wifi.write_text("[connection]\nid=fixture-network\n", encoding="utf-8")
+                wifi.chmod(0o600)
+                persisted = {path.relative_to(state_root): path.read_bytes() for path in state_root.rglob("*") if path.is_file()}
+
+                expected_chowns = [
+                    (state_root, 0, 12346),
+                    (state_root / "identity", 0, 12346),
+                    (state_root / "browser", 12345, 12345),
+                    (state_root / "journal", 0, 12347),
+                ]
+                for _reboot in range(2):
+                    simulator.chowns.clear()
+                    second = initialize_device(state_root, lambda _command: self.fail("SSH keys were regenerated."), "a" * 32)
+                    apply_device_permissions(state_root)
+                    self.assertEqual(first, second)
+                    self.assertEqual(browser.stat().st_ino, browser_inode)
+                    self.assertEqual(simulator.owner_of(browser), (12345, 12345))
+                    self.assertEqual(browser.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(wifi.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(
+                        {path.relative_to(state_root): path.read_bytes() for path in state_root.rglob("*") if path.is_file()},
+                        persisted,
+                    )
+                    self.assertEqual(simulator.chowns, expected_chowns)
+
     @unittest.skipUnless(os.geteuid() == 0, "Tests enforce actual directory ownership.")
     def test_initialization_rejects_unexpected_owners_including_browser(self) -> None:
         kiosk_user = pwd.struct_passwd(("hexclave-tv", "x", 12345, 12345, "", "/nonexistent", "/usr/sbin/nologin"))
@@ -88,6 +222,32 @@ class FirstBootTests(unittest.TestCase):
                 with mock.patch("hexclave_tv_box.firstboot.pwd.getpwnam", return_value=kiosk_user):
                     with self.assertRaisesRegex(RuntimeError, "unexpected owner"):
                         initialize_device(state_root, lambda _command: None, "a" * 32)
+
+    def test_simulated_initialization_rejects_unexpected_owners_including_browser(self) -> None:
+        kiosk_user = pwd.struct_passwd(("hexclave-tv", "x", 12345, 12345, "", "/nonexistent", "/usr/sbin/nologin"))
+        for name, owner in (("browser", 12349), ("identity", kiosk_user.pw_uid), ("network-connections", kiosk_user.pw_uid)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(suffix=".untracked") as directory, SimulatedRootOwnership(Path(directory)) as simulator:
+                state_root = Path(directory) / "state"
+                child = state_root / name
+                child.mkdir(parents=True)
+                os.chown(child, owner, owner)
+                with mock.patch("hexclave_tv_box.firstboot.pwd.getpwnam", return_value=kiosk_user):
+                    with self.assertRaisesRegex(RuntimeError, "unexpected owner"):
+                        initialize_device(state_root, lambda _command: None, "a" * 32)
+
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory, SimulatedRootOwnership(Path(directory)):
+            state_root = Path(directory) / "state"
+            browser = state_root / "browser"
+            browser.mkdir(parents=True)
+            os.chown(browser, kiosk_user.pw_uid, kiosk_user.pw_gid)
+
+            def fake_keygen(command: list[str]) -> None:
+                key_path = Path(command[command.index("-f") + 1])
+                key_path.write_text("private", encoding="utf-8")
+                Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+            with mock.patch("hexclave_tv_box.firstboot.pwd.getpwnam", return_value=kiosk_user):
+                initialize_device(state_root, fake_keygen, "a" * 32)
 
     def test_system_hostname_writes_only_the_expected_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -248,6 +408,56 @@ class FirstBootTests(unittest.TestCase):
             self.assertEqual(relay.stat().st_uid, os.getuid())
             self.assertEqual(list(relay.iterdir()), [])
 
+    def test_simulated_unsafe_optional_relay_path_blocks_only_relay_initialization(self) -> None:
+        for kind, error_type in (
+            ("symlink", ValueError),
+            ("dangling-symlink", ValueError),
+            ("wrong-owner", ValueError),
+            ("unsafe-mode", ValueError),
+            ("regular-file", FileExistsError),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(suffix=".untracked") as directory, SimulatedRootOwnership(Path(directory)) as simulator:
+                root = Path(directory)
+                state_root = root / "state"
+                state_root.mkdir(mode=0o700)
+                outside = root / "outside"
+                outside.mkdir(mode=0o700)
+                (outside / "keep").write_text("unchanged", encoding="utf-8")
+                relay = state_root / "relay"
+                if kind == "symlink":
+                    relay.symlink_to(outside, target_is_directory=True)
+                elif kind == "dangling-symlink":
+                    relay.symlink_to(root / "missing", target_is_directory=True)
+                elif kind == "regular-file":
+                    relay.write_text("unchanged", encoding="utf-8")
+                else:
+                    relay.mkdir(mode=0o750)
+                    if kind == "wrong-owner":
+                        os.chown(relay, 12349, 12349)
+                    else:
+                        relay.chmod(0o777)
+                before = relay.lstat()
+                simulator.chowns.clear()
+
+                def fake_keygen(command: list[str]) -> None:
+                    key_path = Path(command[command.index("-f") + 1])
+                    key_path.write_text("private", encoding="utf-8")
+                    Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+                with self.assertRaises(error_type):
+                    initialize_relay_identity(state_root, group_id=os.getgid())
+                initialize_device(state_root, fake_keygen, "a" * 32)
+                after = relay.lstat()
+                self.assertEqual(
+                    (after.st_ino, after.st_mode, after.st_uid, after.st_gid),
+                    (before.st_ino, before.st_mode, before.st_uid, before.st_gid),
+                )
+                self.assertEqual((outside / "keep").read_text(encoding="utf-8"), "unchanged")
+                self.assertFalse((root / "missing").exists())
+                self.assertEqual(simulator.chowns, [])
+                with self.assertRaises(error_type):
+                    initialize_relay_identity(state_root, group_id=os.getgid())
+
     @unittest.skipUnless(os.geteuid() == 0, "Relay initialization enforces actual root-owned metadata.")
     def test_unsafe_optional_relay_path_blocks_only_relay_initialization(self) -> None:
         for kind, error_type in (
@@ -297,6 +507,30 @@ class FirstBootTests(unittest.TestCase):
                 self.assertFalse((root / "missing").exists())
                 with self.assertRaises(error_type):
                     initialize_relay_identity(state_root, group_id=os.getgid())
+
+    def test_simulated_initialization_preserves_existing_private_relay_mountpoint_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory, SimulatedRootOwnership(Path(directory)) as simulator:
+            state_root = Path(directory) / "state"
+            relay = state_root / "relay"
+            relay.mkdir(mode=0o700, parents=True)
+            os.chown(relay, 0, 12349)
+            (relay / "keep").write_text("unchanged", encoding="utf-8")
+            before = relay.stat()
+            simulator.chowns.clear()
+
+            def fake_keygen(command: list[str]) -> None:
+                key_path = Path(command[command.index("-f") + 1])
+                key_path.write_text("private", encoding="utf-8")
+                Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+            initialize_device(state_root, fake_keygen, "a" * 32)
+            after = relay.stat()
+            self.assertEqual(
+                (after.st_ino, after.st_mode, after.st_uid, after.st_gid),
+                (before.st_ino, before.st_mode, before.st_uid, before.st_gid),
+            )
+            self.assertEqual((relay / "keep").read_text(encoding="utf-8"), "unchanged")
+            self.assertEqual(simulator.chowns, [])
 
     @unittest.skipUnless(os.geteuid() == 0, "Tests enforce actual relay directory metadata.")
     def test_initialization_preserves_existing_private_relay_mountpoint_metadata(self) -> None:
