@@ -7,6 +7,32 @@ icon: "/images/app-icons/rbac.svg"
 
 Permissions are a way to control what each user can do and access within your application. Hexclave RBAC lets you define reusable permission IDs in the dashboard, compose them into higher-level roles, assign team permissions to team members, and check permissions from the SDK.
 
+Enable the RBAC app first. Defining `rbac.permissions` in config does not install the app:
+
+```ts title="hexclave.config.ts"
+import type { HexclaveConfig } from "@hexclave/js";
+
+export const config: HexclaveConfig = {
+  apps: {
+    installed: {
+      rbac: { enabled: true },
+    },
+  },
+  rbac: {
+    permissions: {
+      super_admin: {
+        description: "Global admin",
+        scope: "project",
+      },
+    },
+  },
+};
+```
+
+`super_admin` here is a permission ID you choose — it is not a built-in. System team permissions are the ones that start with `$`.
+
+On the user object, `hasPermission(team, permissionId)` is team-scoped; `hasPermission(permissionId)` (no team) is a project permission. Same split for `getPermission` and `usePermission`.
+
 ## Permission Types
 
 Hexclave supports two types of permissions:

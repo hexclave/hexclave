@@ -204,6 +204,8 @@ By default anyone can create an account. [Sign-up rules](./sign-up-rules) are or
 
 Start with `log` rules to see what they'd catch, then promote them to `reject` or `restrict`. The dashboard has a tester that simulates sign-ups without touching real users, and [Fraud protection](./fraud-protection) adds risk signals you can reference in the same conditions.
 
+To close sign-up entirely (invite-only / an existing directory), set `auth.allowSignUp` to `false` and create users with the [server API](/api/server/users/create-user). People who already have a Hexclave user can still sign in; a first-time OAuth or password sign-up cannot create a new one. See [Sign-up rules](./sign-up-rules#invite-only-or-an-existing-directory).
+
 ## 9. Before you ship to production
 
 The defaults that make development frictionless are exactly the ones you need to replace. The [Launch checklist](../launch-checklist/overview) tracks these four in this order:
@@ -225,6 +227,14 @@ OAuth client IDs and secrets, trusted domains, and email credentials are all env
 6. A plan for verifying sessions on any separate backend
 
 Everything else — [teams](../teams/overview), [RBAC](../rbac/overview), [payments](../payments/overview), [emails](../emails/overview), [analytics](../analytics/overview) — keys off this same user directory.
+
+## Troubleshooting
+
+**OTP or magic link never arrives.** In a development environment, auth mail goes out on Hexclave's shared server to the address you typed. It is wrapped as a Hexclave "dev email." Check spam, then **Emails → Sent** in the dashboard.
+
+**OAuth callback fails after Google (or another provider) returns.** Add your app origin as a trusted domain in the cloud dashboard. Hexclave allows localhost callbacks in development; production must list your domain. Register the provider callback Hexclave documents (for Google: `https://api.hexclave.com/api/v1/auth/oauth/callback/google`). See [Launch checklist](../launch-checklist/overview).
+
+**`useHexclaveApp must be used within a HexclaveProvider`.** Put a single `<HexclaveProvider>` in the root layout and pass your app object into it. Nested layouts should not wrap another provider. The hook only works in a Client Component.
 
 ## Related
 

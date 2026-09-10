@@ -6,6 +6,8 @@ sidebarTitle: Migration
 
 Stack Auth is now Hexclave. The dashboard, APIs, and your data are unchanged — only the brand and the package names changed. Both backends (`api.stack-auth.com` and `api.hexclave.com`) point at the same service, so each `@stackframe/*` package continues to work; staying on the legacy SDK requires no action.
 
+You can wrap local development with [`hexclave dev`](/guides/going-further/cli#hexclave-dev) without renaming packages. The CLI injects both `HEXCLAVE_*` and `STACK_*` credentials into the child process, so legacy `@stackframe/*` code that still reads `STACK_*` keeps working. If you set both names yourself, they must match - the SDK throws if they differ.
+
 This guide is for projects that want to migrate to `@hexclave/*` packages.
 
 ## 1. Install the new packages
