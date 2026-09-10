@@ -235,13 +235,17 @@ def contains_certificate_record(content: bytes) -> bool:
 
 
 def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
-    """Do not follow symlinks or nested mounts while scanning the exact read-only image."""
+    """Scan the image tree without crossing symlinks or nested mounts."""
     root_device = root.stat().st_dev
     public_vectors = json.loads(POLICY.read_text(encoding="utf-8")).get("public_test_vectors", {})
     for directory, directories, files in os.walk(root, followlinks=False):
         for name in list(directories):
             path = Path(directory) / name
-            if path.is_symlink() or path.lstat().st_dev != root_device:
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                directories.remove(name)
+                continue
+            if metadata.st_dev != root_device:
                 raise ValueError(f"Nested mount or symlinked directory inside image filesystem: {path}")
         for name in files:
             path = Path(directory) / name

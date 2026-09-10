@@ -152,15 +152,22 @@ class ImageVerificationTests(unittest.TestCase):
             self.assertNotIn("DO-NOT-PRINT-SECRET", str(rejected.exception))
             path.unlink()
 
-    def test_secret_scan_checks_chunk_boundaries_does_not_follow_symlinks_and_allows_public_trust(self) -> None:
+    def test_secret_scan_checks_chunk_boundaries_prunes_symlinks_and_allows_public_trust(self) -> None:
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "key").write_bytes(b"-----BEGIN PRIVATE KEY-----\nSECRET\n")
         (self.boot / "external").symlink_to(outside, target_is_directory=True)
         (self.boot / "public-ca.pub").write_text(fixture_public_key(), encoding="ascii")
-        with self.assertRaisesRegex(ValueError, "Nested mount or symlinked directory"):
-            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
         (self.boot / "external").unlink()
+        (self.boot / "usr/bin").mkdir(parents=True)
+        (self.boot / "usr/bin/hidden").write_bytes(b"-----BEGIN PRIVATE KEY-----\nSECRET\n")
+        (self.boot / "bin").symlink_to(self.boot / "usr/bin", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "Private-key"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        (self.boot / "bin").unlink()
+        (self.boot / "usr/bin/hidden").unlink()
+        (self.boot / "usr/bin").rmdir()
         path = self.boot / "hidden"
         path.write_bytes(b"x" * (1024 * 1024 - 8) + b"\n-----BEGIN PRIVATE KEY-----\nSECRET\n")
         with self.assertRaisesRegex(ValueError, "Private-key"):
@@ -170,8 +177,24 @@ class ImageVerificationTests(unittest.TestCase):
         outside = self.root / "outside"
         outside.mkdir()
         (self.boot / "external").symlink_to(outside, target_is_directory=True)
-        with self.assertRaisesRegex(ValueError, "Nested mount or symlinked directory"):
-            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_secret_scan_rejects_nested_mounts(self) -> None:
+        nested = self.boot / "nested"
+        nested.mkdir()
+        original_lstat = Path.lstat
+
+        def fake_lstat(path: Path) -> object:
+            metadata = original_lstat(path)
+            if path == nested:
+                values = list(metadata)
+                values[2] += 1
+                return type(metadata)(values)
+            return metadata
+
+        with patch.object(Path, "lstat", autospec=True, side_effect=fake_lstat):
+            with self.assertRaisesRegex(ValueError, "Nested mount or symlinked directory"):
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
 
     def test_authorized_keys_options_do_not_hide_certificates(self) -> None:
         key_type = b"ssh-ed25519-cert-v01@openssh.com"
@@ -188,6 +211,12 @@ class ImageVerificationTests(unittest.TestCase):
             + base64.b64encode(payload)
         )
         self.assertTrue(image_verification.contains_certificate_record(malformed_options))
+        malformed_comment = (
+            b"ssh-ed25519-cert-v01@openssh.com "
+            + base64.b64encode(payload)
+            + b' comment="unterminated'
+        )
+        self.assertTrue(image_verification.contains_certificate_record(malformed_comment))
 
     def certificate_record(self) -> bytes:
         ca, operator = self.root / "ca.untracked", self.root / "operator.untracked"

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -219,14 +220,61 @@ class NetworkAgentTests(unittest.TestCase):
             )
 
     def test_frontend_probe_does_not_follow_redirects(self) -> None:
-        opener = mock.Mock()
-        opener.open.side_effect = OSError("redirect rejected")
-        commands = []
-        with mock.patch("hexclave_tv_box.network_agent.urllib_request.build_opener", return_value=opener) as build:
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", "/redirected")
+                self.end_headers()
+
+            def log_message(self, _format: str, *args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
             from hexclave_tv_box.network_agent import _frontend_reachable
-            self.assertFalse(_frontend_reachable("https://example.com"))
-        build.assert_called_once()
-        opener.open.assert_called_once()
+            self.assertFalse(_frontend_reachable(f"http://127.0.0.1:{server.server_port}"))
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+    def test_saved_profile_failure_still_advances_retry_throttle(self) -> None:
+        class FailingController(FakeController):
+            def __init__(self) -> None:
+                super().__init__(saved=True, connected=False)
+                self.fail_saved_lookup = False
+
+            def saved_connections(self) -> list[str]:
+                if self.fail_saved_lookup:
+                    raise RuntimeError("NetworkManager unavailable")
+                return super().saved_connections()
+
+            def activate_saved_connections(self) -> None:
+                self.calls.append("activate-saved")
+                self.fail_saved_lookup = True
+                self.saved_connections()
+
+        with tempfile.TemporaryDirectory() as directory:
+            now = [0.0]
+            controller = FailingController()
+            agent = TvBoxNetworkAgent(
+                controller,
+                runtime_root=Path(directory),
+                policy=NetworkPolicy(initial_retry_seconds=100, setup_window_seconds=100, retry_window_seconds=100),
+                service_runner=FakeServices(),
+                frontend_probe=lambda _url, _timeout: True,
+                setup_portal_waiter=lambda _url, _timeout: True,
+                monotonic=lambda: now[0],
+            )
+            agent.state = agent.state.__class__(NetworkMode.STATION_RETRY, 0)
+            agent.applied_mode = NetworkMode.STATION_RETRY
+            with self.assertRaisesRegex(RuntimeError, "NetworkManager"):
+                agent.apply_mode()
+            now[0] = 5
+            agent.apply_mode()
+            self.assertEqual(controller.calls.count("activate-saved"), 1)
 
     def test_connected_accepts_global_ipv6_but_not_link_local_only(self) -> None:
         responses = iter(("100 (connected)\nOffice\n\n2001:db8::1/64\n", "100 (connected)\nOffice\n\nfe80::1/64\n"))

@@ -194,6 +194,13 @@ class RelayStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Partial relay identity"):
             relay.initialize_relay_identity(self.root, group_id=os.getgid())
 
+    def test_symlinked_key_identity_requires_explicit_recovery(self) -> None:
+        public_key = self.root / "relay/id_ed25519.pub"
+        public_key.unlink()
+        public_key.symlink_to(self.root / "relay/id_ed25519")
+        with self.assertRaisesRegex(ValueError, "Partial relay identity"):
+            relay.initialize_relay_identity(self.root, group_id=os.getgid())
+
     def test_existing_key_pair_must_correspond(self) -> None:
         (self.root / "relay/id_ed25519.pub").write_text(PUBLIC_KEY + "\n")
         with self.assertRaisesRegex(ValueError, "key pair does not match"):

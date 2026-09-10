@@ -134,7 +134,7 @@ def _frontend_reachable(url: str, timeout: int = 10) -> bool:
     request = urllib_request.Request(url, method="GET", headers={"User-Agent": "Hexclave-TV-Box-Recovery/1"})
     try:
         class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
-            def redirect_request(self, _request, _response, _code, _msg, _headers):
+            def redirect_request(self, _request, _response, _code, _msg, _headers, _newurl):
                 return None
 
         # The caller supplies the fixed local setup URL or a validated
@@ -584,8 +584,10 @@ class TvBoxNetworkAgent:
                         or self.monotonic() - self._last_saved_activation >= SAVED_PROFILE_RETRY_INTERVAL_S
                     )
                 ):
-                    self.controller.activate_saved_connections()
-                    self._last_saved_activation = self.monotonic()
+                    try:
+                        self.controller.activate_saved_connections()
+                    finally:
+                        self._last_saved_activation = self.monotonic()
                 self._reconcile_services()
                 return
             previous_mode = self.applied_mode
@@ -597,8 +599,10 @@ class TvBoxNetworkAgent:
                 # tearing the complete Cage/Cog stack down five seconds later.
                 self.saved_network_attempts += 1
                 LOGGER.info("saved-network-attempt=%d mode=%s", self.saved_network_attempts, self.state.mode.value)
-                self.controller.activate_saved_connections()
-                self._last_saved_activation = self.monotonic()
+                try:
+                    self.controller.activate_saved_connections()
+                finally:
+                    self._last_saved_activation = self.monotonic()
                 if self.controller.connected():
                     self.state = NetworkState(NetworkMode.CONNECTED, self.monotonic())
                     reason = "saved-network-connected"
