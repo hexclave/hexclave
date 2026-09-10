@@ -39,7 +39,7 @@ export function resolveTvQuickTunnelDevelopmentConfig({
 
   const origin = parseExactQuickTunnelOrigin(configuredOrigin);
   const backendPortSuffix = useFallbackBackend ? "10" : "02";
-  const backendOrigin = `http://127.0.0.1:${portPrefix}${backendPortSuffix}`;
+  const backendOrigin = `http://127.0.0.1:${portPrefix === "" ? "81" : portPrefix}${backendPortSuffix}`;
 
   return {
     allowedDevOrigins: [origin.hostname],

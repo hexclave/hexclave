@@ -44,6 +44,19 @@ describe("TV Quick Tunnel development configuration", () => {
     ]);
   });
 
+  it("uses the default port prefix when it is empty", () => {
+    expect(resolveTvQuickTunnelDevelopmentConfig({
+      ...defaultOptions,
+      portPrefix: "",
+      configuredOrigin: "https://phase-one-box.trycloudflare.com",
+    })?.rewrites).toEqual([
+      {
+        source: "/api/latest/tv-displays/:path*",
+        destination: "http://127.0.0.1:8102/api/latest/tv-displays/:path*",
+      },
+    ]);
+  });
+
   it.each([
     "",
     "http://phase-one-box.trycloudflare.com",
