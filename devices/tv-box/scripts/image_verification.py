@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -215,7 +216,7 @@ def contains_certificate_record(content: bytes) -> bool:
         try:
             tokens = shlex.split(line)
         except ValueError:
-            continue
+            tokens = line.split()
         for index, token in enumerate(tokens):
             if not OPENSSH_CERTIFICATE.fullmatch(token):
                 continue
@@ -223,7 +224,7 @@ def contains_certificate_record(content: bytes) -> bool:
                 continue
             try:
                 prefix = base64.b64decode(tokens[index + 1], validate=True)
-            except (ValueError, base64.binascii.Error):
+            except (ValueError, binascii.Error):
                 continue
             if len(prefix) < 4:
                 continue

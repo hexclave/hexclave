@@ -96,7 +96,7 @@ class KioskSupervisorTests(unittest.TestCase):
     def test_renderer_diagnostics_are_bounded_and_suppress_sensitive_values(self) -> None:
         self.assertEqual(
             _sanitize_renderer_output(b"failed URL https://example.com/tv-box?code=secret#fragment\n"),
-            "failed URL https://example.com/tv-box",
+            "<redacted renderer output>",
         )
         self.assertEqual(
             _sanitize_renderer_output(b"Cookie: session=abc\n"),
@@ -105,6 +105,14 @@ class KioskSupervisorTests(unittest.TestCase):
         self.assertEqual(
             _sanitize_renderer_output(b"https://u:p@host/x?token=1\n"),
             "https://host/x",
+        )
+        self.assertEqual(
+            _sanitize_renderer_output(b"Cookie: session=abc https://example.com/x\n"),
+            "<redacted renderer output>",
+        )
+        self.assertEqual(
+            _sanitize_renderer_output(b"WebKit: failed https://u:p@host/x?token=1\n"),
+            "WebKit: failed https://host/x",
         )
         self.assertEqual(
             _sanitize_renderer_output(b"(WebKitNetworkProcess:123): WebKit-WARNING **: warning\n"),

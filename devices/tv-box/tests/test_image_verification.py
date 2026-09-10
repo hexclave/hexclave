@@ -183,6 +183,11 @@ class ImageVerificationTests(unittest.TestCase):
         )
         self.assertTrue(image_verification.contains_certificate_record(certificate))
         self.assertFalse(image_verification.contains_certificate_record(b"ssh-ed25519 AAAA\n"))
+        malformed_options = (
+            b'command="echo \'x ssh-ed25519-cert-v01@openssh.com '
+            + base64.b64encode(payload)
+        )
+        self.assertTrue(image_verification.contains_certificate_record(malformed_options))
 
     def certificate_record(self) -> bytes:
         ca, operator = self.root / "ca.untracked", self.root / "operator.untracked"

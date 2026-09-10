@@ -81,7 +81,7 @@ def _sanitize_renderer_output(raw_line: bytes) -> str | None:
     line = raw_line.decode("utf-8", errors="replace").strip()
     if line == "":
         return None
-    if SAFE_RENDERER_DIAGNOSTIC_PATTERN.match(line) is None and re.search(r"https?://", line) is None:
+    if SAFE_RENDERER_DIAGNOSTIC_PATTERN.match(line) is None:
         return REDACTED_RENDERER_OUTPUT
     # Renderer failures occasionally contain the document URL. Query strings
     # and fragments are unnecessary for diagnosing Cage/Cog and may contain
