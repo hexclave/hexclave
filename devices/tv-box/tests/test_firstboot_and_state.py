@@ -16,6 +16,7 @@ from hexclave_tv_box.state import atomic_write, clear_exact_state_directory, req
 class SimulatedRootOwnership:
     def __init__(self, scope: Path) -> None:
         self.scope = scope.resolve()
+        self.scope_ancestors = frozenset((self.scope, *self.scope.parents))
         self.owners: dict[tuple[int, int], tuple[int, int]] = {}
         self.chowns: list[tuple[Path, int, int]] = []
         self._real_lstat = os.lstat
@@ -49,7 +50,12 @@ class SimulatedRootOwnership:
         return absolute
 
     def _metadata_with_owner(self, path: object, metadata: os.stat_result) -> os.stat_result:
-        if self._scoped_path(path) is None:
+        scoped_path = self._scoped_path(path)
+        try:
+            absolute = Path(os.path.abspath(os.fsdecode(os.fspath(path))))
+        except (TypeError, ValueError):
+            return metadata
+        if scoped_path is None and absolute not in self.scope_ancestors:
             return metadata
         uid, gid = self.owners.get((metadata.st_dev, metadata.st_ino), (0, 0))
         return os.stat_result((

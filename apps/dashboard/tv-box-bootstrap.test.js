@@ -125,7 +125,7 @@ describe("TV Box document bootstrap recovery", () => {
     expect(navigationErrors).toEqual([]);
   });
 
-  it.each(["garbage", "-1", "Infinity", "999999999999999999999", "2junk"])(
+  it.each(["", "  ", "garbage", "-1", "Infinity", "999999999999999999999", "2junk"])(
     "uses bounded recovery for invalid persisted counts (%s)", async (count) => {
       openBrowser((window) => {
         window.sessionStorage.setItem("hexclave-tv-box-bootstrap-reloads", count);
@@ -136,6 +136,16 @@ describe("TV Box document bootstrap recovery", () => {
       expect(navigationErrors).toEqual(["Not implemented: navigation (except hash changes)"]);
     },
   );
+
+  it("uses the persisted retry count for canonical decimal state", async () => {
+    openBrowser((window) => {
+      window.sessionStorage.setItem("hexclave-tv-box-bootstrap-reloads", "2");
+    });
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(navigationErrors).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(navigationErrors).toEqual(["Not implemented: navigation (except hash changes)"]);
+  });
 
   it("cancels the slow recovery timer when the page is left", async () => {
     openBrowser((window) => {
