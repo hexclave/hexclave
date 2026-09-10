@@ -80,6 +80,7 @@ const state = {
   rotationPaused: false,
   controlsVisible: false,
   controlsTimer: undefined,
+  controlsNotice: undefined,
   fullscreenAvailable: false,
   isFullscreen: false,
   renderedHighlightKey: null,
@@ -800,6 +801,11 @@ function renderControls() {
     );
   }
   controlsRoot.append(controls);
+  if (state.controlsVisible && state.controlsNotice != null) {
+    const notice = createElement("div", "tv-control-notice", state.controlsNotice);
+    notice.setAttribute("role", "alert");
+    controls.append(notice);
+  }
 }
 
 function showControls() {
@@ -810,6 +816,7 @@ function showControls() {
   if (state.controlsTimer != null) window.clearTimeout(state.controlsTimer);
   state.controlsTimer = window.setTimeout(() => {
     state.controlsVisible = false;
+    state.controlsNotice = undefined;
     state.controlsTimer = undefined;
     renderControls();
   }, 2_800);
@@ -847,7 +854,13 @@ async function toggleFullscreen() {
     }
   } catch (cause) {
     reportFailure("fullscreen-failed", cause);
+    state.controlsNotice = "Fullscreen isn’t available on this display.";
+    showControls();
+    renderControls();
+    return;
   }
+  state.controlsNotice = undefined;
+  renderControls();
 }
 
 function renderCurrent() {

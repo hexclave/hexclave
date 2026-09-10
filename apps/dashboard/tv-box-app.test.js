@@ -256,4 +256,43 @@ describe("TV Box actual renderer orchestration", () => {
     expect(document.querySelector(`[data-connection-status].tv-connection-${variant}`)).not.toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("shows a visible notice when fullscreen fails", async () => {
+    Object.defineProperty(document.documentElement, "requestFullscreen", {
+      configurable: true,
+      value: vi.fn().mockRejectedValue(new Error("denied")),
+    });
+    Object.defineProperty(document, "exitFullscreen", {
+      configurable: true,
+      value: vi.fn().mockResolvedValue(undefined),
+    });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "initial-token" }))
+      .mockResolvedValueOnce(jsonResponse(snapshot));
+    await launch();
+    document.querySelector('button[aria-label="Enter fullscreen"]')?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.querySelector(".tv-control-notice")?.textContent).toMatch(/Fullscreen isn’t available/);
+    expect(document.querySelector(".tv-control-notice")?.getAttribute("role")).toBe("alert");
+    await vi.advanceTimersByTimeAsync(2_801);
+    expect(document.querySelector(".tv-control-notice")).toBeNull();
+  });
+
+  it("does not show a notice when fullscreen succeeds", async () => {
+    Object.defineProperty(document.documentElement, "requestFullscreen", {
+      configurable: true,
+      value: vi.fn().mockResolvedValue(undefined),
+    });
+    Object.defineProperty(document, "exitFullscreen", {
+      configurable: true,
+      value: vi.fn().mockResolvedValue(undefined),
+    });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "initial-token" }))
+      .mockResolvedValueOnce(jsonResponse(snapshot));
+    await launch();
+    document.querySelector('button[aria-label="Enter fullscreen"]')?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.querySelector(".tv-control-notice")).toBeNull();
+  });
 });
