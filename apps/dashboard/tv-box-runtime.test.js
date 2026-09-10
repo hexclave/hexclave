@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTvFixtureSnapshot, getTvProfileFixture } from "./src/lib/tv-mode/fixtures.ts";
 import { TV_FIXTURE_VARIANTS } from "./src/lib/tv-mode/types.ts";
 import { createCelebrationLayer } from "./public/tv-box/effects.mjs";
+import { TvRequestTimeoutError, withTvRequestDeadline } from "./public/tv-box/request.mjs";
 import {
   assertPairingChallenge,
   assertPairingStatus,
@@ -147,7 +148,7 @@ describe("TV Box runtime contract", () => {
     ["insight evidence", (snapshot) => { snapshot.screens[0].insight = { message: "Activity changed", evidence: null }; }],
     ["fatal error", (snapshot) => { snapshot.fatalErrorMessage = {}; }],
     ["terminal source data", (snapshot) => { snapshot.screens[0].sourceStatus = "empty"; }],
-  ])("rejects invalid %s before replacing the last safe snapshot", (_field, mutate) => {
+  ])("rejects invalid %s snapshots", (_field, mutate) => {
     const snapshot = createSnapshot();
     mutate(snapshot);
     expect(() => assertTvSnapshot(snapshot)).toThrow();
@@ -160,6 +161,18 @@ describe("TV Box runtime contract", () => {
     expect(() => assertPairingChallenge({
       challengeId: "challenge-a", deviceSecret: "secret", pairingCode: "1234ABCD", pollingIntervalSeconds: 0,
     })).toThrow(/pairing challenge is invalid/);
+  });
+
+  it("rejects timed out requests with a typed timeout error", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = withTvRequestDeadline(() => new Promise(() => {}), 100);
+      const rejection = expect(pending).rejects.toBeInstanceOf(TvRequestTimeoutError);
+      await vi.advanceTimersByTimeAsync(100);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("accepts the centralized celebration fixture used by the QA route", () => {

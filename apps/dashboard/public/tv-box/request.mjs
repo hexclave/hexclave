@@ -1,3 +1,10 @@
+export class TvRequestTimeoutError extends Error {
+  constructor() {
+    super("TV display request timed out.");
+    this.name = "TvRequestTimeoutError";
+  }
+}
+
 /**
  * Bound the whole operation, including response-body reads. Fetch resolves when
  * headers arrive, which is too early to release a display's recovery deadline.
@@ -16,7 +23,7 @@ export async function withTvRequestDeadline(operation, timeoutMilliseconds, pare
   /** @type {Promise<never>} */
   const deadline = new Promise((_resolve, reject) => {
     timeout = window.setTimeout(() => {
-      reject(new Error("TV display request timed out."));
+      reject(new TvRequestTimeoutError());
       controller.abort();
     }, timeoutMilliseconds);
     cancel = () => {

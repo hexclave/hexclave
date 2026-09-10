@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTvBoxDocument } from "./src/app/tv-box/document.ts";
 import { createTvFixtureSnapshot, getTvProfileFixture } from "./src/lib/tv-mode/fixtures.ts";
+import { TV_SNAPSHOT_REQUEST_TIMEOUT_MS } from "./public/tv-box/runtime.mjs";
 
 const profile = getTvProfileFixture("company-pulse");
 if (profile == null) throw new Error("The renderer tests require the company-pulse fixture.");
@@ -105,6 +106,19 @@ describe("TV Box actual renderer orchestration", () => {
     stalled.resolve({ accessToken: "expired-response-token" });
     await vi.advanceTimersByTimeAsync(0);
     expect(title()).toBe("Live Pulse");
+  });
+
+  it("reports a stalled snapshot fetch as a snapshot timeout", async () => {
+    const error = vi.spyOn(console, "error");
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "initial-token" }))
+      .mockReturnValueOnce(new Promise(() => {}));
+    await launch();
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining("snapshot-timeout"),
+      expect.any(Error),
+    );
   });
 
   it("keeps challenge creation single-flight across reconnects and ignores a timed-out body", async () => {

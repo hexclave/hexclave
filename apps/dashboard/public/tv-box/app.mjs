@@ -27,7 +27,7 @@ import {
 } from "./runtime.mjs";
 import { createCelebrationLayer } from "./effects.mjs";
 import { createIcon } from "./icons.mjs";
-import { withTvRequestDeadline } from "./request.mjs";
+import { TvRequestTimeoutError, withTvRequestDeadline } from "./request.mjs";
 
 const root = document.querySelector("#tv-box-root");
 const stageRoot = document.querySelector("#tv-box-stage");
@@ -1193,8 +1193,10 @@ async function refreshSnapshot() {
     synchronizePresentationTimers();
   } catch (cause) {
     if (state.stopped) return;
-    if (controller.signal.aborted) {
+    if (cause instanceof TvRequestTimeoutError) {
       reportFailure("snapshot-timeout", new Error("TV snapshot request timed out."));
+    } else if (controller.signal.aborted) {
+      reportFailure("snapshot-timeout", new Error("TV snapshot request was cancelled."));
     } else {
       reportFailure("snapshot-refresh-failed", cause);
     }
