@@ -26,6 +26,14 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
+function dispatchPairingInput(input: HTMLInputElement, value: string, selectionStart: number, inputType: string) {
+  const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (valueSetter == null) throw new Error("HTMLInputElement value setter is unavailable.");
+  valueSetter.call(input, value);
+  input.setSelectionRange(selectionStart, selectionStart);
+  input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType }));
+}
+
 function approvalResponse(overrides: Partial<{ approvedAt: string, expiresAt: string }> = {}): Response {
   return jsonResponse({
     success: true,
@@ -155,7 +163,7 @@ describe("TV display pairing feedback", () => {
     renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
     const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
     fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
-    fireEvent.change(codeInput, { target: { value: "ABCDEFGH", selectionStart: 4, selectionEnd: 4 } });
+    dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentBackward");
     expect(codeInput).toHaveProperty("value", "ABCE-FGH");
     expect(codeInput.selectionStart).toBe(3);
     expect(codeInput.selectionEnd).toBe(3);
@@ -166,10 +174,22 @@ describe("TV display pairing feedback", () => {
     renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
     const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
     fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
-    fireEvent.change(codeInput, { target: { value: "ABC-EFGH", selectionStart: 3, selectionEnd: 3 } });
+    dispatchPairingInput(codeInput, "ABC-EFGH", 3, "deleteContentBackward");
     expect(codeInput).toHaveProperty("value", "ABCE-FGH");
     expect(codeInput.selectionStart).toBe(3);
     expect(codeInput.selectionEnd).toBe(3);
+  });
+
+  it("preserves the character before the separator on forward delete", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+    const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
+    fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentForward");
+    codeInput.setSelectionRange(5, 5);
+    expect(codeInput).toHaveProperty("value", "ABCD-EFGH");
+    expect(codeInput.selectionStart).toBe(5);
+    expect(codeInput.selectionEnd).toBe(5);
   });
 
   it("recognizes a retried rate-limit failure without exposing its diagnostics", () => {

@@ -279,7 +279,7 @@ export function TvDisplayManagement({
                 onChange={(event) => {
                   let nextValue = event.target.value;
                   let caret = event.target.selectionStart ?? nextValue.length;
-                  if (caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
+                  if (event.nativeEvent instanceof InputEvent && event.nativeEvent.inputType === "deleteContentBackward" && caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
                     nextValue = nextValue.slice(0, caret - 1) + nextValue.slice(caret);
                     caret -= 1;
                   }
