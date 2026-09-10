@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from hexclave_tv_box.firstboot import apply_system_hostname, initialize_device
-from hexclave_tv_box.state import clear_exact_state_directory
+from hexclave_tv_box.state import atomic_write, clear_exact_state_directory, require_exact_child
 
 
 class FirstBootTests(unittest.TestCase):
@@ -98,6 +98,29 @@ class FirstBootTests(unittest.TestCase):
                 clear_exact_state_directory(root, "browser")
             self.assertEqual((ssh / "host-key").read_text(encoding="utf-8"), "keep")
 
+    def test_state_helpers_reject_symlinked_roots_and_parents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            real_root = base / "real"
+            real_root.mkdir()
+            linked_root = base / "linked"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "linked"):
+                require_exact_child(linked_root / "browser", linked_root, "browser")
+
+            parent = base / "parent"
+            target = base / "target"
+            target.mkdir()
+            parent.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "directory"):
+                atomic_write(parent / "value", "secret")
+
+            nested_parent = base / "nested"
+            nested_parent.mkdir()
+            (nested_parent / "linked").symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "linked"):
+                require_exact_child(nested_parent / "linked" / "browser", nested_parent, "browser")
+
     def test_exact_state_clear_unlinks_child_symlinks_without_following_them(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "state"
@@ -124,6 +147,35 @@ class FirstBootTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "do not match"):
                 initialize_device(state_root, fake_keygen, "b" * 32)
 
+    def test_initialization_rejects_state_child_symlink_without_writing_through_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_root = root / "state"
+            state_root.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (state_root / "identity").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                initialize_device(state_root, lambda _command: None, "a" * 32)
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_hosts_update_preserves_aliases_comments_and_other_managed_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            system_root = Path(directory)
+            (system_root / "etc").mkdir()
+            (system_root / "etc/hostname").write_text("image-default\n", encoding="utf-8")
+            (system_root / "etc/hosts").write_text(
+                "127.0.1.1\timage-default alias.example # keep this comment\n"
+                "127.0.1.1 other-name other-alias\n",
+                encoding="utf-8",
+            )
+            identity = {"device_id": "unused", "machine_id": "a" * 32, "hostname": "hexclave-tv-abcdef"}
+            apply_system_hostname(identity, system_root)
+            self.assertEqual(
+                (system_root / "etc/hosts").read_text(encoding="utf-8"),
+                "127.0.1.1\thexclave-tv-abcdef\talias.example # keep this comment\n"
+                "127.0.1.1 other-name other-alias\n",
+            )
 
 if __name__ == "__main__":
     unittest.main()

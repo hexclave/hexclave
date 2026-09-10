@@ -149,7 +149,11 @@ def initialize_relay_identity(state_root: Path = STATE_ROOT, *, group_id: int | 
     _relay_root(state_root)
     private_key = directory / "id_ed25519"
     public_key = directory / "id_ed25519.pub"
-    if private_key.exists() or private_key.is_symlink():
+    private_exists = private_key.exists() or private_key.is_symlink()
+    public_exists = public_key.exists() or public_key.is_symlink()
+    if private_exists != public_exists:
+        raise ValueError("Partial relay identity requires explicit recovery.")
+    if private_exists:
         # Validate correspondence, not just two plausible files. The root
         # initializer feeds a private pipe so OpenSSH never sees a group-
         # readable file owned by its current UID; the relay UID reads the

@@ -56,11 +56,28 @@ def initialize_device(
     runner: CommandRunner = run_command,
     system_machine_id: str | None = None,
 ) -> dict[str, str]:
-    state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    expected_uid = 0 if os.geteuid() == 0 else os.getuid()
+    try:
+        state_metadata = os.lstat(state_root)
+    except FileNotFoundError:
+        state_root.mkdir(mode=0o700, parents=True)
+        state_metadata = os.lstat(state_root)
+    if stat.S_ISLNK(state_metadata.st_mode) or not stat.S_ISDIR(state_metadata.st_mode):
+        raise RuntimeError("TV Box state root must be a real directory, not a symlink.")
+    if state_metadata.st_uid != expected_uid:
+        raise RuntimeError("TV Box state root has an unexpected owner.")
     state_root.chmod(0o700)
     for name in ("browser", "identity", "journal", "network-connections", "ssh"):
         directory = state_root / name
-        directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            metadata = os.lstat(directory)
+        except FileNotFoundError:
+            os.mkdir(directory, 0o700)
+            metadata = os.lstat(directory)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"TV Box state directory {name!r} must be a real directory, not a symlink.")
+        if metadata.st_uid != expected_uid:
+            raise RuntimeError(f"TV Box state directory {name!r} has an unexpected owner.")
         directory.chmod(0o700)
 
     identity_root = state_root / "identity"
@@ -120,19 +137,30 @@ def _update_existing_regular_file(path: Path, transform: Callable[[str], str]) -
 
 
 def _hosts_with_hostname(contents: str, hostname: str) -> str:
-    replacement = f"127.0.1.1\t{hostname}"
     lines: list[str] = []
     replaced = False
+    managed_line: str | None = None
     for line in contents.splitlines():
-        fields = line.split()
-        if fields and fields[0] == "127.0.1.1":
+        before_comment, separator, comment = line.partition("#")
+        fields = before_comment.split()
+        if fields and fields[0] == "127.0.1.1" and len(fields) >= 2:
             if not replaced:
+                replacement = f"127.0.1.1\t{hostname}"
+                if len(fields) > 2:
+                    replacement += "\t" + "\t".join(fields[2:])
+                if separator:
+                    replacement += " " + separator + comment
                 lines.append(replacement)
+                managed_line = line
                 replaced = True
+            elif line == managed_line:
+                continue
+            else:
+                lines.append(line)
             continue
         lines.append(line)
     if not replaced:
-        lines.append(replacement)
+        lines.append(f"127.0.1.1\t{hostname}")
     return "\n".join(lines) + "\n"
 
 

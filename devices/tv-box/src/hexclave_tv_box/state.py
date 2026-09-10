@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 
@@ -12,7 +13,26 @@ RUNTIME_ROOT = Path("/run/hexclave-tv-box")
 
 
 def atomic_write(path: Path, value: str, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    missing: list[Path] = []
+    current = path.parent
+    while True:
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            missing.append(current)
+            current = current.parent
+            continue
+        if os.path.islink(current) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"TV Box state parent must be a real directory: {current}")
+        break
+    for directory in reversed(missing):
+        os.mkdir(directory, 0o700)
+    try:
+        metadata = os.lstat(path.parent)
+    except FileNotFoundError as error:
+        raise ValueError(f"TV Box state parent does not exist: {path.parent}") from error
+    if os.path.islink(path.parent) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"TV Box state parent must be a real directory: {path.parent}")
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary_name)
     try:
@@ -32,11 +52,29 @@ def atomic_write(path: Path, value: str, mode: int = 0o600) -> None:
 
 
 def require_exact_child(path: Path, root: Path, expected_name: str) -> Path:
+    root_metadata = os.lstat(root)
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise ValueError("TV Box state root must be a real directory, not a linked path.")
     resolved_root = root.resolve()
     expected = resolved_root / expected_name
     # Never follow a state-directory symlink. In particular, a link from the
     # requested name to a sibling would otherwise make both resolved paths
     # equal and could turn a scoped reset into deletion of the sibling.
+    lexical_root = Path(os.path.abspath(root))
+    lexical_parent = Path(os.path.abspath(path.parent))
+    try:
+        relative_parent = lexical_parent.relative_to(lexical_root)
+    except ValueError as error:
+        raise ValueError(f"Refusing to operate outside the exact TV Box state target {expected_name!r}.") from error
+    ancestor = lexical_root
+    for component in relative_parent.parts:
+        ancestor /= component
+        try:
+            metadata = os.lstat(ancestor)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("TV Box state path contains a linked or non-directory ancestor.")
     if path.is_symlink():
         raise ValueError(f"Refusing to operate on a linked TV Box state target {expected_name!r}.")
     resolved_path = path.resolve()

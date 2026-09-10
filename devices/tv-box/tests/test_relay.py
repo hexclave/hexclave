@@ -186,7 +186,12 @@ class RelayStateTests(unittest.TestCase):
 
     def test_partial_key_identity_is_not_silently_replaced(self) -> None:
         (self.root / "relay/id_ed25519.pub").unlink()
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaisesRegex(ValueError, "Partial relay identity"):
+            relay.initialize_relay_identity(self.root, group_id=os.getgid())
+
+    def test_public_only_key_identity_is_not_silently_replaced(self) -> None:
+        (self.root / "relay/id_ed25519").unlink()
+        with self.assertRaisesRegex(ValueError, "Partial relay identity"):
             relay.initialize_relay_identity(self.root, group_id=os.getgid())
 
     def test_existing_key_pair_must_correspond(self) -> None:
