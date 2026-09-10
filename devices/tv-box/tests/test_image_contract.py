@@ -410,27 +410,32 @@ class ImageContractTests(unittest.TestCase):
 
             command = [str(ROOT / "scripts/verify-image.sh"), str(image), str(rootfs), str(state), str(boot), str(manifest), str(output)]
             environment = mount_command_environment(image, rootfs, state, temporary_root, boot=boot)
-            # The fixture runs as the checkout user; normalize only ownership
-            # predicates so the production uid/gid-zero contract remains tested
-            # for permissions without requiring root in the test environment.
-            ownership_find = Path(environment["PATH"].split(":", maxsplit=1)[0]) / "find"
-            ownership_find.write_text(
-                "#!/usr/bin/env python3\n"
-                "import os\n"
-                "import sys\n"
-                "arguments = sys.argv[1:]\n"
-                "for index in range(len(arguments) - 1):\n"
-                "    if arguments[index] == '-uid' and arguments[index + 1] == '0':\n"
-                "        arguments[index + 1] = str(os.getuid())\n"
-                "    elif arguments[index] == '-gid' and arguments[index + 1] == '0':\n"
-                "        arguments[index + 1] = str(os.getgid())\n"
-                "os.execv('/usr/bin/find', ['find', *arguments])\n",
-                encoding="utf-8",
+            environment.update(
+                HEXCLAVE_TV_BOX_TEST_ROOT_UID=str(os.getuid()),
+                HEXCLAVE_TV_BOX_TEST_ROOT_GID=str(os.getgid()),
             )
-            ownership_find.chmod(0o755)
+            ownership_find = Path("/usr/bin/find")
+            if os.getuid() != 0:
+                # The non-root fixture needs ownership predicates normalized to
+                # the test user; rejection cases override those predicates.
+                ownership_find = Path(environment["PATH"].split(":", maxsplit=1)[0]) / "find"
+                ownership_find.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import os\n"
+                    "import sys\n"
+                    "arguments = sys.argv[1:]\n"
+                    "for index in range(len(arguments) - 1):\n"
+                    "    if arguments[index] == '-uid' and arguments[index + 1] == '0':\n"
+                    "        arguments[index + 1] = os.environ['HEXCLAVE_TV_BOX_TEST_ROOT_UID']\n"
+                    "    elif arguments[index] == '-gid' and arguments[index + 1] == '0':\n"
+                    "        arguments[index + 1] = os.environ['HEXCLAVE_TV_BOX_TEST_ROOT_GID']\n"
+                    "os.execv('/usr/bin/find', ['find', *arguments])\n",
+                    encoding="utf-8",
+                )
+                ownership_find.chmod(0o755)
 
-            def run_verifier() -> subprocess.CompletedProcess[str]:
-                return subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            def run_verifier(run_environment: dict[str, str] = environment) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(command, env=run_environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
             accepted = run_verifier()
             self.assertEqual(accepted.returncode, 0, accepted.stdout)
@@ -445,6 +450,14 @@ class ImageContractTests(unittest.TestCase):
             self.assertNotEqual(rejected_writable.returncode, 0)
             self.assertIn("Image root-delegated code has unexpected ownership or writability.", rejected_writable.stdout)
             support.chmod(0o755)
+            rejected_uid_environment = {**environment, "HEXCLAVE_TV_BOX_TEST_ROOT_UID": str(os.getuid() + 1)}
+            rejected_uid = run_verifier(rejected_uid_environment)
+            self.assertNotEqual(rejected_uid.returncode, 0)
+            self.assertIn("Image root-delegated code has unexpected ownership or writability.", rejected_uid.stdout)
+            rejected_gid_environment = {**environment, "HEXCLAVE_TV_BOX_TEST_ROOT_GID": str(os.getgid() + 1)}
+            rejected_gid = run_verifier(rejected_gid_environment)
+            self.assertNotEqual(rejected_gid.returncode, 0)
+            self.assertIn("Image root-delegated code has unexpected ownership or writability.", rejected_gid.stdout)
 
             relative_cwd = temporary_root / "relative-output-cwd"
             relative_cwd.mkdir()

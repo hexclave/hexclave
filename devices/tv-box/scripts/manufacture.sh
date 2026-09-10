@@ -22,23 +22,31 @@ case "$device" in
   *) printf 'Refusing unsupported manufacturing target: %s\n' "$device" >&2; exit 1 ;;
 esac
 test -b "$device" || { printf 'Manufacturing target is not a block device: %s\n' "$device" >&2; exit 1; }
-test "$(lsblk -dn -o TYPE "$device")" = disk || { printf 'Manufacturing target is not a whole disk: %s\n' "$device" >&2; exit 1; }
-
-root_source=$(findmnt -n -o SOURCE /)
-if [ "$device" = "$root_source" ] || lsblk -sno PATH "$root_source" 2>/dev/null | grep -Fxq "$device"; then
-  printf 'Refusing to overwrite the current system disk: %s\n' "$device" >&2
-  exit 1
-fi
-if lsblk -nr -o MOUNTPOINT "$device" | grep -Eq '[^[:space:]]'; then
-  printf 'Refusing a manufacturing target with mounted filesystems: %s\n' "$device" >&2
-  exit 1
-fi
 exec 4<> "$device"
 device_target=/dev/fd/4
 device_rdev=$(stat -Lc '%t:%T' "$device_target")
+if [ "$(stat -Lc '%t:%T' "$device")" != "$device_rdev" ]; then
+  printf 'Manufacturing target changed while it was being opened: %s\n' "$device" >&2
+  exit 1
+fi
+device_node=/dev/block/$(printf '%d:%d' "0x${device_rdev%%:*}" "0x${device_rdev##*:}")
+# Use the node derived from the held descriptor so path replacement cannot redirect checks.
+test -b "$device_node" || { printf 'Manufacturing target is not a block device: %s\n' "$device" >&2; exit 1; }
+test "$(lsblk -dn -o TYPE "$device_node")" = disk || { printf 'Manufacturing target is not a whole disk: %s\n' "$device" >&2; exit 1; }
+
+root_source=$(findmnt -n -o SOURCE /)
+device_node_path=$(lsblk -dn -o PATH "$device_node")
+if [ "$device_node_path" = "$root_source" ] || lsblk -sno PATH "$root_source" 2>/dev/null | grep -Fxq "$device_node_path"; then
+  printf 'Refusing to overwrite the current system disk: %s\n' "$device" >&2
+  exit 1
+fi
+if lsblk -nr -o MOUNTPOINT "$device_node" | grep -Eq '[^[:space:]]'; then
+  printf 'Refusing a manufacturing target with mounted filesystems: %s\n' "$device" >&2
+  exit 1
+fi
 image_bytes=$(stat -Lc %s "$image_source")
 device_bytes=$(blockdev --getsize64 "$device_target")
-device_identity=$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device")
+device_identity=$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device_node")
 if [ "$image_bytes" -gt "$device_bytes" ]; then
   printf '%s\n' 'Image is larger than the selected manufacturing device.' >&2
   exit 1
@@ -50,9 +58,9 @@ test "$confirmation" = "$device" || { printf '%s\n' 'Cancelled.' >&2; exit 1; }
 
 # Confirmation can take minutes. A remount or a replaced USB reader must not
 # turn the previously inspected path into a different destructive target.
-if [ "$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device")" != "$device_identity" ] ||
+if [ "$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device_node")" != "$device_identity" ] ||
    [ "$(stat -Lc '%t:%T' "$device")" != "$device_rdev" ] ||
-   lsblk -nr -o MOUNTPOINT "$device" | grep -Eq '[^[:space:]]'; then
+   lsblk -nr -o MOUNTPOINT "$device_node" | grep -Eq '[^[:space:]]'; then
   printf '%s\n' 'Manufacturing target changed or became mounted after confirmation.' >&2
   exit 1
 fi
