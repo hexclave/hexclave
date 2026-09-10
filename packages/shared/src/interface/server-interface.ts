@@ -91,6 +91,33 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
     return await response.json();
   }
 
+  async validatePromoCodes(
+    options: {
+      product_id: string,
+      price_id?: string,
+      quantity?: number,
+      promo_codes: string[],
+    },
+  ): Promise<{ original_amount: string, net_amount: string, recurring_amount: string, applied_code_names: string[] }> {
+    const response = await this.sendServerRequest(
+      "/payments/promo-codes/validate",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          product_id: options.product_id,
+          price_id: options.price_id,
+          quantity: options.quantity,
+          promo_codes: options.promo_codes,
+        }),
+      },
+      null,
+    );
+    return await response.json();
+  }
+
   override async createCustomerPaymentMethodSetupIntent(
     customerType: "user" | "team",
     customerId: string,

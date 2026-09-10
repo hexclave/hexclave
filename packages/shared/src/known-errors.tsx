@@ -1872,6 +1872,196 @@ const NewPurchasesBlocked = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const PromoCodesDisabled = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODES_DISABLED",
+  () => [
+    403,
+    "Promo codes are currently disabled for this project. Enable them in your project configuration to use them.",
+  ] as const,
+  () => [] as const,
+);
+
+const PromoCodeStackingDisabled = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_STACKING_DISABLED",
+  () => [
+    403,
+    "Promo code stacking is currently disabled for this project. Enable it in your project configuration to apply more than one code.",
+  ] as const,
+  () => [] as const,
+);
+
+const PromoCodeCodeNameAlreadyExists = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_CODE_NAME_ALREADY_EXISTS",
+  (codeName: string) => [
+    400,
+    `A promo code named ${JSON.stringify(codeName)} already exists in this project.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodeStripeCreateFailed = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_STRIPE_CREATE_FAILED",
+  (reason: string) => [
+    400,
+    `Could not create the promo code. ${reason}`,
+    { reason },
+  ] as const,
+  (json) => [json.reason] as const,
+);
+
+const PromoCodeInvalid = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_INVALID",
+  (reason: string) => [
+    400,
+    reason,
+    { reason },
+  ] as const,
+  (json) => [json.reason] as const,
+);
+
+const PromoCodeNotFound = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_NOT_FOUND",
+  (codeName: string) => [
+    400,
+    `Promo code ${JSON.stringify(codeName)} was not found.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodePaused = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_PAUSED",
+  (codeName: string) => [
+    400,
+    `Promo code ${JSON.stringify(codeName)} is paused and cannot be redeemed.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodeEnded = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_ENDED",
+  (codeName: string) => [
+    400,
+    `Promo code ${JSON.stringify(codeName)} has ended and cannot be redeemed.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodeExpired = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_EXPIRED",
+  (codeName: string) => [
+    400,
+    `Promo code ${JSON.stringify(codeName)} has expired and cannot be redeemed.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodeNotYetAvailable = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_NOT_YET_AVAILABLE",
+  (codeName: string) => [
+    400,
+    `Promo code ${JSON.stringify(codeName)} is not available yet.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodeNotApplicableToProduct = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_NOT_APPLICABLE_TO_PRODUCT",
+  (codeName: string) => [
+    400,
+    `Promo code ${JSON.stringify(codeName)} does not apply to this product.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodeRedemptionLimitReached = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_REDEMPTION_LIMIT_REACHED",
+  (codeName: string) => [
+    400,
+    `Promo code ${JSON.stringify(codeName)} has reached its redemption limit.`,
+    { code_name: codeName },
+  ] as const,
+  (json) => [json.code_name] as const,
+);
+
+const PromoCodeStackingNotAllowed = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_STACKING_NOT_ALLOWED",
+  () => [
+    400,
+    "Only one promo code can be applied to this checkout.",
+  ] as const,
+  () => [] as const,
+);
+
+const PromoCodeNothingToDiscount = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_NOTHING_TO_DISCOUNT",
+  () => [
+    400,
+    "This price is already $0, so a promo code cannot be applied.",
+  ] as const,
+  () => [] as const,
+);
+
+const PromoCodeDiscountBelowStripeMinimum = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_DISCOUNT_BELOW_STRIPE_MINIMUM",
+  () => [
+    400,
+    "This discount would bring the one-time charge below Stripe's minimum.",
+  ] as const,
+  () => [] as const,
+);
+
+const PromoCodeCannotPause = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_CANNOT_PAUSE",
+  () => [
+    400,
+    "This promo code cannot be paused because it has ended or permanently expired.",
+  ] as const,
+  () => [] as const,
+);
+
+const PromoCodeCannotResume = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_CANNOT_RESUME",
+  () => [
+    400,
+    "This promo code cannot be resumed because it has ended or permanently expired.",
+  ] as const,
+  () => [] as const,
+);
+
+const PromoCodeAlreadyEnded = createKnownErrorConstructor(
+  KnownError,
+  "PROMO_CODE_ALREADY_ENDED",
+  () => [
+    400,
+    "This promo code has already been ended.",
+  ] as const,
+  () => [] as const,
+);
+
 const TooManyImageAttachments = createKnownErrorConstructor(
   KnownError,
   "TOO_MANY_IMAGE_ATTACHMENTS",
@@ -2043,6 +2233,24 @@ export const KnownErrors = {
   StripeAccountInfoNotFound,
   DefaultPaymentMethodRequired,
   NewPurchasesBlocked,
+  PromoCodesDisabled,
+  PromoCodeStackingDisabled,
+  PromoCodeCodeNameAlreadyExists,
+  PromoCodeStripeCreateFailed,
+  PromoCodeInvalid,
+  PromoCodeNotFound,
+  PromoCodePaused,
+  PromoCodeEnded,
+  PromoCodeExpired,
+  PromoCodeNotYetAvailable,
+  PromoCodeNotApplicableToProduct,
+  PromoCodeRedemptionLimitReached,
+  PromoCodeStackingNotAllowed,
+  PromoCodeNothingToDiscount,
+  PromoCodeDiscountBelowStripeMinimum,
+  PromoCodeCannotPause,
+  PromoCodeCannotResume,
+  PromoCodeAlreadyEnded,
   DataVaultStoreDoesNotExist,
   DataVaultStoreHashedKeyDoesNotExist,
   AnalyticsQueryTimeout,
