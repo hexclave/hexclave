@@ -161,7 +161,13 @@ Credentials resolve in three ways, in this order: workload identity federation, 
 Prefer federation for any hosted deployment; it is required on a host with no metadata server
 (Vercel). Set `HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_AUDIENCE` to the provider resource and
 `HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT` to the controller service account it
-impersonates — setting only one of the two is a startup error rather than a fallback. Marshal
+impersonates — setting only one of the two is a startup error rather than a fallback. Also set
+`HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE` to the `aud` the host mints into
+its assertion (`https://vercel.com/<team-slug>` on Vercel; the provider's `--allowed-audiences`
+value, which `bootstrap-gcp.sh` prints). It is a different value from the STS audience: the
+exchange is addressed to the provider resource, but the assertion is addressed to the team URL,
+and Marshal filters incoming assertion headers by the latter. Left unset it defaults to the
+provider resource, matching a provider created without `--allowed-audiences`. Marshal
 exchanges the host's OIDC assertion for a federated token and impersonates the service account
 with it, so no long-lived key exists anywhere. This matters more here than it usually does: the
 controller identity can create, bill, and delete every tenant project, so a static key for it

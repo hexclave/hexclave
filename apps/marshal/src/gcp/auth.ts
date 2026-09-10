@@ -27,8 +27,16 @@ type AccessToken = {
 // it is preferred over GOOGLE_APPLICATION_CREDENTIALS for a hosted deployment — the
 // controller identity can create, bill, and delete every tenant project, so a static key for
 // it is the most valuable secret the system would otherwise hold.
+//
+// Two audiences are involved, and they are NOT the same value. `audience` is the pool
+// provider's resource name, which is what the STS exchange is addressed to. `assertionAudience`
+// is the `aud` claim the host mints INTO its assertion, which the provider's allowed-audiences
+// list must accept: Vercel signs `https://vercel.com/<team>`, and the provider is created with
+// exactly that (bootstrap-gcp.sh). Google's default allowed audience is the provider resource
+// itself, so when nothing is configured the two coincide.
 type WorkloadIdentityConfig = {
   audience: string,
+  assertionAudience: string,
   serviceAccountEmail: string,
   tokenEnvVar: string,
 };
@@ -119,10 +127,13 @@ export function recordHostIdentityAssertion(request: Request): void {
   if (assertion !== "" && assertionMatchesConfiguredAudience(assertion)) requestAssertion = assertion;
 }
 
-// The audience is what ties an assertion to THIS workload identity pool provider: Google
-// rejects any other, so anything else is noise we must not cache over a working credential.
-// Signature verification belongs to Google's STS, not here — this only decides which header
-// is worth presenting to it.
+// The assertion's `aud` is what ties it to THIS workload identity pool provider: the provider
+// accepts only its allowed audiences, so anything else is noise we must not cache over a
+// working credential. Compared against the audience the host MINTS, not the STS audience the
+// exchange is addressed to — a real Vercel assertion never carries the provider resource as
+// its `aud`, and checking for that would silently drop every production header. Signature
+// verification belongs to Google's STS, not here — this only decides which header is worth
+// presenting to it.
 function assertionMatchesConfiguredAudience(assertion: string): boolean {
   const config = workloadIdentityConfig();
   if (config === null) return false;
@@ -137,8 +148,8 @@ function assertionMatchesConfiguredAudience(assertion: string): boolean {
   if (!isRecord(claims)) return false;
   const audience = claims.aud;
   return typeof audience === "string"
-    ? audience === config.audience
-    : Array.isArray(audience) && audience.includes(config.audience);
+    ? audience === config.assertionAudience
+    : Array.isArray(audience) && audience.includes(config.assertionAudience);
 }
 
 function hostIdentityAssertion(tokenEnvVar: string): string {
@@ -157,6 +168,9 @@ function workloadIdentityConfig(): WorkloadIdentityConfig | null {
   }
   return {
     audience,
+    // Unset means the provider was created without --allowed-audiences, in which case Google
+    // expects the assertion's `aud` to be the provider resource itself.
+    assertionAudience: (process.env.HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE || "").trim() || audience,
     serviceAccountEmail,
     tokenEnvVar: (process.env.HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_TOKEN_ENV || "").trim() || DEFAULT_OIDC_TOKEN_ENV_VAR,
   };
