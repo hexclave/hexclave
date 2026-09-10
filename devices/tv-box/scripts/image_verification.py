@@ -18,9 +18,8 @@ from pathlib import Path, PurePosixPath
 
 POLICY = Path(__file__).resolve().parents[1] / "image/qualified-runtime.json"
 PRIVATE_KEY = re.compile(rb"(?:^|\n)-----BEGIN (?:OPENSSH |RSA |EC |DSA |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----\r?\n")
-OPENSSH_CERTIFICATE = re.compile(
-    r"^(?:sk-)?(?:ssh|ecdsa)-[A-Za-z0-9@.-]*-cert-v01@openssh\.com$"
-)
+CERTIFICATE_TYPE_PREFIX = re.compile(rb"^(?:sk-)?(?:ssh|ecdsa)-")
+CERTIFICATE_TYPE_SUFFIX = b"-cert-v01@openssh.com"
 PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9+.-]+(?::[a-z0-9-]+)?")
 VERIFICATION_ARTIFACTS = (
     "packages.tsv", "builder-manifest.tsv", "qualified-runtime.json", "image-manifest.txt",
@@ -206,32 +205,127 @@ def builder_packages(path: Path) -> dict[str, str]:
     return packages
 
 
-def contains_certificate_record(content: bytes) -> bool:
-    if b"-cert-v01@openssh.com" not in content:
-        return False
-    for raw_line in content.splitlines():
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line or line.startswith("#"):
-            continue
+class CertificateToken:
+    """Bounded state for a type name and, optionally, its following wire blob."""
+
+    def __init__(self, expected_type: tuple[int, bytes] | None) -> None:
+        self.expected_type = expected_type
+        self.length = 0
+        self.prefix = b""
+        self.suffix = b""
+        self.type_hash = hashlib.sha256()
+        self.valid_name = True
+        self.valid_payload = expected_type is not None
+        self.encoded_tail = b""
+        self.wire_header = b""
+        self.wire_type_bytes = 0
+        self.wire_type_hash = hashlib.sha256()
+
+    def feed(self, part: bytes) -> None:
+        self.length += len(part)
+        if self.valid_name:
+            self.valid_name = re.fullmatch(rb"[A-Za-z0-9@.-]+", part) is not None
+            if self.valid_name:
+                self.prefix = (self.prefix + part[:10])[:10]
+                self.suffix = (self.suffix + part[-len(CERTIFICATE_TYPE_SUFFIX):])[-len(CERTIFICATE_TYPE_SUFFIX):]
+                self.type_hash.update(part)
+        if not self.valid_payload:
+            return
+        encoded = self.encoded_tail + part
+        # Decode complete unpadded quartets now; only the final quartet may
+        # contain padding. Acceptance waits for the token boundary, never a
+        # read boundary, so a malformed suffix cannot follow an accepted prefix.
+        padding = encoded.find(b"=")
+        end = (len(encoded) if padding < 0 else padding) // 4 * 4
+        self.decode(encoded[:end])
+        self.encoded_tail = encoded[end:]
+        if len(self.encoded_tail) > 4:
+            self.valid_payload = False
+            self.encoded_tail = b""
+
+    def decode(self, encoded: bytes) -> None:
+        if not self.valid_payload:
+            return
         try:
-            tokens = shlex.split(line)
-        except ValueError:
-            tokens = line.split()
-        for index, token in enumerate(tokens):
-            if not OPENSSH_CERTIFICATE.fullmatch(token):
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            self.valid_payload = False
+            return
+        if base64.b64encode(decoded) != encoded:
+            self.valid_payload = False
+            return
+        header_size = min(4 - len(self.wire_header), len(decoded))
+        self.wire_header += decoded[:header_size]
+        decoded = decoded[header_size:]
+        if len(self.wire_header) < 4:
+            return
+        if self.expected_type is None:
+            raise ValueError("Certificate wire decoding requires a preceding algorithm token.")
+        type_size, _ = self.expected_type
+        if struct.unpack(">I", self.wire_header)[0] != type_size:
+            self.valid_payload = False
+            return
+        type_part = decoded[:type_size - self.wire_type_bytes]
+        self.wire_type_hash.update(type_part)
+        self.wire_type_bytes += len(type_part)
+
+    def certificate(self) -> bool:
+        self.decode(self.encoded_tail)
+        return (self.valid_payload and self.expected_type is not None
+                and self.expected_type == (self.wire_type_bytes, self.wire_type_hash.digest()))
+
+    def algorithm(self) -> tuple[int, bytes] | None:
+        prefix = CERTIFICATE_TYPE_PREFIX.match(self.prefix)
+        if (self.valid_name and prefix is not None and self.suffix == CERTIFICATE_TYPE_SUFFIX
+            and self.length >= prefix.end() + len(CERTIFICATE_TYPE_SUFFIX)):
+            # Hashing the complete type name permits an exact wire-field
+            # length/content check without retaining an unbounded text token.
+            return self.length, self.type_hash.digest()
+        return None
+
+
+class CertificateRecordScanner:
+    """Keep record boundaries and strict token validation across bounded reads."""
+
+    def __init__(self) -> None:
+        self.token: CertificateToken | None = None
+        self.expected_type: tuple[int, bytes] | None = None
+        self.line_start = True
+        self.comment = False
+
+    def feed(self, content: bytes) -> bool:
+        for match in re.finditer(rb"\s+|\S+", content):
+            part = match[0]
+            if part[:1].isspace():
+                if self.token is not None:
+                    if self.token.certificate():
+                        return True
+                    self.expected_type = self.token.algorithm()
+                    self.token = None
+                if b"\n" in part or b"\r" in part:
+                    self.expected_type = None
+                    self.line_start = True
+                    self.comment = False
                 continue
-            if index + 1 >= len(tokens):
+            if self.comment:
                 continue
-            try:
-                prefix = base64.b64decode(tokens[index + 1], validate=True)
-            except (ValueError, binascii.Error):
-                continue
-            if len(prefix) < 4:
-                continue
-            type_size = struct.unpack_from(">I", prefix)[0]
-            if type_size == len(token) and prefix[4:4 + type_size].decode("ascii", errors="ignore") == token:
-                return True
-    return False
+            if self.line_start:
+                self.line_start = False
+                self.comment = part.startswith(b"#")
+                if self.comment:
+                    continue
+            if self.token is None:
+                self.token = CertificateToken(self.expected_type)
+            self.token.feed(part)
+        return False
+
+    def finish(self) -> bool:
+        return self.token is not None and self.token.certificate()
+
+
+def contains_certificate_record(content: bytes) -> bool:
+    scanner = CertificateRecordScanner()
+    return scanner.feed(content) or scanner.finish()
 
 
 def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
@@ -264,12 +358,10 @@ def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
                 continue
             with path.open("rb") as source:
                 overlap = b""
-                first_chunk = True
+                certificates = CertificateRecordScanner()
                 while chunk := source.read(1024 * 1024):
                     data = overlap + chunk
-                    # Retained overlap can start in the middle of a line. It
-                    # must not invent a new record boundary in later chunks.
-                    if contains_certificate_record(data if first_chunk else b"\x00" + data):
+                    if certificates.feed(chunk):
                         raise ValueError(f"OpenSSH certificate material rejected: {label}/{relative}")
                     if (b"PRIVATE KEY" in data and PRIVATE_KEY.search(data)) or data.startswith(b"PuTTY-User-Key-File-"):
                         # Debian ships this publicly documented crypto test vector.
@@ -279,10 +371,12 @@ def scan_clean_filesystem(root: Path, label: str, *, production: bool) -> None:
                         if expected_vector is not None and digest(path) == expected_vector["sha256"]:
                             break
                         raise ValueError(f"Private-key material rejected: {label}/{relative}")
-                    # Include both the text key type and its base64 wire prefix
-                    # when a certificate record crosses an input chunk boundary.
+                    # Fixed private-key headers need only a short overlap;
+                    # variable-length certificates keep their own stream state.
                     overlap = data[-512:]
-                    first_chunk = False
+                else:
+                    if certificates.finish():
+                        raise ValueError(f"OpenSSH certificate material rejected: {label}/{relative}")
 
 
 def begin_output(output: Path, *inputs: Path) -> None:

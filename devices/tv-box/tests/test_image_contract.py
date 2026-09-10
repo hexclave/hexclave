@@ -210,8 +210,10 @@ class ImageContractTests(unittest.TestCase):
         self.assertNotIn("ExecStartPre=", service)
         self.assertIn("ReadWritePaths=/var/lib/hexclave-tv-box/relay", service)
         self.assertNotIn("ReadWritePaths=/var/lib/hexclave-tv-box\n", service)
-        self.assertIn('"ssh", "relay")', firstboot)
-        self.assertIn('mode = 0o750 if name == "relay" else 0o700', firstboot)
+        # Core boot supplies the sandbox mountpoint, not relay credentials or
+        # metadata validation; the lifecycle/isolation tests cover its behavior.
+        self.assertIn('os.mkdir(state_root / "relay", 0o750)', firstboot)
+        self.assertNotIn("relay_group", firstboot)
 
     def test_swap_source_has_distinct_name_from_genimage_output(self) -> None:
         config = (ROOT / "image/image/hexclave-tv-box-image/genimage.cfg.in.ext4").read_text(encoding="utf-8")

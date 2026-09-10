@@ -55,15 +55,8 @@ def initialize_device(
     state_root: Path = STATE_ROOT,
     runner: CommandRunner = run_command,
     system_machine_id: str | None = None,
-    relay_group: str | None = "hexclave-tv-relay",
 ) -> dict[str, str]:
     expected_uid = 0 if os.geteuid() == 0 else os.getuid()
-    relay_gid: int | None = None
-    if relay_group is not None:
-        try:
-            relay_gid = grp.getgrnam(relay_group).gr_gid
-        except KeyError as error:
-            raise RuntimeError(f"TV Box relay group is missing: {relay_group}") from error
     try:
         state_metadata = os.lstat(state_root)
     except FileNotFoundError:
@@ -74,24 +67,31 @@ def initialize_device(
     if state_metadata.st_uid != expected_uid:
         raise RuntimeError("TV Box state root has an unexpected owner.")
     state_root.chmod(0o700)
-    for name in ("browser", "identity", "journal", "network-connections", "ssh", "relay"):
+    for name in ("browser", "identity", "journal", "network-connections", "ssh"):
         directory = state_root / name
-        mode = 0o750 if name == "relay" else 0o700
-        group_id = relay_gid if name == "relay" else None
         try:
             metadata = os.lstat(directory)
         except FileNotFoundError:
-            os.mkdir(directory, mode)
-            if group_id is not None:
-                os.chown(directory, expected_uid, group_id)
+            os.mkdir(directory, 0o700)
             metadata = os.lstat(directory)
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise RuntimeError(f"TV Box state directory {name!r} must be a real directory, not a symlink.")
-        if metadata.st_uid != expected_uid:
+        # The first pass creates this directory as root; provisioning then
+        # hands it to the kiosk account. Reboots must accept both lifecycle
+        # owners without weakening ownership checks on any other state.
+        if metadata.st_uid != expected_uid and (
+            name != "browser" or metadata.st_uid != pwd.getpwnam("hexclave-tv").pw_uid
+        ):
             raise RuntimeError(f"TV Box state directory {name!r} has an unexpected owner.")
-        if group_id is not None and metadata.st_gid != group_id:
-            raise RuntimeError(f"TV Box state directory {name!r} has an unexpected group.")
-        directory.chmod(mode)
+        directory.chmod(0o700)
+
+    # The independent relay initializer needs its sandbox mountpoint to exist,
+    # but owns all relay validation and permissions. Do not inspect or modify
+    # an existing path: optional relay corruption must not block core boot.
+    try:
+        os.mkdir(state_root / "relay", 0o750)
+    except FileExistsError:
+        pass
 
     identity_root = state_root / "identity"
     device_id_path = identity_root / "device-id"

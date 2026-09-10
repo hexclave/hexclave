@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import grp
+import ipaddress
 import json
 import logging
 import os
@@ -179,6 +180,17 @@ def split_nmcli_line(line: str) -> list[str]:
     return fields
 
 
+def _usable_station_address(value: str) -> bool:
+    # --get-values returns one address per line, but --escape yes still
+    # escapes IPv6 colons. Decode before classifying the full IPv6 fe80::/10
+    # and IPv4 link-local ranges instead of matching a textual prefix.
+    try:
+        address = ipaddress.ip_interface(":".join(split_nmcli_line(value))).ip
+    except ValueError:
+        return False
+    return not (address.is_link_local or address.is_loopback or address.is_unspecified or address.is_multicast)
+
+
 def validate_wifi_request(request: dict[str, Any]) -> tuple[str, str, str | None, bool, str]:
     ssid = request.get("ssid")
     security = request.get("security")
@@ -277,7 +289,7 @@ class NetworkManagerController:
         state, connection, *addresses = values
         return (
             state.startswith("100")
-            and any(address and not address.lower().startswith("fe80:") for address in addresses)
+            and any(_usable_station_address(address) for address in addresses)
             and connection != SETUP_CONNECTION_NAME
         )
 

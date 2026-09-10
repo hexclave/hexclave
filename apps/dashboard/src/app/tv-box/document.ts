@@ -60,34 +60,41 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
         // A loaded document can still lose an external module to a brief outage.
         // Only initialization clears this deadline; backend outages use the app's retries.
         const reloadKey = "hexclave-tv-box-bootstrap-reloads";
-        const maximumReloads = 3;
+        // Bound the retry rate, not the number of attempts: an unattended box
+        // must still recover when module delivery resumes after a long outage.
+        const maximumBackoffStep = 4;
+        const allowUnavailableStorage = (error) => {
+          if (!(error instanceof DOMException) ||
+              (error.name !== "SecurityError" && error.name !== "QuotaExceededError")) throw error;
+        };
         let reloadCount;
         try {
-          reloadCount = Number.parseInt(window.sessionStorage.getItem(reloadKey) ?? "0", 10);
-        } catch {
-          reloadCount = maximumReloads;
+          reloadCount = Number(window.sessionStorage.getItem(reloadKey) ?? "0");
+        } catch (error) {
+          allowUnavailableStorage(error);
+          // Storage is only a backoff hint, not a prerequisite for recovery.
+          reloadCount = maximumBackoffStep;
         }
-        if (!Number.isInteger(reloadCount) || reloadCount < 0) reloadCount = 0;
-        const timeout = reloadCount < maximumReloads
-          ? window.setTimeout(() => {
-            try {
-              window.sessionStorage.setItem(reloadKey, String(reloadCount + 1));
-            } catch {
-              return;
-            }
-            window.location.reload();
-          }, 30000)
-          : undefined;
+        if (!Number.isSafeInteger(reloadCount) || reloadCount < 0) reloadCount = maximumBackoffStep;
+        reloadCount = Math.min(reloadCount, maximumBackoffStep);
+        const timeout = window.setTimeout(() => {
+          try {
+            window.sessionStorage.setItem(reloadKey, String(Math.min(reloadCount + 1, maximumBackoffStep)));
+          } catch (error) {
+            allowUnavailableStorage(error);
+          }
+          window.location.reload();
+        }, Math.min(300000, 30000 * 2 ** reloadCount));
         const cancel = () => {
-          if (timeout != null) window.clearTimeout(timeout);
+          window.clearTimeout(timeout);
           try {
             window.sessionStorage.removeItem(reloadKey);
-          } catch {
-            return;
+          } catch (error) {
+            allowUnavailableStorage(error);
           }
         };
         const leave = () => {
-          if (timeout != null) window.clearTimeout(timeout);
+          window.clearTimeout(timeout);
         };
         window.addEventListener("hexclave-tv-box-ready", cancel, { once: true });
         window.addEventListener("pagehide", leave, { once: true });

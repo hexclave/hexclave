@@ -295,6 +295,51 @@ class NetworkAgentTests(unittest.TestCase):
         self.assertFalse(controller.connected())
         self.assertTrue(any("IP6.ADDRESS" in command for command in commands[0]))
 
+    def test_connected_classifies_escaped_networkmanager_addresses(self) -> None:
+        cases = (
+            (r"fe80\:\:1/64", False),
+            (r"FE80\:\:1/64", False),
+            (r"fe90\:\:1/64", False),
+            (r"febf\:ffff\:\:1/64", False),
+            (r"fe80\:\:1%wlan0/64", False),
+            ("169.254.10.20/16", False),
+            ("invalid-address", False),
+            ("192.0.2.1/invalid", False),
+            (r"2001\:db8\:\:1/129", False),
+            ("", False),
+            ("--", False),
+            ("0.0.0.0/0", False),
+            (r"\:\:/128", False),
+            ("127.0.0.1/8", False),
+            (r"\:\:1/128", False),
+            ("224.0.0.1/4", False),
+            (r"ff02\:\:1/16", False),
+            ("192.0.2.10/24", True),
+            ("10.0.0.10/24", True),
+            (r"2001\:db8\:\:1/64", True),
+            (r"2606\:4700\:4700\:\:1111/64", True),
+            (r"fd12\:3456\:789a\:\:1/64", True),
+        )
+        for address, expected in cases:
+            with self.subTest(address=address):
+                controller = NetworkManagerController(
+                    runner=lambda _command, _timeout: f"100 (connected)\nOffice\n{address}\n",
+                )
+                self.assertEqual(controller.connected(), expected)
+
+    def test_connected_requires_station_state_and_at_least_one_usable_address(self) -> None:
+        addresses = r"fe80\:\:1/64" + "\ninvalid-address\n192.0.2.10/24\n"
+        for state, connection, expected in (
+            ("100 (connected)", "Office", True),
+            ("100 (connected)", "hexclave-tv-setup", False),
+            ("30 (disconnected)", "Office", False),
+        ):
+            with self.subTest(state=state, connection=connection):
+                controller = NetworkManagerController(
+                    runner=lambda _command, _timeout: f"{state}\n{connection}\n{addresses}",
+                )
+                self.assertEqual(controller.connected(), expected)
+
     def test_nmcli_escape_parser_preserves_colons_and_backslashes(self) -> None:
         self.assertEqual(split_nmcli_line(r"Office\:West:WPA2:72"), ["Office:West", "WPA2", "72"])
         self.assertEqual(split_nmcli_line(r"Back\\Slash:--:40"), [r"Back\Slash", "--", "40"])

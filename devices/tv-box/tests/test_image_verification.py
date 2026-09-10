@@ -241,9 +241,85 @@ class ImageVerificationTests(unittest.TestCase):
     def test_certificate_records_are_detected_across_chunk_boundaries(self) -> None:
         certificate = self.certificate_record()
         path = self.boot / "support-material.untracked.txt"
-        for split in (1, 24, 48, 80, 127):
-            path.write_bytes(b"x" * (1024 * 1024 - split - 1) + b"\n" + certificate)
+        self.assertGreater(len(certificate), 600)
+        for split in (1, 24, 48, 80, 127, 514, 550, 600, len(certificate) - 2):
+            path.write_bytes(b"\n" * (1024 * 1024 - split) + certificate)
             with self.subTest(split=split), self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_scan_validates_the_entire_base64_token_across_chunks(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        path = self.boot / "support-material.untracked.txt"
+        for invalid in (encoded + b"!", encoded + b"=", encoded[:-3] + b"===", encoded[:512] + b"=A" + encoded[512:]):
+            for split in (127, 514, 550, len(algorithm) + 1 + len(encoded)):
+                with self.subTest(length=len(invalid), split=split):
+                    record = algorithm + b" " + invalid + b"\n"
+                    self.assertFalse(image_verification.contains_certificate_record(record))
+                    path.write_bytes(b"x" * (1024 * 1024 - split - 1) + b"\n" + record)
+                    image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_scan_keeps_comment_and_token_boundaries_across_chunks(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        path = self.boot / "algorithm-source.untracked.py"
+        for prefix, record in (
+            (b"# " + b"x" * (1024 * 1024 - 516), certificate),
+            (b"x" * (1024 * 1024 - 514), certificate),
+            (b"x" * (1024 * 1024 - 514) + b"\n", algorithm + b"\n" + encoded),
+            (b"x" * (1024 * 1024 - 514) + b"\n", b"ssh-rsa-cert-v01@openssh.com " + encoded),
+        ):
+            with self.subTest(prefix_length=len(prefix), record_length=len(record)):
+                path.write_bytes(prefix + record)
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_scanner_is_independent_of_read_size(self) -> None:
+        certificate = self.certificate_record()
+        for content, expected in (
+            (certificate.rstrip(), True),
+            (b'restrict,command="echo hi" ' + certificate, True),
+            (b"# " + certificate, False),
+            (b"\x00" + certificate, False),
+            (certificate.split()[0] + b" " + certificate.split()[1] + b"!", False),
+        ):
+            for read_size in (1, 3, 4, 31, 514):
+                with self.subTest(expected=expected, read_size=read_size):
+                    scanner = image_verification.CertificateRecordScanner()
+                    detected = False
+                    for offset in range(0, len(content), read_size):
+                        if scanner.feed(content[offset:offset + read_size]):
+                            detected = True
+                            break
+                    self.assertEqual(detected or scanner.finish(), expected)
+
+    def test_certificate_scan_bounds_reads_for_long_lines_and_records(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        # A large but valid wire prefix exercises streaming independently of
+        # OpenSSH's configurable principal/extension sizes and signing limits.
+        large_record = algorithm + b" " + base64.b64encode(base64.b64decode(encoded) + bytes(2 * 1024 * 1024))
+        path = self.boot / "long-record.untracked.txt"
+        path.write_bytes(b"x" * (2 * 1024 * 1024) + b"\n" + large_record)
+        original_open = Path.open
+
+        class BoundedReader:
+            def __enter__(reader):
+                reader.source = original_open(path, "rb")
+                return reader
+
+            def __exit__(reader, *arguments):
+                reader.source.close()
+
+            def read(reader, size):
+                self.assertGreater(size, 0)
+                self.assertLessEqual(size, 1024 * 1024)
+                return reader.source.read(size)
+
+        def bounded_open(candidate: Path, *arguments, **keywords):
+            return BoundedReader() if candidate == path else original_open(candidate, *arguments, **keywords)
+
+        with patch.object(Path, "open", autospec=True, side_effect=bounded_open):
+            with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
                 image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
 
     def test_certificate_algorithm_mentions_and_regular_public_ca_keys_remain_allowed(self) -> None:

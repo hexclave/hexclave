@@ -40,6 +40,10 @@ SAFE_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
 TOKEN_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
     r"^(?:https?://|kiosk-renderer-[a-z0-9-]+|renderer-[a-z0-9-]+)"
 )
+SENSITIVE_RENDERER_VALUE_PATTERN = re.compile(
+    r"(?i)(?:authorization|proxy[-_ ]?authorization|(?:set[-_ ]?)?cookie|password|passwd|"
+    r"client[-_ ]?secret|(?:access|refresh)[-_ ]?token|pairing[-_ ]?code)[\"']?\s*[:=]"
+)
 URL_USERINFO_PATTERN = re.compile(r"(https?://)(?:[^/\s@]+@)([^/\s?#]+)")
 URL_QUERY_PATTERN = re.compile(r"(https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?")
 
@@ -90,6 +94,11 @@ def _sanitize_renderer_output(raw_line: bytes) -> str | None:
     # application state, so retain only the public URL path.
     line = URL_USERINFO_PATTERN.sub(r"\1\2", line)
     line = URL_QUERY_PATTERN.sub(r"\1", line)
+    # A native logger prefix does not make message values safe. Suppress the
+    # whole diagnostic instead of guessing where a credential value ends,
+    # and inspect it before truncation so earlier contents cannot escape.
+    if SENSITIVE_RENDERER_VALUE_PATTERN.search(line) is not None:
+        return REDACTED_RENDERER_OUTPUT
     return line[:MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS]
 
 

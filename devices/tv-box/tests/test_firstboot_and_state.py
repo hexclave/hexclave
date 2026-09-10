@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import grp
 import os
+import pwd
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from hexclave_tv_box.firstboot import apply_system_hostname, initialize_device
+from hexclave_tv_box.firstboot import apply_device_permissions, apply_system_hostname, initialize_device
+from hexclave_tv_box.relay import initialize_relay_identity
 from hexclave_tv_box.state import atomic_write, clear_exact_state_directory, require_exact_child
 
 
@@ -19,13 +23,71 @@ class FirstBootTests(unittest.TestCase):
                 key_path.write_text("private", encoding="utf-8")
                 Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
 
-            first = initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
-            second = initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
+            first = initialize_device(state_root, fake_keygen, "a" * 32)
+            second = initialize_device(state_root, fake_keygen, "a" * 32)
             self.assertEqual(first, second)
             self.assertRegex(first["device_id"], r"^[0-9a-f-]{36}$")
             self.assertTrue(first["hostname"].startswith("hexclave-tv-"))
             self.assertEqual((state_root / "ssh" / "ssh_host_ed25519_key").stat().st_mode & 0o777, 0o600)
             self.assertEqual((state_root / "firstboot-state" / "complete").read_text(encoding="utf-8"), "complete\n")
+
+    @unittest.skipUnless(os.geteuid() == 0, "Tests exercise actual appliance ownership transitions.")
+    def test_reboot_after_permissions_preserves_browser_identity_and_wifi(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            state_root = Path(directory) / "state"
+            kiosk_user = pwd.struct_passwd(("hexclave-tv", "x", 12345, 12345, "", "/nonexistent", "/usr/sbin/nologin"))
+            groups = {
+                name: grp.struct_group((name, "x", group_id, []))
+                for name, group_id in (("hexclave-tv-runtime", 12346), ("systemd-journal", 12347))
+            }
+
+            def fake_keygen(command: list[str]) -> None:
+                key_path = Path(command[command.index("-f") + 1])
+                key_path.write_text("private", encoding="utf-8")
+                Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+            with (
+                mock.patch("hexclave_tv_box.firstboot.pwd.getpwnam", return_value=kiosk_user),
+                mock.patch("hexclave_tv_box.firstboot.grp.getgrnam", side_effect=groups.__getitem__),
+            ):
+                first = initialize_device(state_root, fake_keygen, "a" * 32)
+                apply_device_permissions(state_root)
+                browser = state_root / "browser"
+                browser_inode = browser.stat().st_ino
+                cookies = browser / "cookies.sqlite"
+                cookies.write_bytes(b"browser-session-fixture")
+                os.chown(cookies, kiosk_user.pw_uid, kiosk_user.pw_gid)
+                wifi = state_root / "network-connections" / "saved.nmconnection"
+                wifi.write_text("[connection]\nid=fixture-network\n", encoding="utf-8")
+                wifi.chmod(0o600)
+                persisted = {path.relative_to(state_root): path.read_bytes() for path in state_root.rglob("*") if path.is_file()}
+
+                for _reboot in range(2):
+                    second = initialize_device(state_root, lambda _command: self.fail("SSH keys were regenerated."), "a" * 32)
+                    apply_device_permissions(state_root)
+                    self.assertEqual(first, second)
+                    self.assertEqual(browser.stat().st_ino, browser_inode)
+                    self.assertEqual(browser.stat().st_uid, kiosk_user.pw_uid)
+                    self.assertEqual(browser.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(cookies.stat().st_uid, kiosk_user.pw_uid)
+                    self.assertEqual(wifi.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(
+                        {path.relative_to(state_root): path.read_bytes() for path in state_root.rglob("*") if path.is_file()},
+                        persisted,
+                    )
+
+    @unittest.skipUnless(os.geteuid() == 0, "Tests enforce actual directory ownership.")
+    def test_initialization_rejects_unexpected_owners_including_browser(self) -> None:
+        kiosk_user = pwd.struct_passwd(("hexclave-tv", "x", 12345, 12345, "", "/nonexistent", "/usr/sbin/nologin"))
+        for name, owner in (("browser", 12349), ("identity", kiosk_user.pw_uid), ("network-connections", kiosk_user.pw_uid)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+                state_root = Path(directory) / "state"
+                child = state_root / name
+                child.mkdir(parents=True)
+                os.chown(child, owner, owner)
+                with mock.patch("hexclave_tv_box.firstboot.pwd.getpwnam", return_value=kiosk_user):
+                    with self.assertRaisesRegex(RuntimeError, "unexpected owner"):
+                        initialize_device(state_root, lambda _command: None, "a" * 32)
 
     def test_system_hostname_writes_only_the_expected_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -148,24 +210,25 @@ class FirstBootTests(unittest.TestCase):
                 key_path.write_text("private", encoding="utf-8")
                 Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
 
-            initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
+            initialize_device(state_root, fake_keygen, "a" * 32)
             with self.assertRaisesRegex(RuntimeError, "do not match"):
-                initialize_device(state_root, fake_keygen, "b" * 32, relay_group=None)
+                initialize_device(state_root, fake_keygen, "b" * 32)
 
     def test_initialization_rejects_state_child_symlink_without_writing_through_it(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            state_root = root / "state"
-            state_root.mkdir()
-            outside = root / "outside"
-            outside.mkdir()
-            (state_root / "identity").symlink_to(outside, target_is_directory=True)
-            with self.assertRaisesRegex(RuntimeError, "symlink"):
-                initialize_device(state_root, lambda _command: None, "a" * 32, relay_group=None)
-            self.assertEqual(list(outside.iterdir()), [])
+        for name in ("browser", "identity", "journal", "network-connections", "ssh"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+                root = Path(directory)
+                state_root = root / "state"
+                state_root.mkdir()
+                outside = root / "outside"
+                outside.mkdir()
+                (state_root / name).symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "symlink"):
+                    initialize_device(state_root, lambda _command: None, "a" * 32)
+                self.assertEqual(list(outside.iterdir()), [])
 
-    def test_initialization_creates_and_validates_relay_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+    def test_initialization_creates_only_missing_relay_mountpoint_without_relay_group(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
             root = Path(directory)
             state_root = root / "state"
 
@@ -174,18 +237,89 @@ class FirstBootTests(unittest.TestCase):
                 key_path.write_text("private", encoding="utf-8")
                 Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
 
-            initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
+            with mock.patch("hexclave_tv_box.firstboot.grp.getgrnam", side_effect=KeyError("hexclave-tv-relay")) as group_lookup:
+                first = initialize_device(state_root, fake_keygen, "a" * 32)
+                second = initialize_device(state_root, fake_keygen, "a" * 32)
+                group_lookup.assert_not_called()
+            self.assertEqual(first, second)
             relay = state_root / "relay"
+            self.assertFalse(relay.is_symlink())
             self.assertEqual(relay.stat().st_mode & 0o777, 0o750)
             self.assertEqual(relay.stat().st_uid, os.getuid())
+            self.assertEqual(list(relay.iterdir()), [])
 
-            outside = root / "outside"
-            outside.mkdir()
-            relay.rmdir()
-            relay.symlink_to(outside, target_is_directory=True)
-            with self.assertRaisesRegex(RuntimeError, "symlink"):
-                initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
-            self.assertEqual(list(outside.iterdir()), [])
+    @unittest.skipUnless(os.geteuid() == 0, "Relay initialization enforces actual root-owned metadata.")
+    def test_unsafe_optional_relay_path_blocks_only_relay_initialization(self) -> None:
+        for kind, error_type in (
+            ("symlink", ValueError),
+            ("dangling-symlink", ValueError),
+            ("wrong-owner", ValueError),
+            ("unsafe-mode", ValueError),
+            ("regular-file", FileExistsError),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+                root = Path(directory)
+                state_root = root / "state"
+                state_root.mkdir(mode=0o700)
+                outside = root / "outside"
+                outside.mkdir(mode=0o700)
+                (outside / "keep").write_text("unchanged", encoding="utf-8")
+                relay = state_root / "relay"
+                if kind == "symlink":
+                    relay.symlink_to(outside, target_is_directory=True)
+                elif kind == "dangling-symlink":
+                    relay.symlink_to(root / "missing", target_is_directory=True)
+                elif kind == "regular-file":
+                    relay.write_text("unchanged", encoding="utf-8")
+                else:
+                    relay.mkdir(mode=0o750)
+                    if kind == "wrong-owner":
+                        os.chown(relay, 12349, 12349)
+                    else:
+                        relay.chmod(0o777)
+                before = relay.lstat()
+
+                def fake_keygen(command: list[str]) -> None:
+                    key_path = Path(command[command.index("-f") + 1])
+                    key_path.write_text("private", encoding="utf-8")
+                    Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+                with self.assertRaises(error_type):
+                    initialize_relay_identity(state_root, group_id=os.getgid())
+                initialize_device(state_root, fake_keygen, "a" * 32)
+                after = relay.lstat()
+                self.assertEqual(
+                    (after.st_ino, after.st_mode, after.st_uid, after.st_gid),
+                    (before.st_ino, before.st_mode, before.st_uid, before.st_gid),
+                )
+                self.assertEqual((state_root / "firstboot-state" / "complete").read_text(encoding="utf-8"), "complete\n")
+                self.assertEqual((outside / "keep").read_text(encoding="utf-8"), "unchanged")
+                self.assertFalse((root / "missing").exists())
+                with self.assertRaises(error_type):
+                    initialize_relay_identity(state_root, group_id=os.getgid())
+
+    @unittest.skipUnless(os.geteuid() == 0, "Tests enforce actual relay directory metadata.")
+    def test_initialization_preserves_existing_private_relay_mountpoint_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+            state_root = Path(directory) / "state"
+            relay = state_root / "relay"
+            relay.mkdir(mode=0o700, parents=True)
+            os.chown(relay, 0, 12349)
+            (relay / "keep").write_text("unchanged", encoding="utf-8")
+            before = relay.stat()
+
+            def fake_keygen(command: list[str]) -> None:
+                key_path = Path(command[command.index("-f") + 1])
+                key_path.write_text("private", encoding="utf-8")
+                Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+            initialize_device(state_root, fake_keygen, "a" * 32)
+            after = relay.stat()
+            self.assertEqual(
+                (after.st_ino, after.st_mode, after.st_uid, after.st_gid),
+                (before.st_ino, before.st_mode, before.st_uid, before.st_gid),
+            )
+            self.assertEqual((relay / "keep").read_text(encoding="utf-8"), "unchanged")
 
     def test_hosts_update_preserves_aliases_comments_and_other_managed_lines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

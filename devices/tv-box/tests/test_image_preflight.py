@@ -165,9 +165,13 @@ class ImagePreflightTests(unittest.TestCase):
                 ):
                     image_preflight.verify_mount(image, mount, expected)
 
-            verify(filesystem, loop)
+            for options in ("ro,noload,relatime", "ro,norecovery,relatime"):
+                with self.subTest(options=options):
+                    verify({**filesystem, "options": options}, loop)
             for location, field, value in (
                 ("fs", "options", "rw,relatime"), ("fs", "options", "ro,relatime"),
+                ("fs", "options", "rw,noload"), ("fs", "options", "rw,norecovery"),
+                ("fs", "options", "ro,rw,noload"), ("fs", "options", "ro,rw,norecovery"),
                 ("fs", "fsroot", "/subdir"),
                 ("fs", "fstype", "vfat"), ("fs", "target", str(root)),
                 ("fs", "source", "/dev/sda2"),

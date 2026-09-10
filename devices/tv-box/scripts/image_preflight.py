@@ -68,11 +68,13 @@ def verify_mount(image: Path, mount: Path, partition: Partition, filesystem: str
     ]), "filesystems")
     options = set(str(metadata.get("options", "")).split(","))
     required_options = {"ro"}
-    if filesystem == "ext4":
-        required_options.add("noload")
     missing_options = required_options - options
+    # ext4 reports noload as its equivalent norecovery spelling on some kernels.
+    # Read-only alone still permits journal replay and is never sufficient.
+    if filesystem == "ext4" and not options.intersection({"noload", "norecovery"}):
+        missing_options.add("noload or norecovery")
     if (metadata.get("target") != str(resolved_mount) or metadata.get("fsroot") != "/"
-        or metadata.get("fstype") != filesystem or missing_options):
+        or metadata.get("fstype") != filesystem or missing_options or "rw" in options):
         if missing_options:
             missing = ", ".join(sorted(missing_options))
             raise ValueError(f"Image mount is missing required option: {missing}.")

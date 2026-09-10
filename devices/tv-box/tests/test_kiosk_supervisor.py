@@ -13,6 +13,8 @@ from hexclave_tv_box.kiosk_supervisor import (
     ProcessInfo,
     RendererProcessTree,
     DOCUMENT_RETRY_SECONDS,
+    MAX_RENDERER_DIAGNOSTIC_LINES,
+    MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS,
     RENDERER_GRACEFUL_STOP_SECONDS,
     RENDERER_KILL_WAIT_SECONDS,
     _RendererOutputTail,
@@ -131,6 +133,83 @@ class KioskSupervisorTests(unittest.TestCase):
             "(WebKitNetworkProcess:123): WebKit-WARNING **: warning",
         )
         self.assertEqual(_sanitize_renderer_output(b"\n"), None)
+
+    def test_native_renderer_sensitive_values_are_suppressed_before_retention(self) -> None:
+        prefixes = (
+            "Cog-WARNING **: ",
+            "(WebKitNetworkProcess:123): WebKit-WARNING **: ",
+            "(cog:123): GLib-GObject-CRITICAL **: ",
+        )
+        fields = (
+            "password=example-sensitive-value",
+            "PASSWORD : example-sensitive-value",
+            "passwd=example-sensitive-value",
+            "Authorization: Bearer example-sensitive-value",
+            "Proxy-Authorization: Basic example-sensitive-value",
+            "Cookie: session=example-sensitive-value",
+            "Set-Cookie: session=example-sensitive-value; HttpOnly",
+            "client-secret=example-sensitive-value",
+            "client_secret = example-sensitive-value",
+            "access-token=example-sensitive-value",
+            '"access_token": "example-sensitive-value"',
+            "refresh-token=example-sensitive-value",
+            "refreshToken=example-sensitive-value",
+            "pairing-code=example-sensitive-value",
+            "pairing_code=example-sensitive-value",
+            "pairing code=example-sensitive-value",
+            "{'password': 'example-sensitive-value', 'snapshot': 'example-display-title'}",
+        )
+        for prefix in prefixes:
+            for field in fields:
+                with self.subTest(prefix=prefix, field=field):
+                    tail = _RendererOutputTail()
+                    raw_line = (prefix + field + "\n").encode()
+                    tail.consume(io.BytesIO(raw_line + raw_line))
+                    self.assertEqual(tail.snapshot(), ("<redacted renderer output>",))
+
+    def test_renderer_tail_preserves_useful_diagnostics_and_existing_redaction(self) -> None:
+        tail = _RendererOutputTail()
+        tail.consume(io.BytesIO(
+            b"Cog-WARNING **: platform initialization failed\n"
+            b"WebKit-WARNING **: network process exited unexpectedly\n"
+            b"(cog:123): GLib-GObject-CRITICAL **: object reference assertion failed\n"
+            b"Unable to create the wlroots backend\n"
+            b"WebKit: failed https://example-user:example-password@example.com/x?password=example-query#example-fragment\n"
+            b"renderer-exit password=example-password-value\n"
+            b"https://example.com/x snapshot=example-display-title\n"
+            b"console.log snapshot={title:example-display-title}\n"
+            b"page console password=example-password-value\n"
+        ))
+        self.assertEqual(tail.snapshot(), (
+            "Cog-WARNING **: platform initialization failed",
+            "WebKit-WARNING **: network process exited unexpectedly",
+            "(cog:123): GLib-GObject-CRITICAL **: object reference assertion failed",
+            "Unable to create the wlroots backend",
+            "WebKit: failed https://example.com/x",
+            "renderer-exit",
+            "https://example.com/x",
+            "<redacted renderer output>",
+        ))
+
+    def test_renderer_tail_remains_bounded_and_checks_the_whole_diagnostic(self) -> None:
+        tail = _RendererOutputTail()
+        lines = [
+            f"Cog-WARNING **: diagnostic {index} " + "x" * MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS
+            for index in range(MAX_RENDERER_DIAGNOSTIC_LINES + 2)
+        ]
+        tail.consume(io.BytesIO(("\n".join(lines) + "\n").encode()))
+        self.assertEqual(tail.snapshot(), tuple(
+            line[:MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS]
+            for line in lines[-MAX_RENDERER_DIAGNOSTIC_LINES:]
+        ))
+        # A sensitive field beyond the retained width still suppresses the
+        # entire message, including any earlier unstructured contents.
+        tail.consume(io.BytesIO((
+            "Cog-WARNING **: " + "x" * MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS
+            + " password=example-sensitive-value\n"
+        ).encode()))
+        self.assertEqual(len(tail.snapshot()), MAX_RENDERER_DIAGNOSTIC_LINES)
+        self.assertEqual(tail.snapshot()[-1], "<redacted renderer output>")
 
     def test_renderer_health_requires_cage_cog_and_the_real_web_process(self) -> None:
         processes = {
@@ -366,6 +445,11 @@ finally:
                 self.stdout = io.BytesIO(
                     b"Unable to create the wlroots backend\n"
                     b"Authorization: Bearer must-not-appear\n"
+                    b"Cog-WARNING **: password=example-password-value\n"
+                    b"WebKit-WARNING **: Authorization: Bearer example-auth-value\n"
+                    b"(cog:123): GLib-WARNING **: Cookie: session=example-cookie-value\n"
+                    b"console.log snapshot={title:example-display-title}\n"
+                    b"WebKit-WARNING **: network process exited unexpectedly\n"
                 )
 
             def poll(self) -> int | None:
@@ -385,6 +469,11 @@ finally:
             self.assertIn("Unable to create the wlroots backend", output)
             self.assertIn("<redacted renderer output>", output)
             self.assertNotIn("must-not-appear", output)
+            self.assertNotIn("example-password-value", output)
+            self.assertNotIn("example-auth-value", output)
+            self.assertNotIn("example-cookie-value", output)
+            self.assertNotIn("example-display-title", output)
+            self.assertIn("WebKit-WARNING **: network process exited unexpectedly", output)
             self.assertEqual(health_file.read_text(encoding="utf-8"), "exited\n")
 
 
