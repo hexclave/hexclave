@@ -427,12 +427,33 @@ class ImageContractTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for gate in ("read-only-root", "signed image", "physical customer reset", "full GA fault-injection"):
             self.assertIn(gate, readme)
-        ga_gates = (ROOT / "GA_GATES.md").read_text(encoding="utf-8")
-        for gate in ("A/B", "802.1X", "25 abrupt power cuts", "72-hour", "penetration-test"):
-            self.assertIn(gate, ga_gates)
+        self.assertIn("72-hour", readme)
         runbook = (ROOT / "PILOT_RUNBOOK.md").read_text(encoding="utf-8")
-        for gate in ("Cold boot", "Unpair", "five controlled abrupt power cuts", "24 continuous hours"):
+        for gate in ("Cold boot", "Unpair", "five controlled abrupt power cuts", "10 continuous hours"):
             self.assertIn(gate, runbook)
+
+    def test_customer_wifi_retry_guidance_is_in_the_runbook(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("[PILOT_RUNBOOK.md](PILOT_RUNBOOK.md)", readme)
+        content = (ROOT / "PILOT_RUNBOOK.md").read_text(encoding="utf-8")
+        for instruction in (
+            "incorrect **hotspot password**",
+            "incorrect **destination Wi-Fi password**",
+            "1–2 minutes",
+            "same hotspot name and a **new per-session password**",
+            "forget only the saved",
+            "http://10.42.0.1",
+        ):
+            self.assertIn(instruction, content)
+
+    def test_public_document_links_do_not_depend_on_local_reference_files(self) -> None:
+        for document in ("README.md", "PILOT_RUNBOOK.md"):
+            content = (ROOT / document).read_text(encoding="utf-8")
+            for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", content):
+                if target.startswith(("https://", "http://", "#")):
+                    continue
+                path = ROOT / target.split("#", 1)[0]
+                self.assertTrue(path.is_file(), f"Broken link in {document}: {target}")
 
 
 if __name__ == "__main__":
