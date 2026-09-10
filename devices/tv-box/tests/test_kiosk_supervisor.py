@@ -15,6 +15,7 @@ from hexclave_tv_box.kiosk_supervisor import (
     DOCUMENT_RETRY_SECONDS,
     MAX_RENDERER_DIAGNOSTIC_LINES,
     MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS,
+    MAX_RENDERER_OUTPUT_LINE_BYTES,
     RENDERER_GRACEFUL_STOP_SECONDS,
     RENDERER_KILL_WAIT_SECONDS,
     _RendererOutputTail,
@@ -227,7 +228,7 @@ class KioskSupervisorTests(unittest.TestCase):
         class BoundedStream(io.BytesIO):
             def readline(self, size: int = -1) -> bytes:
                 testcase.assertGreater(size, 0)
-                testcase.assertLessEqual(size, 4097)
+                testcase.assertLessEqual(size, MAX_RENDERER_OUTPUT_LINE_BYTES + 1)
                 return super().readline(size)
 
         tail = _RendererOutputTail()
@@ -244,9 +245,9 @@ class KioskSupervisorTests(unittest.TestCase):
     def test_incomplete_or_oversized_renderer_lines_never_publish_prefixes_or_document_events(self) -> None:
         prefix = b"Cog-Core-Message: <https://example.com/"
         cases = (
-            b"Cog-WARNING **: " + b"x" * 4096 + b" password=fixture-secret\n",
-            prefix + b"x" * 4096 + b"> Loaded successfully.\n",
-            prefix + b"x" * 4096 + b"> Load started.\n",
+            b"Cog-WARNING **: " + b"x" * MAX_RENDERER_OUTPUT_LINE_BYTES + b" password=fixture-secret\n",
+            prefix + b"x" * MAX_RENDERER_OUTPUT_LINE_BYTES + b"> Loaded successfully.\n",
+            prefix + b"x" * MAX_RENDERER_OUTPUT_LINE_BYTES + b"> Load started.\n",
             b"Cog-WARNING **: incomplete diagnostic",
             prefix + b"tv-box> Loaded successfully.",
             prefix + b"\xff> Loaded successfully.\n",
@@ -260,7 +261,7 @@ class KioskSupervisorTests(unittest.TestCase):
 
     def test_renderer_ingestion_accepts_the_exact_line_bound_and_coalesces_discarded_lines(self) -> None:
         prefix = b"Cog-WARNING **: "
-        line = prefix + b"x" * (4096 - len(prefix) - 1) + b"\n"
+        line = prefix + b"x" * (MAX_RENDERER_OUTPUT_LINE_BYTES - len(prefix) - 1) + b"\n"
         tail = _RendererOutputTail()
         tail.consume(io.BytesIO(line + line[:-1] + b"x\n" + b"z" * 8192 + b"\n"))
         self.assertEqual(tail.snapshot(), (

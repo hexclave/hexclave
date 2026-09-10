@@ -18,11 +18,15 @@ import image_source
 
 class ImageSourceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory(suffix=".untracked")
-        self.addCleanup(self.directory.cleanup)
-        self.repository = Path(self.directory.name)
+        self.repository = self.new_repository()
+
+    def new_repository(self) -> Path:
+        directory = tempfile.TemporaryDirectory(suffix=".untracked")
+        self.addCleanup(directory.cleanup)
+        repository = Path(directory.name)
         for relative in image_source.PAYLOAD_SOURCES:
-            (self.repository / relative).mkdir(parents=True)
+            (repository / relative).mkdir(parents=True)
+        return repository
 
     def check_inputs(self, *ignored: Path) -> None:
         result = subprocess.CompletedProcess([], 0, b"".join(os.fsencode(path) + b"\0" for path in ignored), b"")
@@ -176,21 +180,18 @@ class ImageSourceTests(unittest.TestCase):
                 image_source.verify_ignored_payload_inputs(self.repository)
             command.assert_not_called()
 
-        with tempfile.TemporaryDirectory(suffix=".untracked") as second_directory:
-            second_repository = Path(second_directory)
-            for relative in image_source.PAYLOAD_SOURCES:
-                (second_repository / relative).mkdir(parents=True)
-            second_outside = second_repository.parent / f"{second_repository.name}-outside"
-            self.addCleanup(shutil.rmtree, second_outside, ignore_errors=True)
-            (second_outside / "tv-box/image/rootfs").mkdir(parents=True)
-            (second_outside / "tv-box/image/rootfs/planted.txt").write_text("external-fixture", encoding="utf-8")
-            shutil.rmtree(second_repository / "devices/tv-box")
-            (second_repository / "devices/tv-box").symlink_to(second_outside / "tv-box", target_is_directory=True)
+        second_repository = self.new_repository()
+        second_outside = second_repository.parent / f"{second_repository.name}-outside"
+        self.addCleanup(shutil.rmtree, second_outside, ignore_errors=True)
+        (second_outside / "tv-box/image/rootfs").mkdir(parents=True)
+        (second_outside / "tv-box/image/rootfs/planted.txt").write_text("external-fixture", encoding="utf-8")
+        shutil.rmtree(second_repository / "devices/tv-box")
+        (second_repository / "devices/tv-box").symlink_to(second_outside / "tv-box", target_is_directory=True)
 
-            with patch.object(image_source.subprocess, "run", side_effect=AssertionError("git must not run")) as command:
-                with self.assertRaisesRegex(ValueError, "linked ancestors"):
-                    image_source.verify_ignored_payload_inputs(second_repository)
-                command.assert_not_called()
+        with patch.object(image_source.subprocess, "run", side_effect=AssertionError("git must not run")) as command:
+            with self.assertRaisesRegex(ValueError, "linked ancestors"):
+                image_source.verify_ignored_payload_inputs(second_repository)
+            command.assert_not_called()
 
     def test_nested_git_entries_are_rejected_before_git_inspection(self) -> None:
         def assert_rejected(repository: Path) -> None:
@@ -205,24 +206,18 @@ class ImageSourceTests(unittest.TestCase):
         (nested_directory / "config").write_text("gitdir-fixture", encoding="utf-8")
         assert_rejected(self.repository)
 
-        with tempfile.TemporaryDirectory(suffix=".untracked") as second_directory:
-            second_repository = Path(second_directory)
-            for relative in image_source.PAYLOAD_SOURCES:
-                (second_repository / relative).mkdir(parents=True)
-            (second_repository / image_source.PAYLOAD_SOURCES[2] / ".git").write_text(
-                "gitfile-fixture", encoding="utf-8"
-            )
-            assert_rejected(second_repository)
+        second_repository = self.new_repository()
+        (second_repository / image_source.PAYLOAD_SOURCES[2] / ".git").write_text(
+            "gitfile-fixture", encoding="utf-8"
+        )
+        assert_rejected(second_repository)
 
-        with tempfile.TemporaryDirectory(suffix=".untracked") as third_directory:
-            third_repository = Path(third_directory)
-            for relative in image_source.PAYLOAD_SOURCES:
-                (third_repository / relative).mkdir(parents=True)
-            target = third_repository.parent / f"{third_repository.name}-git-target"
-            self.addCleanup(shutil.rmtree, target, ignore_errors=True)
-            target.mkdir()
-            (third_repository / image_source.RUNTIME_SOURCE / ".git").symlink_to(target, target_is_directory=True)
-            assert_rejected(third_repository)
+        third_repository = self.new_repository()
+        target = third_repository.parent / f"{third_repository.name}-git-target"
+        self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+        target.mkdir()
+        (third_repository / image_source.RUNTIME_SOURCE / ".git").symlink_to(target, target_is_directory=True)
+        assert_rejected(third_repository)
 
     def test_allowed_bytecode_is_removed_by_the_actual_layer_cleanup(self) -> None:
         runtime = self.repository / image_source.RUNTIME_SOURCE
