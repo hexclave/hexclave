@@ -134,11 +134,11 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn("    - network-manager", layer)
         self.assertNotIn("libraspberrypi-bin", layer)
         self.assertNotIn("${DIRECTORY}", layer)
-        self.assertIn('cp -a "${SRCROOT}/rootfs/." "$1/"', layer)
-        self.assertIn('cp -a "${SRCROOT}/../src/hexclave_tv_box"', layer)
+        self.assertIn('cp -a --no-preserve=ownership "${SRCROOT}/rootfs/." "$1/"', layer)
+        self.assertIn('cp -a --no-preserve=ownership "${SRCROOT}/../src/hexclave_tv_box"', layer)
         self.assertIn("-name __pycache__ -prune -exec rm -rf {} +", layer)
         self.assertIn("-name '*.pyc' -o -name '*.pyo'", layer)
-        self.assertIn('cp -a "${SRCROOT}/../setup-ui/."', layer)
+        self.assertIn('cp -a --no-preserve=ownership "${SRCROOT}/../setup-ui/."', layer)
         self.assertIn(': > "$1/etc/machine-id"', layer)
         self.assertIn(': > "$1/etc/hostname"', layer)
         self.assertIn("bluetooth.service hciuart.service", layer)
@@ -178,6 +178,8 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn('if ! (cd "$tree" && find . -xdev -type f -print0 > "$list"); then', verifier)
         self.assertIn("LC_ALL=C sort -z \"$list\" | xargs -0 -r sha256sum", verifier)
         self.assertIn("Unable to enumerate image files.", verifier)
+        self.assertIn("Image root-delegated code has unexpected ownership or writability.", verifier)
+        self.assertIn("! -uid 0 -o ! -gid 0 -o -perm /022", verifier)
 
     def test_build_image_requires_clean_builder_and_absolute_support_ca(self) -> None:
         build = (ROOT / "scripts/build-image.sh").read_text(encoding="utf-8")
@@ -392,6 +394,9 @@ class ImageContractTests(unittest.TestCase):
                 )
             make_verification_fixture(rootfs, manifest)
             cursor_asset.install_cursor(rootfs)
+            support = rootfs / "usr/lib/hexclave-tv-box/support"
+            support.write_text("support\n", encoding="utf-8")
+            (rootfs / "etc/sudoers.d").mkdir(parents=True)
             (rootfs / "etc/machine-id").write_text("", encoding="utf-8")
             (rootfs / "var/lib/hexclave-tv-box/network-connections").mkdir(parents=True)
             (rootfs / "etc/NetworkManager").mkdir(parents=True)
@@ -405,6 +410,24 @@ class ImageContractTests(unittest.TestCase):
 
             command = [str(ROOT / "scripts/verify-image.sh"), str(image), str(rootfs), str(state), str(boot), str(manifest), str(output)]
             environment = mount_command_environment(image, rootfs, state, temporary_root, boot=boot)
+            # The fixture runs as the checkout user; normalize only ownership
+            # predicates so the production uid/gid-zero contract remains tested
+            # for permissions without requiring root in the test environment.
+            ownership_find = Path(environment["PATH"].split(":", maxsplit=1)[0]) / "find"
+            ownership_find.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os\n"
+                "import sys\n"
+                "arguments = sys.argv[1:]\n"
+                "for index in range(len(arguments) - 1):\n"
+                "    if arguments[index] == '-uid' and arguments[index + 1] == '0':\n"
+                "        arguments[index + 1] = str(os.getuid())\n"
+                "    elif arguments[index] == '-gid' and arguments[index + 1] == '0':\n"
+                "        arguments[index + 1] = str(os.getgid())\n"
+                "os.execv('/usr/bin/find', ['find', *arguments])\n",
+                encoding="utf-8",
+            )
+            ownership_find.chmod(0o755)
 
             def run_verifier() -> subprocess.CompletedProcess[str]:
                 return subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -416,6 +439,12 @@ class ImageContractTests(unittest.TestCase):
                 manifest_lines = (output / manifest_name).read_text(encoding="utf-8").splitlines()
                 manifest_paths = [line.split("  ", maxsplit=1)[1] for line in manifest_lines]
                 self.assertEqual(manifest_paths, sorted(manifest_paths), manifest_name)
+
+            support.chmod(0o775)
+            rejected_writable = run_verifier()
+            self.assertNotEqual(rejected_writable.returncode, 0)
+            self.assertIn("Image root-delegated code has unexpected ownership or writability.", rejected_writable.stdout)
+            support.chmod(0o755)
 
             relative_cwd = temporary_root / "relative-output-cwd"
             relative_cwd.mkdir()
@@ -534,7 +563,7 @@ class ImageContractTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
                 "  *ssh_host_*_key*) exit 1 ;;\n"
-                "  *) exec /usr/bin/find \"$@\" ;;\n"
+                f"  *) exec \"{ownership_find}\" \"$@\" ;;\n"
                 "esac\n",
                 encoding="utf-8",
             )

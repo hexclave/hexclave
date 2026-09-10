@@ -35,10 +35,10 @@ SAFE_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
     r"^(?:"
     r"(?:\([^)]*\): )?(?:GLib|WebKit|WebKitNetworkProcess|Cog|Cog-Core|Wayland|wlroots)"
     r"|Unable to create the wlroots backend"
-    r"|https?://"
-    r"|kiosk-renderer-[a-z0-9-]+"
-    r"|renderer-[a-z0-9-]+"
     r")"
+)
+TOKEN_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
+    r"^(?:https?://|kiosk-renderer-[a-z0-9-]+|renderer-[a-z0-9-]+)"
 )
 URL_USERINFO_PATTERN = re.compile(r"(https?://)(?:[^/\s@]+@)([^/\s?#]+)")
 URL_QUERY_PATTERN = re.compile(r"(https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?")
@@ -82,7 +82,9 @@ def _sanitize_renderer_output(raw_line: bytes) -> str | None:
     if line == "":
         return None
     if SAFE_RENDERER_DIAGNOSTIC_PATTERN.match(line) is None:
-        return REDACTED_RENDERER_OUTPUT
+        if TOKEN_RENDERER_DIAGNOSTIC_PATTERN.match(line) is None:
+            return REDACTED_RENDERER_OUTPUT
+        line = line.split(maxsplit=1)[0]
     # Renderer failures occasionally contain the document URL. Query strings
     # and fragments are unnecessary for diagnosing Cage/Cog and may contain
     # application state, so retain only the public URL path.

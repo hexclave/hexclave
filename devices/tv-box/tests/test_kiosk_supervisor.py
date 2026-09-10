@@ -107,6 +107,18 @@ class KioskSupervisorTests(unittest.TestCase):
             "https://host/x",
         )
         self.assertEqual(
+            _sanitize_renderer_output(b"https://app.hexclave.com/tv-box password=secret\n"),
+            "https://app.hexclave.com/tv-box",
+        )
+        self.assertEqual(
+            _sanitize_renderer_output(b"https://u:p@host/x?token=1 extra=secret\n"),
+            "https://host/x",
+        )
+        self.assertEqual(
+            _sanitize_renderer_output(b"renderer-exit code=1 password=secret\n"),
+            "renderer-exit",
+        )
+        self.assertEqual(
             _sanitize_renderer_output(b"Cookie: session=abc https://example.com/x\n"),
             "<redacted renderer output>",
         )

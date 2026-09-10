@@ -64,16 +64,16 @@ mmdebstrap:
     - date -d "@${SOURCE_DATE_EPOCH}" > "$1/etc/fake-hwclock.data"
     - |-
       set -eu
-      cp -a "${SRCROOT}/rootfs/." "$1/"
+      cp -a --no-preserve=ownership "${SRCROOT}/rootfs/." "$1/"
       install -d -m 0755 "$1/usr/lib/python3/dist-packages"
-      cp -a "${SRCROOT}/../src/hexclave_tv_box" "$1/usr/lib/python3/dist-packages/"
+      cp -a --no-preserve=ownership "${SRCROOT}/../src/hexclave_tv_box" "$1/usr/lib/python3/dist-packages/"
       # Host-side validation imports these modules and may leave bytecode for
       # the build host's Python version. Never copy that generated state into
       # the target image; the appliance runs directly from reviewed sources.
       find "$1/usr/lib/python3/dist-packages/hexclave_tv_box" -type d -name __pycache__ -prune -exec rm -rf {} +
       find "$1/usr/lib/python3/dist-packages/hexclave_tv_box" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
       install -d -m 0755 "$1/usr/share/hexclave-tv-box/setup-ui"
-      cp -a "${SRCROOT}/../setup-ui/." "$1/usr/share/hexclave-tv-box/setup-ui/"
+      cp -a --no-preserve=ownership "${SRCROOT}/../setup-ui/." "$1/usr/share/hexclave-tv-box/setup-ui/"
       python3 -B "${SRCROOT}/../scripts/cursor_asset.py" install "$1"
       python3 -B "${SRCROOT}/../scripts/image_verification.py" runtime "$1" "${SRCROOT}/qualified-runtime.json"
       python3 -B "${SRCROOT}/../scripts/image_verification.py" public-key "${IGconf_tvbox_support_ca_key}"

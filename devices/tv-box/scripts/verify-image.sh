@@ -26,6 +26,19 @@ python3 -B "$script_directory/image_verification.py" legacy-inputs "$rootfs" $re
 for path in $required; do
   test -f "$rootfs/$path" || { printf 'Missing image path: %s\n' "$path" >&2; exit 1; }
 done
+delegated_violation=$(find \
+  "$rootfs/usr/lib/hexclave-tv-box" \
+  "$rootfs/usr/lib/python3/dist-packages/hexclave_tv_box" \
+  "$rootfs/usr/share/hexclave-tv-box" \
+  "$rootfs/etc/sudoers.d" \
+  \( ! -uid 0 -o ! -gid 0 -o -perm /022 \) -print -quit) || {
+  printf '%s\n' 'Image root-delegated code has unexpected ownership or writability.' >&2
+  exit 1
+}
+if [ -n "$delegated_violation" ]; then
+  printf '%s\n' 'Image root-delegated code has unexpected ownership or writability.' >&2
+  exit 1
+fi
 grep -qxF 'Environment=WLR_LIBINPUT_NO_DEVICES=1' "$rootfs/etc/systemd/system/hexclave-tv-box-kiosk.service" || {
   printf '%s\n' 'Image kiosk does not declare no-input Cage operation.' >&2
   exit 1
