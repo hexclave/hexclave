@@ -1430,13 +1430,14 @@ describe("deploys against the Marshal runtime", () => {
 
     const first = await syncServiceAndUpload(serviceId, { public: true, ports: { 3000: { protocol: "http" } } });
     const publicRun = await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
-    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/[^.]+\.deploy\.built-with-hexclave\.com$/);
+    // <app suffix>-<12 hex signature>: the gateway routes only hostnames Marshal signed.
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/[a-z0-9-]+-[0-9a-f]{12}\.deploy\.built-with-hexclave\.com$/);
     const publicService = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
     expect((publicService.body as any).public).toBe(true);
     expect((publicService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
     expect((publicService.body as any).url).toBe(serviceOutcome(publicRun, serviceId).url);
     const publicApp = await findMockApp(serviceId);
-    expect(serviceOutcome(publicRun, serviceId).url).toBe(`https://${publicApp.name.slice(4)}.deploy.built-with-hexclave.com`);
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(new RegExp(`^https://${publicApp.name.slice(4)}-[0-9a-f]{12}\\.deploy\\.built-with-hexclave\\.com$`));
     expect(publicApp.certificates).toEqual([]);
     expect(publicApp.sharedIpv4).not.toBeNull();
     expect(publicApp.dedicatedIps.some((ip) => ip.type === "v6")).toBe(true);

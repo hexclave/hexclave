@@ -1,9 +1,16 @@
 # Deployment gateway
 
-One Fly app proxies every `<suffix>.deploy.built-with-hexclave.com` request to
-`https://hxc-<suffix>.fly.dev`. Marshal uses the existing Fly app identity to generate
-these hostnames. Nginx handles HTTP, streaming uploads/downloads, and WebSockets.
-There is no per-deployment routing table or ownership lookup.
+One Fly app proxies every `<suffix>-<mac>.deploy.built-with-hexclave.com` request to
+`https://hxc-<suffix>.fly.dev`. Marshal uses the existing Fly app identity for `<suffix>`
+and signs it: `<mac>` is the first 12 hex characters of an HMAC-SHA256 over the domain and
+suffix under `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY`, a key only Marshal and this gateway hold
+(`gateway.js` here, `platformHostnameMac` in `apps/marshal/src/platform-domain-names.ts`).
+Fly app names are global across every Fly organization, so anyone can register an
+`hxc-*` app of the right shape; without the key they cannot produce a hostname the gateway
+routes to it, which keeps our wildcard certificate and domain off content we did not
+deploy. That signature is the ownership check — there is no per-deployment routing table.
+Every other hostname, including vanity names like `login.<domain>`, returns 421. Nginx
+(with its njs module) handles HTTP, streaming uploads/downloads, and WebSockets.
 
 Source and deployment configuration live here. Hosted components remain on Vercel
 under `<project-id>.built-with-hexclave.com`; they are not in this traffic path.
@@ -29,6 +36,9 @@ export HEXCLAVE_GATEWAY_APP=hexclave-deployment-gateway
 fly apps create "$HEXCLAVE_GATEWAY_APP" --org YOUR_FLY_ORG
 fly ips allocate-v6 --app "$HEXCLAVE_GATEWAY_APP"
 fly ips allocate-v4 --shared --app "$HEXCLAVE_GATEWAY_APP"
+# The hostname signing key. Generate once, set it here, and set the SAME value as
+# HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY on the Marshal that serves this gateway's domain.
+fly secrets set --app "$HEXCLAVE_GATEWAY_APP" --stage "HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY=$(openssl rand -hex 32)"
 fly deploy --app "$HEXCLAVE_GATEWAY_APP" --ha=true
 fly scale count 2 --app "$HEXCLAVE_GATEWAY_APP"
 fly certs add '*.deploy.built-with-hexclave.com' --app "$HEXCLAVE_GATEWAY_APP"
@@ -50,6 +60,13 @@ The gateway's default `.fly.dev` hostname intentionally returns 421: only deploy
 hostnames route traffic. Health checks use `Host: gateway-health.internal` and `/healthz`,
 so no customer URL path is reserved by the gateway.
 
+The gateway refuses to start without a 64-hex-character `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY`.
+A gateway and Marshal holding different keys route nothing (every hostname is 421), which
+is the failure to look for first when a fresh deployment's platform URL does not answer.
+Rotating the key renames every platform URL Marshal has handed out, so it is rotated on
+compromise, not on a schedule; to rotate, set the new value on the gateway first, then on
+Marshal, and redeploy every public service so the backend learns its new URL.
+
 For a separate preproduction gateway, create another Fly app from the same source and
 use a separate wildcard domain. Set `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN` to the bare
 suffix (for example, `deploy.example.net`) on the gateway with `fly deploy --env
@@ -58,7 +75,9 @@ certificate using that suffix. The value must be a lowercase DNS domain, without
 
 Pass the same environment variable to the local Marshal live-test command and optionally
 the Docker test command. Both use the production domain when the variable is unset.
-The override does not change Fly app names. The backend's production namespace reservation
+The override does not change Fly app names, but it does change every signature (the
+domain is bound into the mac), so a preproduction gateway needs its own Marshal
+configuration even if it shares a key. The backend's production namespace reservation
 is unchanged; this override supports testing the gateway and Marshal directly.
 
 ## Updates and operations
@@ -105,7 +124,9 @@ bun test apps/deployment-gateway/gateway.test.mjs
 
 This builds the actual gateway image and runs a pinned Bun fixture on an isolated Docker
 network. A generated test-only TLS certificate is trusted only inside that disposable
-container. Tests verify host rejection, health routing, path/method forwarding, cookies,
+container. Tests verify host rejection, signature verification (unsigned, mis-signed, wrongly
+keyed and wrongly shaped hostnames all return 421, with one signature pinned against
+Marshal's unit test), health routing, path/method forwarding, cookies,
 TLS hostname validation, incremental SSE/chunked responses, and authenticated WebSocket
 text/binary echo with clean close. Additional checks cover concurrent applications,
 redirects and upstream errors, streaming uploads, disconnected clients, unavailable
@@ -127,7 +148,8 @@ Once the gateway and wildcard DNS/TLS are ready:
 pnpm -C apps/marshal test:platform-domains:live
 ```
 
-This uses real Fly/S3 credentials in `apps/marshal/.env.local`, creates a disposable
+This uses real Fly/S3 credentials in `apps/marshal/.env.local` together with the
+gateway's `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY`, creates a disposable
 application, and checks both its direct Fly URL and gateway URL. Open the two printed
 `/compatibility` pages and click **Run browser checks** on each. It waits for both reports
 before asserting the combined result, then redeploys and checks its stable URL. Cleanup

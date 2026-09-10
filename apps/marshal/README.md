@@ -222,7 +222,9 @@ pnpm -C apps/marshal test:platform-domains:live
 
 The runner reads real Fly and S3 credentials from `apps/marshal/.env.local`, accepting either
 the `MARSHAL_*` names or `FLY_API_TOKEN`, `FLY_ORG_SLUG`, `S3_ACCESS_KEY_ID`,
-`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`. No Vercel API token is required.
+`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`, plus the gateway's hostname
+signing key as `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY` (or `GATEWAY_HOSTNAME_KEY`) — the gateway
+routes only hostnames signed with its own key. No Vercel API token is required.
 Configure the dedicated gateway and wildcard DNS/TLS first, following its README.
 For an isolated test gateway on a separate domain, pass
 `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=deploy.example.net` to the command and configure the
