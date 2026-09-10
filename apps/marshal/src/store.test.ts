@@ -108,8 +108,8 @@ describe("authoritative state authentication", () => {
 
   // TRANSITIONAL — see readAuthenticatedControlPlaneState. A bucket that predates signing holds
   // bare claims, and until sign-control-plane-state.ts has been run against it those must read
-  // exactly as they always did. When that branch is made to fail closed again, this test flips
-  // to `rejects.toThrow("is unsigned")`.
+  // exactly as they always did. When that branch is made to fail closed again, this test and
+  // every assertion below marked TRANSITIONAL flip to rejecting the unsigned read.
   it("still reads a legacy unsigned domain claim as-is", async () => {
     const claim = {
       hostname: "app.example.com",
@@ -153,7 +153,7 @@ describe("authoritative state authentication", () => {
     await expect(readPoolCreationLedgerVersioned()).resolves.toEqual({ etag: '"v1"', createdAtMillis: [100, 200] });
   });
 
-  it("does not let an unsigned ready-pool record become a signed tenant assignment", async () => {
+  it("binds a signed pool record to its object key, and still reads an unsigned one as-is", async () => {
     const entry = {
       state: "ready",
       created_at_millis: 1,
@@ -173,7 +173,8 @@ describe("authoritative state authentication", () => {
     await expect(readPoolProject("hxc-pool-project")).resolves.toEqual({ value: entry, etag: "pool-etag" });
 
     // The MAC binds the object key, so a validly signed record copied under another key is
-    // refused — which is what stops a pool entry from being replayed as some other project's.
+    // refused: a SIGNED pool entry cannot be replayed as some other project's. (A copy that
+    // strips the envelope is read as legacy state for as long as the TRANSITIONAL branch exists.)
     send.mockResolvedValueOnce({ Body: { transformToString: async () => body }, ETag: "moved-etag" });
     await expect(readPoolProject("hxc-other-project")).rejects.toThrow("failed authentication");
 

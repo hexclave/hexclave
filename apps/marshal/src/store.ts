@@ -160,16 +160,20 @@ function readAuthenticatedControlPlaneState(key: string, stored: unknown): unkno
     // not. Failing closed here would instead break every deploy, park and teardown of a
     // service that holds a custom domain the moment this version boots.
     //
-    // What this gives up, and only this: tamper-evidence on records nobody has rewritten yet.
-    // A record that IS signed is still verified below, so a forged edit to a signed claim is
-    // still refused, and every write signs (see authenticatedControlPlaneState), so the bucket
-    // converges on its own for anything rewritten. Deliberately NOT signed on read: accepting an
+    // What this gives up: tamper-evidence, for as long as this branch exists. A record that IS
+    // signed is still verified below, so an edit that keeps the envelope is refused — but a
+    // writer who strips the envelope and stores the bare value lands here and is trusted, so a
+    // signed record can be downgraded to a forged unsigned one. That is precisely the trust
+    // every Marshal before signing extended, no more and no less; the signatures written in
+    // the meantime (every write signs — see authenticatedControlPlaneState) become protective
+    // only once this branch throws again. Deliberately NOT signed on read: accepting an
     // unsigned object and then signing it would authenticate whatever was in the bucket at that
     // moment, forged claim included — which is why the migration is an offline script run
     // against a bucket someone has decided to trust.
     //
     // TODO(security): once sign-control-plane-state.ts has been run against production
-    // (`unsigned: 0` in its report), make this branch throw again so unsigned state fails closed.
+    // (`unsigned: 0` in its report), make this branch throw again so unsigned state fails
+    // closed, and flip the TRANSITIONAL assertions in store.test.ts back to rejections.
     return stored;
   }
   const serialized = JSON.stringify(stored.value);

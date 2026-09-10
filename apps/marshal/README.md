@@ -44,10 +44,11 @@ Domain claims, project-pool entries and its creation ledger, and namespace recor
 signed and a signed record that fails verification is refused. An UNSIGNED record — the shape every
 Marshal before signing wrote — is currently still read as-is (see `readAuthenticatedControlPlaneState`
 in `src/store.ts`): production's bucket predates the signature, and signing it in place needs the
-key in hand, so this version boots on an unsigned bucket rather than failing closed. That leaves
-records nobody has rewritten without tamper-evidence until `scripts/sign-control-plane-state.ts`
-has been run against the bucket (Fly-era `domains/*.json` are the ones that exist); once it reports
-`unsigned: 0`, the read path should be made to fail closed again. Automatically trusting AND
+key in hand, so this version boots on an unsigned bucket rather than failing closed. Until the
+read path fails closed again, the signatures are advisory: a bucket writer can strip a signed
+record's envelope and have the bare value trusted, exactly as every earlier Marshal trusted it.
+Run `scripts/sign-control-plane-state.ts` against the bucket (Fly-era `domains/*.json` are the
+records that exist); once it reports `unsigned: 0`, make the read path fail closed. Automatically trusting AND
 rewriting an unsigned object at read time would authenticate exactly the forgery this boundary is
 intended to detect, which is why the script is offline and deliberate.
 
