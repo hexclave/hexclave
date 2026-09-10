@@ -141,7 +141,7 @@ describe("TV display pairing feedback", () => {
   it("preserves the pairing-code caret when typing in the middle", async () => {
     const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
     renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
-    const codeInput = await screen.findByLabelText("Pairing code");
+    const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
     fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
     codeInput.setSelectionRange(2, 2);
     fireEvent.change(codeInput, { target: { value: "ABXCD-EFGH", selectionStart: 3, selectionEnd: 3 } });
