@@ -1,4 +1,5 @@
 /** @vitest-environment jsdom */
+import { CookieJar } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTvBoxDocument } from "./src/app/tv-box/document.ts";
 import { createTvFixtureSnapshot, getTvProfileFixture } from "./src/lib/tv-mode/fixtures.ts";
@@ -149,13 +150,29 @@ describe("TV Box actual renderer orchestration", () => {
     expect(document.querySelector(".tv-pairing-code")?.textContent).toBe("2345-ABCD");
   });
 
-  it("never consumes a pairing challenge twice on reconnect, and ignores a late obsolete result", async () => {
+  it("restores the received cookie after a consumed pairing body stalls, without overlapping recovery", async () => {
     const stalled = deferredBody();
+    const restored = deferredBody();
+    const cookieJar = new CookieJar();
+    const cookie = "hexclave-tv-display-refresh=example-refresh-token; Path=/api/latest/tv-displays; HttpOnly; Secure";
+    stalled.response.headers.set("set-cookie", cookie);
     fetchMock
       .mockResolvedValueOnce(jsonResponse(null, 401))
       .mockResolvedValueOnce(jsonResponse(challenge))
-      .mockResolvedValueOnce(stalled.response)
-      .mockResolvedValueOnce(jsonResponse({ status: "paired", accessToken: "paired-token" }))
+      .mockImplementationOnce(async (url, options) => {
+        // Fetch delivers headers, and the browser stores HttpOnly cookies,
+        // before the JSON body completes. A body timeout does not undo that.
+        expect(options.credentials).toBe("include");
+        cookieJar.setCookieSync(cookie, url);
+        return stalled.response;
+      })
+      .mockResolvedValueOnce(jsonResponse({ status: "used" }))
+      .mockImplementationOnce(async (url, options) => {
+        expect(new URL(url).pathname).toBe("/api/latest/tv-displays/auth/refresh");
+        expect(options.credentials).toBe("include");
+        expect(cookieJar.getCookieStringSync(url)).toBe("hexclave-tv-display-refresh=example-refresh-token");
+        return restored.response;
+      })
       .mockResolvedValueOnce(jsonResponse(snapshot));
     await launch();
     window.dispatchEvent(new Event("online"));
@@ -165,11 +182,149 @@ describe("TV Box actual renderer orchestration", () => {
     await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
     expect(fetchMock.mock.calls[2][1].signal.aborted).toBe(true);
     await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_INITIAL_MS);
-    expect(title()).toBe("Live Pulse");
-    stalled.resolve({ status: "used" });
+    expect(title()).toBe("Connecting TV Mode");
+    expect(document.querySelector(".tv-pairing-code")).toBeNull();
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    restored.resolve({ accessToken: "restored-token" });
     await vi.advanceTimersByTimeAsync(0);
     expect(title()).toBe("Live Pulse");
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    stalled.resolve({ status: "paired", accessToken: "obsolete-token" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(title()).toBe("Live Pulse");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock.mock.calls[5][1].headers.get("authorization")).toBe("Bearer restored-token");
+    expect(fetchMock.mock.calls.map(([url]) => new URL(url).pathname)).toMatchInlineSnapshot(`
+      [
+        "/api/latest/tv-displays/auth/refresh",
+        "/api/latest/tv-displays/pairing-challenges",
+        "/api/latest/tv-displays/pairing-challenges/927dfeac-2e80-4311-8180-4879b687bfc0/status",
+        "/api/latest/tv-displays/pairing-challenges/927dfeac-2e80-4311-8180-4879b687bfc0/status",
+        "/api/latest/tv-displays/auth/refresh",
+        "/api/latest/tv-displays/snapshot",
+      ]
+    `);
+  });
+
+  it("requires a new pairing when a consumed challenge has no valid refresh cookie", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(challenge))
+      .mockResolvedValueOnce(jsonResponse({ status: "used" }))
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse({
+        ...challenge,
+        challengeId: "eb3c1c65-4c2e-4c0d-9a68-8868b635fbea",
+        pairingCode: "2345ABCD",
+      }))
+      .mockImplementation(async () => jsonResponse({ status: "waiting", retryAfterSeconds: 5 }));
+    await launch();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector(".tv-pairing-code")?.textContent).toBe("2345-ABCD");
+    expect(document.body.textContent).not.toContain(snapshot.project.displayName);
+    expect(fetchMock.mock.calls.slice(0, 5).map(([url]) => new URL(url).pathname)).toMatchInlineSnapshot(`
+      [
+        "/api/latest/tv-displays/auth/refresh",
+        "/api/latest/tv-displays/pairing-challenges",
+        "/api/latest/tv-displays/pairing-challenges/927dfeac-2e80-4311-8180-4879b687bfc0/status",
+        "/api/latest/tv-displays/auth/refresh",
+        "/api/latest/tv-displays/pairing-challenges",
+      ]
+    `);
+    expect(fetchMock.mock.calls.some(([url]) => new URL(url).pathname.endsWith("/snapshot"))).toBe(false);
+  });
+
+  it.each(["expired", "rejected"])("renews a %s challenge without treating it as a consumed approval", async (status) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(challenge))
+      .mockResolvedValueOnce(jsonResponse({ status }))
+      .mockResolvedValueOnce(jsonResponse({ ...challenge, pairingCode: "2345ABCD" }))
+      .mockImplementation(async () => jsonResponse({ status: "waiting", retryAfterSeconds: 5 }));
+    await launch();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector(".tv-pairing-code")?.textContent).toBe("2345-ABCD");
+    expect(fetchMock.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/auth/refresh"))).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([url]) => new URL(url).pathname.endsWith("/snapshot"))).toBe(false);
+  });
+
+  it("returns a recovered pairing to a new challenge when refreshed snapshot access is rejected, without background snapshot polling", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(challenge))
+      .mockResolvedValueOnce(jsonResponse({ status: "used" }))
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "recovered-token" }))
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "refreshed-token" }))
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse({
+        ...challenge,
+        challengeId: "eb3c1c65-4c2e-4c0d-9a68-8868b635fbea",
+        pairingCode: "2345ABCD",
+      }))
+      .mockImplementation(async () => jsonResponse({ status: "waiting", retryAfterSeconds: 5 }));
+    await launch();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector(".tv-pairing-code")?.textContent).toBe("2345-ABCD");
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_MAXIMUM_MS);
+    const requestedPaths = fetchMock.mock.calls.map(([url]) => new URL(url).pathname);
+    expect(requestedPaths.filter((path) => path.endsWith("/snapshot"))).toHaveLength(2);
+    expect(requestedPaths.filter((path) => path.endsWith("/auth/refresh"))).toHaveLength(3);
+    expect(requestedPaths.filter((path) => path.endsWith("/pairing-challenges"))).toHaveLength(2);
+    expect(document.querySelector(".tv-pairing-code")?.textContent).toBe("2345-ABCD");
+    expect(document.body.textContent).not.toContain(snapshot.project.displayName);
+  });
+
+  it.each(["server", "transport", "timeout"])("retries %s failures while restoring a consumed pairing without creating another challenge", async (failure) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(challenge))
+      .mockResolvedValueOnce(jsonResponse({ status: "used" }));
+    if (failure === "server") {
+      fetchMock.mockResolvedValueOnce(jsonResponse(null, 503));
+    } else if (failure === "transport") {
+      fetchMock.mockRejectedValueOnce(new TypeError("Network request failed"));
+    } else {
+      fetchMock.mockResolvedValueOnce(deferredBody().response);
+    }
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "restored-token" }))
+      .mockResolvedValueOnce(jsonResponse(snapshot));
+    await launch();
+    if (failure === "timeout") {
+      await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
+      expect(fetchMock.mock.calls[3][1].signal.aborted).toBe(true);
+    }
+    expect(title()).toBe("TV Mode Temporarily Unavailable");
+    expect(document.querySelector(".tv-pairing-code")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_INITIAL_MS - 1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(title()).toBe("Live Pulse");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/pairing-challenges"))).toHaveLength(1);
+  });
+
+  it.each(["body", "backoff"])("cancels consumed-pairing recovery during %s on page exit", async (phase) => {
+    const stalled = deferredBody();
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse(challenge))
+      .mockResolvedValueOnce(jsonResponse({ status: "used" }))
+      .mockResolvedValueOnce(phase === "body" ? stalled.response : jsonResponse(null, 503));
+    await launch();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(new URL(fetchMock.mock.calls[3][0]).pathname).toBe("/api/latest/tv-displays/auth/refresh");
+    window.dispatchEvent(new Event("pagehide"));
+    stalled.resolve({ accessToken: "obsolete-token" });
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_MAXIMUM_MS);
+    if (phase === "body") expect(fetchMock.mock.calls[3][1].signal.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(document.body.textContent).not.toContain(snapshot.project.displayName);
   });
 
   it("aborts pending pairing on page exit without applying or retrying its late response", async () => {
@@ -218,6 +373,49 @@ describe("TV Box actual renderer orchestration", () => {
     expect(title()).toBe("Live Pulse");
     await vi.advanceTimersByTimeAsync(20_000);
     expect(title()).toBe("Audience Momentum");
+  });
+
+  it("clears the previous presentation immediately after a post-refresh snapshot rejection", async () => {
+    const stalled = deferredBody();
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "initial-token" }))
+      .mockResolvedValueOnce(jsonResponse(snapshot))
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "refreshed-token" }))
+      .mockResolvedValueOnce(jsonResponse(null, 401))
+      .mockResolvedValueOnce(stalled.response);
+    await launch();
+    expect(document.body.textContent).toContain(snapshot.project.displayName);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_POLL_INTERVAL_MS);
+    expect(title()).toBe("Launch TV Mode");
+    expect(document.body.textContent).not.toContain(snapshot.project.displayName);
+    expect(document.querySelector("#tv-box-footer")?.textContent).toBe("");
+    expect(document.querySelector("#tv-box-controls")?.textContent).toBe("");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(new URL(fetchMock.mock.calls[5][0]).pathname).toBe("/api/latest/tv-displays/pairing-challenges");
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
+    expect(document.body.textContent).not.toContain(snapshot.project.displayName);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it.each(["refresh", "snapshot"])("retains the authorized presentation across a temporary %s failure during credential renewal", async (failure) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "initial-token" }))
+      .mockResolvedValueOnce(jsonResponse(snapshot))
+      .mockResolvedValueOnce(jsonResponse(null, 401));
+    if (failure === "snapshot") {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ accessToken: "refreshed-token" }));
+    }
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(null, 503))
+      .mockImplementation(async () => jsonResponse(snapshot));
+    await launch();
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_POLL_INTERVAL_MS);
+    expect(document.body.textContent).toContain(snapshot.project.displayName);
+    expect(document.querySelector(".tv-pairing-code-panel")).toBeNull();
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_POLL_INTERVAL_MS);
+    expect(document.body.textContent).toContain(snapshot.project.displayName);
+    expect(fetchMock.mock.calls.some(([url]) => new URL(url).pathname.endsWith("/pairing-challenges"))).toBe(false);
   });
 
   it("bounds refresh bodies inside snapshot requests and continues polling", async () => {

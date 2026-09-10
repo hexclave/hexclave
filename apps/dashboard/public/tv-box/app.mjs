@@ -1133,6 +1133,17 @@ async function pollPairing() {
     scheduleSnapshotPoll();
     return;
   }
+  if (result.status === "used") {
+    // The browser can receive the pairing cookie before its response body is
+    // lost. A consumed challenge is not authorization: validate that cookie
+    // through the same serialized recovery and backoff used at startup.
+    invalidatePairing();
+    state.challenge = null;
+    state.authenticationState = "restoring";
+    renderMessage("loading", "Connecting TV Mode", "Restoring this display’s secure connection…");
+    await recoverDisplaySession();
+    return;
+  }
   if (result.status !== "waiting") {
     await createChallenge();
     return;
@@ -1160,6 +1171,9 @@ async function refreshSnapshot() {
         if (refreshed == null) return null;
         response = await loadSnapshot(refreshed, signal);
       }
+      // A rejection after refresh is authoritative, not an outage for which
+      // the previously authorized snapshot may remain visible.
+      if (response.status === 401) return null;
       if (!response.ok) throw new Error(`TV display snapshot failed with ${response.status}.`);
       return assertTvSnapshot(await response.json());
     }, TV_SNAPSHOT_REQUEST_TIMEOUT_MS, controller.signal);

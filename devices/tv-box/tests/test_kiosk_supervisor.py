@@ -211,6 +211,53 @@ class KioskSupervisorTests(unittest.TestCase):
         self.assertEqual(len(tail.snapshot()), MAX_RENDERER_DIAGNOSTIC_LINES)
         self.assertEqual(tail.snapshot()[-1], "<redacted renderer output>")
 
+    def test_renderer_ingestion_bounds_each_read_and_resumes_after_an_oversized_line(self) -> None:
+        testcase = self
+
+        class BoundedStream(io.BytesIO):
+            def readline(self, size: int = -1) -> bytes:
+                testcase.assertGreater(size, 0)
+                testcase.assertLessEqual(size, 4097)
+                return super().readline(size)
+
+        tail = _RendererOutputTail()
+        tail.consume(BoundedStream(
+            b"Cog-WARNING **: " + b"x" * (4 * 1024 * 1024)
+            + b" password=fixture-secret\n"
+            + b"WebKit-WARNING **: bounded diagnostic\n"
+        ))
+        self.assertEqual(tail.snapshot(), (
+            "<redacted renderer output>",
+            "WebKit-WARNING **: bounded diagnostic",
+        ))
+
+    def test_incomplete_or_oversized_renderer_lines_never_publish_prefixes_or_document_events(self) -> None:
+        prefix = b"Cog-Core-Message: <https://example.com/"
+        cases = (
+            b"Cog-WARNING **: " + b"x" * 4096 + b" password=fixture-secret\n",
+            prefix + b"x" * 4096 + b"> Loaded successfully.\n",
+            prefix + b"x" * 4096 + b"> Load started.\n",
+            b"Cog-WARNING **: incomplete diagnostic",
+            prefix + b"tv-box> Loaded successfully.",
+            prefix + b"\xff> Loaded successfully.\n",
+        )
+        for content in cases:
+            with self.subTest(size=len(content), tail=content[-24:]):
+                tail = _RendererOutputTail()
+                tail.consume(io.BytesIO(content))
+                self.assertEqual(tail.snapshot(), ("<redacted renderer output>",))
+                self.assertEqual(tail.document_status(), ("loading", 0))
+
+    def test_renderer_ingestion_accepts_the_exact_line_bound_and_coalesces_discarded_lines(self) -> None:
+        prefix = b"Cog-WARNING **: "
+        line = prefix + b"x" * (4096 - len(prefix) - 1) + b"\n"
+        tail = _RendererOutputTail()
+        tail.consume(io.BytesIO(line + line[:-1] + b"x\n" + b"z" * 8192 + b"\n"))
+        self.assertEqual(tail.snapshot(), (
+            line[:MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS].decode(),
+            "<redacted renderer output>",
+        ))
+
     def test_renderer_health_requires_cage_cog_and_the_real_web_process(self) -> None:
         processes = {
             100: ProcessInfo(90, "cage"),

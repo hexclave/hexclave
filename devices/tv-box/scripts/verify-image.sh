@@ -181,13 +181,20 @@ cp "$rootfs/etc/hexclave-tv-box-release" "$output/image-manifest.txt"
 write_sha256_manifest() {
   tree=$1
   destination=$2
-  list=$(mktemp)
+  list=$(mktemp --suffix=.untracked)
   if ! (cd "$tree" && find . -xdev -type f -print0 > "$list"); then
     rm -f "$list"
     printf '%s\n' 'Unable to enumerate image files.' >&2
     exit 1
   fi
-  if ! (cd "$tree" && LC_ALL=C sort -z "$list" | xargs -0 -r sha256sum) > "$destination"; then
+  # POSIX sh reports only the final pipeline command's status. Sort separately
+  # so a failed/partial sort cannot turn into a successful empty manifest.
+  if ! LC_ALL=C sort -z -o "$list" "$list"; then
+    rm -f "$list"
+    printf '%s\n' 'Unable to sort image files.' >&2
+    exit 1
+  fi
+  if ! (cd "$tree" && xargs -0 -r sha256sum < "$list") > "$destination"; then
     rm -f "$list"
     printf '%s\n' 'Unable to hash image files.' >&2
     exit 1

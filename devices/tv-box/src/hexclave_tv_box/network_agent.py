@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import secrets
+import select
 import socket
 import socketserver
 import stat
@@ -40,6 +41,8 @@ TEST_IMAGE_MARKER = Path("/etc/hexclave-tv-box-test-image")
 TEST_ORIGIN_FILE = Path("/boot/firmware/hexclave-tv-box-test-origin.txt")
 QUICK_TUNNEL_HOSTNAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$")
 MAX_AGENT_REQUEST_BYTES = 16_384
+MAX_AGENT_CONNECTIONS = 8
+AGENT_LOCK_WAIT_SECONDS = 5
 MAX_KIOSK_HEALTH_BYTES = 256
 SAVED_PROFILE_RETRY_INTERVAL_S = 30
 TEST_SETUP_PASSWORD_LENGTH = 8
@@ -824,11 +827,21 @@ class AgentRequestHandler(socketserver.StreamRequestHandler):
                     raise ValueError("TV Box agent request must be an object.")
                 credentials = self.request.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
                 _pid, user_id, _group_id = struct.unpack("3i", credentials)
-                response = {"ok": True, "result": self.server.agent.handle_request(request, privileged=user_id == 0)}
+                response = {"ok": True, "result": self.server.dispatch_request(
+                    request, privileged=user_id == 0, connection=self.request,
+                )}
+        except ConnectionAbortedError:
+            LOGGER.info("agent-request-abandoned")
+            return
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, OSError, subprocess.SubprocessError) as error:
             LOGGER.warning("agent-request-failed=%s", _failure_code(error))
             response = {"ok": False, "error": "request-failed"}
-        self.wfile.write(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
+        try:
+            self.wfile.write(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
+        except OSError as error:
+            # An admitted mutation keeps its existing cleanup budget even if
+            # the portal loses Wi-Fi; a failed reply is not a failed rollback.
+            LOGGER.warning("agent-response-failed=%s", _failure_code(error))
 
 
 class AgentServer(socketserver.ThreadingUnixStreamServer):
@@ -837,7 +850,63 @@ class AgentServer(socketserver.ThreadingUnixStreamServer):
 
     def __init__(self, path: str, agent: TvBoxNetworkAgent) -> None:
         self.agent = agent
+        self.lock_wait_seconds: float = AGENT_LOCK_WAIT_SECONDS
+        self._connection_limit = threading.BoundedSemaphore(MAX_AGENT_CONNECTIONS)
         super().__init__(path, AgentRequestHandler)
+
+    def process_request(self, request: socket.socket, client_address: str) -> None:
+        if not self._connection_limit.acquire(blocking=False):
+            try:
+                # Do not block the accept loop while rejecting an overloaded
+                # client. The fixed error contains no request or device data.
+                request.setblocking(False)
+                request.sendall(b'{"ok":false,"error":"agent-busy"}\n')
+            except OSError as error:
+                LOGGER.warning("agent-overload-response-failed=%s", _failure_code(error))
+            finally:
+                self.shutdown_request(request)
+            return
+        started = False
+        try:
+            super().process_request(request, client_address)
+            started = True
+        finally:
+            if not started:
+                self._connection_limit.release()
+
+    def process_request_thread(self, request: socket.socket, client_address: str) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_limit.release()
+
+    def dispatch_request(
+        self,
+        request: dict[str, Any],
+        *,
+        privileged: bool,
+        connection: socket.socket,
+    ) -> dict[str, Any]:
+        poller = select.poll()
+        # POLLHUP detects a fully closed peer without rejecting clients that
+        # only finish writing and keep their read half open for the response.
+        poller.register(connection, select.POLLHUP | select.POLLERR | select.POLLNVAL)
+        if poller.poll(0):
+            raise ConnectionAbortedError("TV Box request client disconnected before admission.")
+        deadline = time.monotonic() + self.lock_wait_seconds
+        if not self.agent.lock.acquire(timeout=self.lock_wait_seconds):
+            raise TimeoutError("TV Box request expired waiting to start.")
+        try:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("TV Box request expired waiting to start.")
+            if poller.poll(0):
+                raise ConnectionAbortedError("TV Box request client disconnected while waiting.")
+            # Admission and execution share the existing RLock, so a policy
+            # tick cannot interleave here. Only waiting work expires; once a
+            # mutation starts, its normal bounded cleanup must finish safely.
+            return self.agent.handle_request(request, privileged=privileged)
+        finally:
+            self.agent.lock.release()
 
 
 def serve(agent: TvBoxNetworkAgent, socket_path: Path, socket_group: str) -> None:

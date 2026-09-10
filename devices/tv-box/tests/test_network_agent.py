@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import struct
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ from unittest import mock
 
 from hexclave_tv_box.network_agent import (
     AgentRequestHandler,
+    AgentServer,
     NetworkManagerController,
     NetworkMode,
     OFFLINE_URL,
@@ -31,6 +33,8 @@ from hexclave_tv_box.network_agent import (
     validate_wifi_request,
 )
 from hexclave_tv_box.policy import ADMIN_CONFIRMATION, NetworkPolicy
+from hexclave_tv_box.setup_portal import send_agent_request
+from hexclave_tv_box.support import agent_request as send_support_request
 
 
 class FakeController:
@@ -124,6 +128,162 @@ class BudgetedServices(FakeServices):
                 self.starts_since_reset += 1
                 self.total_starts += 1
         return super().__call__(command, timeout)
+
+
+class AgentServerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(suffix=".untracked")
+        self.addCleanup(self.temporary.cleanup)
+        self.controller = FakeController(saved=False, connected=False)
+        self.agent = TvBoxNetworkAgent(self.controller, service_runner=FakeServices())
+        self.socket_path = Path(self.temporary.name) / "control.sock"
+        self.server = AgentServer(str(self.socket_path), self.agent)
+        self.server.lock_wait_seconds = 2
+        self.clients: list[socket.socket] = []
+        self.handlers = threading.Condition()
+        self.active_handlers = 0
+        original_handle = AgentRequestHandler.handle
+
+        def observed_handle(handler: AgentRequestHandler) -> None:
+            with self.handlers:
+                self.active_handlers += 1
+                self.handlers.notify_all()
+            try:
+                original_handle(handler)
+            finally:
+                with self.handlers:
+                    self.active_handlers -= 1
+                    self.handlers.notify_all()
+
+        self.handler_patch = mock.patch.object(AgentRequestHandler, "handle", observed_handle)
+        self.handler_patch.start()
+        self.addCleanup(self.handler_patch.stop)
+        self.server_thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01})
+        self.server_thread.start()
+
+    def tearDown(self) -> None:
+        for client in self.clients:
+            client.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.server_thread.join(2)
+        self.wait_for_handlers(0)
+
+    def request(self, contents: bytes = b'{"command":"status"}\n') -> socket.socket:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.clients.append(client)
+        client.settimeout(1)
+        client.connect(str(self.socket_path))
+        client.sendall(contents)
+        return client
+
+    def response(self, client: socket.socket) -> object:
+        with client.makefile("rb") as stream:
+            return json.loads(stream.readline(16_385))
+
+    def wait_for_handlers(self, count: int) -> None:
+        with self.handlers:
+            self.assertTrue(self.handlers.wait_for(lambda: self.active_handlers == count, timeout=3))
+
+    def test_actual_server_caps_active_handlers_and_releases_slots_after_completion(self) -> None:
+        with self.agent.lock:
+            clients = []
+            for count in range(1, 9):
+                clients.append(self.request())
+                self.wait_for_handlers(count)
+            self.assertEqual(self.response(self.request()), {"ok": False, "error": "agent-busy"})
+            self.assertEqual(self.active_handlers, 8)
+        for client in clients:
+            self.assertEqual(self.response(client), {"ok": True, "result": {
+                "mode": "setup", "setupSsid": None, "setupPassword": None,
+            }})
+        self.wait_for_handlers(0)
+        self.assertEqual(self.response(self.request()), {"ok": True, "result": {
+            "mode": "setup", "setupSsid": None, "setupPassword": None,
+        }})
+
+    def test_waiting_mutation_expires_without_running_after_the_lock_is_released(self) -> None:
+        self.server.lock_wait_seconds = 0.05
+        with self.agent.lock:
+            client = self.request(b'{"command":"connect"}\n')
+            self.assertEqual(self.response(client), {"ok": False, "error": "request-failed"})
+            self.wait_for_handlers(0)
+        self.assertEqual(self.controller.calls, [])
+        self.assertEqual(self.agent.state.mode, NetworkMode.SETUP)
+
+    def test_disconnected_waiting_client_cannot_start_a_mutation(self) -> None:
+        with self.agent.lock:
+            client = self.request(b'{"command":"connect"}\n')
+            self.wait_for_handlers(1)
+            client.shutdown(socket.SHUT_RDWR)
+            client.close()
+        self.wait_for_handlers(0)
+        self.assertEqual(self.controller.calls, [])
+        self.assertEqual(self.agent.state.mode, NetworkMode.SETUP)
+
+    def test_timed_out_portal_rpc_does_not_run_after_its_client_closes(self) -> None:
+        with self.agent.lock:
+            with self.assertRaises(TimeoutError):
+                send_agent_request(self.socket_path, {"command": "connect"}, timeout=0.05)
+        self.wait_for_handlers(0)
+        self.assertEqual(self.controller.calls, [])
+        self.assertEqual(self.agent.state.mode, NetworkMode.SETUP)
+
+    def test_actual_portal_and_support_clients_keep_their_existing_protocol(self) -> None:
+        self.assertEqual(send_agent_request(self.socket_path, {"command": "status"}), {
+            "mode": "setup", "setupSsid": None, "setupPassword": None,
+        })
+        self.assertEqual(send_support_request({"command": "status"}, self.socket_path), {
+            "mode": "setup", "setupSsid": None, "setupPassword": None,
+        })
+
+    @unittest.skipUnless(os.geteuid() == 0, "Support mutations require a real root socket peer.")
+    def test_actual_support_client_can_execute_an_admitted_privileged_command(self) -> None:
+        self.assertEqual(send_support_request({"command": "restart-kiosk"}, self.socket_path), {"restarted": True})
+        self.assertTrue(self.controller.ap_active)
+
+    def test_half_closed_writer_can_still_receive_its_response(self) -> None:
+        client = self.request()
+        client.shutdown(socket.SHUT_WR)
+        self.assertEqual(self.response(client), {"ok": True, "result": {
+            "mode": "setup", "setupSsid": None, "setupPassword": None,
+        }})
+
+    def test_malformed_and_rejected_requests_release_handler_capacity(self) -> None:
+        for _attempt in range(10):
+            self.assertEqual(self.response(self.request(b"invalid-json\n")), {"ok": False, "error": "request-failed"})
+            self.wait_for_handlers(0)
+            self.assertEqual(self.response(self.request(b'{"command":"unsupported"}\n')), {"ok": False, "error": "request-failed"})
+            self.wait_for_handlers(0)
+        self.assertEqual(self.response(self.request()), {"ok": True, "result": {
+            "mode": "setup", "setupSsid": None, "setupPassword": None,
+        }})
+
+    def test_started_mutation_keeps_its_existing_duration_and_cleanup_after_disconnect(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        original_connect = self.controller.connect
+
+        def slow_connect(request: dict[str, object]) -> None:
+            started.set()
+            if not release.wait(2):
+                raise TimeoutError("Test operation was not released.")
+            original_connect(request)
+
+        self.server.lock_wait_seconds = 0.01
+        with mock.patch.object(self.controller, "connect", side_effect=slow_connect):
+            client = self.request(b'{"command":"connect"}\n')
+            try:
+                self.assertTrue(started.wait(1))
+                client.shutdown(socket.SHUT_RDWR)
+                client.close()
+                self.assertFalse(release.wait(0.05))
+            finally:
+                release.set()
+            self.wait_for_handlers(0)
+        self.assertEqual(self.controller.calls, ["connect"])
+        self.assertEqual(self.agent.state.mode, NetworkMode.CONNECTED)
+        self.assertFalse(self.agent.portal_submission_active)
 
 
 class NetworkAgentTests(unittest.TestCase):
@@ -953,10 +1113,10 @@ class NetworkAgentTests(unittest.TestCase):
                 handler.rfile = io.BytesIO(b'{"command":"reset-network","privileged":true}\n')
                 handler.wfile = io.BytesIO()
                 handler.server = mock.Mock()
-                handler.server.agent.handle_request.return_value = {"reset": True}
+                handler.server.dispatch_request.return_value = {"reset": True}
                 handler.handle()
-                handler.server.agent.handle_request.assert_called_once_with(
-                    {"command": "reset-network", "privileged": True}, privileged=user_id == 0,
+                handler.server.dispatch_request.assert_called_once_with(
+                    {"command": "reset-network", "privileged": True}, privileged=user_id == 0, connection=handler.request,
                 )
                 self.assertEqual(json.loads(handler.wfile.getvalue()), {"ok": True, "result": {"reset": True}})
 

@@ -64,6 +64,9 @@ mmdebstrap:
     - date -d "@${SOURCE_DATE_EPOCH}" > "$1/etc/fake-hwclock.data"
     - |-
       set -eu
+      # YAML customize hooks run on the build host; recheck immediately before
+      # copying, since ordinary Git cleanliness checks omit ignored local files.
+      python3 -B "${SRCROOT}/../scripts/image_source.py" "${SRCROOT}/../../.."
       cp -a --no-preserve=ownership "${SRCROOT}/rootfs/." "$1/"
       install -d -m 0755 "$1/usr/lib/python3/dist-packages"
       cp -a --no-preserve=ownership "${SRCROOT}/../src/hexclave_tv_box" "$1/usr/lib/python3/dist-packages/"

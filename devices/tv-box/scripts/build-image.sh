@@ -47,6 +47,7 @@ if [ -n "$(git -C "$repository_root" status --porcelain --untracked-files=all --
   printf '%s\n' 'Commit the TV Box appliance and renderer changes before producing a versioned image.' >&2
   exit 1
 fi
+python3 -B "$script_directory/image_source.py" "$repository_root"
 
 exec "$RPI_IMAGE_GEN_DIR/rpi-image-gen" build \
   -S "$repository_root/devices/tv-box/image" \

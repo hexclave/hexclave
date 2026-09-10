@@ -12,7 +12,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -30,6 +30,7 @@ DOCUMENT_LOAD_TIMEOUT_SECONDS = 120
 DOCUMENT_RETRY_SECONDS = 240
 MAX_RENDERER_DIAGNOSTIC_LINES = 64
 MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS = 512
+MAX_RENDERER_OUTPUT_LINE_BYTES = 4096
 REDACTED_RENDERER_OUTPUT = "<redacted renderer output>"
 SAFE_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
     r"^(?:"
@@ -102,6 +103,23 @@ def _sanitize_renderer_output(raw_line: bytes) -> str | None:
     return line[:MAX_RENDERER_DIAGNOSTIC_LINE_CHARACTERS]
 
 
+def _bounded_renderer_lines(stream: BinaryIO) -> Iterator[bytes | None]:
+    """Yield complete bounded lines, or one redaction marker per discarded line."""
+    discarding = False
+    while part := stream.readline(MAX_RENDERER_OUTPUT_LINE_BYTES + 1):
+        complete = part.endswith(b"\n")
+        if discarding:
+            discarding = not complete
+            continue
+        if len(part) > MAX_RENDERER_OUTPUT_LINE_BYTES or not complete:
+            # Never interpret a truncated prefix: later bytes might contain a
+            # credential or change the apparent native document-load event.
+            discarding = not complete
+            yield None
+        else:
+            yield part
+
+
 class _RendererOutputTail:
     """Drain renderer stderr continuously while retaining only a bounded tail."""
 
@@ -118,11 +136,14 @@ class _RendererOutputTail:
 
     def consume(self, stream: BinaryIO) -> None:
         redacted_burst = False
-        for raw_line in iter(stream.readline, b""):
+        for raw_line in _bounded_renderer_lines(stream):
+            try:
+                native = None if raw_line is None else raw_line.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                native = None
             # Cog's native load callbacks are independent of page console
             # forwarding. Never forward these URL-bearing progress messages.
-            native = raw_line.decode("utf-8", errors="replace").strip()
-            if "Cog-Core" in native:
+            if native is not None and "Cog-Core" in native:
                 progress = True
                 with self._lock:
                     if re.search(r"> Load started\.$", native):
@@ -141,7 +162,7 @@ class _RendererOutputTail:
                         progress = False
                 if progress:
                     continue
-            line = _sanitize_renderer_output(raw_line)
+            line = REDACTED_RENDERER_OUTPUT if native is None or raw_line is None else _sanitize_renderer_output(raw_line)
             if line is None:
                 redacted_burst = False
                 continue

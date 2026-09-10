@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import os
 import re
@@ -176,7 +177,8 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn("hexclave-support-ca.pub", verifier)
         self.assertIn('find . -xdev -type f -print0 > "$list"', verifier)
         self.assertIn('if ! (cd "$tree" && find . -xdev -type f -print0 > "$list"); then', verifier)
-        self.assertIn("LC_ALL=C sort -z \"$list\" | xargs -0 -r sha256sum", verifier)
+        self.assertIn('if ! LC_ALL=C sort -z -o "$list" "$list"; then', verifier)
+        self.assertIn('xargs -0 -r sha256sum < "$list"', verifier)
         self.assertIn("Unable to enumerate image files.", verifier)
         self.assertIn("Image root-delegated code has unexpected ownership or writability.", verifier)
         self.assertIn("! -uid 0 -o ! -gid 0 -o -perm /022", verifier)
@@ -185,6 +187,54 @@ class ImageContractTests(unittest.TestCase):
         build = (ROOT / "scripts/build-image.sh").read_text(encoding="utf-8")
         self.assertIn('git -C "$RPI_IMAGE_GEN_DIR" status --porcelain --untracked-files=all', build)
         self.assertRegex(build, r"(realpath|CDPATH=.*dirname.*pwd).*HEXCLAVE_TV_BOX_SUPPORT_CA")
+        source_check = 'python3 -B "$script_directory/image_source.py" "$repository_root"'
+        self.assertIn(source_check, build)
+        self.assertLess(build.index(source_check), build.index('exec "$RPI_IMAGE_GEN_DIR/rpi-image-gen" build'))
+        layer = (ROOT / "image/layer/hexclave-tv-box-pilot.yaml").read_text(encoding="utf-8")
+        layer_check = 'python3 -B "${SRCROOT}/../scripts/image_source.py" "${SRCROOT}/../../.."'
+        self.assertIn(layer_check, layer)
+        self.assertLess(layer.index(layer_check), layer.index('cp -a --no-preserve=ownership "${SRCROOT}/rootfs/."'))
+
+    def test_manifest_function_fails_closed_when_sort_fails(self) -> None:
+        verifier = (ROOT / "scripts/verify-image.sh").read_text(encoding="utf-8")
+        function = re.search(r"(?ms)^write_sha256_manifest\(\) \{\n.*?^\}", verifier)
+        if function is None:
+            self.fail("Image verifier must expose its filesystem-manifest function.")
+        script = "set -eu\n" + function[0] + '\nwrite_sha256_manifest "$1" "$2"\nprintf passed > "$3"\n'
+        for behavior in ("success", "empty-failure", "partial-failure"):
+            with self.subTest(behavior=behavior), tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+                temporary_root = Path(directory)
+                tree, tools, scratch = (temporary_root / name for name in ("tree", "tools", "scratch"))
+                for path in (tree, tools, scratch):
+                    path.mkdir()
+                for name in ("z.untracked.txt", "a.untracked.txt"):
+                    (tree / name).write_bytes(b"manifest-fixture\n")
+                destination = temporary_root / "manifest.untracked.txt"
+                destination.write_text("previous manifest fixture\n", encoding="utf-8")
+                completed = temporary_root / "completed.untracked"
+                if behavior != "success":
+                    sorter = tools / "sort"
+                    partial_output = "printf './a.untracked.txt\\000'\n" if behavior == "partial-failure" else ""
+                    sorter.write_text("#!/bin/sh\n" + partial_output + "exit 73\n", encoding="utf-8")
+                    sorter.chmod(0o755)
+                result = subprocess.run(
+                    ["sh", "-c", script, "manifest-test", str(tree), str(destination), str(completed)],
+                    env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "TMPDIR": str(scratch)},
+                    text=True, capture_output=True, check=False,
+                )
+                if behavior == "success":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    checksum = hashlib.sha256(b"manifest-fixture\n").hexdigest()
+                    self.assertEqual(destination.read_text(encoding="utf-8"), "".join(
+                        f"{checksum}  ./{name}\n" for name in ("a.untracked.txt", "z.untracked.txt")
+                    ))
+                    self.assertTrue(completed.is_file())
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Unable to sort image files", result.stderr)
+                    self.assertEqual(destination.read_text(encoding="utf-8"), "previous manifest fixture\n")
+                    self.assertFalse(completed.exists())
+                self.assertEqual(list(scratch.iterdir()), [])
 
     def test_image_layer_validates_support_ca_before_installing(self) -> None:
         layer = (ROOT / "image/layer/hexclave-tv-box-pilot.yaml").read_text(encoding="utf-8")
@@ -598,6 +648,17 @@ class ImageContractTests(unittest.TestCase):
         runbook = (ROOT / "PILOT_RUNBOOK.md").read_text(encoding="utf-8")
         for gate in ("Cold boot", "Unpair", "five controlled abrupt power cuts", "10 continuous hours"):
             self.assertIn(gate, runbook)
+        pilot, heading, deferred = runbook.partition("### Deferred GA fault-injection checks")
+        self.assertNotEqual(heading, "")
+        deferred, soak_heading, soak = deferred.partition("## Pilot soak gate")
+        self.assertNotEqual(soak_heading, "")
+        for gate in ("Stop Cog, terminate its WPE web process", "five controlled abrupt power cuts"):
+            self.assertNotIn(gate, pilot)
+            self.assertIn(gate, deferred)
+        for gate in ("single kiosk restart", "two consecutive kiosk restarts", "an OS reboot", "one controlled abrupt power cut during paired playback"):
+            self.assertIn(gate, pilot)
+        self.assertIn("not blocking requirements for this pilot", deferred)
+        self.assertIn("10 continuous hours", soak)
 
     def test_customer_wifi_retry_guidance_is_in_the_runbook(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
