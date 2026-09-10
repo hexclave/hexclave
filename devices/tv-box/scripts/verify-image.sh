@@ -147,7 +147,7 @@ if [ -e "$rootfs/var/lib/systemd/random-seed" ]; then
   printf '%s\n' 'Image contains a pre-generated random seed.' >&2
   exit 1
 fi
-host_key_artifact=$(find "$rootfs/etc/ssh" -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit) || {
+host_key_artifact=$(find "$rootfs/etc/ssh" -maxdepth 1 -name 'ssh_host_*_key' -print -quit) || {
   printf '%s\n' 'Unable to inspect image SSH host keys.' >&2
   exit 1
 }
@@ -174,7 +174,7 @@ write_sha256_manifest() {
     printf '%s\n' 'Unable to enumerate image files.' >&2
     exit 1
   fi
-  if ! (cd "$tree" && LC_ALL=C sort -z "$list" | xargs -0 -r sha256sum > "$destination"); then
+  if ! (cd "$tree" && LC_ALL=C sort -z "$list" | xargs -0 -r sha256sum) > "$destination"; then
     rm -f "$list"
     printf '%s\n' 'Unable to hash image files.' >&2
     exit 1

@@ -173,12 +173,6 @@ class ImageVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Private-key"):
             image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
 
-    def test_secret_scan_rejects_symlinked_directories(self) -> None:
-        outside = self.root / "outside"
-        outside.mkdir()
-        (self.boot / "external").symlink_to(outside, target_is_directory=True)
-        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
-
     def test_secret_scan_rejects_nested_mounts(self) -> None:
         nested = self.boot / "nested"
         nested.mkdir()

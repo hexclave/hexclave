@@ -10,6 +10,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import urlopen
 from unittest import mock
 
 from hexclave_tv_box.network_agent import (
@@ -222,9 +223,14 @@ class NetworkAgentTests(unittest.TestCase):
     def test_frontend_probe_does_not_follow_redirects(self) -> None:
         class RedirectHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                self.send_response(302)
-                self.send_header("Location", "/redirected")
-                self.end_headers()
+                if self.path == "/":
+                    self.send_response(302)
+                    self.send_header("Location", "/redirected")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"redirected")
 
             def log_message(self, _format: str, *args: object) -> None:
                 return
@@ -234,7 +240,10 @@ class NetworkAgentTests(unittest.TestCase):
         thread.start()
         try:
             from hexclave_tv_box.network_agent import _frontend_reachable
-            self.assertFalse(_frontend_reachable(f"http://127.0.0.1:{server.server_port}"))
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.assertFalse(_frontend_reachable(base))
+            with urlopen(base) as response:
+                self.assertEqual(response.status, 200)
         finally:
             server.shutdown()
             thread.join()

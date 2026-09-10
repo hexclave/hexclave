@@ -19,8 +19,8 @@ class FirstBootTests(unittest.TestCase):
                 key_path.write_text("private", encoding="utf-8")
                 Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
 
-            first = initialize_device(state_root, fake_keygen, "a" * 32)
-            second = initialize_device(state_root, fake_keygen, "a" * 32)
+            first = initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
+            second = initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
             self.assertEqual(first, second)
             self.assertRegex(first["device_id"], r"^[0-9a-f-]{36}$")
             self.assertTrue(first["hostname"].startswith("hexclave-tv-"))
@@ -148,9 +148,9 @@ class FirstBootTests(unittest.TestCase):
                 key_path.write_text("private", encoding="utf-8")
                 Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
 
-            initialize_device(state_root, fake_keygen, "a" * 32)
+            initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
             with self.assertRaisesRegex(RuntimeError, "do not match"):
-                initialize_device(state_root, fake_keygen, "b" * 32)
+                initialize_device(state_root, fake_keygen, "b" * 32, relay_group=None)
 
     def test_initialization_rejects_state_child_symlink_without_writing_through_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -161,7 +161,30 @@ class FirstBootTests(unittest.TestCase):
             outside.mkdir()
             (state_root / "identity").symlink_to(outside, target_is_directory=True)
             with self.assertRaisesRegex(RuntimeError, "symlink"):
-                initialize_device(state_root, lambda _command: None, "a" * 32)
+                initialize_device(state_root, lambda _command: None, "a" * 32, relay_group=None)
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_initialization_creates_and_validates_relay_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_root = root / "state"
+
+            def fake_keygen(command: list[str]) -> None:
+                key_path = Path(command[command.index("-f") + 1])
+                key_path.write_text("private", encoding="utf-8")
+                Path(f"{key_path}.pub").write_text("public", encoding="utf-8")
+
+            initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
+            relay = state_root / "relay"
+            self.assertEqual(relay.stat().st_mode & 0o777, 0o750)
+            self.assertEqual(relay.stat().st_uid, os.getuid())
+
+            outside = root / "outside"
+            outside.mkdir()
+            relay.rmdir()
+            relay.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                initialize_device(state_root, fake_keygen, "a" * 32, relay_group=None)
             self.assertEqual(list(outside.iterdir()), [])
 
     def test_hosts_update_preserves_aliases_comments_and_other_managed_lines(self) -> None:

@@ -172,7 +172,7 @@ class ImageContractTests(unittest.TestCase):
         self.assertIn('test -f "$rootfs/$path"', verifier)
         self.assertNotIn('test -e "$rootfs/$path"', verifier)
         self.assertIn('[ ! -f "$rootfs/etc/hexclave-tv-box-test-image" ]', verifier)
-        self.assertIn("find \"$rootfs/etc/ssh\" -maxdepth 1", verifier)
+        self.assertIn("find \"$rootfs/etc/ssh\" -maxdepth 1 -name 'ssh_host_*_key'", verifier)
         self.assertIn("hexclave-support-ca.pub", verifier)
         self.assertIn('find . -xdev -type f -print0 > "$list"', verifier)
         self.assertIn('if ! (cd "$tree" && find . -xdev -type f -print0 > "$list"); then', verifier)
@@ -204,9 +204,12 @@ class ImageContractTests(unittest.TestCase):
 
     def test_relay_identity_service_only_writes_relay_directory(self) -> None:
         service = (ROOTFS / "etc/systemd/system/hexclave-tv-box-relay-identity.service").read_text(encoding="utf-8")
-        self.assertIn("ExecStartPre=+/usr/bin/install -d -m 0750 -o root -g hexclave-tv-relay", service)
+        firstboot = (ROOT / "src/hexclave_tv_box/firstboot.py").read_text(encoding="utf-8")
+        self.assertNotIn("ExecStartPre=", service)
         self.assertIn("ReadWritePaths=/var/lib/hexclave-tv-box/relay", service)
         self.assertNotIn("ReadWritePaths=/var/lib/hexclave-tv-box\n", service)
+        self.assertIn('"ssh", "relay")', firstboot)
+        self.assertIn('mode = 0o750 if name == "relay" else 0o700', firstboot)
 
     def test_swap_source_has_distinct_name_from_genimage_output(self) -> None:
         config = (ROOT / "image/image/hexclave-tv-box-image/genimage.cfg.in.ext4").read_text(encoding="utf-8")
@@ -414,6 +417,28 @@ class ImageContractTests(unittest.TestCase):
                 manifest_paths = [line.split("  ", maxsplit=1)[1] for line in manifest_lines]
                 self.assertEqual(manifest_paths, sorted(manifest_paths), manifest_name)
 
+            relative_cwd = temporary_root / "relative-output-cwd"
+            relative_cwd.mkdir()
+            relative_output = "verification-relative"
+            relative_command = [*command[:-1], relative_output]
+            relative_result = subprocess.run(
+                relative_command,
+                cwd=relative_cwd,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(relative_result.returncode, 0, relative_result.stdout)
+            for manifest_name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt"):
+                self.assertTrue((relative_cwd / relative_output / manifest_name).is_file(), manifest_name)
+            unexpected_rootfs_outputs = [
+                path
+                for path in rootfs.rglob("*")
+                if "manifest" in path.name or path.name.endswith(".sha256")
+            ]
+            self.assertEqual(unexpected_rootfs_outputs, [])
+
             marker = rootfs / "etc/hexclave-tv-box-test-image"
             marker.write_text("test\n", encoding="utf-8")
             rejected_production_marker = run_verifier()
@@ -474,6 +499,56 @@ class ImageContractTests(unittest.TestCase):
             rejected = run_verifier()
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("initialized device data", rejected.stdout)
+
+            identity_path = state / "identity/device-id"
+            identity_path.unlink()
+            (state / "identity").rmdir()
+            required_path = rootfs / "etc/pam.d/hexclave-tv-box-kiosk"
+            required_contents = required_path.read_text(encoding="utf-8")
+
+            required_path.unlink()
+            required_path.mkdir()
+            rejected_directory = run_verifier()
+            self.assertNotEqual(rejected_directory.returncode, 0)
+            required_path.rmdir()
+            required_path.write_text(required_contents, encoding="utf-8")
+
+            required_path.unlink()
+            required_path.symlink_to(rootfs / "etc/hexclave-tv-box-release")
+            rejected_symlink = run_verifier()
+            self.assertNotEqual(rejected_symlink.returncode, 0)
+            required_path.unlink()
+            required_path.write_text(required_contents, encoding="utf-8")
+
+            host_key = rootfs / "etc/ssh/ssh_host_ed25519_key"
+            host_key.symlink_to(rootfs / "etc/hexclave-tv-box-release")
+            rejected_host_key = run_verifier()
+            self.assertNotEqual(rejected_host_key.returncode, 0)
+            self.assertIn("pre-generated SSH host keys", rejected_host_key.stdout)
+            host_key.unlink()
+
+            failing_tools = temporary_root / "failing-tools"
+            failing_tools.mkdir()
+            fake_find = failing_tools / "find"
+            fake_find.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *ssh_host_*_key*) exit 1 ;;\n"
+                "  *) exec /usr/bin/find \"$@\" ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            fake_find.chmod(0o755)
+            failing_environment = {**environment, "PATH": f"{failing_tools}:{environment['PATH']}"}
+            rejected_find = subprocess.run(
+                command,
+                env=failing_environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertNotEqual(rejected_find.returncode, 0)
+            self.assertIn("Unable to", rejected_find.stdout)
 
     def test_pilot_document_keeps_phase_two_gates_explicit(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
