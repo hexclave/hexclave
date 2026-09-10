@@ -392,25 +392,28 @@ describe.sequential("independent TV display persistence", () => {
   });
 
   it("detects recent replay even after the used credential's original idle expiry", async () => {
-    const pairedAt = new Date("2026-08-01T12:00:00.000Z");
+    // Pairing fixtures must be anchored to wall-clock time: challenge creation
+    // opportunistically deletes challenges whose expiresAt is already in the
+    // past, so a challenge created at a fixed historical `now` can be removed
+    // by a concurrent test between approval and poll.
+    const pairedAt = new Date();
     const paired = await pairDisplay({ now: pairedAt });
-    const rotationAt = new Date("2026-08-31T11:00:00.000Z");
+    const rotationAt = new Date(pairedAt.getTime() + 30 * 24 * 60 * 60 * 1000 - 60 * 60 * 1000);
     const rotated = await refreshTvDisplayCredential(paired.refreshToken, rotationAt);
     if (rotated == null) throw new Error("Near-expiry display credential did not rotate.");
 
-    // The consumed token's Clock A ended at noon, but its independent replay
-    // window remains active until 24 hours after the successful rotation.
-    await expect(refreshTvDisplayCredential(
-      paired.refreshToken,
-      new Date("2026-08-31T13:00:00.000Z"),
-    )).resolves.toBeNull();
-    await expect(getAuthorizedTvDisplay(rotated.accessToken)).resolves.toBeNull();
-    await expect(refreshTvDisplayCredential(rotated.refreshToken)).resolves.toBeNull();
+    // The consumed token's Clock A ended an hour after rotation, but its
+    // independent replay window remains active until 24 hours after the
+    // successful rotation.
+    const replayAt = new Date(rotationAt.getTime() + 2 * 60 * 60 * 1000);
+    await expect(refreshTvDisplayCredential(paired.refreshToken, replayAt)).resolves.toBeNull();
+    await expect(getAuthorizedTvDisplay(rotated.accessToken, replayAt)).resolves.toBeNull();
+    await expect(refreshTvDisplayCredential(rotated.refreshToken, replayAt)).resolves.toBeNull();
   });
 
   it("bounds expired replay-history cleanup to the exact display and family", async () => {
-    const pairedAt = new Date("2026-08-31T12:00:00.000Z");
-    const now = new Date("2026-09-01T13:00:00.000Z");
+    const pairedAt = new Date();
+    const now = new Date(pairedAt.getTime() + 25 * 60 * 60 * 1000);
     const paired = await pairDisplay({ now: pairedAt });
     const sibling = await pairDisplay({ now: pairedAt });
     const currentCredential = await globalPrismaClient.tvDisplayCredential.findFirstOrThrow({
@@ -418,8 +421,8 @@ describe.sequential("independent TV display persistence", () => {
       select: { familyId: true },
     });
     const unrelatedFamilyId = randomUUID();
-    const oldUsedAt = new Date("2026-08-31T12:00:00.000Z");
-    const expiresAt = new Date("2026-09-30T12:00:00.000Z");
+    const oldUsedAt = pairedAt;
+    const expiresAt = new Date(pairedAt.getTime() + 30 * 24 * 60 * 60 * 1000);
     await globalPrismaClient.tvDisplayCredential.createMany({
       data: [
         ...Array.from({ length: 105 }, () => ({
