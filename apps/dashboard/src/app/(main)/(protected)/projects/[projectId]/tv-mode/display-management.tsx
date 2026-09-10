@@ -143,7 +143,10 @@ export function TvDisplayManagement({
   const pairingInFlight = useRef(false);
   const refreshInFlight = useRef(false);
   const pairingCodeInput = useRef<HTMLInputElement>(null);
-  const pendingPairingCaret = useRef<number | null>(null);
+  // Kept in state as a fresh object per edit (not a ref) so the caret layout effect also runs
+  // when formatting yields the same code as before, e.g. forward-deleting the separator: React
+  // then restores the controlled value, which moves the caret to the end unless we reposition it.
+  const [pendingPairingCaret, setPendingPairingCaret] = useState<{ characterCount: number } | null>(null);
   const hiddenDisplayIds = useRef(new Set<string>());
   const pendingPairing = useRef<{
     displayName: string,
@@ -197,11 +200,10 @@ export function TvDisplayManagement({
   }, [refreshSafely]);
 
   useLayoutEffect(() => {
-    if (pendingPairingCaret.current == null || pairingCodeInput.current == null) return;
-    const caret = getPairingCodeCaretPosition(pairingCode, pendingPairingCaret.current);
+    if (pendingPairingCaret == null || pairingCodeInput.current == null) return;
+    const caret = getPairingCodeCaretPosition(pairingCode, pendingPairingCaret.characterCount);
     pairingCodeInput.current.setSelectionRange(caret, caret);
-    pendingPairingCaret.current = null;
-  }, [pairingCode]);
+  }, [pairingCode, pendingPairingCaret]);
 
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
   const normalizedPairingCode = pairingCode.replaceAll("-", "");
@@ -225,6 +227,7 @@ export function TvDisplayManagement({
         expiresAt: approval.expiresAt,
       };
       setPairingCode("");
+      setPendingPairingCaret(null);
       setDisplayName("");
       setAcknowledgeExact(false);
       toast({
@@ -283,10 +286,9 @@ export function TvDisplayManagement({
                     nextValue = nextValue.slice(0, caret - 1) + nextValue.slice(caret);
                     caret -= 1;
                   }
-                  pendingPairingCaret.current = nextValue
-                    .slice(0, caret)
-                    .replaceAll(/[^0-9A-Z]/gi, "")
-                    .length;
+                  setPendingPairingCaret({
+                    characterCount: nextValue.slice(0, caret).replaceAll(/[^0-9A-Z]/gi, "").length,
+                  });
                   setPairingCode(formatTvDisplayPairingCode(nextValue));
                 }}
                 placeholder="ABCD-EFGH"

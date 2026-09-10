@@ -186,7 +186,6 @@ describe("TV display pairing feedback", () => {
     const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
     fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
     dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentForward");
-    codeInput.setSelectionRange(5, 5);
     expect(codeInput).toHaveProperty("value", "ABCD-EFGH");
     expect(codeInput.selectionStart).toBe(5);
     expect(codeInput.selectionEnd).toBe(5);
