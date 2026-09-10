@@ -143,7 +143,7 @@ export function TvDisplayManagement({
   const pairingInFlight = useRef(false);
   const refreshInFlight = useRef(false);
   const pairingCodeInput = useRef<HTMLInputElement>(null);
-  // Track selection at keydown because React does not fire onBeforeInput for backward deletion, and select does not fire for collapsed carets.
+  // Capture selection on native beforeinput because React's onBeforeInput does not fire for deletions and select does not fire for collapsed carets; without a captured collapsed selection, skip the workaround so a selected separator is never widened into the preceding character.
   const pairingSelectionBeforeEdit = useRef<{ start: number, end: number } | null>(null);
   // Kept in state as a fresh object per edit (not a ref) so the caret layout effect also runs
   // when formatting yields the same code as before, e.g. forward-deleting the separator: React
@@ -156,6 +156,19 @@ export function TvDisplayManagement({
     approvedAt: string,
     expiresAt: string,
   } | null>(null);
+
+  useEffect(() => {
+    const input = pairingCodeInput.current;
+    if (input == null) return;
+    const record = () => {
+      pairingSelectionBeforeEdit.current = {
+        start: input.selectionStart ?? 0,
+        end: input.selectionEnd ?? 0,
+      };
+    };
+    input.addEventListener("beforeinput", record);
+    return () => input.removeEventListener("beforeinput", record);
+  }, []);
 
   const refresh = useCallback(async () => {
     const next = await fetchTvDisplaysOrThrow(adminApp);
@@ -280,21 +293,13 @@ export function TvDisplayManagement({
                 ref={pairingCodeInput}
                 id="new-tv-display-code"
                 aria-label="Pairing code"
-                onKeyDown={(event) => {
-                  if (event.key === "Backspace") {
-                    pairingSelectionBeforeEdit.current = {
-                      start: event.currentTarget.selectionStart ?? 0,
-                      end: event.currentTarget.selectionEnd ?? 0,
-                    };
-                  }
-                }}
                 value={pairingCode}
                 onChange={(event) => {
                   const selectionBeforeEdit = pairingSelectionBeforeEdit.current;
                   pairingSelectionBeforeEdit.current = null;
                   let nextValue = event.target.value;
                   let caret = event.target.selectionStart ?? nextValue.length;
-                  if (event.nativeEvent instanceof InputEvent && event.nativeEvent.inputType === "deleteContentBackward" && (selectionBeforeEdit == null || selectionBeforeEdit.start === selectionBeforeEdit.end) && caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
+                  if (event.nativeEvent instanceof InputEvent && event.nativeEvent.inputType === "deleteContentBackward" && selectionBeforeEdit != null && selectionBeforeEdit.start === selectionBeforeEdit.end && caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
                     nextValue = nextValue.slice(0, caret - 1) + nextValue.slice(caret);
                     caret -= 1;
                   }

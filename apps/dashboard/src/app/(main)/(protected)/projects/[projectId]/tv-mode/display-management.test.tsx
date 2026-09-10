@@ -26,9 +26,13 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-function dispatchPairingInput(input: HTMLInputElement, value: string, selectionStart: number, inputType: string) {
+function dispatchPairingInput(input: HTMLInputElement, value: string, selectionStart: number, inputType: string, { beforeInput = true, selectionEnd = selectionStart }: { beforeInput?: boolean, selectionEnd?: number } = {}) {
   const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
   if (valueSetter == null) throw new Error("HTMLInputElement value setter is unavailable.");
+  input.setSelectionRange(selectionStart, selectionEnd);
+  if (beforeInput) {
+    input.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType }));
+  }
   valueSetter.call(input, value);
   input.setSelectionRange(selectionStart, selectionStart);
   input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType }));
@@ -163,8 +167,6 @@ describe("TV display pairing feedback", () => {
     renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
     const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
     fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
-    codeInput.setSelectionRange(5, 5);
-    fireEvent.keyDown(codeInput, { key: "Backspace" });
     dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentBackward");
     expect(codeInput).toHaveProperty("value", "ABCE-FGH");
     expect(codeInput.selectionStart).toBe(3);
@@ -176,9 +178,19 @@ describe("TV display pairing feedback", () => {
     renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
     const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
     fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentBackward", { selectionEnd: 5 });
+    expect(codeInput).toHaveProperty("value", "ABCD-EFGH");
+    expect(codeInput.selectionStart).toBe(5);
+    expect(codeInput.selectionEnd).toBe(5);
+  });
+
+  it("never widens a separator deletion when the pre-edit selection is unknown", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+    const codeInput = await screen.findByLabelText<HTMLInputElement>("Pairing code");
+    fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
     codeInput.setSelectionRange(4, 5);
-    fireEvent.keyDown(codeInput, { key: "Backspace" });
-    dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentBackward");
+    dispatchPairingInput(codeInput, "ABCDEFGH", 4, "deleteContentBackward", { beforeInput: false });
     expect(codeInput).toHaveProperty("value", "ABCD-EFGH");
     expect(codeInput.selectionStart).toBe(5);
     expect(codeInput.selectionEnd).toBe(5);
