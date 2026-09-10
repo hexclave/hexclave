@@ -33,8 +33,11 @@ if lsblk -nr -o MOUNTPOINT "$device" | grep -Eq '[^[:space:]]'; then
   printf 'Refusing a manufacturing target with mounted filesystems: %s\n' "$device" >&2
   exit 1
 fi
+exec 4<> "$device"
+device_target=/dev/fd/4
+device_rdev=$(stat -Lc '%t:%T' "$device_target")
 image_bytes=$(stat -Lc %s "$image_source")
-device_bytes=$(blockdev --getsize64 "$device")
+device_bytes=$(blockdev --getsize64 "$device_target")
 device_identity=$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device")
 if [ "$image_bytes" -gt "$device_bytes" ]; then
   printf '%s\n' 'Image is larger than the selected manufacturing device.' >&2
@@ -48,16 +51,17 @@ test "$confirmation" = "$device" || { printf '%s\n' 'Cancelled.' >&2; exit 1; }
 # Confirmation can take minutes. A remount or a replaced USB reader must not
 # turn the previously inspected path into a different destructive target.
 if [ "$(lsblk -dn -o MAJ:MIN,SERIAL,SIZE "$device")" != "$device_identity" ] ||
+   [ "$(stat -Lc '%t:%T' "$device")" != "$device_rdev" ] ||
    lsblk -nr -o MOUNTPOINT "$device" | grep -Eq '[^[:space:]]'; then
   printf '%s\n' 'Manufacturing target changed or became mounted after confirmation.' >&2
   exit 1
 fi
 python3 -B "$script_directory/image_verification.py" receipt "$image_source" "$verification"
 
-dd if="$image_source" of="$device" bs=8M conv=fsync status=progress
+dd if="$image_source" of="$device_target" bs=8M conv=fsync status=progress
 sync
 # Invalidate the host's block cache before the bounded read-back; otherwise a
 # cached read could "verify" bytes that never reached the physical SD card.
-blockdev --flushbufs "$device"
-python3 -B "$script_directory/image_verification.py" readback "$verification" "$device"
+blockdev --flushbufs "$device_target"
+python3 -B "$script_directory/image_verification.py" readback "$verification" "$device_target"
 printf '%s\n' 'Flash and full image-extent read-back verified. Boot once, verify unique host identity and unpaired state, then shut down cleanly.'

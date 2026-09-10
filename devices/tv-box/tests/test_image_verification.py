@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -371,6 +372,11 @@ class ImageVerificationTests(unittest.TestCase):
         target.write_bytes(image.read_bytes() + b"unused-card-space")
         command = [sys.executable, "-B", str(ROOT / "scripts/image_verification.py"), "readback", str(output), str(target)]
         self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        descriptor = os.open(target, os.O_RDONLY)
+        try:
+            image_verification.verify_readback(output, Path(f"/dev/fd/{descriptor}"))
+        finally:
+            os.close(descriptor)
         target.write_bytes(b"wrong-image" + b"unused-card-space")
         rejected = subprocess.run(command, text=True, capture_output=True)
         self.assertNotEqual(rejected.returncode, 0)

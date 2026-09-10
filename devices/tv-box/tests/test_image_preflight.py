@@ -69,6 +69,13 @@ class ImagePreflightTests(unittest.TestCase):
         self.assertIn('dd if="$image_source"', manufacture)
         self.assertNotIn('dd if="$image"', manufacture)
         self.assertNotIn('readback "$image"', manufacture)
+        self.assertIn('exec 4<> "$device"', manufacture)
+        self.assertIn("device_target=/dev/fd/4", manufacture)
+        self.assertIn('device_rdev=$(stat -Lc \'%t:%T\' "$device_target")', manufacture)
+        self.assertIn('dd if="$image_source" of="$device_target"', manufacture)
+        self.assertIn('blockdev --flushbufs "$device_target"', manufacture)
+        self.assertIn('readback "$verification" "$device_target"', manufacture)
+        self.assertIn('stat -Lc \'%t:%T\' "$device"', manufacture)
 
     def test_complete_mount_preflight_requires_boot_from_the_same_readonly_image(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
