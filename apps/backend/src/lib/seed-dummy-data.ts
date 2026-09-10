@@ -2399,6 +2399,8 @@ async function seedDummyAnalyticsMirrorTables(options: {
       client_read_only_metadata: JSON.stringify(u.clientReadOnlyMetadata ?? {}),
       server_metadata: JSON.stringify(u.serverMetadata ?? {}),
       is_anonymous: u.isAnonymous ? 1 : 0,
+      sign_up_risk_score_bot: u.signUpRiskScoreBot,
+      sign_up_risk_score_free_trial_abuse: u.signUpRiskScoreFreeTrialAbuse,
       restricted_by_admin: u.restrictedByAdmin ? 1 : 0,
       restricted_by_admin_reason: u.restrictedByAdminReason,
       restricted_by_admin_private_details: u.restrictedByAdminPrivateDetails,

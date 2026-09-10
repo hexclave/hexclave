@@ -317,6 +317,52 @@ describe.sequential('External DB Sync - Basic Tests', () => {
     });
   }, TEST_TIMEOUT);
 
+  test("Syncs user sign-up risk scores to ClickHouse", async ({ expect }) => {
+    await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+
+    const user = await User.create({
+      primary_email: "clickhouse-risk-scores@example.com",
+      display_name: "ClickHouse Risk Scores User",
+    });
+    await niceBackendFetch(`/api/v1/users/${user.userId}`, {
+      accessType: "server",
+      method: "PATCH",
+      body: {
+        risk_scores: {
+          sign_up: {
+            bot: 37,
+            free_trial_abuse: 82,
+          },
+        },
+      },
+    });
+
+    await InternalApiKey.createAndSetProjectKeys();
+    const timeoutMs = 180_000;
+    const intervalMs = 2_000;
+    const start = performance.now();
+    let response;
+    while (performance.now() - start < timeoutMs) {
+      response = await runQueryForCurrentProject({
+        query: "SELECT sign_up_risk_score_bot, sign_up_risk_score_free_trial_abuse FROM users WHERE primary_email = {email:String}",
+        params: {
+          email: "clickhouse-risk-scores@example.com",
+        },
+      });
+      expect(response.status).toBe(200);
+      if (
+        response.body.result.length === 1
+        && response.body.result[0].sign_up_risk_score_bot === 37
+        && response.body.result[0].sign_up_risk_score_free_trial_abuse === 82
+      ) {
+        return;
+      }
+      await wait(intervalMs);
+    }
+
+    throw new HexclaveAssertionError("Timed out waiting for ClickHouse user sign-up risk scores to sync.", { response });
+  }, TEST_TIMEOUT);
+
   test("Deleted user is removed from ClickHouse view", async ({ expect }) => {
     await Project.createAndSwitch({ config: { magic_link_enabled: true } });
 
