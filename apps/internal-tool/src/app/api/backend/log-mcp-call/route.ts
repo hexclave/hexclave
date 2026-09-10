@@ -17,6 +17,9 @@ const bodySchema = z.object({
   durationMs: z.number().int().nonnegative(),
   modelId: z.string(),
   errorMessage: z.string().optional(),
+  context: z.string().optional(),
+  user: z.string().optional(),
+  project: z.string().optional(),
 });
 
 export async function POST(req: Request): Promise<Response> {
@@ -37,6 +40,9 @@ export async function POST(req: Request): Promise<Response> {
       body.durationMs,
       body.modelId,
       opt(body.errorMessage),
+      opt(body.context),
+      opt(body.user),
+      opt(body.project),
     ]);
     return successResponse();
   } catch (err) {

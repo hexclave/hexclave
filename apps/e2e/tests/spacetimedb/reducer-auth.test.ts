@@ -19,7 +19,7 @@ const ALL_MUTATING_REDUCERS: Array<{ name: string, args: unknown[] }> = [
   { name: "update_qa_entry_with_publish", args: [0n, "q", "a", false] },
   {
     name: "log_mcp_call",
-    args: ["corr", opt(null), "tool", "reason", "prompt", "q", "r", 0, "[]", 0n, "model", opt(null)],
+    args: ["corr", opt(null), "tool", "reason", "prompt", "q", "r", 0, "[]", 0n, "model", opt(null), opt(null), opt(null), opt(null)],
   },
   {
     name: "log_ai_query",
@@ -66,6 +66,9 @@ describe.skipIf(!canRun)("SpacetimeDB reducer auth", () => {
       0n, // durationMs
       "model",
       opt(null), // errorMessage
+      opt(null), // context
+      opt(null), // user
+      opt(null), // project
     ]);
     expect(seed.ok, seed.body).toBe(true);
 

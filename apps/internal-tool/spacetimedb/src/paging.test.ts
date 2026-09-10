@@ -149,6 +149,34 @@ describe("pageByCreatedAt", () => {
     expect(slices).toHaveLength(1);
   });
 
+  it("fills a page using only rows accepted by the server filter", () => {
+    const rows = Array.from({ length: 20 }, (_, i) => row(i + 1, NOW - BigInt(i + 1)));
+    const { scan } = fakeIndex(rows);
+
+    const page = pageByCreatedAt(scan, () => false, cursorAt(NOW), 5, {
+      matches: candidate => candidate.id % 2n === 1n,
+    });
+
+    expect(page.rows).toHaveLength(5);
+    expect(page.rows.every(candidate => candidate.id % 2n === 1n)).toBe(true);
+  });
+
+  it("never scans or returns rows older than the requested lower bound", () => {
+    const lowerBound = NOW - HOUR;
+    const { scan, slices } = fakeIndex([
+      row(1, NOW - 10n, "inside"),
+      row(2, lowerBound - 1n, "outside"),
+    ]);
+
+    const page = pageByCreatedAt(scan, () => true, cursorAt(NOW), 10, {
+      createdAtOrAfterMicros: lowerBound,
+    });
+
+    expect(labels(page.rows)).toEqual(["inside"]);
+    expect(slices.every(slice => slice.lo >= lowerBound)).toBe(true);
+    expect(page.resumeBeforeMicros).toBeUndefined();
+  });
+
   it("visits a row on a slice boundary exactly once", () => {
     // NOW - HOUR is the boundary between the first slice and the second.
     const { scan } = fakeIndex([row(1, NOW - HOUR)]);

@@ -104,7 +104,7 @@ describe.skipIf(!canRun)("qa_entries CRUD invariants", () => {
     const mcpMarker = uniqueMarker("delete-scope-mcp");
     scope.trackMcpQuestion(mcpMarker);
     const seedMcp = await callReducer(reviewerToken, "log_mcp_call", [
-      mcpMarker, opt(null), "delete-scope-tool", "reason", "prompt", mcpMarker, "response", 0, "[]", 0n, "model", opt(null),
+      mcpMarker, opt(null), "delete-scope-tool", "reason", "prompt", mcpMarker, "response", 0, "[]", 0n, "model", opt(null), opt(null), opt(null), opt(null),
     ]);
     expect(seedMcp.ok, seedMcp.body).toBe(true);
 

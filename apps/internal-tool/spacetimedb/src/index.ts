@@ -10,6 +10,7 @@ import {
   type PageableRow,
   type SliceScanner,
 } from './paging';
+import { aiLogMatches, mcpLogMatches } from './log-filters';
 
 // Injected at publish time by scripts/spacetime-auth-config.mjs (non-secret).
 // SpacetimeDB validates the JWT signature via OIDC discovery on the token's
@@ -168,6 +169,11 @@ const mcpCallLog = table(
     // default to none — readers treat the epoch-0 sentinel (pre-migration
     // rows) as unknown via max(createdAt, qaReviewRequestedAt).
     qaReviewRequestedAt: t.timestamp().default(Timestamp.UNIX_EPOCH),
+    // Trailing non-optional defaults preserve existing rows during module
+    // migration. Empty means the MCP caller did not provide that context.
+    context: t.string().default('(not provided)'),
+    user: t.string().default('(not provided)'),
+    project: t.string().default('(not provided)'),
   }
 );
 
@@ -450,6 +456,7 @@ function requireMemberSession(ctx: {
 }
 
 type PageArgs = { beforeCreatedAtMicros: bigint | undefined, beforeId: bigint | undefined, limit: number };
+const MAX_FILTER_VALUE_LENGTH = 256;
 
 function cursorOf(now: Timestamp, args: PageArgs): PageCursor {
   // No cursor means "newest page": everything ever written is at or before now.
@@ -465,11 +472,44 @@ function requireValidLimit(limit: number): number {
   return clampPageLimit(limit);
 }
 
-const pageParams = {
+function requireValidExactFilter(value: string | undefined, label: string): void {
+  if (value != null && (value === '' || value.length > MAX_FILTER_VALUE_LENGTH)) {
+    throw new SenderError(`${label} must contain between 1 and ${MAX_FILTER_VALUE_LENGTH} characters`);
+  }
+}
+
+function requireAllowedFilter(value: string | undefined, label: string, allowed: readonly string[]): void {
+  if (value != null && !allowed.includes(value)) {
+    throw new SenderError(`${label} must be one of: ${allowed.join(', ')}`);
+  }
+}
+
+const basePageParams = {
   beforeCreatedAtMicros: t.u64().optional(),
   beforeId: t.u64().optional(),
   limit: t.u32(),
 };
+
+const mcpPageParams = {
+  ...basePageParams,
+  createdAtOrAfterMicros: t.u64().optional(),
+  toolName: t.string().optional(),
+  hasError: t.bool().optional(),
+  qaState: t.string().optional(),
+  humanReviewState: t.string().optional(),
+};
+
+const aiQueryPageParams = {
+  ...basePageParams,
+  createdAtOrAfterMicros: t.u64().optional(),
+  systemPromptId: t.string().optional(),
+  modelId: t.string().optional(),
+  mode: t.string().optional(),
+  isAuthenticated: t.bool().optional(),
+  hasError: t.bool().optional(),
+};
+
+const feedbackPageParams = basePageParams;
 
 const mcpCallLogPage = t.object('McpCallLogPage', {
   rows: t.array(mcpCallLog.rowType),
@@ -490,27 +530,52 @@ const feedbackLogPage = t.object('FeedbackLogPage', {
 });
 
 export const page_mcp_call_log = spacetimedb.procedure(
-  pageParams,
+  mcpPageParams,
   mcpCallLogPage,
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
     const limit = requireValidLimit(args.limit);
-    return toPage(pageByCreatedAt(sliceScannerFor(tx.db.mcpCallLog.shardCreatedAt), olderRowProbeFor(tx.db.mcpCallLog.shardCreatedAt), cursorOf(ctx.timestamp, args), limit), limit);
+    requireValidExactFilter(args.toolName, 'toolName');
+    requireAllowedFilter(args.qaState, 'qaState', ['pending', 'review-failed', 'error', 'pass', 'warn', 'fail', 'feature-request']);
+    requireAllowedFilter(args.humanReviewState, 'humanReviewState', ['required', 'reviewed', 'not-reviewed']);
+    const nowMicros = ctx.timestamp.microsSinceUnixEpoch;
+    return toPage(pageByCreatedAt(
+      sliceScannerFor(tx.db.mcpCallLog.shardCreatedAt),
+      olderRowProbeFor(tx.db.mcpCallLog.shardCreatedAt),
+      cursorOf(ctx.timestamp, args),
+      limit,
+      {
+        createdAtOrAfterMicros: args.createdAtOrAfterMicros,
+        matches: row => mcpLogMatches(row, args, nowMicros),
+      },
+    ), limit);
   }),
 );
 
 export const page_ai_query_log = spacetimedb.procedure(
-  pageParams,
+  aiQueryPageParams,
   aiQueryLogPage,
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
     const limit = requireValidLimit(args.limit);
-    return toPage(pageByCreatedAt(sliceScannerFor(tx.db.aiQueryLog.shardCreatedAt), olderRowProbeFor(tx.db.aiQueryLog.shardCreatedAt), cursorOf(ctx.timestamp, args), limit), limit);
+    requireValidExactFilter(args.systemPromptId, 'systemPromptId');
+    requireValidExactFilter(args.modelId, 'modelId');
+    requireAllowedFilter(args.mode, 'mode', ['stream', 'generate']);
+    return toPage(pageByCreatedAt(
+      sliceScannerFor(tx.db.aiQueryLog.shardCreatedAt),
+      olderRowProbeFor(tx.db.aiQueryLog.shardCreatedAt),
+      cursorOf(ctx.timestamp, args),
+      limit,
+      {
+        createdAtOrAfterMicros: args.createdAtOrAfterMicros,
+        matches: row => aiLogMatches(row, args),
+      },
+    ), limit);
   }),
 );
 
 export const page_feedback_log = spacetimedb.procedure(
-  pageParams,
+  feedbackPageParams,
   feedbackLogPage,
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
@@ -533,6 +598,9 @@ export const log_mcp_call = spacetimedb.reducer(
     durationMs: t.u64(),
     modelId: t.string(),
     errorMessage: t.string().optional(),
+    context: t.string().optional(),
+    user: t.string().optional(),
+    project: t.string().optional(),
   },
   (ctx, args) => {
     requireProjectMember(ctx.senderAuth);
@@ -554,6 +622,9 @@ export const log_mcp_call = spacetimedb.reducer(
       errorMessage: args.errorMessage,
       publishedToQa: false,
       qaReviewRequestedAt: ctx.timestamp,
+      context: args.context ?? '(not provided)',
+      user: args.user ?? '(not provided)',
+      project: args.project ?? '(not provided)',
     } as Parameters<typeof ctx.db.mcpCallLog.insert>[0]);
   }
 );

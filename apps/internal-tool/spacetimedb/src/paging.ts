@@ -41,13 +41,20 @@ export type Page<Row extends PageableRow> = {
   resumeBeforeMicros: bigint | undefined,
 };
 
+export type PageOptions<Row extends PageableRow> = {
+  matches?: (row: Row) => boolean,
+  createdAtOrAfterMicros?: bigint,
+};
+
 export function pageByCreatedAt<Row extends PageableRow>(
   scanSlice: SliceScanner<Row>,
   anyOlderThan: OlderRowProbe,
   cursor: PageCursor,
   limit: number,
+  options: PageOptions<Row> = {},
 ): Page<Row> {
   const cursorMicros = cursor.beforeCreatedAtMicros;
+  const createdAtOrAfterMicros = options.createdAtOrAfterMicros ?? 0n;
   const collected: Row[] = [];
   let hiMicros = cursorMicros;
   let windowMicros = PAGE_INITIAL_WINDOW_MICROS;
@@ -59,24 +66,27 @@ export function pageByCreatedAt<Row extends PageableRow>(
   };
 
   for (let widening = 0; widening <= PAGE_MAX_WIDENINGS; widening++) {
-    if (hiMicros <= 0n) break;
-    const loMicros = hiMicros > windowMicros ? hiMicros - windowMicros : 0n;
+    if (hiMicros < createdAtOrAfterMicros || hiMicros <= 0n) break;
+    const windowStart = hiMicros > windowMicros ? hiMicros - windowMicros : 0n;
+    const loMicros = windowStart > createdAtOrAfterMicros ? windowStart : createdAtOrAfterMicros;
 
     for (const row of scanSlice(loMicros, hiMicros, widening === 0)) {
       if (cursor.beforeId != null && row.createdAt.microsSinceUnixEpoch === cursorMicros && row.id >= cursor.beforeId) {
         continue;
       }
+      if (options.matches != null && !options.matches(row)) continue;
       collected.push(row);
       if (collected.length >= limit * 4) trimToBest();
     }
 
     trimToBest();
     if (collected.length >= limit) break;
+    if (loMicros === createdAtOrAfterMicros) break;
 
     hiMicros = loMicros;
     windowMicros *= 2n;
 
-    if (widening === PAGE_MAX_WIDENINGS && hiMicros > 0n && anyOlderThan(hiMicros)) {
+    if (widening === PAGE_MAX_WIDENINGS && hiMicros > createdAtOrAfterMicros && anyOlderThan(hiMicros)) {
       resumeBeforeMicros = hiMicros - 1n;
     }
   }

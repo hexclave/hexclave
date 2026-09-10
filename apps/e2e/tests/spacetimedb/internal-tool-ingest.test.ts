@@ -15,7 +15,7 @@
 import { signJWT } from "@hexclave/shared/dist/utils/jwt";
 import { afterEach, beforeEach, describe } from "vitest";
 import { it } from "../helpers";
-import { createCleanupScope, isSpacetimedbReachable, type CleanupScope } from "./helpers";
+import { createCleanupScope, isSpacetimedbReachable, signMemberToken, sqlQuery, touchSession, type CleanupScope } from "./helpers";
 
 process.env.STACK_SERVER_SECRET ??= "23-wuNpik0gIW4mruTz25rbIvhuuvZFrLOLtL7J4tyo";
 
@@ -99,6 +99,9 @@ function validMcpCallBody(question: string) {
     innerToolCallsJson: "[]",
     durationMs: 0,
     modelId: "e2e-model",
+    context: "setting up authentication",
+    user: "Hexclave engineer",
+    project: "internal test project",
   };
 }
 
@@ -212,6 +215,22 @@ describe.skipIf(!canRun)("internal tool ingest validation", () => {
     const res = await postIngest("/api/backend/log-mcp-call", validMcpCallBody(marker));
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body)).toMatchInlineSnapshot(`{ "success": true }`);
+  });
+
+  it("log-mcp-call retains user, project, and task context for reviewers", async ({ expect }) => {
+    const marker = uniqueMarker("ingest-context");
+    scope.trackMcpQuestion(marker);
+    const body = validMcpCallBody(marker);
+    const res = await postIngest("/api/backend/log-mcp-call", body);
+    expect(res.status).toBe(200);
+
+    const memberToken = await signMemberToken();
+    await touchSession(memberToken);
+    const { rows } = await sqlQuery(memberToken, "SELECT * FROM my_visible_mcp_call_log");
+    const stored = rows.find(row => row.question === marker);
+    expect(stored?.context).toBe(body.context);
+    expect(stored?.user).toBe(body.user);
+    expect(stored?.project).toBe(body.project);
   });
 
   it("log-ai-query rejects malformed JSON payload fields", async ({ expect }) => {

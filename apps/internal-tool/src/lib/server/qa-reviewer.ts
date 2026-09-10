@@ -8,6 +8,7 @@ import { generateText, Output, stepCountIs } from "ai";
 import { z } from "zod";
 import { callReducerStrict, opt } from "./spacetimedb-client";
 import { getVerifiedQaContext } from "./verified-qa";
+import { normalizeQaFlags } from "../feature-request-flag";
 
 const QA_SYSTEM_PROMPT = `You are a QA reviewer for Hexclave's AI documentation assistant.
 You will receive a question, the agent's stated reason for asking, and the AI's response.
@@ -15,12 +16,15 @@ You will receive a question, the agent's stated reason for asking, and the AI's 
 Your tasks:
 1. RELEVANCE: Does the response actually answer the question? Does the stated reason align with what was asked?
 2. CORRECTNESS: Verify factual claims about Hexclave. Use human-verified Q&A (appended below, if any) as the highest-priority source of truth — these are always correct. Then use the available tools to look up additional information from the Hexclave codebase. If the AI response contradicts a human-verified answer, flag it as incorrect.
+3. CAPABILITY GAP: Determine whether the user explicitly asked Hexclave to do or support a product, API, or workflow capability that Hexclave does not currently provide. Verify current support with the repository tools when needed. Do not classify bugs, documentation gaps, setup problems, requests that are already supported, or speculative ideas the user did not ask for. This verdict is product input and must not lower the answer score or require human QA review by itself.
 
 The repo name for all tool calls is "hexclave/hexclave". Only use the repository documentation tools (read_wiki_structure, read_wiki_contents, ask_question) — do not create sessions or modify any other resources.
 
 Produce a structured review. For each issue you find, add an entry to "flags" with a type, severity (one of "low", "medium", "high", "critical"), and explanation.
 
-Flag types: "factual_error", "incomplete_answer", "off_topic", "hallucination", "outdated_info", "missing_context", "misleading", "reason_mismatch"
+Flag types: "factual_error", "incomplete_answer", "off_topic", "hallucination", "outdated_info", "missing_context", "misleading", "reason_mismatch". Do not add capability-gap flags yourself; report that verdict only through featureRequest.
+
+For featureRequest, set detected=true only for a verified unsupported capability the user actually requested. Give it a short, standalone summary suitable for a product backlog and cite the specific request plus the evidence that it is unsupported. When detected=false, return empty strings for summary and evidence.
 
 Scoring:
 - 90-100: Excellent — factually correct, fully addresses the question
@@ -33,7 +37,8 @@ Set needsHumanReview=true if: score < 50, any critical flag, or you are uncertai
 
 const REVIEW_MODEL_ID = "x-ai/grok-build-0.1";
 
-const qaReviewSchema = z.object({
+// Exported for the schema-shape tests only; the reviewer is the sole runtime consumer.
+export const qaReviewSchema = z.object({
   needsHumanReview: z.boolean(),
   answerCorrect: z.boolean(),
   answerRelevant: z.boolean(),
@@ -42,6 +47,14 @@ const qaReviewSchema = z.object({
     severity: z.string(),
     explanation: z.string(),
   })),
+  // Same reasoning as `improvementSuggestions` below: the model tends to drop
+  // "nothing to report" objects, and a missing verdict must mean "no feature
+  // request detected", not a failed review that leaves the row unreviewed.
+  featureRequest: z.object({
+    detected: z.boolean(),
+    summary: z.string().default(""),
+    evidence: z.string().default(""),
+  }).default({ detected: false, summary: "", evidence: "" }),
   // Optional in practice: the model omits this for good answers with nothing to suggest.
   // Defaulting (rather than requiring) avoids turning those into structured-output failures.
   improvementSuggestions: z.string().default(""),
@@ -159,7 +172,7 @@ export async function reviewMcpCall(accessToken: string, entry: {
       qaNeedsHumanReview: needsHumanReview,
       qaAnswerCorrect: parsed.answerCorrect,
       qaAnswerRelevant: parsed.answerRelevant,
-      qaFlagsJson: JSON.stringify(parsed.flags),
+      qaFlagsJson: JSON.stringify(normalizeQaFlags(parsed.flags, parsed.featureRequest)),
       qaImprovementSuggestions: parsed.improvementSuggestions,
       qaOverallScore: overallScore,
       qaConversationJson: JSON.stringify(conversation),
