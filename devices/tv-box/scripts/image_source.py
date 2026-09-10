@@ -50,8 +50,9 @@ def reject_special_payload_inputs(repository: Path) -> None:
 def verify_ignored_payload_inputs(repository: Path) -> None:
     repository = repository.resolve(strict=True)
     for relative in PAYLOAD_SOURCES:
-        if not stat.S_ISDIR((repository / relative).lstat().st_mode):
-            raise ValueError(f"Image payload source must be a real directory: {relative}")
+        source = repository / relative
+        if not stat.S_ISDIR(source.lstat().st_mode) or source.resolve(strict=True) != source:
+            raise ValueError(f"Image payload source must be a real directory inside the checkout, without linked ancestors: {relative}")
     reject_special_payload_inputs(repository)
     result = subprocess.run(
         ["git", "-C", str(repository), "ls-files", "--others", "--ignored", "--exclude-standard",

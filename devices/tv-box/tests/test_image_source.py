@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -159,6 +160,35 @@ class ImageSourceTests(unittest.TestCase):
         source.symlink_to(self.repository, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "real directory"):
             self.check_inputs()
+
+    def test_payload_source_with_linked_ancestor_is_rejected(self) -> None:
+        outside = self.repository.parent / f"{self.repository.name}-outside"
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "image/rootfs").mkdir(parents=True)
+        (outside / "image/rootfs/planted.txt").write_text("external-fixture", encoding="utf-8")
+        shutil.rmtree(self.repository / "devices/tv-box/image")
+        (self.repository / "devices/tv-box/image").symlink_to(outside / "image", target_is_directory=True)
+
+        with patch.object(image_source.subprocess, "run", side_effect=AssertionError("git must not run")) as command:
+            with self.assertRaisesRegex(ValueError, "linked ancestors"):
+                image_source.verify_ignored_payload_inputs(self.repository)
+            command.assert_not_called()
+
+        with tempfile.TemporaryDirectory(suffix=".untracked") as second_directory:
+            second_repository = Path(second_directory)
+            for relative in image_source.PAYLOAD_SOURCES:
+                (second_repository / relative).mkdir(parents=True)
+            second_outside = second_repository.parent / f"{second_repository.name}-outside"
+            self.addCleanup(shutil.rmtree, second_outside, ignore_errors=True)
+            (second_outside / "tv-box/image/rootfs").mkdir(parents=True)
+            (second_outside / "tv-box/image/rootfs/planted.txt").write_text("external-fixture", encoding="utf-8")
+            shutil.rmtree(second_repository / "devices/tv-box")
+            (second_repository / "devices/tv-box").symlink_to(second_outside / "tv-box", target_is_directory=True)
+
+            with patch.object(image_source.subprocess, "run", side_effect=AssertionError("git must not run")) as command:
+                with self.assertRaisesRegex(ValueError, "linked ancestors"):
+                    image_source.verify_ignored_payload_inputs(second_repository)
+                command.assert_not_called()
 
     def test_allowed_bytecode_is_removed_by_the_actual_layer_cleanup(self) -> None:
         runtime = self.repository / image_source.RUNTIME_SOURCE
