@@ -571,32 +571,47 @@ async function attachDomain(ns: string, hostname: string, serviceKey: string): P
   }
   assertServiceCanHoldADomain(serviceKey, stored.spec.config.ports, stored.spec.config.public, "Change the service's ports first, then attach the domain.");
 
-  const existingClaim = await readDomainClaimVersioned(hostname);
+  let existingClaim = await readDomainClaimVersioned(hostname);
   if (existingClaim === null) {
     const claimed = await claimDomain({ hostname, ns, service_key: serviceKey, claimed_at_millis: Date.now() });
-    if (!claimed) throw conflict(`hostname ${JSON.stringify(hostname)} is already attached elsewhere`);
-  } else if (existingClaim.value.ns !== ns) {
-    // Never reveal which namespace holds it.
-    throw conflict(`hostname ${JSON.stringify(hostname)} is already attached elsewhere`);
-  } else if (existingClaim.value.service_key !== serviceKey) {
-    // Re-PUT within the namespace repoints: certificate moves from the old service's app.
-    //
-    // OWNERSHIP TRANSFERS FIRST, teardown second. The conditional rewrite is the only step
-    // that can lose a race, and losing it after the teardown would leave the registry still
-    // naming the previous service as owner while that service has already lost its TLS
-    // termination and its public IPs — a state no later code path repairs. In this order a
-    // failure after the rewrite leaves at worst an orphaned certificate on the old app, which
-    // the next attach or detach on that app reconciles.
-    const previousApp = appNameForService(config.envId, ns, existingClaim.value.service_key);
-    const rewritten = await rewriteDomainClaim(existingClaim, { hostname, ns, service_key: serviceKey, claimed_at_millis: Date.now() });
-    if (!rewritten) throw conflict(`hostname ${JSON.stringify(hostname)} changed owners concurrently; retry the attach`);
-    await fly.deleteCertificate(previousApp, hostname);
-    await releaseServicePublicIpsIfUnused(ns, existingClaim.value.service_key);
-  } else {
-    // Idempotent re-attach on the same service: re-assert the index entry, which repairs the
-    // case where a prior claim landed but its index write was lost (an orphaned claim that
-    // deleteService could otherwise never release).
-    await claimDomain(existingClaim.value);
+    // Losing this race does NOT mean someone ELSE holds the hostname: two concurrent attaches
+    // of the SAME hostname on the SAME service both read no claim and both try to create one,
+    // which is the concurrent form of the replay the same-service branch below treats as
+    // success. Re-read and let the ownership branches decide, so the loser reaches the same
+    // answer a sequential replay does instead of a spurious conflict.
+    if (!claimed) {
+      existingClaim = await readDomainClaimVersioned(hostname);
+      // Claimed and then released between the two reads: nobody owns it, and there is no
+      // ownership left to reconcile against, so the caller's retry is the honest answer.
+      if (existingClaim === null) throw conflict(`hostname ${JSON.stringify(hostname)} changed owners concurrently; retry the attach`);
+    }
+  }
+  // Skipped entirely when this request created the claim itself: there is no prior owner to
+  // reconcile against.
+  if (existingClaim !== null) {
+    if (existingClaim.value.ns !== ns) {
+      // Never reveal which namespace holds it.
+      throw conflict(`hostname ${JSON.stringify(hostname)} is already attached elsewhere`);
+    } else if (existingClaim.value.service_key !== serviceKey) {
+      // Re-PUT within the namespace repoints: certificate moves from the old service's app.
+      //
+      // OWNERSHIP TRANSFERS FIRST, teardown second. The conditional rewrite is the only step
+      // that can lose a race, and losing it after the teardown would leave the registry still
+      // naming the previous service as owner while that service has already lost its TLS
+      // termination and its public IPs — a state no later code path repairs. In this order a
+      // failure after the rewrite leaves at worst an orphaned certificate on the old app, which
+      // the next attach or detach on that app reconciles.
+      const previousApp = appNameForService(config.envId, ns, existingClaim.value.service_key);
+      const rewritten = await rewriteDomainClaim(existingClaim, { hostname, ns, service_key: serviceKey, claimed_at_millis: Date.now() });
+      if (!rewritten) throw conflict(`hostname ${JSON.stringify(hostname)} changed owners concurrently; retry the attach`);
+      await fly.deleteCertificate(previousApp, hostname);
+      await releaseServicePublicIpsIfUnused(ns, existingClaim.value.service_key);
+    } else {
+      // Idempotent re-attach on the same service: re-assert the index entry, which repairs the
+      // case where a prior claim landed but its index write was lost (an orphaned claim that
+      // deleteService could otherwise never release).
+      await claimDomain(existingClaim.value);
+    }
   }
 
   // A custom domain needs the same public ingress as `public: true`: allocate the shared
