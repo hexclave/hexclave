@@ -95,7 +95,7 @@ def resolve_renderer_url(
         return PRODUCTION_URL
     try:
         origin = parse_test_renderer_origin(test_origin_file.read_text(encoding="utf-8"))
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         # A typo on removable media must never broaden trust or put an appliance
         # into a reboot loop. Reject the override and retain the production URL.
         LOGGER.error("test-renderer-origin-rejected=%s", error)

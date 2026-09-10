@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import struct
 import subprocess
 import tempfile
@@ -195,6 +196,26 @@ class NetworkAgentTests(unittest.TestCase):
                     resolve_renderer_url(test_image_marker=marker, test_origin_file=origin_file),
                     PRODUCTION_URL,
                 )
+
+    def test_test_image_falls_back_when_boot_origin_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "test-image"
+            marker.write_text("test\n", encoding="utf-8")
+            origin_file = root / "hexclave-tv-box-test-origin.txt"
+            if os.geteuid() == 0:
+                class UnreadablePath(type(origin_file)):
+                    def read_text(self, *args, **kwargs):
+                        raise OSError("origin file is unreadable")
+
+                origin_file = UnreadablePath(origin_file)
+            else:
+                origin_file.write_text("https://pilot-box.trycloudflare.com\n", encoding="utf-8")
+                origin_file.chmod(0)
+            self.assertEqual(
+                resolve_renderer_url(test_image_marker=marker, test_origin_file=origin_file),
+                PRODUCTION_URL,
+            )
 
     def test_nmcli_escape_parser_preserves_colons_and_backslashes(self) -> None:
         self.assertEqual(split_nmcli_line(r"Office\:West:WPA2:72"), ["Office:West", "WPA2", "72"])
