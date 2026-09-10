@@ -63,6 +63,8 @@ async function adminJsonRequest(options: {
 }
 
 async function createPairedDisplay(displayName: string) {
+  // Keep this file at or below five pairings: the endpoint's per-minute IP
+  // limit is shared by every E2E request.
   const project = await Project.createAndSwitch();
   const challengeResponse = await publicJsonRequest("/tv-displays/pairing-challenges", { method: "POST" });
   if (challengeResponse.status !== 200) throw new Error(`Expected pairing challenge, received ${challengeResponse.status}.`);
@@ -231,30 +233,14 @@ it("keeps latest and v1 refresh aliases synchronized across repeated rotations a
   expect(compromisedSnapshot.status).toBe(401);
 });
 
-it("migrates an existing original-name v1 cookie to the distinct alias without re-pairing", async ({ expect }) => {
-  const { statusResponse } = await createPairedDisplay("Legacy V1 Cookie Display");
-  const legacyCookie = activeRefreshCookie(statusResponse, LATEST_REFRESH_COOKIE);
-  const migratedResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
-    version: "v1",
+it("scopes refresh cookies per route and migrates original-name v1 cookies without re-pairing", async ({ expect }) => {
+  const { statusResponse } = await createPairedDisplay("Refresh Cookie Alias Display");
+  const wrongAliasResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
     method: "POST",
-    cookie: legacyCookie,
+    cookie: activeRefreshCookie(statusResponse, V1_REFRESH_COOKIE),
   });
-  expect(migratedResponse.status).toBe(200);
+  expect(wrongAliasResponse.status).toBe(401);
 
-  const nextResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
-    version: "v1",
-    method: "POST",
-    cookie: activeRefreshCookie(migratedResponse, V1_REFRESH_COOKIE),
-  });
-  expect(nextResponse.status).toBe(200);
-  const snapshot = await publicJsonRequest("/tv-displays/snapshot", {
-    authorization: nextResponse.body.accessToken,
-  });
-  expect(snapshot.status).toBe(200);
-});
-
-it("does not retry a rejected v1 alias with a valid legacy credential", async ({ expect }) => {
-  const { statusResponse } = await createPairedDisplay("Conflicting Alias Display");
   const legacyCookie = activeRefreshCookie(statusResponse, LATEST_REFRESH_COOKIE);
   const invalidResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
     version: "v1",
@@ -274,21 +260,23 @@ it("does not retry a rejected v1 alias with a valid legacy credential", async ({
     cookie: legacyCookie,
   });
   expect(validResponse.status).toBe(200);
-});
 
-it("does not accept a v1-only cookie on the latest route", async ({ expect }) => {
-  const { statusResponse } = await createPairedDisplay("Path Scoped Cookie Display");
-  const wrongAliasResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+  const migratedResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    version: "v1",
     method: "POST",
-    cookie: activeRefreshCookie(statusResponse, V1_REFRESH_COOKIE),
+    cookie: activeRefreshCookie(validResponse, LATEST_REFRESH_COOKIE),
   });
-  expect(wrongAliasResponse.status).toBe(401);
-
-  const validResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+  expect(migratedResponse.status).toBe(200);
+  const nextResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    version: "v1",
     method: "POST",
-    cookie: activeRefreshCookie(statusResponse, LATEST_REFRESH_COOKIE),
+    cookie: activeRefreshCookie(migratedResponse, V1_REFRESH_COOKIE),
   });
-  expect(validResponse.status).toBe(200);
+  expect(nextResponse.status).toBe(200);
+  const snapshot = await publicJsonRequest("/tv-displays/snapshot", {
+    authorization: nextResponse.body.accessToken,
+  });
+  expect(snapshot.status).toBe(200);
 });
 
 it("hard-deletes a display after an administrator unpairs it and rejects its remote credentials", async ({ expect }) => {
