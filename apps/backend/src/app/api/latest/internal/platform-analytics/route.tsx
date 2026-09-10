@@ -278,7 +278,14 @@ export const GET = createSmartRouteHandler({
             AND type = 'EMAIL' AND is_verified = 1
           SETTINGS do_not_merge_across_partitions_select_final = 1
         )`;
-      const verifiedQuerySettings = "SETTINGS max_threads = 1, max_final_threads = 1, max_block_size = 1024";
+      // Every FINAL read over the synced tables (users, contact_channels, teams, ...) gets the
+      // same low-parallelism settings: on object-backed storage each reader buffers a whole
+      // block per part, and the platform-wide users table has enough parts that default
+      // parallelism alone overran the 488 MiB per-query cap while reading parts (not while
+      // aggregating). The partition keys (signed_up_at / created_at) never change for a row,
+      // so a ReplacingMergeTree duplicate always lives in the same partition and FINAL can
+      // skip merging across partitions without changing the result.
+      const finalQuerySettings = "SETTINGS max_threads = 1, max_final_threads = 1, max_block_size = 1024, do_not_merge_across_partitions_select_final = 1";
       const [
         dauSeries, pvSeries, signupSeries, mauProjects, userCounts, country, deadClicks, split,
         totalsByProject, verifiedByProject, signupsByProject, activeByProject, sparkByProject,
@@ -313,6 +320,7 @@ export const GET = createSmartRouteHandler({
           WHERE ${customerUserScope} AND is_anonymous = 0
             AND signed_up_at >= {since:DateTime} AND signed_up_at < {until:DateTime}
           GROUP BY day ORDER BY day ASC
+          ${finalQuerySettings}
         `, windowParams),
         // MAU + active projects, current vs prior 30d window (single pass over 60d).
         chQuery<{ mauCur: string | number, mauPrev: string | number, projCur: string | number, projPrev: string | number }>(`
@@ -336,7 +344,7 @@ export const GET = createSmartRouteHandler({
             countIf(is_anonymous = 1) AS anonymous
           FROM analytics_internal.users FINAL
           WHERE ${customerUserScope}
-          ${verifiedQuerySettings}
+          ${finalQuerySettings}
         `, { branchId, internalProjectId, mid: midParam }),
         // Users by country (for the globe) over the window.
         chQuery<{ country_code: string, c: string | number }>(`
@@ -394,13 +402,14 @@ export const GET = createSmartRouteHandler({
           SELECT project_id AS projectId, count() AS c
           FROM analytics_internal.users FINAL
           WHERE ${customerUserScope} AND is_anonymous = 0 GROUP BY project_id
+          ${finalQuerySettings}
         `, baseParams),
         // Per-project verified users.
         chQuery<CountRow>(`
           SELECT project_id AS projectId, count() AS c
           FROM analytics_internal.users FINAL
           WHERE ${customerUserScope} AND is_anonymous = 0 AND ${verifiedSubquery} GROUP BY project_id
-          ${verifiedQuerySettings}
+          ${finalQuerySettings}
         `, baseParams),
         // Per-project signups, current vs prior window.
         chQuery<{ projectId: string, cur: string | number, prev: string | number }>(`
@@ -411,6 +420,7 @@ export const GET = createSmartRouteHandler({
           WHERE ${customerUserScope} AND is_anonymous = 0
             AND signed_up_at >= {priorSince:DateTime} AND signed_up_at < {until:DateTime}
           GROUP BY project_id
+          ${finalQuerySettings}
         `, twoWindowParams),
         // Per-project active users, current vs prior window.
         chQuery<{ projectId: string, cur: string | number, prev: string | number }>(`
@@ -433,9 +443,9 @@ export const GET = createSmartRouteHandler({
           GROUP BY project_id, day
         `, windowParams),
         // Feature adoption signals (per project) from synced CH tables.
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.teams FINAL WHERE ${customerUserScope} GROUP BY project_id`, baseParams),
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.connected_accounts FINAL WHERE ${customerUserScope} GROUP BY project_id`, baseParams),
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.email_outboxes FINAL WHERE ${customerUserScope} GROUP BY project_id`, baseParams),
+        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.teams FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
+        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.connected_accounts FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
+        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.email_outboxes FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
         chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.events WHERE event_type = '$page-view' AND branch_id = {branchId:String} AND ${customerEventScope} GROUP BY project_id`, baseParams),
       ]);
       ch = {
