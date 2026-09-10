@@ -2,7 +2,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTvBoxDocument } from "./src/app/tv-box/document.ts";
 import { createTvFixtureSnapshot, getTvProfileFixture } from "./src/lib/tv-mode/fixtures.ts";
-import { TV_SNAPSHOT_REQUEST_TIMEOUT_MS } from "./public/tv-box/runtime.mjs";
+import {
+  DISPLAY_SESSION_RETRY_INITIAL_MS,
+  DISPLAY_SESSION_RETRY_MAXIMUM_MS,
+  TV_SNAPSHOT_POLL_INTERVAL_MS,
+  TV_SNAPSHOT_REQUEST_TIMEOUT_MS,
+} from "./public/tv-box/runtime.mjs";
 
 const profile = getTvProfileFixture("company-pulse");
 if (profile == null) throw new Error("The renderer tests require the company-pulse fixture.");
@@ -91,10 +96,10 @@ describe("TV Box actual renderer orchestration", () => {
       .mockResolvedValueOnce(jsonResponse({ accessToken: "restored-token" }))
       .mockResolvedValueOnce(jsonResponse(snapshot));
     await launch();
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
     expect(title()).toBe("TV Mode Temporarily Unavailable");
     expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_INITIAL_MS);
     expect(title()).toBe("Live Pulse");
     expect(fetchMock.mock.calls.map(([url]) => new URL(url).pathname)).toMatchInlineSnapshot(`
       [
@@ -134,10 +139,10 @@ describe("TV Box actual renderer orchestration", () => {
     window.dispatchEvent(new Event("online"));
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
     expect(document.body.textContent).toContain("Retrying automatically");
     expect(fetchMock.mock.calls[1][1].signal.aborted).toBe(true);
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_INITIAL_MS);
     expect(document.querySelector(".tv-pairing-code")?.textContent).toBe("2345-ABCD");
     stalled.resolve(challenge);
     await vi.advanceTimersByTimeAsync(0);
@@ -157,9 +162,9 @@ describe("TV Box actual renderer orchestration", () => {
     window.dispatchEvent(new Event("online"));
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
     expect(fetchMock.mock.calls[2][1].signal.aborted).toBe(true);
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_INITIAL_MS);
     expect(title()).toBe("Live Pulse");
     stalled.resolve({ status: "used" });
     await vi.advanceTimersByTimeAsync(0);
@@ -176,7 +181,7 @@ describe("TV Box actual renderer orchestration", () => {
     await launch();
     window.dispatchEvent(new Event("pagehide"));
     stalled.resolve({ status: "paired", accessToken: "obsolete-token" });
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_MAXIMUM_MS);
     expect(fetchMock.mock.calls[2][1].signal.aborted).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(vi.getTimerCount()).toBe(0);
@@ -191,9 +196,9 @@ describe("TV Box actual renderer orchestration", () => {
       .mockImplementation(async () => jsonResponse(snapshot));
     await launch();
     expect(title()).toBe("Live Pulse");
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_POLL_INTERVAL_MS);
     expect(title()).toBe(variant === "empty" ? "Waiting for Activity" : "TV Mode Is Temporarily Unavailable");
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_POLL_INTERVAL_MS);
     expect(title()).toBe("Live Pulse");
     await vi.advanceTimersByTimeAsync(20_000);
     expect(title()).toBe("Audience Momentum");
@@ -223,10 +228,10 @@ describe("TV Box actual renderer orchestration", () => {
       .mockResolvedValueOnce(stalled.response)
       .mockResolvedValueOnce(jsonResponse(snapshot));
     await launch();
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_REQUEST_TIMEOUT_MS);
     expect(fetchMock.mock.calls[2][1].signal.aborted).toBe(true);
     expect(title()).toBe("TV Mode Is Temporarily Unavailable");
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_POLL_INTERVAL_MS);
     expect(title()).toBe("Live Pulse");
   });
 
@@ -258,10 +263,10 @@ describe("TV Box actual renderer orchestration", () => {
       .mockResolvedValueOnce(jsonResponse(snapshot))
       .mockResolvedValueOnce(jsonResponse(malformed));
     await launch();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(TV_SNAPSHOT_POLL_INTERVAL_MS);
     expect(title()).toBe("Live Pulse");
     expect(document.body.textContent).not.toContain("Malformed response");
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_INITIAL_MS);
     expect(title()).toBe("Audience Momentum");
   });
 

@@ -24,7 +24,7 @@ import {
 } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { BroadcastIcon, LinkBreakIcon, MonitorIcon, PlusIcon } from "@phosphor-icons/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const DISPLAY_REFRESH_INTERVAL_MS = 5_000;
 
@@ -33,6 +33,15 @@ export function formatTvDisplayPairingCode(value: string): string {
   return normalized.length <= 4
     ? normalized
     : `${normalized.slice(0, 4)}-${normalized.slice(4)}`;
+}
+
+function getPairingCodeCaretPosition(value: string, characterCount: number): number {
+  let seen = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (seen === characterCount) return value[index] === "-" ? index + 1 : index;
+    if (/[0-9A-Z]/.test(value[index] ?? "")) seen += 1;
+  }
+  return value.length;
 }
 
 type ActionNotice = {
@@ -133,6 +142,8 @@ export function TvDisplayManagement({
   const [pairingError, setPairingError] = useState<ActionNotice | null>(null);
   const pairingInFlight = useRef(false);
   const refreshInFlight = useRef(false);
+  const pairingCodeInput = useRef<HTMLInputElement>(null);
+  const pendingPairingCaret = useRef<number | null>(null);
   const hiddenDisplayIds = useRef(new Set<string>());
   const pendingPairing = useRef<{
     displayName: string,
@@ -184,6 +195,13 @@ export function TvDisplayManagement({
     const interval = window.setInterval(() => runAsynchronously(refreshSafely()), DISPLAY_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [refreshSafely]);
+
+  useLayoutEffect(() => {
+    if (pendingPairingCaret.current == null || pairingCodeInput.current == null) return;
+    const caret = getPairingCodeCaretPosition(pairingCode, pendingPairingCaret.current);
+    pairingCodeInput.current.setSelectionRange(caret, caret);
+    pendingPairingCaret.current = null;
+  }, [pairingCode]);
 
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
   const normalizedPairingCode = pairingCode.replaceAll("-", "");
@@ -253,7 +271,23 @@ export function TvDisplayManagement({
           <div className="grid gap-4 md:grid-cols-3">
             <div className="space-y-2">
               <label htmlFor="new-tv-display-code" className="text-xs font-medium text-foreground">Pairing Code</label>
-              <DesignInput id="new-tv-display-code" aria-label="Pairing code" value={pairingCode} onChange={(event) => setPairingCode(formatTvDisplayPairingCode(event.target.value))} placeholder="ABCD-EFGH" size="lg" className="font-mono uppercase tracking-widest" />
+              <DesignInput
+                ref={pairingCodeInput}
+                id="new-tv-display-code"
+                aria-label="Pairing code"
+                value={pairingCode}
+                onChange={(event) => {
+                  const caret = event.target.selectionStart ?? event.target.value.length;
+                  pendingPairingCaret.current = event.target.value
+                    .slice(0, caret)
+                    .replaceAll(/[^0-9A-Z]/gi, "")
+                    .length;
+                  setPairingCode(formatTvDisplayPairingCode(event.target.value));
+                }}
+                placeholder="ABCD-EFGH"
+                size="lg"
+                className="font-mono uppercase tracking-widest"
+              />
             </div>
             <div className="space-y-2">
               <label htmlFor="new-tv-display-name" className="text-xs font-medium text-foreground">Display Name</label>

@@ -5,11 +5,12 @@ import { resolveTvQuickTunnelDevelopmentConfig } from "./tv-quick-tunnel-config.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isRdeBuild = process.env.HEXCLAVE_DASHBOARD_BUILD_FOR_RDE === "true";
+const useFallbackBackend = (process.env.STACK_DEV_FALLBACK_BACKEND ?? "").trim() !== "";
 const tvQuickTunnelConfig = resolveTvQuickTunnelDevelopmentConfig({
   configuredOrigin: process.env.HEXCLAVE_TV_QUICK_TUNNEL_ORIGIN,
   nodeEnvironment: process.env.NODE_ENV,
   portPrefix: process.env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX ?? "81",
-  useFallbackBackend: process.env.STACK_DEV_FALLBACK_BACKEND != null,
+  useFallbackBackend,
 });
 
 const withConfiguredSentryConfig = (nextConfig) =>

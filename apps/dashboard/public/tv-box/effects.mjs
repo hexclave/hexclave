@@ -30,27 +30,34 @@ function renderStaticConfetti(container) {
 
   const context = canvas.getContext("2d");
   if (context == null) return () => canvas.remove();
-  const width = Math.max(1, Math.floor(container.clientWidth));
-  const height = Math.max(1, Math.floor(container.clientHeight));
-  // A one-to-one backing buffer is deliberate. Rendering the short entrance at
-  // device pixel ratio 2 quadruples canvas work without improving TV-distance legibility.
-  canvas.width = width;
-  canvas.height = height;
-  const particles = Array.from(
-    { length: CONFETTI_PARTICLE_COUNT },
-    (_, index) => createConfettiParticle(index, width, height),
-  );
-  for (const particle of particles) {
-    context.save();
-    context.translate(particle.x, particle.y);
-    context.rotate(particle.rotation);
-    context.fillStyle = particle.color;
-    context.globalAlpha = 0.58;
-    context.fillRect(-particle.width / 2, -2, particle.width, 4);
-    context.restore();
-  }
-  context.globalAlpha = 1;
-  return () => canvas.remove();
+  const resize = () => {
+    const width = Math.max(1, Math.floor(container.clientWidth));
+    const height = Math.max(1, Math.floor(container.clientHeight));
+    // A one-to-one backing buffer is deliberate. Rendering the short entrance at
+    // device pixel ratio 2 quadruples canvas work without improving TV-distance legibility.
+    canvas.width = width;
+    canvas.height = height;
+    const particles = Array.from(
+      { length: CONFETTI_PARTICLE_COUNT },
+      (_, index) => createConfettiParticle(index, width, height),
+    );
+    for (const particle of particles) {
+      context.save();
+      context.translate(particle.x, particle.y);
+      context.rotate(particle.rotation);
+      context.fillStyle = particle.color;
+      context.globalAlpha = 0.58;
+      context.fillRect(-particle.width / 2, -2, particle.width, 4);
+      context.restore();
+    }
+    context.globalAlpha = 1;
+  };
+  resize();
+  window.addEventListener("resize", resize);
+  return () => {
+    window.removeEventListener("resize", resize);
+    canvas.remove();
+  };
 }
 
 export function createCelebrationLayer(container) {

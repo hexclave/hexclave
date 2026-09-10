@@ -78,6 +78,15 @@ describe("TV Box API origin selection", () => {
     })).toEqual({ mode: "configured", apiBaseUrl: "http://localhost:8102" });
   });
 
+  it("treats blank browser API values as unset", () => {
+    expect(resolveTvBoxApiConfiguration({
+      configuredApiUrl: " http://localhost:8102 ",
+      configuredBrowserApiUrl: "   ",
+      nodeEnvironment: "production",
+      quickTunnelEnabled: false,
+    })).toEqual({ mode: "configured", apiBaseUrl: "http://localhost:8102" });
+  });
+
   it("uses the browser origin only for an explicitly enabled development tunnel", () => {
     expect(resolveTvBoxApiConfiguration({
       configuredApiUrl: "http://localhost:8102",
@@ -104,6 +113,15 @@ describe("TV Box API origin selection", () => {
       configuredApiUrl: undefined,
       configuredBrowserApiUrl: undefined,
       nodeEnvironment: "development",
+      quickTunnelEnabled: false,
+    })).toThrowError(/not configured/);
+  });
+
+  it("rejects blank API configuration values", () => {
+    expect(() => resolveTvBoxApiConfiguration({
+      configuredApiUrl: " \t ",
+      configuredBrowserApiUrl: "\n",
+      nodeEnvironment: "production",
       quickTunnelEnabled: false,
     })).toThrowError(/not configured/);
   });

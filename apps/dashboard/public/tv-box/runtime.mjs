@@ -72,6 +72,11 @@ function isPositiveInteger(value) {
   return Number.isInteger(value) && value > 0;
 }
 
+const TV_DISPLAY_CHALLENGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TV_DISPLAY_PAIRING_CODE_PATTERN = /^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{8}$/;
+const TV_DISPLAY_SECRET_MINIMUM_LENGTH = 32;
+const TV_DISPLAY_SECRET_MAXIMUM_LENGTH = 256;
+
 function isTrendPoint(value) {
   return isRecord(value) && hasString(value, "label") && hasFiniteNumber(value, "value");
 }
@@ -290,9 +295,13 @@ export function assertTvSnapshot(value) {
 
 export function assertPairingChallenge(value) {
   if (!isRecord(value)
-    || !hasString(value, "challengeId")
-    || !hasString(value, "deviceSecret")
-    || !hasString(value, "pairingCode")
+    || typeof value.challengeId !== "string"
+    || !TV_DISPLAY_CHALLENGE_ID_PATTERN.test(value.challengeId)
+    || typeof value.deviceSecret !== "string"
+    || value.deviceSecret.length < TV_DISPLAY_SECRET_MINIMUM_LENGTH
+    || value.deviceSecret.length > TV_DISPLAY_SECRET_MAXIMUM_LENGTH
+    || typeof value.pairingCode !== "string"
+    || !TV_DISPLAY_PAIRING_CODE_PATTERN.test(value.pairingCode)
     || !isPositiveInteger(value.pollingIntervalSeconds)) {
     throw new Error("TV display pairing challenge is invalid.");
   }

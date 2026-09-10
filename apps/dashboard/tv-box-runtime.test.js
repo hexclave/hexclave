@@ -159,7 +159,24 @@ describe("TV Box runtime contract", () => {
     delete snapshot.profile.screenDurations;
     expect(assertTvSnapshot(snapshot)).toBe(snapshot);
     expect(() => assertPairingChallenge({
-      challengeId: "challenge-a", deviceSecret: "secret", pairingCode: "1234ABCD", pollingIntervalSeconds: 0,
+      challengeId: "927dfeac-2e80-4311-8180-4879b687bfc0",
+      deviceSecret: "x".repeat(32),
+      pairingCode: "1234ABCD",
+      pollingIntervalSeconds: 0,
+    })).toThrow(/pairing challenge is invalid/);
+  });
+
+  it.each([
+    ["challenge ID", { challengeId: "challenge-a" }],
+    ["pairing code", { pairingCode: "1234-IJKL" }],
+    ["device secret", { deviceSecret: "short" }],
+  ])("rejects an invalid pairing challenge %s", (_field, override) => {
+    expect(() => assertPairingChallenge({
+      challengeId: "927dfeac-2e80-4311-8180-4879b687bfc0",
+      deviceSecret: "x".repeat(32),
+      pairingCode: "1234ABCD",
+      pollingIntervalSeconds: 2,
+      ...override,
     })).toThrow(/pairing challenge is invalid/);
   });
 
@@ -220,7 +237,7 @@ describe("TV Box runtime contract", () => {
 
   it("validates pairing responses", () => {
     const challenge = {
-      challengeId: "challenge-a",
+      challengeId: "927dfeac-2e80-4311-8180-4879b687bfc0",
       deviceSecret: "x".repeat(32),
       pairingCode: "1234ABCD",
       pollingIntervalSeconds: 2,
@@ -228,6 +245,30 @@ describe("TV Box runtime contract", () => {
     expect(assertPairingChallenge(challenge)).toBe(challenge);
     expect(assertPairingStatus({ status: "waiting", retryAfterSeconds: 2 })).toEqual({ status: "waiting", retryAfterSeconds: 2 });
     expect(assertPairingStatus({ status: "paired", accessToken: "token" })).toEqual({ status: "paired", accessToken: "token" });
+  });
+
+  it("propagates caller abort reasons to the request and rejection", async () => {
+    const reason = new Error("caller cancelled");
+    const parent = new AbortController();
+    let requestSignal;
+    const pending = withTvRequestDeadline((signal) => {
+      requestSignal = signal;
+      return new Promise(() => {});
+    }, 10_000, parent.signal);
+    parent.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(requestSignal.aborted).toBe(true);
+    expect(requestSignal.reason).toBe(reason);
+  });
+
+  it("uses an AbortError when the caller aborts without a reason", async () => {
+    const parent = new AbortController();
+    const pending = withTvRequestDeadline(() => new Promise(() => {}), 10_000, parent.signal);
+    parent.abort();
+    const rejection = await pending.catch((error) => error);
+    expect(rejection).toBeInstanceOf(DOMException);
+    expect(rejection.name).toBe("AbortError");
+    expect(rejection.message).toMatch(/aborted/i);
   });
 });
 
@@ -319,6 +360,48 @@ describe("TV Box transport and playback helpers", () => {
 
     getContext.mockRestore();
     requestAnimationFrame.mockRestore();
+  });
+
+  it("resizes active confetti and removes its resize listener when destroyed", () => {
+    const context = {
+      fillRect: vi.fn(),
+      restore: vi.fn(),
+      rotate: vi.fn(),
+      save: vi.fn(),
+      translate: vi.fn(),
+      fillStyle: "",
+      globalAlpha: 1,
+    };
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context);
+    const container = document.createElement("div");
+    Object.defineProperties(container, {
+      clientHeight: { configurable: true, value: 1080, writable: true },
+      clientWidth: { configurable: true, value: 1920, writable: true },
+    });
+    const layer = createCelebrationLayer(container);
+    layer.update({
+      ambientActive: true,
+      eventId: "celebration-a",
+      entryBurst: true,
+      foreground: true,
+      takeoverActive: true,
+    });
+    const canvas = container.querySelector("canvas");
+    expect(canvas).toMatchObject({ width: 1920, height: 1080 });
+    expect(context.fillRect).toHaveBeenCalledTimes(72);
+
+    Object.defineProperties(container, {
+      clientHeight: { configurable: true, value: 720, writable: true },
+      clientWidth: { configurable: true, value: 1280, writable: true },
+    });
+    window.dispatchEvent(new Event("resize"));
+    expect(canvas).toMatchObject({ width: 1280, height: 720 });
+    expect(context.fillRect).toHaveBeenCalledTimes(144);
+
+    layer.destroy();
+    window.dispatchEvent(new Event("resize"));
+    expect(context.fillRect).toHaveBeenCalledTimes(144);
+    getContext.mockRestore();
   });
 
   it("keeps live transport and fixture preview boot modes disjoint", () => {

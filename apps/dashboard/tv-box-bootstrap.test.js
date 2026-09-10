@@ -47,4 +47,24 @@ describe("TV Box document bootstrap recovery", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(navigationErrors).toEqual([]);
   });
+
+  it("caps consecutive bootstrap reload attempts", async () => {
+    const cappedErrors = [];
+    const virtualConsole = new VirtualConsole();
+    virtualConsole.on("jsdomError", (error) => cappedErrors.push(error.message));
+    const cappedBrowser = new JSDOM(createTvBoxDocument({
+      mode: "live",
+      api: { mode: "configured", apiBaseUrl: "https://api.example.com" },
+    }), {
+      url: "https://app.example.com/tv-box",
+      runScripts: "dangerously",
+      virtualConsole,
+      beforeParse(window) {
+        window.sessionStorage.setItem("hexclave-tv-box-bootstrap-reloads", "3");
+      },
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cappedErrors).toEqual([]);
+    cappedBrowser.window.close();
+  });
 });

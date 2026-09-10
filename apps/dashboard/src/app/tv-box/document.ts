@@ -28,7 +28,9 @@ export function resolveTvBoxApiConfiguration(options: {
     return { mode: "browser-origin" };
   }
 
-  const configuredBase = options.configuredBrowserApiUrl ?? options.configuredApiUrl;
+  const configuredBase = [options.configuredBrowserApiUrl, options.configuredApiUrl]
+    .map((value) => value?.trim())
+    .find((value) => value != null && value !== "");
   if (configuredBase == null) throw new Error("TV Box display API URL is not configured.");
   return { mode: "configured", apiBaseUrl: configuredBase };
 }
@@ -57,10 +59,38 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
       (() => {
         // A loaded document can still lose an external module to a brief outage.
         // Only initialization clears this deadline; backend outages use the app's retries.
-        const timeout = window.setTimeout(() => window.location.reload(), 30000);
-        const cancel = () => window.clearTimeout(timeout);
+        const reloadKey = "hexclave-tv-box-bootstrap-reloads";
+        const maximumReloads = 3;
+        let reloadCount;
+        try {
+          reloadCount = Number.parseInt(window.sessionStorage.getItem(reloadKey) ?? "0", 10);
+        } catch {
+          reloadCount = maximumReloads;
+        }
+        if (!Number.isInteger(reloadCount) || reloadCount < 0) reloadCount = 0;
+        const timeout = reloadCount < maximumReloads
+          ? window.setTimeout(() => {
+            try {
+              window.sessionStorage.setItem(reloadKey, String(reloadCount + 1));
+            } catch {
+              return;
+            }
+            window.location.reload();
+          }, 30000)
+          : undefined;
+        const cancel = () => {
+          if (timeout != null) window.clearTimeout(timeout);
+          try {
+            window.sessionStorage.removeItem(reloadKey);
+          } catch {
+            return;
+          }
+        };
+        const leave = () => {
+          if (timeout != null) window.clearTimeout(timeout);
+        };
         window.addEventListener("hexclave-tv-box-ready", cancel, { once: true });
-        window.addEventListener("pagehide", cancel, { once: true });
+        window.addEventListener("pagehide", leave, { once: true });
       })();
     </script>
     <script type="module" src="/tv-box/app.mjs"></script>

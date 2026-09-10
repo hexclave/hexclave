@@ -138,6 +138,18 @@ describe("TV display pairing feedback", () => {
     expect(formatTvDisplayPairingCode("abcd efgh extra")).toBe("ABCD-EFGH");
   });
 
+  it("preserves the pairing-code caret when typing in the middle", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+    const codeInput = await screen.findByLabelText("Pairing code");
+    fireEvent.change(codeInput, { target: { value: "ABCD-EFGH" } });
+    codeInput.setSelectionRange(2, 2);
+    fireEvent.change(codeInput, { target: { value: "ABXCD-EFGH", selectionStart: 3, selectionEnd: 3 } });
+    expect(codeInput).toHaveProperty("value", "ABXC-DEFG");
+    expect(codeInput.selectionStart).toBe(3);
+    expect(codeInput.selectionEnd).toBe(3);
+  });
+
   it("recognizes a retried rate-limit failure without exposing its diagnostics", () => {
     const notice = getPairingFailureNotice(new AggregateError([
       new Error("Rate limited, no retry-after header received"),

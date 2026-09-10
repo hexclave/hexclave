@@ -16,7 +16,9 @@ export class TvRequestTimeoutError extends Error {
  * @returns {Promise<T>}
  */
 export async function withTvRequestDeadline(operation, timeoutMilliseconds, parentSignal = null) {
-  if (parentSignal?.aborted) throw new DOMException("TV display request was cancelled.", "AbortError");
+  const getAbortReason = (signal) => signal.reason
+    ?? new DOMException("Aborted", "AbortError");
+  if (parentSignal?.aborted) throw getAbortReason(parentSignal);
   const controller = new AbortController();
   let timeout;
   let cancel;
@@ -27,8 +29,9 @@ export async function withTvRequestDeadline(operation, timeoutMilliseconds, pare
       controller.abort();
     }, timeoutMilliseconds);
     cancel = () => {
-      reject(new DOMException("TV display request was cancelled.", "AbortError"));
-      controller.abort();
+      const reason = getAbortReason(parentSignal);
+      reject(reason);
+      controller.abort(reason);
     };
     parentSignal?.addEventListener("abort", cancel, { once: true });
   });

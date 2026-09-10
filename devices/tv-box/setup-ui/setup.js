@@ -53,6 +53,8 @@ async function loadNetworks() {
   manualOption.value = "manual";
   manualOption.textContent = "Enter another network…";
   networkSelect.append(manualOption);
+  const firstSupportedNetwork = networks.findIndex((network) => network.security !== "unsupported");
+  networkSelect.value = firstSupportedNetwork >= 0 ? String(firstSupportedNetwork) : "manual";
   updateFields();
   statusElement.textContent = "Wi-Fi credentials stay only on this TV Box.";
 }
