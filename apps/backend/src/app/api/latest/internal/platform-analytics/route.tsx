@@ -282,10 +282,11 @@ export const GET = createSmartRouteHandler({
       // same low-parallelism settings: on object-backed storage each reader buffers a whole
       // block per part, and the platform-wide users table has enough parts that default
       // parallelism alone overran the 488 MiB per-query cap while reading parts (not while
-      // aggregating). The partition keys (signed_up_at / created_at) never change for a row,
-      // so a ReplacingMergeTree duplicate always lives in the same partition and FINAL can
-      // skip merging across partitions without changing the result.
-      const finalQuerySettings = "SETTINGS max_threads = 1, max_final_threads = 1, max_block_size = 1024, do_not_merge_across_partitions_select_final = 1";
+      // aggregating). Deliberately NOT setting do_not_merge_across_partitions_select_final here:
+      // the sync writes deletion tombstones with signed_up_at / created_at = deletedAt (see
+      // db-sync-mappings.ts), so a tombstone usually lands in a different month partition than
+      // the live row it supersedes, and partition-local FINAL would keep counting deleted rows.
+      const finalQuerySettings = "SETTINGS max_threads = 1, max_final_threads = 1, max_block_size = 1024";
       const [
         dauSeries, pvSeries, signupSeries, mauProjects, userCounts, country, deadClicks, split,
         totalsByProject, verifiedByProject, signupsByProject, activeByProject, sparkByProject,
