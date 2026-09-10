@@ -167,20 +167,65 @@ type HexclaveServiceBase = {
   ports: Record<number, HexclavePort>,
   /** Run locally by `hexclave dev --service-id`. Never sent to the server. */
   devCommand?: string,
+  /**
+   * A single command line, run through `sh -c` while your image is BUILT — e.g.
+   * `"pnpm install --frozen-lockfile && pnpm build"`. Chain steps with `&&`; it
+   * is one command, not a script.
+   *
+   * What it builds ON depends on the rest of the service:
+   * - no `image` and no `dockerfilePath`: the Hexclave base image (Debian-based,
+   *   with node, npm, pnpm, yarn, git and a C toolchain preinstalled). Your whole uploaded source is
+   *   copied to `/app`, and the command runs in your `rootDirectory`. This
+   *   REPLACES Railpack auto-detection, so nothing is inferred for you — and
+   *   `startCommand` becomes required, since that base starts nothing by itself.
+   * - `image`: the same, but built on that image instead. Naming a build command
+   *   is what turns an image from "the thing to run" into "the thing to build
+   *   on", so the service is built and uploaded like any other. Your source is
+   *   copied in as root and the command inherits the image's own `USER`, so a
+   *   base that defaults to a non-root user needs to be able to write under
+   *   `/app` — if it cannot, use a Dockerfile, where you control both.
+   * - `dockerfilePath`: appended to your Dockerfile as a final `RUN`. Nothing is
+   *   copied in that your Dockerfile did not copy itself.
+   *
+   * Every env var is available to it, exactly as in a Railpack build.
+   */
+  buildCommand?: string,
+  /**
+   * A single command line, run through `sh -c` as the container's process,
+   * INSTEAD of whatever the image would have started — e.g. `"node server.js"`.
+   *
+   * It is applied when the container starts, not baked into the image, so it
+   * causes no build: naming one on an `image` service keeps that service's
+   * deploy build-less, and changing only this restarts the service without
+   * rebuilding it. It replaces the image's entrypoint as well as its command,
+   * so it must be the whole way to start the process.
+   *
+   * On its own it changes nothing about the build: a service with no `image`,
+   * `dockerfilePath` or `buildCommand` is still auto-detected by Railpack and
+   * simply starts with your command instead of the detected one.
+   *
+   * Required when a `buildCommand` is used with no `image` and no
+   * `dockerfilePath`. Unrelated to `devCommand`, which only ever runs locally.
+   */
+  startCommand?: string,
   /** Environment variables. Values may be literals, `null` to omit, or references from the context object. */
   env?: Record<string, HexclaveEnvVarValue>,
 };
 
 /**
- * Where a service's container comes from: either it is BUILT from your source,
- * or it is an already-built IMAGE.
+ * What a service's container is BUILT FROM: your own Dockerfile, an image, or
+ * neither (Railpack auto-detection, or the Hexclave base image once you write a
+ * `buildCommand`).
  *
- * A union rather than three independent optional fields, so that naming an
- * image AND a source directory does not compile. The two describe different
- * things — where your code lives versus what to run — and a service that gave
- * both would leave the deploy with two answers to the same question. (Same
- * reasoning as `public` living on the service rather than the port: make the
- * invalid state unrepresentable instead of validating it after the fact.)
+ * A union rather than independent optional fields, so that naming an image AND a
+ * Dockerfile does not compile: each of them says what the build starts from, and
+ * a service that gave both would leave the deploy with two answers to one
+ * question. (Same reasoning as `public` living on the service rather than the
+ * port: make the invalid state unrepresentable instead of validating it after
+ * the fact.)
+ *
+ * `rootDirectory` belongs to neither branch and is legal alongside an image,
+ * because a `buildCommand` copies your source onto that image and runs there.
  */
 export type HexclaveServiceSource =
   | {
@@ -192,9 +237,16 @@ export type HexclaveServiceSource =
   }
   | {
     /**
-     * An already-built image to run instead of building one: `"postgres:16"`,
-     * `"ghcr.io/org/app:1.2.3"`, or a digest. Nothing is built and nothing is
-     * uploaded for this service, so a deploy of it takes seconds.
+     * An image: `"postgres:16"`, `"ghcr.io/org/app:1.2.3"`, or a digest.
+     *
+     * On its own it is the image to RUN. Nothing is built and nothing is
+     * uploaded for the service, so a deploy of it takes seconds — and env vars
+     * reach the container at RUNTIME only, so a framework that inlines values
+     * while it compiles (`NEXT_PUBLIC_*`) needs a source build instead.
+     *
+     * With a `buildCommand` it is instead the BASE your service is built on:
+     * your source is copied to `/app` and the command runs in your
+     * `rootDirectory`. That service is built and uploaded like any other.
      *
      * A tag is resolved when the image is PULLED, by the platform rather than
      * at deploy time. So a tag can name different bytes on machines started at
@@ -203,20 +255,17 @@ export type HexclaveServiceSource =
      * explicit tag or digest is required either way: a bare `"postgres"` means
      * `:latest`, which can change under you between deploys.
      *
-     * Env vars reach the container at RUNTIME only. There is no build, so
-     * nothing can be baked into the image — a framework that inlines values at
-     * build time (`NEXT_PUBLIC_*`) needs a source build instead.
-     *
      * Only public registries are supported today.
      */
     image: string,
-    rootDirectory?: never,
+    /** Where `buildCommand` runs, relative to the deploy file. Only meaningful with one. */
+    rootDirectory?: string,
     dockerfilePath?: never,
   };
 
 /**
  * A single always-one-instance service, and the only kind that may hold a
- * persistent volume.
+ * persistent volume. Requires a paid plan.
  */
 export type HexclaveServerService = HexclaveServiceBase & HexclaveServiceSource & {
   type: "server",
@@ -230,16 +279,25 @@ export type HexclaveServerService = HexclaveServiceBase & HexclaveServiceSource 
    */
   persistentVolumes?: Record<string, HexclavePersistentVolume>,
   /**
-   * 1 (the default) keeps the single instance up. 0 lets it SUSPEND when idle,
-   * so it resumes with its memory intact and without a cold start on the next
-   * connection — but a suspended service can only be woken by inbound traffic,
-   * so a worker (`ports: {}`) needs 1.
-   *
-   * The Free plan requires 0.
+   * 1 (the default) keeps the single instance up; 0 lets it suspend when idle
+   * and resume with its memory intact. Above 0 needs a paid plan.
    */
   minInstances?: 0 | 1,
   /** Always 1 for a server. Use `type: "serverless"` to scale out. */
   maxInstances?: 1,
+  /**
+   * How much memory the machine gets. Defaults to "512MB".
+   *
+   * CPU comes with it — you pick memory, the platform picks the matching
+   * machine shape: one shared, burstable vCPU up to "2GB", two shared vCPUs at
+   * "4GB", and "8GB" is the first size with 2 dedicated cores. A CPU-bound
+   * service wants "8GB" even when it fits in less memory.
+   *
+   * Changing this restarts the machine with the new shape, so the service is
+   * briefly unavailable. A persistent volume survives — the disk outlives the
+   * machine. Sizes above the default need a paid plan.
+   */
+  memory?: "512MB" | "1GB" | "2GB" | "4GB" | "8GB",
 };
 
 /**
@@ -253,13 +311,21 @@ export type HexclaveServerlessService = HexclaveServiceBase & HexclaveServiceSou
   minInstances?: number,
   /** Upper scaling bound, 1–10. Defaults to 1. */
   maxInstances?: number,
+  /**
+   * How much memory each instance gets. Defaults to "512MB".
+   *
+   * CPU comes with it: one shared, burstable vCPU up to "2GB", two shared vCPUs
+   * at "4GB", and 2 dedicated cores at "8GB". Changing it rolls the machines
+   * one at a time. Sizes above the default need a paid plan.
+   */
+  memory?: "512MB" | "1GB" | "2GB" | "4GB" | "8GB",
 };
 
 export type HexclaveService = HexclaveServerService | HexclaveServerlessService;
 
 /**
  * The `deploy` export of a deploy file (hexclave.deploy.ts) — the services
- * deployed together by one `hexclave deploy` — or of hexclave.config.ts.
+ * deployed together by one `hexclave deploy`.
  *
  * It is a FUNCTION of the deployment context, so it can reach secrets,
  * connections and the managed backend's outputs:
@@ -273,9 +339,11 @@ export type HexclaveService = HexclaveServerService | HexclaveServerlessService;
  * export const deploymentGroupId = "backend";
  *
  * export const deploy: HexclaveDeploymentConfig = ({ secret, service, hexclave }) => ({
+ *   builder: { memory: "32GB" },
  *   services: {
  *     api: {
  *       type: "server",
+ *       memory: "4GB",
  *       ports: { 3000: { protocol: "http" } },
  *       persistentVolumes: { uploads: { path: "/data", sizeGb: 10 } },
  *       env: { DB_URL: service("db").url(5432), PROJECT_ID: hexclave.projectId },
@@ -285,12 +353,35 @@ export type HexclaveService = HexclaveServerService | HexclaveServerlessService;
  * });
  * ```
  *
- * Deployments normally live in their own file so that one Hexclave project can
- * be deployed from several repositories, each shipping the services it owns and
- * each deploying on its own schedule. The same export is accepted in
- * hexclave.config.ts for a project that has only one; those services belong to a
- * deployment group named after that file.
+ * Deployments live in their own file, never in hexclave.config.ts, so that one
+ * Hexclave project can be deployed from several repositories, each shipping the
+ * services it owns and each deploying on its own schedule — while at most one of
+ * them owns the project's configuration.
  */
+/**
+ * The machine that builds a deployment.
+ *
+ * One `hexclave deploy` uploads one tree and builds every service of it on ONE
+ * machine, so the builder is declared beside `services` rather than inside one:
+ * there is a single machine to size, and a per-service setting could only ever
+ * be a request that another service's overrode.
+ */
+export type HexclaveBuilder = {
+  /**
+   * How much memory the builder gets. Leave it out and the build gets a machine
+   * sized for its shape — a larger one when the build is auto-detected (that
+   * path unpacks a large base image and holds the whole layer store in memory,
+   * and dies at less).
+   *
+   * Raise it when a build is killed for running out of memory or space — a
+   * large monorepo install, or a compiler that wants the whole project in
+   * memory at once. It has no effect on what the service runs on; that is the
+   * service's own `memory`. Sizes above the default need a paid plan.
+   */
+  memory?: "8GB" | "16GB" | "32GB",
+};
+
 export type HexclaveDeploymentConfig = (context: HexclaveDeploymentContext) => {
   services: Record<string, HexclaveService>,
+  builder?: HexclaveBuilder,
 };

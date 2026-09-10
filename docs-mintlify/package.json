@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/docs-mintlify",
-  "version": "1.0.104",
+  "version": "1.0.119",
   "private": true,
   "scripts": {
     "dev": "mint dev --port ${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}04 --no-open",

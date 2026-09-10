@@ -1,0 +1,64 @@
+# hxc- leaves at most 59 characters for the suffix of a 63-character Fly app name.
+map $host $deployment_app {
+    default "";
+    "~^(?<deployment_suffix>[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)[.]${HEXCLAVE_GATEWAY_DOMAIN_PATTERN}$" hxc-$deployment_suffix;
+}
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+# Fly terminates client TLS before sending HTTP to this gateway. Replace incoming
+# forwarded-host data rather than trusting a caller-provided destination.
+map $http_x_forwarded_proto $client_proto {
+    default https;
+    http http;
+    https https;
+}
+resolver ${HEXCLAVE_GATEWAY_RESOLVER} valid=30s;
+resolver_timeout 5s;
+
+server {
+    listen 8080 default_server;
+    server_name _;
+    if ($deployment_app = "") { return 421; }
+
+    # Stream uploads/downloads without nginx's default 1MB request limit or disk
+    # buffering. Idle streams need heartbeats at least once per hour.
+    client_max_body_size 0;
+    client_body_timeout 60s;
+    location / {
+        set $upstream_host $deployment_app.fly.dev;
+        proxy_pass https://$upstream_host$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host $upstream_host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $client_proto;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_ssl_server_name on;
+        proxy_ssl_name $upstream_host;
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_ssl_verify_depth 3;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_redirect off;
+        proxy_intercept_errors off;
+        # Avoid retrying a state-changing request against another resolved address.
+        proxy_next_upstream off;
+    }
+}
+
+# A separate virtual host keeps health checks from stealing any deployment path.
+server {
+    listen 8080;
+    server_name gateway-health.internal;
+    access_log off;
+    location = /healthz { return 200 'ok\n'; }
+    location / { return 404; }
+}

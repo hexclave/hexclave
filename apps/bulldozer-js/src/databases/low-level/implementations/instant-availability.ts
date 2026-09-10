@@ -171,6 +171,9 @@ export function declareInstantAvailabilityLowLevelDatabase(wrapped: LowLevelData
     };
 
     const result: LowLevelKvStore & LowLevelKvDump = {
+      reserveKeys(count) {
+        return wrappedStore.reserveKeys(count).map(cloneArrayBuffer);
+      },
       async get(key) {
         return await traceSpanHot({ description: "bulldozer-js.low-level.instant.get", attributes }, async (span) => {
           const cached = cachedValues.get(cacheKey(key));
@@ -227,11 +230,15 @@ export function declareInstantAvailabilityLowLevelDatabase(wrapped: LowLevelData
       },
       async insertAll(values, insertOptions) {
         return await traceSpanHot({ description: "bulldozer-js.low-level.instant.insertAll", attributes: { ...attributes, "bulldozer.low_level.value_count": values.length } }, async () => {
+          if (insertOptions?.keys !== undefined && insertOptions.keys.length !== values.length) {
+            throw new Error("KV dump insertion must provide exactly one key per value");
+          }
           if (values.length === 0) return { keys: [], seq: insertOptions?.requiresSeq ?? initialSeq };
           return await withWriteGate(async () => {
             const valuesForWrapped = values.map(cloneArrayBuffer);
+            const keysForWrapped = insertOptions?.keys?.map(cloneArrayBuffer);
             const requiresSeq = getChainedRequiresSeq(insertOptions?.requiresSeq);
-            const { keys, seq: underlyingSeq } = await wrappedStore.insertAll(valuesForWrapped, { requiresSeq });
+            const { keys, seq: underlyingSeq } = await wrappedStore.insertAll(valuesForWrapped, { requiresSeq, keys: keysForWrapped });
             const seq = recordWrite(underlyingSeq, keys.map((key, index) => ({ key, value: valuesForWrapped[index] })));
             return { keys: keys.map(cloneArrayBuffer), seq };
           });
@@ -249,25 +256,63 @@ export function declareInstantAvailabilityLowLevelDatabase(wrapped: LowLevelData
           }
           return await withWriteGate(async () => {
             const existingValues = await Promise.all(entries.map(async ({ key }) => await result.get(key)));
-            const results = entries.map(({ compare }, index) => {
+            const locallyMatching = entries.map(({ compare }, index) => {
               const existing = existingValues[index];
-              return existing.buffer !== null && arrayBuffersAreEqual(existing.buffer, compare);
+              return compare === null
+                ? existing.buffer === null
+                : existing.buffer !== null && arrayBuffersAreEqual(existing.buffer, compare);
             });
-            const matchingEntries = entries.filter((_, index) => results[index]);
+            const matchingEntries = entries.filter((_, index) => locallyMatching[index]);
             if (matchingEntries.length === 0) {
+              const failedResults: Array<{ wasSet: false, seq: null }> = locallyMatching.map(() => ({ wasSet: false, seq: null }));
               return {
-                results: results.map(() => ({ wasSet: false as const, seq: null })),
+                results: failedResults,
                 seq: compareAndSetOptions?.requiresSeq ?? initialSeq,
               };
             }
-            const entriesForWrapped = matchingEntries.map(({ key, value }) => ({ key: cloneArrayBuffer(key), value: cloneArrayBuffer(value) }));
+            // Existing-value comparisons are serialized by this wrapper's write gate and keep the
+            // cheap setAll path. Absence must be checked by the wrapped store: another instant
+            // wrapper can otherwise observe the same miss and overwrite the first initializer.
+            const missingEntriesForWrapped = matchingEntries.filter(entry => entry.compare === null).map(({ key, value }) => ({
+              key: cloneArrayBuffer(key),
+              compare: null,
+              value: cloneArrayBuffer(value),
+            }));
+            const presentEntriesForWrapped = matchingEntries.filter(entry => entry.compare !== null).map(({ key, value }) => ({
+              key: cloneArrayBuffer(key),
+              value: cloneArrayBuffer(value),
+            }));
             const requiresSeq = getChainedRequiresSeq(compareAndSetOptions?.requiresSeq);
-            const { seq: underlyingSeq } = await wrappedStore.setAll(entriesForWrapped, { requiresSeq });
-            const seq = recordWrite(underlyingSeq, entriesForWrapped);
-            return {
-              results: results.map(wasSet => wasSet ? { wasSet: true, seq } : { wasSet: false, seq: null }),
-              seq,
-            };
+            const [missingResult, presentResult] = await Promise.all([
+              missingEntriesForWrapped.length === 0
+                ? null
+                : wrappedStore.compareAndSetAll(missingEntriesForWrapped, { requiresSeq }),
+              presentEntriesForWrapped.length === 0
+                ? null
+                : wrappedStore.setAll(presentEntriesForWrapped, { requiresSeq }),
+            ]);
+            const successfulMissingEntries = missingResult === null
+              ? []
+              : missingEntriesForWrapped.filter((_, index) => missingResult.results[index].wasSet);
+            const successfulEntries = [...successfulMissingEntries, ...presentEntriesForWrapped];
+            const successfulUnderlyingSeqs = [
+              ...(successfulMissingEntries.length === 0 || missingResult === null ? [] : [missingResult.seq]),
+              ...(presentResult === null ? [] : [presentResult.seq]),
+            ];
+            const seq = successfulEntries.length === 0
+              ? compareAndSetOptions?.requiresSeq ?? initialSeq
+              : recordWrite(wrapped.combineSeqs(...successfulUnderlyingSeqs), successfulEntries);
+            const results: Array<{ wasSet: true, seq: DatabaseSeq } | { wasSet: false, seq: null }> = [];
+            let missingIndex = 0;
+            for (const [index, entry] of entries.entries()) {
+              if (!locallyMatching[index]) {
+                results.push({ wasSet: false, seq: null });
+                continue;
+              }
+              const wasSet = entry.compare !== null || missingResult?.results[missingIndex++].wasSet === true;
+              results.push(wasSet ? { wasSet: true, seq } : { wasSet: false, seq: null });
+            }
+            return { results, seq };
           });
         });
       },
@@ -311,6 +356,9 @@ export function declareInstantAvailabilityLowLevelDatabase(wrapped: LowLevelData
     },
     async waitUntilReplicated(seq) {
       await traceSpanHot({ description: "bulldozer-js.low-level.instant.waitUntilReplicated", attributes: { "bulldozer.low_level.backend": "instant-availability" } }, async () => await wrapped.waitUntilReplicated(getUnderlyingSeq(seq)));
+    },
+    async waitUntilConsistent(seq) {
+      await traceSpanHot({ description: "bulldozer-js.low-level.instant.waitUntilConsistent", attributes: { "bulldozer.low_level.backend": "instant-availability" } }, async () => await wrapped.waitUntilConsistent(getUnderlyingSeq(seq)));
     },
     combineSeqs(...seqs) {
       if (seqs.length === 0) return initialSeq;

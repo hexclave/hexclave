@@ -1,0 +1,13 @@
+-- Which infrastructure runtime a deployment source's services run on.
+--
+-- Defaulted to "fly" rather than left nullable: every source that exists today
+-- runs on Fly, and "fly" is what an absent `version` export means, so the
+-- default IS the truth for every existing row rather than a guess about it.
+-- Written by the same sync that stores the service definitions, so it rides
+-- that sync's fence like the builder size does.
+--
+-- On the source rather than on the project because the source is what a deploy
+-- file maps to and what the sync route updates; the per-PROJECT rule (every
+-- source of a project must agree, since services share a private network) is
+-- application policy enforced at sync time, not a shape this column can hold.
+ALTER TABLE "DeploymentSource" ADD COLUMN "runtime" TEXT NOT NULL DEFAULT 'fly';

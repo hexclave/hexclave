@@ -64,7 +64,7 @@ You can list all teams a user belongs to using the `listTeams` or `useTeams` fun
   </Tab>
   <Tab title="Server Component">
     ```tsx
-    const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+    const user = await hexclaveServerApp.getUser({ or: 'throw' });
     const allTeams = await user.listTeams();
     const someTeam = await user.getTeam('some-team-id'); // May be null if the user is not a member of this team
 

@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/sdk-spec",
-  "version": "1.0.104",
+  "version": "1.0.119",
   "private": true,
   "description": "Hexclave SDK specification files",
   "scripts": {}

@@ -28,11 +28,71 @@ export const DEPLOYMENT_ENV_VAR_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // never has to name a source: two sources declaring the same service id is a
 // conflict, refused at sync.
 //
-// Dots are allowed because deployments declared in hexclave.config.ts belong to
-// a source whose id IS the file name (see CONFIG_FILE_DEPLOYMENT_SOURCE_ID) —
-// they appear in no reference, so nothing has to parse them.
+// Dots are allowed: a source id appears in no reference, so nothing has to
+// parse one, and projects deployed before services moved out of
+// hexclave.config.ts still have a stored source id named after that file.
 export const DEPLOYMENT_SOURCE_ID_REGEX = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/;
 export const MAX_DEPLOYMENT_SOURCE_ID_LENGTH = 63;
+
+// ---------------------------------------------------------------------------
+// Runtimes.
+//
+// Marshal can run a project's services on one of two infrastructure providers.
+// "fly" is the default and what every project runs on unless it says otherwise;
+// "gcp" is opted into per project with an INTERNAL, undocumented export in the
+// deploy file:
+//
+//   export const version = "gcp-beta-1";
+//
+// The token is a VERSION rather than a provider name on purpose: it is a
+// channel we hand to ourselves for testing, and the runtime it maps to (and the
+// behaviour that comes with it) may change from one token to the next without
+// the deploy file changing. Absent means the default. An unknown token is
+// refused by the CLI and the backend rather than ignored, so a typo in one of
+// ours cannot silently deploy to the default, and a stray `version` in a user's
+// file cannot silently mean anything.
+//
+// The runtime is pinned per PROJECT, not per deploy file: services of one
+// project share a private network and resolve each other's addresses, neither
+// of which can span providers. The backend enforces that every deploy file of a
+// project agrees, and Marshal pins the namespace on first use.
+export const DEPLOYMENT_RUNTIMES = ["fly", "gcp"] as const;
+export type DeploymentRuntime = typeof DEPLOYMENT_RUNTIMES[number];
+export const DEFAULT_DEPLOYMENT_RUNTIME = "fly" satisfies DeploymentRuntime;
+
+// Every accepted `version` token and the runtime it selects.
+export const DEPLOYMENT_VERSIONS = {
+  "gcp-beta-1": "gcp",
+} as const satisfies Record<string, DeploymentRuntime>;
+export type DeploymentVersion = keyof typeof DEPLOYMENT_VERSIONS;
+export const DEPLOYMENT_VERSION_TOKENS = Object.keys(DEPLOYMENT_VERSIONS) as DeploymentVersion[];
+
+export function isDeploymentRuntime(value: unknown): value is DeploymentRuntime {
+  return typeof value === "string" && (DEPLOYMENT_RUNTIMES as readonly string[]).includes(value);
+}
+
+export function isDeploymentVersion(value: unknown): value is DeploymentVersion {
+  return typeof value === "string" && (DEPLOYMENT_VERSION_TOKENS as readonly string[]).includes(value);
+}
+
+/**
+ * The runtime a deploy file's `version` export selects. Absent (or null) is the
+ * default runtime; an unknown token is null, and the caller refuses it.
+ */
+export function deploymentRuntimeForVersion(version: string | null | undefined): DeploymentRuntime | null {
+  if (version === undefined || version === null) return DEFAULT_DEPLOYMENT_RUNTIME;
+  return isDeploymentVersion(version) ? DEPLOYMENT_VERSIONS[version] : null;
+}
+
+import.meta.vitest?.test("version tokens map to runtimes, and absent is the default", ({ expect }) => {
+  expect(deploymentRuntimeForVersion(undefined)).toBe("fly");
+  expect(deploymentRuntimeForVersion(null)).toBe("fly");
+  expect(deploymentRuntimeForVersion("gcp-beta-1")).toBe("gcp");
+  // Unknown tokens are refused by the caller, never rounded to a runtime.
+  expect(deploymentRuntimeForVersion("gcp")).toBe(null);
+  expect(deploymentRuntimeForVersion("1.0.0")).toBe(null);
+  expect(isDeploymentVersion("constructor")).toBe(false);
+});
 
 // ---------------------------------------------------------------------------
 // Source manifest
@@ -157,23 +217,24 @@ export function parseSourceManifest(value: unknown): DeploymentSourceManifest | 
  *
  * `rootDirectory` is the service's own subtree of the shared upload; null or
  * "." means the whole tree. Paths are posix and relative to the upload root.
+ *
+ * `prefix` is that root as a path prefix ("web/", or "" for the whole tree).
+ * Returned rather than left for the caller to re-derive: entries keep their
+ * full paths, so anything that displays them relative to the service — the
+ * dashboard's folder tree — needs exactly the prefix this filtered on, and a
+ * second copy of this normalisation is a second place for it to drift.
  */
 export function sourceManifestEntriesForService(
   manifest: DeploymentSourceManifest,
   rootDirectory: string | null,
-): { entries: { path: string, bytes: number }[], truncated: boolean } {
+): { entries: { path: string, bytes: number }[], truncated: boolean, prefix: string } {
   const normalized = (rootDirectory ?? ".").replace(/^\.\/+/, "").replace(/\/+$/, "");
   const prefix = normalized === "" || normalized === "." ? "" : `${normalized}/`;
   const entries = prefix === "" ? manifest.entries : manifest.entries.filter((entry) => entry.path.startsWith(prefix));
   // Truncated is a property of the whole manifest, not of this slice: once the
   // cap dropped files, no subtree can claim to be complete.
-  return { entries, truncated: manifest.file_count > manifest.entries.length };
+  return { entries, truncated: manifest.file_count > manifest.entries.length, prefix };
 }
-
-// The source id of deployments declared in hexclave.config.ts, which has no
-// `deploymentGroupId` export of its own. Named after the file so the dashboard
-// can show where those services came from without a special case.
-export const CONFIG_FILE_DEPLOYMENT_SOURCE_ID = "hexclave.config.ts";
 
 // A connection value is `<serviceId>.<outputKey>` — a typed pointer to another
 // service's output — or `hexclave.<outputKey>` for the managed service. The
@@ -191,7 +252,7 @@ export const DEPLOYMENT_CONNECTION_VALUE_REGEX = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*\.[
 
 /**
  * The managed Hexclave service's slot on the deployments board. A service in
- * the config's `services` export must never shadow it — `service("hexclave")`
+ * the deploy file's `deploy` export must never shadow it — `service("hexclave")`
  * doesn't exist (the `hexclave` context object replaces it), but the id stays
  * reserved so connection values like "hexclave.projectId" are unambiguous.
  */
@@ -238,26 +299,36 @@ export function parseConnectionValue(value: string): { serviceId: string, output
 }
 
 /**
- * Whether a reference actually requires its target to have DEPLOYED.
+ * Whether a reference actually requires its target to have DEPLOYED. The
+ * answer depends on the RUNTIME, because it is a fact about where addresses
+ * come from:
  *
- * `hostname()` never does: it is a pure function of the service identity and
- * resolves before the target exists. `url()` depends on the TARGET SERVICE:
- *
- *  - a PUBLIC service's URL is the platform URL (or a verified custom domain),
- *    which only exists once the service has been provisioned;
- *  - a PRIVATE service's URL is built from the deterministic hostname and the
- *    port written in the reference, so it resolves just as early as hostname();
- *  - a bare `url()` has to read the target's synced definition to learn its sole
- *    HTTP port, so it waits regardless.
- *
+ * On "fly", a service's private hostname is a pure function of its identity
+ * (Fly's 6PN DNS publishes "<app>.internal" the moment the app exists), so
+ * `hostname` and a private `url` with a named port resolve before the target
+ * ever runs. Only a PUBLIC url (the platform URL, which exists once the service
+ * is up) and a bare `url()` (which has to read the target's ports) wait.
  * `targetIsPublic` is null when the caller cannot answer — a reference into a
- * source this deploy file does not contain, or one naming a port the target does
- * not declare — in which case the conservative answer is that it waits. Getting
- * this wrong in the other direction would serialize independent deploys, cascade
- * false "skipped" results when the target fails, and reject mutually-wired
- * services as circular.
+ * source this deploy file does not contain, or one naming a port the target
+ * does not declare — in which case the conservative answer is that it waits.
+ * Getting this wrong in the other direction would serialize independent
+ * deploys, cascade false "skipped" results when the target fails, and reject
+ * mutually-wired services as circular.
+ *
+ * On "gcp", every SERVICE output waits — `url` and `hostname` alike, public or
+ * private, named port or not. Both are the target's runtime ADDRESS, and GCP
+ * publishes none for a service that does not exist yet: a private service is
+ * reached at its VM's internal IP (assigned when the instance is created), a
+ * public one at its platform URL, and a serverless one at the URI its revision
+ * got. The cost is that mutually-wired services are a circular dependency
+ * there, reported as one, instead of silently resolving.
+ *
+ * `hexclave.*` outputs are not service outputs and never wait — they come from
+ * the managed service, which always exists.
  */
-export function connectionRequiresTargetDeployed(outputKey: string, port: number | null, targetIsPublic: boolean | null = null): boolean {
+export function connectionRequiresTargetDeployed(runtime: DeploymentRuntime, outputKey: string, port: number | null, targetIsPublic: boolean | null): boolean {
+  if (!SERVICE_OUTPUT_KEYS.includes(outputKey as ServiceOutputKey)) return false;
+  if (runtime === "gcp") return true;
   if (outputKey !== "url") return false;
   if (port === null) return true;
   return targetIsPublic !== false;
@@ -287,15 +358,31 @@ export type DeploymentEnvVarDefinition = {
   key?: string | undefined,
 };
 
+/**
+ * The builder machine for one deployment source.
+ *
+ * A property of the DEPLOYMENT rather than of any service: one `hexclave deploy`
+ * uploads one tree and builds every service of it on ONE machine, so there is
+ * exactly one builder to size and a per-service field could only ever be a
+ * request that some other service's request overrode.
+ *
+ * Absent, or `memory` absent within it, means the deployment picks its own size
+ * — the floor a build of that shape needs (see DEFAULT_BUILDER_MEMORY, and the
+ * larger floor an auto-detected build gets).
+ */
+export type DeploymentBuilderDefinition = {
+  memory?: DeploymentMemorySize | undefined,
+};
+
 export type DeploymentServiceDefinition = {
-  // How the service is run on the Fly-backed Marshal runtime.
+  // How the service is run on the Marshal runtime.
   //
-  // - "server": exactly one instance (max_instances is always 1). With
-  //   min_instances 0 it SUSPENDS when idle rather than stopping, so it resumes
-  //   with its memory intact and without a cold start; with min_instances 1
-  //   (the default) it simply stays up. It is the only type allowed to hold a
-  //   persistent volume — a volume is local disk on one host, which only a
-  //   single instance can ever mount.
+  // - "server": exactly one instance (max_instances is always 1), backed by a
+  //   single Compute Engine VM. There is no request-triggered suspend, so
+  //   min_instances 0 keeps its availability and disk semantics but does not
+  //   guarantee scale-to-zero billing; min_instances 1 (the default) stays up.
+  //   It is the only type allowed to hold a persistent volume — a volume is
+  //   local disk on one host, which only a single instance can ever mount.
   // - "serverless": scales between min_instances and max_instances and STOPS
   //   (not suspends) on scale-down, so every start is a cold start from a clean
   //   rootfs. Persistent volumes are rejected: a fleet would give each instance
@@ -340,11 +427,28 @@ export type DeploymentServiceDefinition = {
   // suspend switch: 1 (the default) stays up, 0 suspends when idle.
   min_instances?: number | undefined,
   max_instances?: number | undefined,
-  // Relative to the directory containing hexclave.deploy.ts. Only used
-  // client-side (it decides what `hexclave deploy` packages), but stored so
-  // the dashboard can display it.
+  // How much memory the container gets, as a size token ("512MB", "4GB"). Absent
+  // = the type's default (see defaultDeploymentMemoryForType), which is what the
+  // service ran at before compute was configurable.
   //
-  // Mutually exclusive with `image`: a prebuilt image is not built from the
+  // CPU is DERIVED from it rather than declared: a "server" is a whole machine
+  // from a fixed catalog of shapes and a "serverless" container has legal
+  // cpu/memory pairs rather than free choice, so memory is the only dial that
+  // lands on a valid combination for both. On the smaller server rungs the
+  // derived CPU is a burstable fraction of a core, which is why every surface
+  // that shows it says so.
+  //
+  // Changing it re-rolls the service: for a "serverless" that is an ordinary
+  // rolling revision, but a "server" is a VM that has to be replaced, so it goes
+  // down and comes back (its persistent disk survives — the disk outlives the
+  // instance by design).
+  memory?: DeploymentMemorySize | undefined,
+  // Relative to the directory containing hexclave.deploy.ts. Decides what
+  // `hexclave deploy` packages, and — on the generated-Dockerfile path below —
+  // the working directory `build_command` runs in.
+  //
+  // Meaningful alongside `image` only when a `build_command` makes the image a
+  // BASE: a service that merely runs a prebuilt image is not built from the
   // uploaded source, so it has no directory within it.
   root_directory?: string | undefined,
   // The Dockerfile to build from, as a path within the uploaded tree — i.e.
@@ -353,14 +457,20 @@ export type DeploymentServiceDefinition = {
   // `rootDirectory` and the CLI joins the two before sending it, so that the
   // pre-flight, this schema and the remote builder all resolve it against one
   // base. When absent the service is NOT built from a Dockerfile — the remote
-  // builder auto-detects the build with Railpack (https://railpack.com) instead.
+  // builder auto-detects the build with Railpack (https://railpack.com) instead
+  // — unless a `build_command` is set, which selects the generated-Dockerfile
+  // path below rather than auto-detection.
   //
   // Mutually exclusive with `image`.
   dockerfile_path?: string | undefined,
-  // An ALREADY-BUILT image to run, instead of building one from the uploaded
-  // source: `postgres:16`, `ghcr.io/org/app:1.2.3`, or a digest. Mutually
-  // exclusive with `root_directory` and `dockerfile_path` — those say where the
-  // code is, this says what to run, and a service has exactly one of the two.
+  // An already-built image: `postgres:16`, `ghcr.io/org/app:1.2.3`, or a digest.
+  //
+  // On its own it is the image to RUN, and the service is not built at all —
+  // nothing is uploaded for it and its deploy takes seconds. With a
+  // `build_command` it is instead the BASE the service is built from, and the
+  // uploaded source is copied in on top of it (see `build_command`).
+  //
+  // Mutually exclusive with `dockerfile_path`: both name a base.
   //
   // Stored as the author wrote it (normalized to a canonical, fully-qualified
   // ref by parseDeploymentImageRef, so `postgres:16` is stored as
@@ -380,8 +490,68 @@ export type DeploymentServiceDefinition = {
   // never hold one id at a time. See MAX_PERSISTENT_VOLUMES_PER_SERVICE for the
   // current one-per-service cap.
   persistent_volumes?: Record<string, DeploymentVolumeDefinition> | undefined,
+  // A single command line, run through `/bin/sh -c` while the image is BUILT.
+  //
+  // It selects a GENERATED DOCKERFILE, whose base is `image` if one is named and
+  // the Hexclave base image otherwise. The whole uploaded source is copied into
+  // `/app`, the command runs in `/app/<root_directory>`, and every build-visible
+  // env var is available to it. That is what makes `image` + `build_command`
+  // mean "start from this image, add my code" rather than "run this image".
+  //
+  // The one exception is `dockerfile_path`, which already describes a complete
+  // build: there the command is APPENDED to the author's Dockerfile as a final
+  // `RUN`, and nothing is copied in that the Dockerfile did not copy itself.
+  //
+  // Absent = the base decides the build entirely (Railpack auto-detection, the
+  // author's Dockerfile, or — for a bare `image` — no build at all).
+  build_command?: string | undefined,
+  // A single command line, run through `/bin/sh -c` as the container's process,
+  // INSTEAD of whatever the image would have started.
+  //
+  // Applied at RUN time (the machine's init, which replaces both the image's
+  // entrypoint and its command — verified against real Fly), not baked into the
+  // image. So it costs no build: naming one on a prebuilt `image` service keeps
+  // that service's deploy build-less, and changing only this rolls the machines
+  // without rebuilding anything.
+  //
+  // It never changes HOW the service is built, which is what makes it usable on
+  // every shape: a Railpack-built service keeps its auto-detected build and just
+  // starts differently.
+  //
+  // REQUIRED when the service builds on the Hexclave base image (no `image`, no
+  // `dockerfile_path`, but a command): that base starts nothing on its own, so a
+  // service without one would deploy and then immediately exit.
+  start_command?: string | undefined,
   env: Record<string, DeploymentEnvVarDefinition>,
 };
+
+// Whether a definition is BUILT from the deployment's uploaded source.
+//
+// True for everything except a service that merely runs an already-built
+// `image`: naming a `build_command` alongside one turns it into a base, which
+// means an upload, a builder machine and a build log. Shared because the answer
+// decides several unrelated things — whether the CLI packages the source at all,
+// whether the runtime demands an upload, and whether a deploy has logs to show —
+// and those must not be able to disagree.
+export function deploymentServiceIsBuilt(definition: Pick<DeploymentServiceDefinition, "image" | "build_command">): boolean {
+  return definition.image === undefined || definition.build_command !== undefined;
+}
+
+// Whether a definition builds from a GENERATED Dockerfile — the path that copies
+// the uploaded source onto a base image, rather than Railpack auto-detection or
+// the author's own Dockerfile.
+//
+// Only a `build_command` selects it. A `start_command` deliberately does NOT:
+// it is applied by the runtime and works on whatever image the service ends up
+// with, so letting it switch the BUILD would mean that adding "run it this way"
+// to a working Railpack service silently threw away the install and compile
+// steps that made it work — an image that builds fine and then has no
+// node_modules. Overriding a wrongly-detected start command is exactly what a
+// start command is for, and it must stay possible without rebuilding anything.
+export function deploymentServiceUsesGeneratedDockerfile(definition: Pick<DeploymentServiceDefinition, "image" | "dockerfile_path" | "build_command">): boolean {
+  if (definition.build_command === undefined) return false;
+  return definition.dockerfile_path === undefined;
+}
 
 // How one port the container listens on is exposed.
 //
@@ -567,6 +737,23 @@ export const MAX_VOLUME_SIZE_GB = 500;
 // more than one mount.
 export const MAX_PERSISTENT_VOLUMES_PER_SERVICE = 1;
 
+// The Free plan's disk entitlement: how many persistent volumes one project may
+// hold in total, and how large each of them may be.
+//
+// Volumes are the one deployment resource that keeps costing after the project
+// stops using it. A suspended machine bills nothing; a provisioned disk bills on
+// its size whether or not anything mounts it, and tearing a service down
+// DETACHES its disk rather than destroying it (see the Fly provider's
+// deleteService), so an abandoned volume outlives the service that made it.
+// That is why disks are capped on Free by count and size rather than left to
+// the always-on gate, which only ever reaches running machines.
+//
+// Counted per PROJECT rather than per service: MAX_PERSISTENT_VOLUMES_PER_SERVICE
+// already holds a service to one disk, so a per-service cap would bound nothing
+// a second service could not simply ask for again.
+export const FREE_PLAN_MAX_VOLUMES_PER_PROJECT = 1;
+export const FREE_PLAN_MAX_VOLUME_SIZE_GB = 10;
+
 // Volume ids become Fly volume names (see appVolumeName in Marshal), which are
 // alphanumeric + underscore and at most 30 characters. The id is capped at 26
 // so a 4-character prefix still fits, and lowercased so two ids cannot differ
@@ -574,15 +761,235 @@ export const MAX_PERSISTENT_VOLUMES_PER_SERVICE = 1;
 export const DEPLOYMENT_VOLUME_ID_REGEX = /^[a-z][a-z0-9_]*$/;
 export const MAX_VOLUME_ID_LENGTH = 26;
 
+// ---------------------------------------------------------------------------
+// Compute sizing.
+//
+// How much memory a service's container gets, and how much the builder machine
+// that builds a deployment gets. Written as a SIZE TOKEN ("512MB", "4GB") rather
+// than a number, so the unit is part of the value and a bare `memory: 4` cannot
+// mean four of something unstated.
+//
+// Only MB and GB are spelled, and only in that capitalization: "Mb" is megabits,
+// which is not another spelling of this but a different quantity. One canonical
+// token per size, for the same reason port keys refuse a leading zero — two
+// spellings of one value is a duplicate-detection problem nobody needs.
+//
+// The ladder is deliberately COARSE and closed. Memory is the only dial; CPU is
+// derived from it, which is what makes every rung valid on both runtime shapes
+// at once. A "server" is a whole VM and can only be one of a fixed catalog of
+// machine shapes; a "serverless" container has legal cpu/memory PAIRS rather
+// than free choice (past 4GB it must have more than one CPU). Free-form
+// cpu/memory would let an author write a combination that neither can honour,
+// and we would have to silently round it into one that they can.
+//
+// The cost of deriving CPU is that a memory change is also a CPU change, and on
+// the bottom three server rungs that CPU is a burstable fraction of a core
+// rather than a whole one. That is stated wherever the derived value is shown —
+// a 4GB server running on one burstable core is a surprise worth spending words
+// on, not one to discover under load.
+export const DEPLOYMENT_MEMORY_SIZES = ["512MB", "1GB", "2GB", "4GB", "8GB", "16GB", "32GB"] as const;
+export type DeploymentMemorySize = typeof DEPLOYMENT_MEMORY_SIZES[number];
+
+// MB here is what the platforms mean by it — a binary megabyte — so "512MB" is
+// the 512Mi the container runtime is asked for and "1GB" is the 1 GiB a machine
+// shape actually carries. The decimal spelling is the one every developer reads,
+// and nothing computes bytes from these: the number only ever indexes a table.
+const MEMORY_MB_BY_SIZE: Record<DeploymentMemorySize, number> = {
+  "512MB": 512,
+  "1GB": 1024,
+  "2GB": 2048,
+  "4GB": 4096,
+  "8GB": 8192,
+  "16GB": 16384,
+  "32GB": 32768,
+};
+
+// Which rungs each kind may ask for, PER RUNTIME. These ARE the paid-plan
+// ceilings: rather than defining sizes nobody can select and refusing them
+// later in the plan gate, the ladder stops where the entitlement does, so
+// autocomplete never offers a value that cannot be deployed. Raising a ceiling
+// is one entry here.
+//
+// The ladders differ at the bottom because the runtimes' smallest shapes do.
+// On Fly a machine of either type can carry 512MB (and that IS what every
+// service ran on before sizes existed, so it is the default there for both
+// types). On GCP a "server" is a Compute Engine machine and the smallest one
+// carries a full gigabyte, so there is no 512MB server rung to offer — offering
+// it would be offering a size that silently becomes a different one.
+export const FLY_SERVER_MEMORY_SIZES = ["512MB", "1GB", "2GB", "4GB", "8GB"] as const satisfies readonly DeploymentMemorySize[];
+export const FLY_SERVERLESS_MEMORY_SIZES = ["512MB", "1GB", "2GB", "4GB", "8GB"] as const satisfies readonly DeploymentMemorySize[];
+export const GCP_SERVER_MEMORY_SIZES = ["1GB", "2GB", "4GB", "8GB"] as const satisfies readonly DeploymentMemorySize[];
+export const GCP_SERVERLESS_MEMORY_SIZES = ["512MB", "1GB", "2GB", "4GB", "8GB"] as const satisfies readonly DeploymentMemorySize[];
+// Every rung ANY runtime offers a type, for the schema: the wire schema does not
+// know which runtime a definition is bound for, so it accepts the union and the
+// runtime-specific check happens where the runtime is known (the CLI, which has
+// the deploy file's `version`, and the sync route, which has the source's pin).
+export const SERVER_MEMORY_SIZES = FLY_SERVER_MEMORY_SIZES;
+export const SERVERLESS_MEMORY_SIZES = FLY_SERVERLESS_MEMORY_SIZES;
+// The builder starts where the services stop: it is a transient machine that
+// exists for one build, so its floor is the size a real build needs rather than
+// the size a small service idles at. The same on both runtimes.
+export const BUILDER_MEMORY_SIZES = ["8GB", "16GB", "32GB"] as const satisfies readonly DeploymentMemorySize[];
+
+// The sizes a deployment gets when it says nothing. Each is exactly what that
+// kind ran at before compute was configurable ON THAT RUNTIME, so an unchanged
+// deploy file deploys the same machines it did before this existed — which is
+// also why the two runtimes disagree about a server's default.
+export const DEFAULT_SERVER_MEMORY = "512MB" satisfies DeploymentMemorySize;
+export const DEFAULT_SERVERLESS_MEMORY = "512MB" satisfies DeploymentMemorySize;
+export const GCP_DEFAULT_SERVER_MEMORY = "1GB" satisfies DeploymentMemorySize;
+export const DEFAULT_BUILDER_MEMORY = "8GB" satisfies DeploymentMemorySize;
+
+/** The rungs a service of this type may ask for on this runtime. */
+export function deploymentMemorySizesForType(type: DeploymentServiceType, runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME): readonly DeploymentMemorySize[] {
+  if (runtime === "gcp") return type === "server" ? GCP_SERVER_MEMORY_SIZES : GCP_SERVERLESS_MEMORY_SIZES;
+  return type === "server" ? FLY_SERVER_MEMORY_SIZES : FLY_SERVERLESS_MEMORY_SIZES;
+}
+
+/** What a service of this type runs at on this runtime when it declares no `memory`. */
+export function defaultDeploymentMemoryForType(type: DeploymentServiceType, runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME): DeploymentMemorySize {
+  if (type === "server") return runtime === "gcp" ? GCP_DEFAULT_SERVER_MEMORY : DEFAULT_SERVER_MEMORY;
+  return DEFAULT_SERVERLESS_MEMORY;
+}
+
+/** A size token as a whole number of megabytes. */
+export function deploymentMemoryToMb(size: DeploymentMemorySize): number {
+  return MEMORY_MB_BY_SIZE[size];
+}
+
+/**
+ * The size token for a stored megabyte count, or null when no rung matches.
+ *
+ * Null rather than a throw or a rounded neighbour: the input is a database
+ * column, and a value written by a future version (or edited by hand) must
+ * degrade to "unset" — which every reader already handles — rather than claim
+ * to be a size the deployment is not running.
+ */
+export function deploymentMemoryFromMb(megabytes: number): DeploymentMemorySize | null {
+  return DEPLOYMENT_MEMORY_SIZES.find((size) => MEMORY_MB_BY_SIZE[size] === megabytes) ?? null;
+}
+
+/**
+ * The canonical token for something an author wrote, or null.
+ *
+ * Case-insensitive and space-tolerant on PURPOSE, and used only to phrase a
+ * "did you mean" — never to accept the input. "4gb" and "4 GB" are refused like
+ * any other non-canonical spelling; recognising them is what lets the error say
+ * which token to write instead of listing seven and leaving the reader to
+ * diff them by eye. Binary suffixes are recognised for the same reason: "4Gi"
+ * is what someone arriving from a container platform will type first.
+ */
+export function suggestDeploymentMemorySize(raw: string): DeploymentMemorySize | null {
+  const match = /^\s*([0-9]+)\s*(m|mb|mi|mib|g|gb|gi|gib)\s*$/i.exec(raw);
+  if (match === null) return null;
+  const amount = Number(match[1]);
+  const megabytes = /^m/i.test(match[2]) ? amount : amount * 1024;
+  return deploymentMemoryFromMb(megabytes);
+}
+
+/**
+ * The CPU that comes with a memory size, and whether it is a whole core.
+ *
+ * Derived rather than declared — see the note on the ladder above — but NOT
+ * hidden: on the smaller server sizes it is a burstable fraction of a core, and
+ * a 4GB server that turns out to have one shared core is a surprise worth
+ * spending a line of UI on rather than one to meet under load. Every surface
+ * that shows a size shows this beside it.
+ *
+ * `shared` means the vCPU is a burstable slice: it can reach a full core in
+ * bursts and is throttled to `count` sustained. A dedicated CPU is `count`
+ * cores, always.
+ *
+ * This is the DISPLAY copy of the mapping. The runtime derives its own machine
+ * shapes from the same ladder at the point it calls a provider — that boundary
+ * re-derives rather than trusting a number off the wire, exactly as it
+ * re-validates every other part of a spec.
+ */
+export function deploymentCpuForMemory(
+  type: DeploymentServiceType,
+  memory: DeploymentMemorySize,
+  runtime: DeploymentRuntime = DEFAULT_DEPLOYMENT_RUNTIME,
+): { count: number, shared: boolean } {
+  if (runtime === "fly") {
+    // Fly machine guests, the same for both types: shared-cpu-1x up to 2GB,
+    // shared-cpu-2x at 4GB, and performance-2x (two dedicated cores) at 8GB.
+    switch (memory) {
+      case "4GB": { return { count: 2, shared: true }; }
+      case "8GB": { return { count: 2, shared: false }; }
+      default: { return { count: 1, shared: true }; }
+    }
+  }
+  if (type === "server") {
+    // Whole machines, from a fixed catalog: the three smallest are shared-core
+    // and the fourth is the first with dedicated ones.
+    switch (memory) {
+      case "1GB": { return { count: 0.25, shared: true }; }
+      case "2GB": { return { count: 0.5, shared: true }; }
+      case "4GB": { return { count: 1, shared: true }; }
+      default: { return { count: 2, shared: false }; }
+    }
+  }
+  // Containers, where CPU and memory come in legal PAIRS: past 4GB a single CPU
+  // is not an allowed combination, which is the real reason memory is the only
+  // dial an author turns.
+  switch (memory) {
+    case "4GB": { return { count: 2, shared: false }; }
+    case "8GB": { return { count: 4, shared: false }; }
+    default: { return { count: 1, shared: false }; }
+  }
+}
+
+/**
+ * The most memory one project may hold in ALWAYS-ON services at once.
+ *
+ * Hexclave's own capacity guard, not a per-project quota: nothing meters
+ * deployment compute, so the plan ladder bounds what one service may ask for
+ * and this bounds how many of them may ask at once. Without it a paid project
+ * can stand up an arbitrary number of top-rung servers, each of which is a
+ * machine somebody pays for.
+ *
+ * Only always-on services count (effective `min_instances` of 1 or more). A
+ * service that scales to zero holds no machine while it is idle, and how far it
+ * may scale UP is already bounded by MAX_INSTANCES_PER_SERVICE.
+ */
+export const MAX_PROJECT_ALWAYS_ON_MEMORY_MB = 32 * 1024;
+
+// ---------------------------------------------------------------------------
+// Build and start commands.
+//
+// A command is a single command LINE, run through `/bin/sh -c` — the same shape
+// as the deploy file's `devCommand`, and the same shape every other platform's
+// build/start command has. Not a script: a newline in a Dockerfile `RUN` is a
+// new instruction, and a newline in the machine's start command would have to be
+// re-quoted at every hop. `sh -c` means `&&`, pipes and redirections all work,
+// so a command that wants two steps writes them with `&&` (or, past a certain
+// size, moves into a script the command invokes).
+export const MAX_DEPLOYMENT_COMMAND_LENGTH = 2048;
+
+/**
+ * Whether `value` is usable as a build or start command.
+ *
+ * Control characters are refused rather than escaped. A build command becomes a
+ * line of a generated Dockerfile and a start command becomes an argv entry in a
+ * machine config, and in both places a newline or a NUL is a structural
+ * character of the thing being generated rather than data — so the rule is
+ * stated here, once, and the generators may then assume it.
+ */
+export function isValidDeploymentCommand(value: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return value.trim() !== "" && value.length <= MAX_DEPLOYMENT_COMMAND_LENGTH && !/[\x00-\x1f\x7f]/.test(value);
+}
+
 
 // ---------------------------------------------------------------------------
 // Prebuilt images.
 //
 // A service either builds from the uploaded source (`root_directory` /
-// `dockerfile_path`) or names an ALREADY-BUILT image (`image`). The two are
-// mutually exclusive: those fields describe where the code is, `image`
-// describes what to run, and a definition carrying both would leave the
-// deployment with two answers to "what does this service run".
+// `dockerfile_path`) or names an ALREADY-BUILT image (`image`) — unless it also
+// carries a `build_command`, which turns the image into the BASE of a build
+// rather than the thing to run. `image` and `dockerfile_path` stay mutually
+// exclusive: each of them names a base, and a definition carrying both would
+// leave the deployment with two answers to "what is this built from".
 
 export const MAX_DEPLOYMENT_IMAGE_REF_LENGTH = 512;
 
@@ -780,6 +1187,44 @@ export const deploymentSecretDefaultsSchema = yupRecord(
   yupString().defined(),
 );
 
+// The GitLab-style CI variables describing the commit a deploy ships (see
+// collectCiEnv in the CLI). Sent with a DEPLOY request and never stored: they
+// describe one deploy, so persisting them on the definition would leave a stale
+// commit sha on every service the next deploy doesn't ship.
+//
+// Restricted to the CI_ namespace, so this channel can only ever add CI metadata:
+// a deploy must not be able to reach the injected Hexclave credentials (or any
+// other env var the definition owns) through a field meant for provenance.
+//
+// Bare `CI` is deliberately NOT in the namespace. The runtime sets CI=true for
+// every remote build, and accepting it here would let a caller send CI=false and
+// turn that guarantee off — while also setting CI at RUNTIME, which is the one
+// thing that flag should never say.
+const DEPLOYMENT_CI_ENV_VAR_KEY_REGEX = /^CI_[A-Z0-9_]+$/;
+// A bound on the whole field, checked at the front door. Without one the only
+// backstop is the runtime's build-env cap, which fires after the deploy has
+// already read secrets, consumed the upload and burned a deployment number —
+// so an oversized ci_env would fail late and leave a failed row behind. Ten
+// short provenance variables need well under a kilobyte.
+export const MAX_DEPLOYMENT_CI_ENV_BYTES = 4 * 1024;
+export const deploymentCiEnvSchema = yupRecord(
+  yupString().matches(DEPLOYMENT_CI_ENV_VAR_KEY_REGEX, "ci_env keys must be CI variable names: CI_ followed by upper-case letters, digits and underscores"),
+  yupString().defined(),
+).test(
+  "ci-env-within-size-limit",
+  `ci_env may be at most ${MAX_DEPLOYMENT_CI_ENV_BYTES} bytes in total (keys plus values)`,
+  (value: Record<string, string> | undefined) => {
+    if (value === undefined) return true;
+    let total = 0;
+    for (const [key, entry] of Object.entries(value)) {
+      // Measured in UTF-8 rather than UTF-16 code units: this bounds what
+      // travels to the runtime and onto the builder machine, which is bytes.
+      total += Buffer.byteLength(key, "utf8") + Buffer.byteLength(String(entry), "utf8");
+    }
+    return total <= MAX_DEPLOYMENT_CI_ENV_BYTES;
+  },
+);
+
 export const deploymentServiceDefinitionSchema = yupObject({
   type: yupString().oneOf([...DEPLOYMENT_SERVICE_TYPES]).defined(),
   // Keyed by port NUMBER, exactly as the deploy file writes it. JSON object keys
@@ -849,12 +1294,12 @@ export const deploymentServiceDefinitionSchema = yupObject({
       return value === undefined || reservedStandardPortConflicts(value, (this.parent as { public?: boolean }).public === true).length === 0;
     }),
   // min is capped at the same MAX_INSTANCES_PER_SERVICE as max — an unbounded
-  // min would only ever fail downstream. On a "server" it is the SUSPEND switch
-  // rather than a fleet size:
-  // 1 (the default) keeps its single instance up, and 0 lets it suspend when idle and
-  // resume with its memory intact on the next connection.
+  // min would only ever fail downstream. On a "server" it is not a fleet size:
+  // 1 (the default) keeps its single instance up, and 0 is the Free-plan value.
+  // The runtime has no request-triggered suspend for a server, so 0 does not
+  // currently guarantee scale-to-zero billing.
   min_instances: yupNumber().integer().min(0).max(MAX_INSTANCES_PER_SERVICE).optional()
-    .test("server-is-single-instance-min", 'a "server" service holds a single instance, so min_instances must be 0 (suspend when idle) or 1 (always on) — use type "serverless" to scale out', function (value) {
+    .test("server-is-single-instance-min", 'a "server" service holds a single instance, so min_instances must be 0 or 1 — use type "serverless" to scale out', function (value) {
       return (this.parent as { type?: string }).type !== "server" || value === undefined || value === 0 || value === 1;
     }),
   max_instances: yupNumber().integer().min(1).max(MAX_INSTANCES_PER_SERVICE).optional()
@@ -868,6 +1313,21 @@ export const deploymentServiceDefinitionSchema = yupObject({
     })
     .test("server-is-single-instance", 'a "server" service is always a single instance, so max_instances must be 1 (use type "serverless" to scale out)', function (value) {
       return (this.parent as { type?: string }).type !== "server" || value === undefined || value === 1;
+    }),
+  // Only the rungs the service's own type offers: a "server" has no 512MB shape
+  // to run on, and each type's ladder stops where the plan entitlement does.
+  // Validated against `type` rather than against one flat list so the message
+  // names the sizes that are actually available to THIS service.
+  memory: yupString().oneOf([...DEPLOYMENT_MEMORY_SIZES]).optional()
+    .test("memory-is-available-for-type", "the memory size is not available for this service type", function (value) {
+      if (value === undefined) return true;
+      const type = (this.parent as { type?: DeploymentServiceType }).type;
+      // A missing/invalid type is its own error; do not add a second one that
+      // only says the size could not be checked.
+      if (type !== "server" && type !== "serverless") return true;
+      const available = deploymentMemorySizesForType(type);
+      if ((available as readonly string[]).includes(value)) return true;
+      return this.createError({ message: `memory ${JSON.stringify(value)} is not available for a ${JSON.stringify(type)} service — it can be ${available.join(", ")}` });
     }),
   root_directory: yupString().optional(),
   // Persistent disks, keyed by volume id. The rules here must be AT LEAST as
@@ -946,10 +1406,42 @@ export const deploymentServiceDefinitionSchema = yupObject({
       // author to guess which of a dozen rules they broke.
       return parsed.ok || this.createError({ message: parsed.message });
     })
-    .test("image-excludes-source-build", "a service either names an `image` to run or is built from your source with `root_directory`/`dockerfile_path` — it cannot do both", function (value) {
+    // `image` and `dockerfile_path` each name a BASE, so a service has at most
+    // one of them. `root_directory` is deliberately not in this rule any more:
+    // with a `build_command` the image is a base, the source is copied onto it,
+    // and the root directory is where that command runs.
+    .test("image-excludes-dockerfile-path", "a service is built from an `image` or from a `dockerfile_path`, not both — each of them says what the build starts from", function (value) {
       if (value === undefined) return true;
-      const parent = this.parent as { root_directory?: string, dockerfile_path?: string };
-      return parent.root_directory === undefined && parent.dockerfile_path === undefined;
+      return (this.parent as { dockerfile_path?: string }).dockerfile_path === undefined;
+    })
+    .test("image-without-build-excludes-root-directory", "a service that only runs an `image` is not built from your source, so it has no `root_directory` within it — add a `build_command` to build on top of the image, or drop `root_directory`", function (value) {
+      if (value === undefined) return true;
+      const parent = this.parent as { root_directory?: string, build_command?: string };
+      return parent.build_command !== undefined || parent.root_directory === undefined;
+    }),
+  // A single command line run through `/bin/sh -c` while the image is built.
+  // Selects the generated-Dockerfile path unless a `dockerfile_path` is set, in
+  // which case it is appended to the author's Dockerfile as a final `RUN`.
+  //
+  // The rules here must be AT LEAST as strict as Marshal's, which generates a
+  // Dockerfile line from this: a command that the runtime would refuse has to
+  // fail at sync time rather than after an upload has been consumed.
+  build_command: yupString().optional().max(MAX_DEPLOYMENT_COMMAND_LENGTH)
+    .test("valid-command", `build_command must be a single non-empty command line of at most ${MAX_DEPLOYMENT_COMMAND_LENGTH} characters, with no control characters (it becomes one \`RUN\` line of the built image — chain steps with \`&&\`)`, (value) =>
+      value === undefined || isValidDeploymentCommand(value)),
+  // A single command line run through `/bin/sh -c` as the container's process,
+  // instead of whatever the image would have started. Applied at run time, so it
+  // never causes a build.
+  start_command: yupString().optional().max(MAX_DEPLOYMENT_COMMAND_LENGTH)
+    .test("valid-command", `start_command must be a single non-empty command line of at most ${MAX_DEPLOYMENT_COMMAND_LENGTH} characters, with no control characters`, (value) =>
+      value === undefined || isValidDeploymentCommand(value))
+    // The Hexclave base image runs nothing on its own: a service built on it
+    // without a start command would deploy, start, and immediately exit. Caught
+    // here rather than at deploy time, where the upload has already been spent.
+    .test("base-image-build-needs-start-command", "a service with a `build_command` but no `image` or `dockerfile_path` is built on the Hexclave base image, which has no command of its own — add a `startCommand` saying how to run it", function (value) {
+      if (value !== undefined) return true;
+      const parent = this.parent as { image?: string, dockerfile_path?: string, build_command?: string };
+      return parent.build_command === undefined || parent.image !== undefined || parent.dockerfile_path !== undefined;
     }),
   // `devCommand` is a config-file-only field: `hexclave dev --service-id`
   // reads it straight out of the local deploy file, and the backend never acts
@@ -964,6 +1456,79 @@ export const deploymentServiceDefinitionSchema = yupObject({
     yupString().matches(DEPLOYMENT_ENV_VAR_KEY_REGEX, "deployment env var keys must start with a letter or underscore and contain only letters, digits, and underscores"),
     deploymentEnvVarSchema.defined(),
   ).defined(),
+});
+
+/**
+ * The `builder` a deploy file declares, alongside its services.
+ *
+ * Deliberately its own schema rather than a field of the service one: the
+ * builder is one machine per DEPLOYMENT, and the sync route stores it on the
+ * deployment source rather than on any service row.
+ */
+export const deploymentBuilderDefinitionSchema = yupObject({
+  memory: yupString().oneOf([...BUILDER_MEMORY_SIZES]).optional(),
+});
+
+import.meta.vitest?.test("memory sizes are per-type ladders with derivable megabytes", async ({ expect }) => {
+  const base = { ports: { "3000": { protocol: "http" } }, env: {} };
+  // Every rung of a type's own ladder is accepted.
+  for (const memory of SERVERLESS_MEMORY_SIZES) {
+    await expect(deploymentServiceDefinitionSchema.validate({ ...base, type: "serverless", memory }, { abortEarly: false })).resolves.toBeDefined();
+  }
+  for (const memory of SERVER_MEMORY_SIZES) {
+    await expect(deploymentServiceDefinitionSchema.validate({ ...base, type: "server", memory }, { abortEarly: false })).resolves.toBeDefined();
+  }
+  // The schema accepts the UNION of the runtimes' ladders (it does not know
+  // which runtime a definition is bound for); the runtime-specific check lives
+  // in the CLI and the sync route. A GCP server has no 512MB shape, which is
+  // what the per-runtime ladder says and the schema deliberately does not.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, type: "server", memory: "512MB",
+  }, { abortEarly: false })).resolves.toBeDefined();
+  expect(deploymentMemorySizesForType("server", "gcp")).not.toContain("512MB");
+  expect(deploymentMemorySizesForType("server", "fly")).toContain("512MB");
+  expect(defaultDeploymentMemoryForType("server", "gcp")).toBe("1GB");
+  expect(defaultDeploymentMemoryForType("server", "fly")).toBe("512MB");
+  expect(defaultDeploymentMemoryForType("serverless", "gcp")).toBe(defaultDeploymentMemoryForType("serverless", "fly"));
+  // Builder-only rungs are not service rungs: the ladders stop where the plan
+  // entitlement does, so a size nobody can deploy is never offered.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, type: "serverless", memory: "16GB",
+  }, { abortEarly: false })).rejects.toThrow(/memory/);
+  // Non-canonical spellings are values outside the ladder, not alternate names.
+  for (const memory of ["4gb", "4 GB", "4Gi", "4096MB", 4096]) {
+    await expect(deploymentServiceDefinitionSchema.validate({ ...base, type: "serverless", memory }, { abortEarly: false })).rejects.toThrow(/memory/);
+  }
+  // Absent stays absent: the default is applied downstream, not baked in here,
+  // so a definition that says nothing keeps hashing as it did before this field.
+  expect(await deploymentServiceDefinitionSchema.validate({ ...base, type: "serverless" }, { abortEarly: false }))
+    .not.toHaveProperty("memory");
+  // The builder ladder starts where the service ladders stop.
+  await expect(deploymentBuilderDefinitionSchema.validate({ memory: "32GB" })).resolves.toBeDefined();
+  await expect(deploymentBuilderDefinitionSchema.validate({ memory: "512MB" })).rejects.toThrow(/memory/);
+});
+
+import.meta.vitest?.test("memory tokens round-trip through megabytes, and near-misses are suggestible", ({ expect }) => {
+  for (const size of DEPLOYMENT_MEMORY_SIZES) {
+    expect(deploymentMemoryFromMb(deploymentMemoryToMb(size))).toBe(size);
+  }
+  // Every ladder entry is a real token, and the defaults are on their own ladder.
+  expect(deploymentMemorySizesForType("server")).toContain(defaultDeploymentMemoryForType("server"));
+  expect(deploymentMemorySizesForType("serverless")).toContain(defaultDeploymentMemoryForType("serverless"));
+  // A megabyte count off the ladder is "unset", never a rounded neighbour: a
+  // column written by a future version must not claim to be a size we run.
+  expect(deploymentMemoryFromMb(3072)).toBe(null);
+  expect(deploymentMemoryFromMb(0)).toBe(null);
+  // Suggestions recognise the spellings someone actually types first, including
+  // the binary suffixes of other container platforms. Recognising is not
+  // accepting — the schema above still refuses all of these.
+  expect(suggestDeploymentMemorySize("4gb")).toBe("4GB");
+  expect(suggestDeploymentMemorySize("4 GB")).toBe("4GB");
+  expect(suggestDeploymentMemorySize("4Gi")).toBe("4GB");
+  expect(suggestDeploymentMemorySize("4096MB")).toBe("4GB");
+  expect(suggestDeploymentMemorySize("512Mi")).toBe("512MB");
+  expect(suggestDeploymentMemorySize("3GB")).toBe(null);
+  expect(suggestDeploymentMemorySize("lots")).toBe(null);
 });
 
 import.meta.vitest?.test("deploymentServiceDefinitionSchema accepts all env var shapes", async ({ expect }) => {
@@ -1076,13 +1641,101 @@ import.meta.vitest?.test("deploymentServiceDefinitionSchema accepts an image ser
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: {}, image: "postgres", env: {},
   }, { abortEarly: false })).rejects.toThrow(/no tag or digest/);
-  // Either the image says what to run, or the source fields say what to build.
+  // An image with nothing built on top of it is not built from the source, so it
+  // has no directory within it.
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: {}, image: "postgres:16", root_directory: "./database", env: {},
-  }, { abortEarly: false })).rejects.toThrow(/cannot do both/);
+  }, { abortEarly: false })).rejects.toThrow(/has no `root_directory`/);
+  // `image` and `dockerfile_path` each name a base.
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: {}, image: "postgres:16", dockerfile_path: "Dockerfile", env: {},
-  }, { abortEarly: false })).rejects.toThrow(/cannot do both/);
+  }, { abortEarly: false })).rejects.toThrow(/not both/);
+});
+
+import.meta.vitest?.test("deploymentServiceDefinitionSchema accepts build and start commands, including on an image base", async ({ expect }) => {
+  // The generated-Dockerfile path: no base named, so the Hexclave base image is
+  // used and a start command is what makes it runnable.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    type: "serverless", ports: { "3000": { protocol: "http" } }, root_directory: "./web",
+    build_command: "pnpm install --frozen-lockfile && pnpm build",
+    start_command: "pnpm start",
+    env: {},
+  }, { abortEarly: false })).resolves.toMatchObject({ build_command: "pnpm install --frozen-lockfile && pnpm build", start_command: "pnpm start" });
+  // An image as a BASE: `root_directory` is meaningful again, because the source
+  // is copied onto it and the command runs there.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    type: "serverless", ports: { "3000": { protocol: "http" } },
+    image: "python:3.12-slim", root_directory: "./api", build_command: "pip install -r requirements.txt",
+    start_command: "python -m uvicorn main:app --host 0.0.0.0 --port 3000",
+    env: {},
+  }, { abortEarly: false })).resolves.toMatchObject({ image: "docker.io/library/python:3.12-slim", root_directory: "./api" });
+  // A start command alone never causes a build, so it is legal on a bare image.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    type: "server", ports: { "6379": { protocol: "tcp" } }, image: "redis:7-alpine",
+    start_command: "redis-server --appendonly yes", env: {},
+  }, { abortEarly: false })).resolves.toMatchObject({ start_command: "redis-server --appendonly yes" });
+  // A Dockerfile plus a build command appends to the author's build.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    type: "serverless", ports: { "3000": { protocol: "http" } }, dockerfile_path: "Dockerfile",
+    build_command: "npm run postbuild", env: {},
+  }, { abortEarly: false })).resolves.toMatchObject({ build_command: "npm run postbuild" });
+});
+
+import.meta.vitest?.test("deploymentServiceDefinitionSchema refuses commands it could not generate from", async ({ expect }) => {
+  const base = { type: "serverless" as const, ports: { "3000": { protocol: "http" } }, env: {} };
+  // A newline would be a second Dockerfile instruction, and a NUL cannot survive
+  // an argv entry — both are refused rather than escaped.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, build_command: "npm run build\nrm -rf /", start_command: "npm start",
+  }, { abortEarly: false })).rejects.toThrow(/build_command/);
+  await expect(deploymentServiceDefinitionSchema.validate({
+    // A TAB is the field separator of the manifest the builder reads, so it
+    // cannot reach the build either.
+    ...base, start_command: "npm\tstart",
+  }, { abortEarly: false })).rejects.toThrow(/start_command/);
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, build_command: "   ", start_command: "npm start",
+  }, { abortEarly: false })).rejects.toThrow(/build_command/);
+  // Not `abortEarly: false` here: an over-length command breaks BOTH the max and
+  // the shape rule, and an aggregated ValidationError reports only "2 errors
+  // occurred" rather than either message.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, start_command: "x".repeat(MAX_DEPLOYMENT_COMMAND_LENGTH + 1),
+  })).rejects.toThrow(/start_command/);
+  // The Hexclave base image has no command of its own.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, build_command: "npm run build",
+  }, { abortEarly: false })).rejects.toThrow(/no command of its own/);
+  // ...but a base that DOES (the author's image or Dockerfile) needs none.
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, build_command: "npm run build", image: "node:22-bookworm",
+  }, { abortEarly: false })).resolves.toBeDefined();
+  await expect(deploymentServiceDefinitionSchema.validate({
+    ...base, build_command: "npm run build", dockerfile_path: "Dockerfile",
+  }, { abortEarly: false })).resolves.toBeDefined();
+});
+
+import.meta.vitest?.test("deploymentServiceIsBuilt and deploymentServiceUsesGeneratedDockerfile agree on what each shape means", ({ expect }) => {
+  const built = (definition: Partial<DeploymentServiceDefinition>) => deploymentServiceIsBuilt(definition);
+  const generated = (definition: Partial<DeploymentServiceDefinition>) => deploymentServiceUsesGeneratedDockerfile(definition);
+  // Railpack auto-detection: built, but not from a generated Dockerfile.
+  expect([built({}), generated({})]).toEqual([true, false]);
+  // The author's Dockerfile owns the build, with or without an appended command.
+  expect([built({ dockerfile_path: "Dockerfile" }), generated({ dockerfile_path: "Dockerfile" })]).toEqual([true, false]);
+  expect(generated({ dockerfile_path: "Dockerfile", build_command: "make" })).toBe(false);
+  // A bare image is the one shape that is not built at all.
+  expect([built({ image: "postgres:16" }), generated({ image: "postgres:16" })]).toEqual([false, false]);
+  // ...and a start command does not change that: it is applied at run time.
+  expect(built({ image: "postgres:16", start_command: "postgres -c fsync=off" })).toBe(false);
+  // A build command turns the image into a base.
+  expect([built({ image: "node:22", build_command: "npm ci" }), generated({ image: "node:22", build_command: "npm ci" })]).toEqual([true, true]);
+  // With no base at all, a BUILD command selects the Hexclave base image...
+  expect(generated({ build_command: "npm ci" })).toBe(true);
+  // ...but a start command alone never changes how a service is built. Adding
+  // "run it this way" to a Railpack service must not silently throw away the
+  // install and compile that Railpack was doing for it.
+  expect(generated({ start_command: "node server.js" })).toBe(false);
+  expect(built({ start_command: "node server.js" })).toBe(true);
 });
 
 import.meta.vitest?.test("deploymentServiceDefinitionSchema requires explicit port protocols and defaults a service to private", async ({ expect }) => {
@@ -1239,15 +1892,22 @@ import.meta.vitest?.test("connection references round-trip, with and without a p
   }
 });
 
-import.meta.vitest?.test("only a public or unnamed port makes a url reference wait for its target", ({ expect }) => {
-  // A private port's URL is as deterministic as the hostname it is built from.
-  expect(connectionRequiresTargetDeployed("url", 5432, false)).toBe(false);
-  expect(connectionRequiresTargetDeployed("url", 3000, true)).toBe(true);
+import.meta.vitest?.test("which references wait for their target depends on the runtime", ({ expect }) => {
+  // Fly: a private port's URL is as deterministic as the hostname it is built from.
+  expect(connectionRequiresTargetDeployed("fly", "url", 5432, false)).toBe(false);
+  expect(connectionRequiresTargetDeployed("fly", "url", 3000, true)).toBe(true);
   // Unknown publicness (a target this deploy file cannot see) waits.
-  expect(connectionRequiresTargetDeployed("url", 3000, null)).toBe(true);
+  expect(connectionRequiresTargetDeployed("fly", "url", 3000, null)).toBe(true);
   // A bare url() has to read the target's ports to know which one it means.
-  expect(connectionRequiresTargetDeployed("url", null, false)).toBe(true);
-  expect(connectionRequiresTargetDeployed("hostname", null, null)).toBe(false);
+  expect(connectionRequiresTargetDeployed("fly", "url", null, false)).toBe(true);
+  expect(connectionRequiresTargetDeployed("fly", "hostname", null, null)).toBe(false);
+  // GCP: every service output is the target's runtime address, and nothing
+  // publishes one before the target exists.
+  expect(connectionRequiresTargetDeployed("gcp", "url", 5432, false)).toBe(true);
+  expect(connectionRequiresTargetDeployed("gcp", "hostname", null, null)).toBe(true);
+  // The managed service is not deployed by anyone, so its outputs never wait.
+  expect(connectionRequiresTargetDeployed("fly", "projectId", null, null)).toBe(false);
+  expect(connectionRequiresTargetDeployed("gcp", "projectId", null, null)).toBe(false);
 });
 
 import.meta.vitest?.test("deploymentServiceDefinitionSchema accepts a persistent volume on a server service", async ({ expect }) => {
@@ -1271,8 +1931,8 @@ import.meta.vitest?.test("deploymentServiceDefinitionSchema pins a server servic
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: { "3000": { protocol: "http" } }, max_instances: 2, env: {},
   }, { abortEarly: false })).rejects.toThrow(/max_instances must be 1/);
-  // 0 (suspend when idle) and 1 (stay up) are the only meanings a single
-  // instance can have; anything above is a fleet, which "server" is not.
+  // 0 and 1 are the only meanings a single instance can have; anything above
+  // is a fleet, which "server" is not.
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: { "3000": { protocol: "http" } }, min_instances: 1, env: {},
   }, { abortEarly: false })).resolves.toBeDefined();
@@ -1281,7 +1941,7 @@ import.meta.vitest?.test("deploymentServiceDefinitionSchema pins a server servic
   }, { abortEarly: false })).resolves.toBeDefined();
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "server", ports: { "3000": { protocol: "http" } }, min_instances: 2, env: {},
-  }, { abortEarly: false })).rejects.toThrow(/min_instances must be 0 \(suspend when idle\) or 1/);
+  }, { abortEarly: false })).rejects.toThrow(/min_instances must be 0 or 1/);
   // Serverless keeps the full range.
   await expect(deploymentServiceDefinitionSchema.validate({
     type: "serverless", ports: { "3000": { protocol: "http" } }, min_instances: 1, max_instances: 10, env: {},
@@ -1421,6 +2081,38 @@ import.meta.vitest?.test("deploymentSecretDefaultsSchema accepts env-var-keyed d
   }, { abortEarly: false })).rejects.toThrow(/env var keys/);
 });
 
+import.meta.vitest?.test("deploymentCiEnvSchema only accepts CI variable names", async ({ expect }) => {
+  await expect(deploymentCiEnvSchema.validate({
+    CI_COMMIT_SHA: "abc123",
+    CI_COMMIT_SHORT_SHA: "abc123de",
+  }, { abortEarly: false })).resolves.toEqual({ CI_COMMIT_SHA: "abc123", CI_COMMIT_SHORT_SHA: "abc123de" });
+  // The whole point of the namespace: a deploy cannot reach the injected
+  // credentials (or anything else the definition owns) through this field.
+  await expect(deploymentCiEnvSchema.validate({
+    HEXCLAVE_SECRET_SERVER_KEY: "ssk_evil",
+  }, { abortEarly: false })).rejects.toThrow(/CI variable names/);
+  await expect(deploymentCiEnvSchema.validate({
+    CI_lowercase: "x",
+  }, { abortEarly: false })).rejects.toThrow(/CI variable names/);
+  // Bare CI is excluded on purpose: it is the runtime's to set for the build,
+  // and accepting it here would let a caller send CI=false to switch that off.
+  await expect(deploymentCiEnvSchema.validate({
+    CI: "false",
+  }, { abortEarly: false })).rejects.toThrow(/CI variable names/);
+});
+
+import.meta.vitest?.test("deploymentCiEnvSchema bounds the whole field", async ({ expect }) => {
+  await expect(deploymentCiEnvSchema.validate({
+    CI_COMMIT_MESSAGE: "x".repeat(MAX_DEPLOYMENT_CI_ENV_BYTES),
+  }, { abortEarly: false })).rejects.toThrow(/at most/);
+  // Measured across every entry, not per value: many small vars must not add up
+  // to more than one large one is allowed to be.
+  await expect(deploymentCiEnvSchema.validate(
+    Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`CI_VAR_${index}`, "x".repeat(500)])),
+    { abortEarly: false },
+  )).rejects.toThrow(/at most/);
+});
+
 // Type-level check that the yup schema stays assignable to the hand-written
 // definition type (yup's InferType makes optional fields `| undefined`, which
 // matches under exactOptionalPropertyTypes only if the shapes agree).
@@ -1492,6 +2184,12 @@ import.meta.vitest?.test("sourceManifestEntriesForService slices the shared uplo
   expect(sourceManifestEntriesForService(manifest, "./web/").entries).toHaveLength(2);
   // A prefix must match a whole path SEGMENT: "web" is not "website".
   expect(sourceManifestEntriesForService(manifest, "webs").entries).toHaveLength(0);
+  // The prefix it filtered on comes back, so a caller showing paths relative to
+  // the service strips exactly what was matched.
+  expect(sourceManifestEntriesForService(manifest, "./web/").prefix).toBe("web/");
+  for (const root of [null, ".", "./", ""]) {
+    expect(sourceManifestEntriesForService(manifest, root).prefix).toBe("");
+  }
 });
 
 import.meta.vitest?.test("sourceManifestEntriesForService reports truncation as the manifest's, not the slice's", ({ expect }) => {

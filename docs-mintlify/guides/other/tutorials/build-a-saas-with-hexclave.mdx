@@ -9,7 +9,7 @@ This tutorial is a **generic SaaS path** on Hexclave: install and configure the 
 
 - A working sign-in and account flow using Hexclave's handler routes (Next.js) or your framework’s equivalent.
 - A clear pattern for **who** is signed in across server components, client components, server actions, and route handlers.
-- **Protected** areas of your app (for example middleware on `/app/*` or `getUser({ or: "redirect" })` on key routes).
+- **Protected** areas of your app (for example middleware on `/app/*` or `getUser({ or: "throw" })` on key server routes).
 - A short map for **where** multi-tenant and authorization work fits when you need it, plus a mindset for **production** domains, OAuth, and email.
 
 ## Prerequisites
@@ -165,7 +165,7 @@ Almost every SaaS screen starts from the **current user**: profile, preferences,
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function AppHomePage() {
-      const user = await hexclaveServerApp.getUser({ or: "redirect" });
+      const user = await hexclaveServerApp.getUser({ or: "throw" });
       return <p>Hello, {user.displayName ?? user.primaryEmail ?? user.id}</p>;
     }
     ```

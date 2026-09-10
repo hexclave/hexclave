@@ -137,6 +137,7 @@ export const POST = createSmartRouteHandler({
           signUpRuleOptions: buildSignUpRuleOptions({
             authMethod: 'oauth',
             oauthProvider: 'apple',
+            oauthAccountCreatedAtMillis: null,
             requestContext,
             turnstileAssessment: isBotChallengeDisabled()
               ? getDisabledBotChallengeAssessment()

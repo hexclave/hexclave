@@ -79,20 +79,11 @@ const config = {
           "0%": { opacity: "0" },
           "100%": { opacity: "1" },
         },
-        // Wrong-answer feedback in the Growth Games quiz. Small (4px) and short, so it reads as a
-        // "no" rather than as the page breaking; the component skips it entirely under
-        // prefers-reduced-motion, where the red ring and X marker carry the same verdict.
-        quizShake: {
-          "0%, 100%": { transform: "translateX(0)" },
-          "20%, 60%": { transform: "translateX(-4px)" },
-          "40%, 80%": { transform: "translateX(4px)" },
-        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
         "fade-in": "fadeIn 0.3s ease-in-out forwards",
-        "quiz-shake": "quizShake 0.18s ease-in-out 1",
       },
     },
   },

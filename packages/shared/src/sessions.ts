@@ -190,9 +190,15 @@ export class InternalSession {
 
     const accessToken = this.getAccessTokenIfNotExpiredYet(minMillisUntilExpiration, maxMillisSinceIssued);
     if (!accessToken) {
-      const newTokens = await this.fetchNewTokens();
+      let newTokens = await this.fetchNewTokens();
+      let issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
+      if (maxMillisSinceIssued !== null && issuedMillisAgo !== undefined && issuedMillisAgo > maxMillisSinceIssued) {
+        // The process may have been suspended after the server issued the token but before this code resumed.
+        // Retry once so an otherwise healthy session does not fail because of that scheduling delay.
+        newTokens = await this.fetchNewTokens();
+        issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
+      }
       const expiresInMillis = newTokens?.accessToken.expiresInMillis;
-      const issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
       if (expiresInMillis !== undefined && expiresInMillis < minMillisUntilExpiration) {
         throw new HexclaveAssertionError(`Required access token expiry ${minMillisUntilExpiration}ms is too long; access tokens are too short when they're generated (${expiresInMillis}ms)`);
       }
@@ -321,16 +327,24 @@ export class InternalSession {
   }
 
   private _refreshAndSetRefreshPromise(refreshToken: RefreshToken) {
-    let refreshPromise: Promise<AccessToken | null> = this._options.refreshAccessTokenCallback(refreshToken).then((accessToken) => {
-      if (refreshPromise === this._refreshPromise) {
-        this._refreshPromise = null;
-        this._accessToken.set(accessToken);
-        if (!accessToken) {
-          this.markInvalid();
+    let refreshPromise: Promise<AccessToken | null> = this._options.refreshAccessTokenCallback(refreshToken)
+      .then((accessToken) => {
+        if (refreshPromise === this._refreshPromise) {
+          this._refreshPromise = null;
+          this._accessToken.set(accessToken);
+          if (!accessToken) {
+            this.markInvalid();
+          }
         }
-      }
-      return accessToken;
-    });
+        return accessToken;
+      })
+      .finally(() => {
+        // A failed refresh must not poison this session permanently. Fulfilled refreshes clear the promise above
+        // before notifying listeners, while this also covers rejection without changing that listener ordering.
+        if (refreshPromise === this._refreshPromise) {
+          this._refreshPromise = null;
+        }
+      });
     this._refreshPromise = refreshPromise;
   }
 }

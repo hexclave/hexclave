@@ -4,16 +4,17 @@ import { Link } from "@/components/link";
 import { ProjectCard } from "@/components/project-card";
 import { useRouter } from "@/components/router";
 import { SearchBar } from "@/components/search-bar";
-import { DesignAlert, DesignBadge, DesignButton, DesignDialog, DesignInput } from "@/components/design-components";
+import { DesignAlert, DesignBadge, DesignButton, DesignCard, DesignDialog, DesignInput } from "@/components/design-components";
 import { Button, Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue, Skeleton, Typography, toast } from "@/components/ui";
 import { getPublicEnvVar } from "@/lib/env";
 import { hexclaveAppInternalsSymbol } from "@/lib/hexclave-app-internals";
-import { FileCode, GearIcon, UserPlusIcon } from "@phosphor-icons/react";
+import { ArrowSquareOutIcon, FileCode, GearIcon, UserPlusIcon } from "@phosphor-icons/react";
 import { AdminOwnedProject, Team, useStackApp, useUser } from "@hexclave/next";
 import { isPaidPlan } from "@hexclave/shared/dist/plans";
 import { projectOnboardingStatusValues, strictEmailSchema, yupObject, type ProjectOnboardingStatus } from "@hexclave/shared/dist/schema-fields";
 import { groupBy } from "@hexclave/shared/dist/utils/arrays";
 import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import type { ReadonlyJson } from "@hexclave/shared/dist/utils/json";
 import { runAsynchronously, runAsynchronouslyWithAlert, wait } from "@hexclave/shared/dist/utils/promises";
 import { useQueryState } from "@hexclave/shared/dist/utils/react";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
@@ -30,6 +31,8 @@ type HexclaveAppInternals = {
 };
 
 const PROJECT_ONBOARDING_STATUSES = projectOnboardingStatusValues;
+const NEW_DASHBOARD_URL = "https://hexclave.com/projects";
+const NEW_DASHBOARD_BANNER_START = new Date("2026-09-10T00:00:00-07:00");
 
 function isStackAppInternals(value: unknown): value is HexclaveAppInternals {
   return (
@@ -57,6 +60,32 @@ function getStackAppInternals(appValue: unknown): HexclaveAppInternals {
 
 function isProjectOnboardingStatus(value: unknown): value is ProjectOnboardingStatus {
   return typeof value === "string" && PROJECT_ONBOARDING_STATUSES.some((status) => status === value);
+}
+
+type ReadonlyJsonObject = { readonly [key: string]: ReadonlyJson };
+
+function isReadonlyJsonObject(value: ReadonlyJson): value is ReadonlyJsonObject {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function getClientMetadataWithNewDashboardPreference(clientMetadata: ReadonlyJson | undefined): ReadonlyJsonObject {
+  if (clientMetadata == null) {
+    return { prefersNewDashboard: true };
+  }
+  if (!isReadonlyJsonObject(clientMetadata)) {
+    throw new Error("The current user's client metadata must be a JSON object before setting the dashboard preference.");
+  }
+  return {
+    ...clientMetadata,
+    prefersNewDashboard: true,
+  };
+}
+
+async function setNewDashboardPreference(
+  clientMetadata: ReadonlyJson | undefined,
+  updateClientMetadata: (clientMetadata: ReadonlyJsonObject) => Promise<void>,
+) {
+  await updateClientMetadata(getClientMetadataWithNewDashboardPreference(clientMetadata));
 }
 
 export default function PageClient() {
@@ -188,6 +217,13 @@ function RdeProjectsListPage() {
 
   return (
     <div className="flex-grow p-4">
+      <NewDashboardBanner
+        onTryNewDashboard={() => setNewDashboardPreference(
+          user.clientMetadata,
+          async (clientMetadata) => await user.update({ clientMetadata }),
+        )}
+      />
+
       <div className="mb-5 space-y-2">
         <Typography type="h2" className="text-xl font-semibold tracking-tight">
           Local config files
@@ -272,7 +308,30 @@ function ProjectsListPage() {
   const [projectDailySignups, setProjectDailySignups] = useState<Map<string, { date: string, activity: number }[]>>(new Map());
   const [loadingProjectMetrics, setLoadingProjectMetrics] = useState(true);
   const [projectMetricsError, setProjectMetricsError] = useState(false);
+  const [showNewDashboardBanner, setShowNewDashboardBanner] = useState(process.env.NODE_ENV === "development");
   const router = useRouter();
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === "development") {
+      return;
+    }
+
+    const delay = NEW_DASHBOARD_BANNER_START.getTime() - new Date().getTime();
+    if (delay <= 0) {
+      setShowNewDashboardBanner(true);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => setShowNewDashboardBanner(true), delay);
+    return () => window.clearTimeout(timeout);
+  }, []);
+
+  const saveNewDashboardPreference = async () => {
+    await setNewDashboardPreference(
+      user.clientMetadata,
+      async (clientMetadata) => await user.update({ clientMetadata }),
+    );
+  };
 
   useEffect(() => {
     if (rawProjects.length === 0 && !isRemoteDevelopmentEnvironment) {
@@ -430,6 +489,8 @@ function ProjectsListPage() {
 
   return (
     <div className="flex-grow p-4">
+      {showNewDashboardBanner && <NewDashboardBanner onTryNewDashboard={saveNewDashboardPreference} />}
+
       <div className="flex justify-between gap-4 mb-4 flex-col sm:flex-row">
         <SearchBar
           placeholder="Search project name"
@@ -502,6 +563,90 @@ function ProjectsListPage() {
         );
       })}
     </div>
+  );
+}
+
+function NewDashboardBanner(props: { onTryNewDashboard: () => Promise<void> }) {
+  return (
+    <DesignCard
+      glassmorphic={false}
+      contentClassName="p-0"
+      className="relative mb-4 overflow-hidden rounded-2xl border border-cyan-300/25 bg-[#071326] text-white shadow-[0_20px_70px_-35px_rgba(14,165,233,0.75)] dark:border-blue-200/70 dark:bg-[#dbeafe] dark:text-slate-950 dark:shadow-[0_16px_60px_-25px_rgba(56,189,248,0.85)]"
+    >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 opacity-80 dark:hidden"
+        style={{
+          backgroundImage: [
+            "radial-gradient(circle at 78% 28%, rgba(14, 165, 233, 0.38), transparent 18%)",
+            "radial-gradient(circle at 58% 110%, rgba(37, 99, 235, 0.34), transparent 38%)",
+            "radial-gradient(circle, rgba(255, 255, 255, 0.65) 1px, transparent 1px)",
+          ].join(", "),
+          backgroundSize: "auto, auto, 37px 37px",
+        }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 hidden dark:block"
+        style={{
+          backgroundImage: [
+            "radial-gradient(circle at 78% 28%, rgba(14, 165, 233, 0.32), transparent 20%)",
+            "radial-gradient(circle at 58% 115%, rgba(37, 99, 235, 0.22), transparent 42%)",
+            "radial-gradient(circle, rgba(15, 23, 42, 0.2) 1px, transparent 1px)",
+          ].join(", "),
+          backgroundSize: "auto, auto, 37px 37px",
+        }}
+      />
+      <div aria-hidden="true" className="pointer-events-none absolute -right-10 top-1/2 hidden h-56 w-80 -translate-y-1/2 opacity-70 sm:block">
+        <svg viewBox="0 0 320 224" className="h-full w-full" fill="none">
+          <path d="M159 31 194 51v40l-35 20-35-20V51l35-20Z" stroke="rgb(34 211 238 / 0.45)" />
+          <path d="m235 78 26 15v30l-26 15-26-15V93l26-15Z" stroke="rgb(96 165 250 / 0.35)" />
+          <path d="m83 101 25 14v29l-25 15-25-15v-29l25-14Z" stroke="rgb(96 165 250 / 0.3)" />
+          <path d="m159 111 43 25v49l-43 25-43-25v-49l43-25Z" stroke="rgb(34 211 238 / 0.3)" />
+          <path d="M108 130h8M202 151h33M194 71h41" stroke="rgb(34 211 238 / 0.45)" strokeDasharray="2 5" />
+          <circle cx="159" cy="71" r="4" fill="rgb(34 211 238)" />
+          <circle cx="235" cy="108" r="3" fill="rgb(96 165 250)" />
+          <circle cx="159" cy="160" r="5" fill="rgb(34 211 238 / 0.8)" />
+        </svg>
+      </div>
+
+      <div className="relative flex flex-col items-start gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:gap-8 sm:px-6">
+        <div className="max-w-2xl">
+          <Typography type="h2" className="text-xl font-semibold tracking-tight text-white dark:text-slate-950 sm:text-2xl">
+            Meet the new Hexclave dashboard
+          </Typography>
+          <Typography className="mt-1.5 max-w-xl text-sm leading-relaxed text-slate-300 dark:text-slate-700">
+            The dashboard you&apos;re using will remain available at{" "}
+            <a
+              href="https://app.hexclave.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-white underline decoration-white/40 underline-offset-2 transition-colors duration-150 hover:text-cyan-200 hover:transition-none dark:text-slate-950 dark:decoration-slate-950/40 dark:hover:text-blue-700"
+            >
+              app.hexclave.com
+            </a>
+            .
+          </Typography>
+        </div>
+
+        <DesignButton
+          asChild
+          variant="plain"
+          className="z-10 shrink-0 rounded-full bg-white px-5 text-slate-950 shadow-[0_0_28px_-8px_rgba(125,211,252,0.9)] transition-colors duration-150 hover:bg-cyan-50 hover:transition-none dark:bg-slate-950 dark:text-white dark:hover:bg-blue-950"
+          onClick={props.onTryNewDashboard}
+        >
+          <a
+            href={NEW_DASHBOARD_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2"
+          >
+            Try the new dashboard
+            <ArrowSquareOutIcon className="h-4 w-4" weight="bold" />
+          </a>
+        </DesignButton>
+      </div>
+    </DesignCard>
   );
 }
 

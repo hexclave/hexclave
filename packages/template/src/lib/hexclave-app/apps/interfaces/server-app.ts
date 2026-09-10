@@ -53,6 +53,12 @@ export type StackServerApp<HasTokenStore extends boolean = boolean, ProjectId ex
     useUser(options: { from: "convex", ctx: GenericQueryCtx<any>, or?: "return-null" | "anonymous" }): ServerUser | null,
     // END_PLATFORM
 
+    /**
+     * @deprecated Whether an app object has server permissions does not determine whether this
+     * call runs in a browser, so an async read should not implicitly choose a navigation strategy.
+     * In React, use useUser({ or: "redirect" }). Otherwise, call getUser() and explicitly invoke
+     * redirectToSignIn() from browser code when it returns null.
+     */
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'redirect' }): Promise<ProjectCurrentServerUser<ProjectId>>,
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'throw' }): Promise<ProjectCurrentServerUser<ProjectId>>,
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'anonymous' }): Promise<ProjectCurrentServerUser<ProjectId>>,

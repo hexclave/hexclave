@@ -17,63 +17,27 @@ If you are still wiring Stack into your app, complete [Build a SaaS with Hexclav
 
 ## 1. Protect a page (and know what that actually guarantees)
 
-You typically combine **one or more** of:
+Use `useUser({ or: "redirect" })` in a Client Component. This lets Hexclave capture the current
+browser URL and establish the PKCE handoff before navigating to hosted authentication.
 
-1. **Middleware** — cheap gate when the URL alone tells you the area is private (for example everything under `/app`).
-2. **Server Components / server loaders** — `await hexclaveServerApp.getUser({ or: "redirect" })` (or handle `null`) on the route that renders sensitive UI.
-3. **Client Components** — `useUser({ or: "redirect" })` for UX; **never** the only layer for authorization.
+```tsx title="app/app/dashboard/page.tsx"
+"use client";
 
-<Tabs>
-  <Tab title="Middleware (route prefix)">
-    ```tsx title="middleware.ts"
-    import { NextRequest, NextResponse } from "next/server";
-    import { hexclaveServerApp } from "@/hexclave/server";
+import { useUser } from "@hexclave/next";
 
-    export async function middleware(request: NextRequest) {
-      const user = await hexclaveServerApp.getUser();
-      if (!user) {
-        return NextResponse.redirect(new URL("/handler/sign-in", request.url));
-      }
-      return NextResponse.next();
-    }
+export default function DashboardPage() {
+  const user = useUser({ or: "redirect" });
+  return <h1>Welcome, {user.displayName ?? user.primaryEmail ?? user.id}</h1>;
+}
+```
 
-    export const config = {
-      matcher: "/app/:path*",
-    };
-    ```
-
-    Match **only** prefixes that should be gated. Do **not** blanket-match `/` or you can block static assets and Stack’s **`/handler`** routes (sign-in, sign-up, callbacks).
-
-    If your project uses hosted components or cross-domain auth, prefer protecting pages with `hexclaveServerApp.getUser({ or: "redirect" })` in a Server Component. Middleware cannot run the runtime `redirectToSignIn()` helper, so only hard-code `/handler/sign-in` here when your app owns a same-domain handler route.
-  </Tab>
-  <Tab title="Server Component">
-    ```tsx title="app/app/dashboard/page.tsx"
-    import { hexclaveServerApp } from "@/hexclave/server";
-
-    export default async function DashboardPage() {
-      await hexclaveServerApp.getUser({ or: "redirect" });
-      return <h1>Dashboard</h1>;
-    }
-    ```
-  </Tab>
-  <Tab title="Client Component (UX gate)">
-    ```tsx title="app/app/settings/client-gate.tsx"
-    "use client";
-
-    import { useUser } from "@hexclave/next";
-
-    export function SettingsGate({ children }: { children: React.ReactNode }) {
-      useUser({ or: "redirect" });
-      return <>{children}</>;
-    }
-    ```
-  </Tab>
-</Tabs>
+This is a navigation and UX gate, not authorization for sensitive operations. Enforce those checks
+again in the server action, route handler, or backend that reads or mutates protected data.
 
 ### `redirect` vs `throw`
 
-- **`{ or: "redirect" }`** — use when a browser navigation is appropriate (pages, most Server Components).
-- **`{ or: "throw" }`** — use in **server actions**, **route handlers**, and other places where redirecting would be wrong; map errors to `401`/`403` responses yourself.
+- **`{ or: "redirect" }`** — use with `useUser`. The `getUser` overload is deprecated on both client and server app objects because app type describes permissions, not whether the call runs in a browser.
+- **`{ or: "throw" }`** — use in server actions, route handlers, and other places where navigation is not the server code's responsibility; map errors to `401`/`403` responses yourself.
 
 ```tsx title="app/api/me/route.ts"
 import { hexclaveServerApp } from "@/hexclave/server";
@@ -89,18 +53,16 @@ export async function GET() {
 }
 ```
 
-### Sensitive content and Next.js composition
+### Sensitive content and client-side rendering
 
-Authentication prevents **impersonation**, but **HTML composition** still matters:
-
-- **Client Components** ship to the browser; gating with hooks does not hide their bundled code.
-- **Server Components**: a protected parent does **not** guarantee an unprotected child (or an unprotected segment under a layout) never reaches the client. Anything that embeds **secrets or PII** should **itself** call `getUser({ or: "redirect" })` / `getUser({ or: "throw" })` (or otherwise avoid rendering that data when unauthenticated).
-- **Middleware**: on **Next.js 15.2.3+**, middleware-only protection does not leak unprotected server-rendered fragments the way older versions could; still treat **authorization** (who may perform an action) as a **server** concern.
+Client Components ship to the browser. Gating one with `useUser` controls navigation, but does not
+hide its bundled code or authorize protected backend operations. Keep secrets out of client code and
+enforce access in the server action, route handler, or backend serving the data.
 
 Read the full discussion in [User fundamentals — Protecting a page](/guides/getting-started/user-fundamentals#protecting-a-page).
 
 <Info>
-  Treat **client-side** checks as **UX only**. Anything that mutates data or exposes another customer’s data must be enforced on the server (Server Components, server actions, route handlers, or your backend with the **secret server key** or validated tokens). For team-scoped apps, re-check [RBAC](/guides/apps/rbac/overview) on the server, not only with `usePermission`.
+  Treat **client-side** checks as **UX only**. Anything that mutates data or exposes another customer’s data must be enforced in server actions, route handlers, or your backend with the **secret server key** or validated tokens. For team-scoped apps, re-check [RBAC](/guides/apps/rbac/overview) on the server, not only with `usePermission`.
 </Info>
 
 ## 2. Secrets, keys, and environments

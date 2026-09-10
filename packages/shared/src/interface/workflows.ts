@@ -187,6 +187,8 @@ export type WorkflowRunDetailsJson = WorkflowRunJson & {
 // ─── Workflows / versions ──────────────────────────────────────────────────
 
 export type WorkflowStatsJson = {
+  /** Number of retained runs available in the workflow's run history. */
+  total_runs: number,
   active_runs: number,
   sleeping_runs: number,
   failed_7d: number,

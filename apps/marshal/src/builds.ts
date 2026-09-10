@@ -1,8 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { BUILDER_GUEST, BUILDER_IMAGE, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, RAILPACK_BUILDER_GUEST, RAILPACK_BUILDKIT_TMPFS_SIZE, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, getConfig, resolveNamespaceOrg } from "./config.js";
-import { flyClientForNamespaceOrg } from "./fly/client.js";
-import { builderAppName, builderNetworkName } from "./naming.js";
-import { presignValidatedUploadGet } from "./store.js";
+import { BASE_IMAGE, BASE_IMAGE_WORKDIR, getConfig } from "./config.js";
 import type { ReconciliationLeaseGuard } from "./reconciliation-lock.js";
 import type { EnvValue } from "./types.js";
 
@@ -20,27 +17,133 @@ export function buildCompletionPath(deploymentId: string): string {
 // Builders start a build for an uploaded source tarball; completion always flows through
 // the webhook path (POST /internal/deployments/:deploymentId/complete →
 // services.completeBuild), so the two implementations stay behaviorally identical:
-//  - fly:  ephemeral per-build Machine running BuildKit; the machine calls the webhook.
+//  - fly:  ephemeral per-build Fly Machine running BuildKit (fly/provider.ts).
+//  - gcp:  ephemeral per-build Compute Engine VM running BuildKit (gcp/provider.ts).
+//          Either one calls the webhook.
 //  - mock: dev/e2e only; "completes" in-process on the next tick with a deterministic
-//          fake digest (the fly-mock accepts any image ref).
+//          fake digest.
 
 // One image to build within a deployment's single builder machine.
 export type BuildTarget = {
   serviceKey: string,
-  // Where to push the built image: the service's own Fly app repository.
+  // Where to push the built image in the tenant's Artifact Registry repository.
   pushTarget: string,
-  // Upload-root-relative Dockerfile to build from; null = Railpack auto-detection.
+  // Upload-root-relative Dockerfile to build from; null = Railpack
+  // auto-detection, unless `baseImage` selects a generated Dockerfile instead.
   dockerfilePath: string | null,
   // Where detection starts, relative to the upload root. The build CONTEXT is
   // always the whole upload — a monorepo service usually has to reach shared
   // code above its own directory — so this only narrows where the builder looks
   // for a build to infer, never what it can COPY.
   rootDirectory: string | null,
+  // Set when this target is built from a GENERATED Dockerfile: the image that
+  // Dockerfile starts FROM, which is either the author's own `image` (a
+  // build command turns it from the thing to run into the thing to build on) or
+  // Marshal's BASE_IMAGE. Null for the Dockerfile and Railpack paths.
+  //
+  // Decided by the caller rather than re-derived here, so the rule that says
+  // which of the three build kinds a target is lives in exactly one place.
+  baseImage: string | null,
+  // A single command line to run while the image is built; null = none.
+  // Guaranteed by validateDeploymentRequest to be one line with no control
+  // characters, which is what lets it be written into a Dockerfile at all.
+  buildCommand: string | null,
   // The tenant env THIS target's build gets to see (buildTimeEnv of its spec).
   // Per target rather than per build: one machine builds them all, but a value
   // belonging to one service must not end up inlined into another's image.
   buildEnv: Record<string, string>,
 };
+
+/**
+ * The Dockerfile Marshal generates for one target, or the lines it appends to
+ * the author's own — the whole difference being whether the target names a base
+ * image or a Dockerfile.
+ *
+ * Generated HERE, in TypeScript, rather than assembled by the /bin/sh harness:
+ * the harness has no JSON, no quoting primitives worth the name, and reads its
+ * per-target inputs out of a tab-separated manifest that a command containing a
+ * tab or a newline would break. Building the file here and injecting it through
+ * the machine `files` API keeps every value out of shell entirely.
+ *
+ * Returns null when the target needs neither (a plain Dockerfile or Railpack
+ * build with no build command).
+ */
+export function generatedDockerfile(target: BuildTarget): { path: "Dockerfile" | "suffix", contents: string } | null {
+  const runLine = target.buildCommand === null
+    ? null
+    // EXEC form, with the command JSON-encoded: shell form would make the
+    // command a line of a Dockerfile, where a trailing backslash continues onto
+    // the next instruction and a `#` at the start is a comment. JSON.stringify
+    // is the encoder for exactly this, and the `sh -c` wrapper is what keeps
+    // `&&`, pipes and `$VAR` expansion working inside it. Build args still reach
+    // it: BuildKit exposes them to the RUN as environment variables regardless
+    // of which form the instruction uses.
+    : `RUN ["/bin/sh", "-c", ${JSON.stringify(target.buildCommand)}]`;
+  // A build ARG per build-visible env var, which is how the values reach the
+  // command: `--opt build-arg:KEY=value` reaches a stage ONLY if that stage
+  // declares `ARG KEY`, and BuildKit then exposes it to the RUN as an
+  // environment variable. Declaring them here is therefore what makes "every env
+  // var is available to your build command, exactly as in a Railpack build"
+  // true — on the appended path especially, where the author's own Dockerfile
+  // has no reason to have declared Hexclave's variables.
+  //
+  // Sorted so two builds of one target generate byte-identical Dockerfiles, and
+  // so a layer cache (a future builder that has one) is not missed over key
+  // order. The keys are already constrained to /^[A-Za-z_][A-Za-z0-9_]*$/, which
+  // is why they can be written unquoted. Re-declaring one the author already
+  // declared is harmless: it re-scopes the same value.
+  const argLines = Object.keys(target.buildEnv).sort().map((key) => `ARG ${key}`);
+  if (target.baseImage === null) {
+    // The author's Dockerfile describes a complete build already, so nothing is
+    // copied in that it did not copy itself; the command is simply the last
+    // thing that runs, in whatever WORKDIR and as whatever USER the Dockerfile
+    // left behind.
+    //
+    // The leading newline is load-bearing: the harness concatenates this onto a
+    // file that is not guaranteed to end in one, and without it the appended RUN
+    // would glue itself to the author's last instruction.
+    return runLine === null ? null : { path: "suffix", contents: `\n${[...argLines, runLine].join("\n")}\n` };
+  }
+  // The runtime's own base image ships node, npm, yarn and corepack, but NOT a
+  // pnpm binary — corepack only installs the shims when told to. One line here is
+  // what makes "pnpm is preinstalled" true, and it respects a `packageManager`
+  // field if the project has one.
+  //
+  // Only for OUR base: an author's own image is not ours to assume anything
+  // about, and `corepack enable` on an image without corepack would fail the
+  // build before their command ever ran.
+  const setupLines = target.baseImage === BASE_IMAGE ? ["RUN corepack enable"] : [];
+  // COPY before WORKDIR: the copy targets the whole upload root, and the WORKDIR
+  // is where the command runs INSIDE it. A rootDirectory of "." (or none) leaves
+  // the working directory at the root itself.
+  //
+  // The `$` is ESCAPED: a Dockerfile expands variables in a WORKDIR path, and the
+  // ARG lines above put every build-visible name in scope — so a real directory
+  // named `apps/$APP` (legal on disk, and accepted by every path check on the way
+  // here) would otherwise expand to something else, or to nothing.
+  const workdir = target.rootDirectory === null || target.rootDirectory === "." || target.rootDirectory === ""
+    ? BASE_IMAGE_WORKDIR
+    : `${BASE_IMAGE_WORKDIR}/${target.rootDirectory.replaceAll("$", "\\$")}`;
+  return {
+    path: "Dockerfile",
+    contents: [
+      `FROM ${target.baseImage}`,
+      ...setupLines,
+      ...argLines,
+      // The whole upload, not just the service's own directory: a monorepo
+      // service usually has to reach shared code above it, which is the same
+      // reason the build CONTEXT is the whole upload on every other path.
+      `COPY . ${BASE_IMAGE_WORKDIR}`,
+      `WORKDIR ${workdir}`,
+      ...(runLine === null ? [] : [runLine]),
+      // Deliberately no CMD. The start command is machine configuration, applied
+      // by the runtime as the machine's init — so an image built here starts
+      // whatever its BASE started, and a base with nothing to start is exactly
+      // why a start command is required on that path.
+      "",
+    ].join("\n"),
+  };
+}
 
 export type StartBuildOptions = {
   ns: string,
@@ -51,6 +154,10 @@ export type StartBuildOptions = {
   // Built in this order, in ONE machine. The first failure aborts the rest: the
   // whole deployment fails, so there is no half-built cluster to salvage.
   targets: BuildTarget[],
+  // The builder size the deployment asked for, or null to let the build shape
+  // decide. One value per build, because there is one machine — see
+  // builderMachineFor, which also applies the floor this must not skip.
+  builderMemoryMb: number | null,
 };
 
 // ONE env channel, Vercel-style: every declared env var goes to both the build and the
@@ -64,7 +171,13 @@ export type StartBuildOptions = {
 // rolled out yet, so at build time there is nothing to resolve it to. Nothing to flag or
 // reject — it simply isn't there.
 export function buildTimeEnv(env: Record<string, EnvValue>): Record<string, string> {
-  const entries: [string, string][] = [];
+  // CI=true is what every package manager, test runner and framework reads to
+  // decide it is not talking to a human: no progress spinners, no interactive
+  // prompts, no "run this again with --fix" offers. It is set here rather than
+  // on the spec because it is only ever true of the BUILD — the service this
+  // produces then runs as an ordinary process, not as a CI job. First in the
+  // list, so a service that declares its own CI still wins.
+  const entries: [string, string][] = [["CI", "true"]];
   for (const [key, value] of Object.entries(env)) {
     if ("value" in value) entries.push([key, value.value]);
   }
@@ -97,8 +210,8 @@ export function verifyWebhookToken(token: string, deploymentId: string, ns: stri
   return provided.length === wanted.length && timingSafeEqual(provided, wanted);
 }
 
-// The harness: BuildKit plus a small shell wrapper, injected via the machine `files` API.
-// Its stdout doubles as the live build log (Fly logs API). The machine's env block carries
+// The harness: BuildKit plus a small shell wrapper, injected through VM metadata.
+// Its stdout doubles as the live build log (Compute Engine serial output). The VM env block carries
 // only Marshal's own credentials (tarball URL, registry auth, webhook callback) — the
 // TENANT's env arrives as files instead, one per var under $BUILD_ENV_DIR, so that a value
 // can never be confused with a credential and `env` in a log dump stays free of both.
@@ -142,14 +255,15 @@ echo "MARSHAL_BUILD_START"
 #    RAILPACK_BUILDER_GUEST). Undersized, this is what an 8g guest with a 6g tmpfs died of:
 #    the store filled and a large "next build" hit ENOSPC, and a hungrier one is OOM-killed
 #    at ~1.3g RSS while the kernel holds ~6g of snapshots it cannot reclaim.
-#  - the ext4 device Fly backs the rootfs overlay with, which it also mounts at
-#    $BUILDKIT_DISK_DIR. A real filesystem and a legal upperdir, costing no RAM — but real-Fly
-#    QA measured a pnpm install of ~1.1g of node_modules taking 404s there against ~40s on
-#    tmpfs, enough on its own to blow BUILD_TIMEOUT_SECONDS. Hence second, not first.
+#  - a disk-backed ext4 directory mounted at $BUILDKIT_DISK_DIR. It is a legal upperdir and
+#    costs no RAM, but is materially slower than tmpfs. Hence second, not first.
 #
 # It is still far better than the third outcome: on the native snapshotter a build does not
 # fail, it silently gets slow enough to time out.
-BUILDKIT_DISK_DIR=/.fly-upper-layer
+# Set by the builder that started this machine: the disk-backed directory differs per
+# runtime (Fly mounts its rootfs overlay device at /.fly-upper-layer; the GCP startup script
+# mounts a data disk at /.marshal-buildkit-disk).
+BUILDKIT_DISK_DIR="\${BUILDKIT_DISK_DIR:-/.marshal-buildkit-disk}"
 BUILDKIT_ROOT=""
 BUILDKIT_STORE_READY=""
 if [ -n "\${BUILDKIT_TMPFS_SIZE:-}" ]; then
@@ -247,6 +361,9 @@ while IFS= read -r TARGET_LINE; do
   [ -n "$SERVICE_KEY" ] || continue
   echo "MARSHAL_TARGET_START $SERVICE_KEY"
   ENV_DIR="$(target_env_dir "$SERVICE_KEY")"
+  # Where Marshal injected this target's generated Dockerfile (or the suffix to
+  # append to the author's), if it generated one. Deliberately not under /ctx.
+  GEN_DIR="$BUILD_DOCKERFILE_DIR/$SERVICE_KEY"
   # The build CONTEXT is always the whole upload, so a monorepo service can COPY shared code
   # from above its own directory. ROOT_DIRECTORY only says where a Dockerfile-less build
   # should look for something to infer.
@@ -255,19 +372,63 @@ while IFS= read -r TARGET_LINE; do
     [ -d "/ctx/$ROOT_DIRECTORY" ] || fail "$SERVICE_KEY: rootDirectory $ROOT_DIRECTORY does not exist in the uploaded source"
     DETECT_DIR="/ctx/$ROOT_DIRECTORY"
   fi
-  if [ -n "$DOCKERFILE_PATH" ]; then
-    [ -f "/ctx/$DOCKERFILE_PATH" ] || fail "$SERVICE_KEY: no Dockerfile found at $DOCKERFILE_PATH in the uploaded source"
-    set -- $(secret_args "$ENV_DIR")
-    if [ -d "$ENV_DIR" ]; then
-      for f in "$ENV_DIR"/*; do
-        [ -f "$f" ] || continue
-        # \\$(cat) drops trailing newlines — a build ARG is a command-line string, so a value
-        # ending in one cannot survive this channel. The secret mount above is byte-exact.
-        set -- "$@" --opt "build-arg:\${f##*/}=$(cat "$f")"
-      done
+  # The Dockerfile-shaped build arguments, shared by both Dockerfile paths below:
+  # every build-visible var as a secret mount (byte-exact, unbaked) and as a build
+  # ARG (the channel a plain \`ARG FOO\` reads, and the one a generated Dockerfile
+  # declares). The Railpack branch resets them; it feeds railpack instead.
+  set -- $(secret_args "$ENV_DIR")
+  if [ -d "$ENV_DIR" ]; then
+    for f in "$ENV_DIR"/*; do
+      [ -f "$f" ] || continue
+      # \\$(cat) drops trailing newlines — a build ARG is a command-line string, so a value
+      # ending in one cannot survive this channel. The secret mount above is byte-exact.
+      set -- "$@" --opt "build-arg:\${f##*/}=$(cat "$f")"
+    done
+  fi
+  # Three build kinds, in the order that decides them:
+  #  - a GENERATED Dockerfile (Marshal wrote one: a base image with the upload copied in),
+  #  - the author's Dockerfile, optionally with a Marshal-written suffix appended,
+  #  - Railpack auto-detection.
+  # Marshal decides which by what it injected into $GEN_DIR, so the harness never
+  # re-derives the rule — it only looks for the files.
+  if [ -f "$GEN_DIR/Dockerfile" ]; then
+    echo "MARSHAL_GENERATED_DOCKERFILE $SERVICE_KEY"
+    # The generated file lives OUTSIDE /ctx (it is not part of the author's source
+    # and must not appear in their \`COPY . .\`), which is fine: \`filename\` is
+    # resolved against the dockerfile local, and every COPY inside it against the
+    # context local, which is still the whole upload.
+    if ! buildctl build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$GEN_DIR" \\
+        --opt "filename=Dockerfile" "$@" \\
+        --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
+      fail "$SERVICE_KEY: the build failed (see the build log above)"
     fi
-    if ! buildctl build --frontend dockerfile.v0 --local context=/ctx --local dockerfile=/ctx \\
-        --opt "filename=$DOCKERFILE_PATH" "$@" \\
+  elif [ -n "$DOCKERFILE_PATH" ]; then
+    [ -f "/ctx/$DOCKERFILE_PATH" ] || fail "$SERVICE_KEY: no Dockerfile found at $DOCKERFILE_PATH in the uploaded source"
+    DOCKERFILE_DIR=/ctx
+    DOCKERFILE_NAME="$DOCKERFILE_PATH"
+    # A build command on a Dockerfile build is appended as a final RUN. Written to
+    # a scratch directory rather than back into /ctx: the context is the author's
+    # source, and a file added to it would land in their own \`COPY . .\`.
+    if [ -f "$GEN_DIR/suffix" ]; then
+      echo "MARSHAL_APPEND_BUILD_COMMAND $SERVICE_KEY"
+      mkdir -p "/tmp/dockerfiles/$SERVICE_KEY"
+      cat "/ctx/$DOCKERFILE_PATH" "$GEN_DIR/suffix" > "/tmp/dockerfiles/$SERVICE_KEY/Dockerfile" \\
+        || fail "$SERVICE_KEY: could not append the build command to $DOCKERFILE_PATH"
+      # A Dockerfile-SPECIFIC ignore file is found by name next to the Dockerfile
+      # ("docker/web.Dockerfile.dockerignore"), so moving the file out of /ctx
+      # would silently stop applying it — and a build that suddenly stops
+      # excluding things bakes them into the image instead. Carried across under
+      # the name the relocated file now has. (The context-wide /ctx/.dockerignore
+      # still applies on its own: the context local is unchanged.)
+      if [ -f "/ctx/$DOCKERFILE_PATH.dockerignore" ]; then
+        cp "/ctx/$DOCKERFILE_PATH.dockerignore" "/tmp/dockerfiles/$SERVICE_KEY/Dockerfile.dockerignore" \\
+          || fail "$SERVICE_KEY: could not carry over $DOCKERFILE_PATH.dockerignore"
+      fi
+      DOCKERFILE_DIR="/tmp/dockerfiles/$SERVICE_KEY"
+      DOCKERFILE_NAME=Dockerfile
+    fi
+    if ! buildctl build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$DOCKERFILE_DIR" \\
+        --opt "filename=$DOCKERFILE_NAME" "$@" \\
         --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
       fail "$SERVICE_KEY: docker build failed (see the build log above)"
     fi
@@ -299,7 +460,7 @@ while IFS= read -r TARGET_LINE; do
       done
     fi
     if ! ( unset REGISTRY_AUTH_B64 WEBHOOK_TOKEN WEBHOOK_URL TARBALL_URL; cd "$DETECT_DIR" && /tmp/railpack-bin/railpack prepare . --plan-out /tmp/railpack-plan/railpack-plan.json "$@" 2>&1 ); then
-      fail "$SERVICE_KEY: railpack could not determine how to build this service (see the log above) — add a Dockerfile and set dockerfilePath in your deploy file, or configure detection with a railpack.json (https://railpack.com)"
+      fail "$SERVICE_KEY: railpack could not determine how to build this service (see the log above) — set a buildCommand in your deploy file to say how to build it, add a Dockerfile and set dockerfilePath, or configure detection with a railpack.json (https://railpack.com)"
     fi
     set -- $(secret_args "$ENV_DIR")
     if [ "$#" -gt 0 ]; then set -- "$@" --opt "build-arg:secrets-hash=$(secrets_hash "$ENV_DIR")"; fi
@@ -323,93 +484,8 @@ echo "MARSHAL_BUILD_DONE"
 `;
 }
 
-export function createFlyBuilder(): Builder {
-  return {
-    name: "fly",
-    async startBuild(options, lease) {
-      const config = getConfig();
-      if (config.publicUrl === null) {
-        throw new Error("MARSHAL_PUBLIC_URL must be set for real Fly builds — the builder machine calls the completion webhook on it");
-      }
-      const org = resolveNamespaceOrg(options.ns);
-      const fly = flyClientForNamespaceOrg(org);
-      const builderApp = builderAppName(config.envId);
-      await lease.assertOwned();
-      await fly.ensureApp(builderApp, builderNetworkName(config.envId));
-
-      const tarballUrl = await presignValidatedUploadGet(options.ns, options.deploymentId, BUILD_TIMEOUT_SECONDS + 60);
-      const webhookToken = computeWebhookToken(options.deploymentId, options.ns);
-      const webhookUrl = `${config.publicUrl}${buildCompletionPath(options.deploymentId)}?ns=${encodeURIComponent(options.ns)}`;
-
-      // The tab-separated manifest the harness loops over. Every field has been
-      // validated (service keys, image refs and paths contain no tabs, newlines
-      // or control characters), which is what lets /bin/sh read it with `read`
-      // instead of parsing JSON without jq.
-      const targetsManifest = options.targets
-        .map((target) => [target.serviceKey, target.pushTarget, target.dockerfilePath ?? "", target.rootDirectory ?? ""].join("\t"))
-        .join("\n");
-      // A Railpack build needs the bigger guest; one machine builds every target,
-      // so ANY auto-detected target decides the size for the whole run.
-      const isRailpackBuild = options.targets.some((target) => target.dockerfilePath === null);
-      await lease.assertOwned();
-      const machine = await fly.createMachine(builderApp, {
-        name: `build-${options.deploymentId.toLowerCase()}`,
-        region: config.fly.region,
-        config: {
-          image: BUILDER_IMAGE,
-          guest: isRailpackBuild ? RAILPACK_BUILDER_GUEST : BUILDER_GUEST,
-          // One microVM per DEPLOYMENT = tenant isolation; auto_destroy reclaims it on exit
-          // (logs survive destruction — smoke-verified). Every service of one deployment
-          // source shares it, which is the point: they share a source tree, and a machine
-          // per service would re-fetch and re-extract it for each.
-          auto_destroy: true,
-          restart: { policy: "no" },
-          init: { exec: ["/bin/sh", "/marshal-build.sh"] },
-          files: [
-            {
-              guest_path: "/marshal-build.sh",
-              raw_value: Buffer.from(buildHarnessScript()).toString("base64"),
-            },
-            {
-              guest_path: "/marshal-targets.tsv",
-              raw_value: Buffer.from(`${targetsManifest}\n`, "utf8").toString("base64"),
-            },
-            // Tenant env, one directory per TARGET and one file per var. NOT in the env
-            // block below: that one holds Marshal's org token and registry auth, and a
-            // tenant value sitting next to them is one careless `env` away from being
-            // logged as a credential — and one careless credential away from being handed
-            // to `railpack prepare`, which runs unsandboxed in the harness.
-            // An EMPTY value is skipped: it would mean a files entry whose raw_value is the
-            // empty string, which the API is free to read as "no content supplied" rather
-            // than "supplied, and empty". There is nothing to inline either way, and the
-            // runtime env still carries the var — so the ambiguity is simply not worth
-            // entering. The harness's `[ -f "$f" ]` guard makes the absence a non-event.
-            ...options.targets.flatMap((target) => Object.entries(target.buildEnv).flatMap(([key, value]) => value === "" ? [] : [{
-              guest_path: `${BUILD_ENV_DIR}/${target.serviceKey}/${key}`,
-              raw_value: Buffer.from(value, "utf8").toString("base64"),
-            }])),
-          ],
-          metadata: { marshal_deployment_id: options.deploymentId },
-          env: {
-            // A path, not a value: the harness reads the values out of the files above.
-            BUILD_ENV_DIR,
-            TARBALL_URL: tarballUrl,
-            REGISTRY_HOST: config.fly.registryHost,
-            REGISTRY_AUTH_B64: fly.registryAuthBase64(),
-            WEBHOOK_URL: webhookUrl,
-            WEBHOOK_TOKEN: webhookToken,
-            BUILD_TIMEOUT_SECONDS: String(BUILD_TIMEOUT_SECONDS),
-            RAILPACK_CLI_URL,
-            RAILPACK_CLI_SHA256,
-            RAILPACK_FRONTEND_IMAGE,
-            ...(isRailpackBuild ? { BUILDKIT_TMPFS_SIZE: RAILPACK_BUILDKIT_TMPFS_SIZE } : {}),
-          },
-        },
-      });
-      return { builderApp, builderMachineId: machine.id };
-    },
-  };
-}
+// The real builders live with their runtimes: fly/provider.ts and gcp/provider.ts. Both
+// inject the harness above and speak the same completion webhook.
 
 export type CompleteBuildFn = (options: {
   ns: string,

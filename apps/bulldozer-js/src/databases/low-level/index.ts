@@ -29,14 +29,40 @@ export type LowLevelDatabaseDebugSnapshot = {
   dumps: Record<string, LowLevelDatabaseDebugEntry[]>,
 };
 
+export type LowLevelMutationOptions = {
+  /**
+   * Establishes a causal dependency from an earlier mutation to this one. The backend may
+   * satisfy the dependency by committing both mutations atomically, but must not make or
+   * replicate this mutation before the required mutation.
+   *
+   * Waiting locally between mutations is not equivalent:
+   *
+   *     const { seq: a } = await firstStore.setAll(firstEntries);
+   *     await database.waitUntilAvailable(a);
+   *     const { seq: b } = await secondStore.setAll(secondEntries);
+   *     await database.waitUntilAvailable(b);
+   *
+   * Because stores replicate independently, another client could still observe `b` without
+   * observing `a`. The causal relationship must be attached to the second mutation:
+   *
+   *     const { seq: a } = await firstStore.setAll(firstEntries);
+   *     const { seq: b } = await secondStore.setAll(secondEntries, { requiresSeq: a });
+   *     await database.waitUntilAvailable(b);
+   *
+   * An explicit wait is still necessary when application code must inspect the first
+   * mutation's available result before it can construct the second mutation.
+   */
+  requiresSeq?: DatabaseSeq,
+};
+
 /**
  * A simple KV store.
  *
  * Keys must be <= 64 bytes and value must be <= 2 GB. These restrictions should be strictly enforced by the
  * implementation.
  *
- * Note that durability (or replication) of a modifying function is only guaranteed after `waitUntilDurable(seq)` (or
- * `waitUntilReplicated(seq)` for either the returned `seq` or a `seq` that's greater (determined using `maxSeq`).
+ * Durability and replication of a mutation are guaranteed independently by `waitUntilDurable(seq)` and
+ * `waitUntilReplicated(seq)`. Use `waitUntilConsistent(seq)` when both guarantees are required.
  *
  * Wrapped stores used by the instant-availability implementation must allocate their returned sequence (and dump
  * keys) locally, before any asynchronous commit or IO. Commit completion remains asynchronous and is represented by
@@ -53,17 +79,17 @@ export type LowLevelKvStore = {
     entries: Array<{ key: ArrayBuffer, value: ArrayBuffer }>,
     hasMore: boolean,
   }>,
-  setAll(entries: Array<{ key: ArrayBuffer, value: ArrayBuffer }>, options?: { requiresSeq?: DatabaseSeq }): Promise<{ seq: DatabaseSeq }>,
-  deleteAll(keys: ArrayBuffer[], options?: { requiresSeq?: DatabaseSeq }): Promise<{ seq: DatabaseSeq }>,
+  setAll(entries: Array<{ key: ArrayBuffer, value: ArrayBuffer }>, options?: LowLevelMutationOptions): Promise<{ seq: DatabaseSeq }>,
+  deleteAll(keys: ArrayBuffer[], options?: LowLevelMutationOptions): Promise<{ seq: DatabaseSeq }>,
 
   /**
    * The returned sequence must cover every successful entry, not just one of them.
    * `results[i]` corresponds to `entries[i]`. Failed entries have no sequence because
    * they did not write. When nothing is written, the returned sequence is
-   * `options.requiresSeq` or the store's initial sequence. A batch must not contain
-   * duplicate keys.
+   * `options.requiresSeq` or the store's initial sequence. `compare: null` succeeds
+   * only when the key does not exist. A batch must not contain duplicate keys.
    */
-  compareAndSetAll(entries: Array<{ key: ArrayBuffer, compare: ArrayBuffer, value: ArrayBuffer }>, options?: { requiresSeq?: DatabaseSeq }): Promise<{
+  compareAndSetAll(entries: Array<{ key: ArrayBuffer, compare: ArrayBuffer | null, value: ArrayBuffer }>, options?: LowLevelMutationOptions): Promise<{
     results: Array<{ wasSet: true, seq: DatabaseSeq } | { wasSet: false, seq: null }>,
     seq: DatabaseSeq,
   }>,
@@ -87,10 +113,16 @@ export type LowLevelKvStore = {
  */
 export type LowLevelKvDump = Omit<LowLevelKvStore, "setAll" | "compareAndSetAll"> & {
   /**
+   * Reserves unique keys without inserting values. Unused reservations may be abandoned.
+   */
+  reserveKeys(count: number): ArrayBuffer[],
+
+  /**
    * Inserts the values and returns their keys in the same order.
    *
    * How the keys are assigned is implementation-dependent, although they must always be unique within a single KV dump.
    * Implementations are encouraged to use keys that make the insert operation as performant as possible.
+   * Reserved keys may be supplied when values must refer to one another before insertion.
    */
-  insertAll(values: ArrayBuffer[], options?: { requiresSeq?: DatabaseSeq }): Promise<{ keys: ArrayBuffer[], seq: DatabaseSeq }>,
+  insertAll(values: ArrayBuffer[], options?: LowLevelMutationOptions & { keys?: ArrayBuffer[] }): Promise<{ keys: ArrayBuffer[], seq: DatabaseSeq }>,
 }

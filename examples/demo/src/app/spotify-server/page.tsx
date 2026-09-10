@@ -1,7 +1,7 @@
 import { hexclaveServerApp } from "src/hexclave";
 
 export default async function Page() {
-  const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+  const user = await hexclaveServerApp.getUser({ or: 'throw' });
   const connection = await user.getConnectedAccount('spotify', { or: 'redirect' });
   const tokens = await connection.getAccessToken();
 

@@ -128,6 +128,7 @@ export const signInVerificationCodeHandler = createVerificationCodeHandler({
         buildSignUpRuleOptions({
           authMethod: 'otp',
           oauthProvider: null,
+          oauthAccountCreatedAtMillis: null,
           requestContext: deserializeStoredSignUpRequestContext(data),
           turnstileAssessment: deserializeStoredTurnstileAssessment(
             data.turnstile_result,

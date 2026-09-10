@@ -209,13 +209,6 @@ export const ALL_APPS = {
     softRequirements: ["analytics"],
     parentAppId: "analytics",
   },
-  "gtm": {
-    displayName: "GTM",
-    subtitle: "AI-driven growth analysis, actionable items, and daily briefs",
-    tags: ["gtm", "operations"],
-    stage: "alpha",
-    softRequirements: ["analytics"],
-  },
   "cli-auth": {
     displayName: "CLI Auth",
     subtitle: "Monitor CLI authentication sessions and active tokens",

@@ -146,6 +146,40 @@ describe("basic config operations", () => {
     expect(updatedConfig.teams.createPersonalTeamOnSignUp).toBe(true);
   });
 
+  it("enables a sub-app independently of its parent app", async ({ expect }) => {
+    const { adminAccessToken } = await Project.createAndSwitch();
+
+    const updateResponse = await niceBackendFetch("/api/v1/internal/config/override/environment", {
+      method: "PATCH",
+      accessType: "admin",
+      headers: adminHeaders(adminAccessToken),
+      body: {
+        config_override_string: JSON.stringify({
+          "apps.installed.analytics.enabled": false,
+          "apps.installed.clickmaps.enabled": true,
+        }),
+      },
+    });
+    expect(updateResponse).toMatchInlineSnapshot(`
+      NiceResponse {
+        "status": 200,
+        "body": { "success": true },
+        "headers": Headers { <some fields may have been hidden> },
+      }
+    `);
+
+    const verifyResponse = await niceBackendFetch("/api/v1/internal/config", {
+      method: "GET",
+      accessType: "admin",
+      headers: adminHeaders(adminAccessToken),
+    });
+    expect(verifyResponse.status).toBe(200);
+
+    const updatedConfig = JSON.parse(verifyResponse.body.config_string);
+    expect(updatedConfig.apps.installed.analytics.enabled).toBe(false);
+    expect(updatedConfig.apps.installed.clickmaps.enabled).toBe(true);
+  });
+
   it("updates project-level config override", async ({ expect }) => {
     const { adminAccessToken } = await Project.createAndSwitch();
 

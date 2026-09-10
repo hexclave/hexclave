@@ -51,11 +51,7 @@ import {
   type DesignDialogSize,
   type DesignDialogVariant,
   DesignInput,
-  DesignChoiceChip,
-  DesignMetricDelta,
   DesignPillToggle,
-  SetupTimeline,
-  type SetupTimelineStepState,
 } from "@/components/design-components";
 import { useMemo, useRef, useState } from "react";
 
@@ -68,7 +64,6 @@ type ComponentId =
   | "button"
   | "card"
   | "category-tabs"
-  | "choice-chip"
   | "cursor-blast"
   | "data-grid"
   | "data-table"
@@ -77,10 +72,8 @@ type ComponentId =
   | "input"
   | "list-item-row"
   | "menu"
-  | "metric-delta"
   | "pill-toggle"
   | "selector-dropdown"
-  | "setup-timeline"
   | "user-list";
 
 const COMPONENT_LIST: Array<{ value: ComponentId, label: string }> = [
@@ -90,7 +83,6 @@ const COMPONENT_LIST: Array<{ value: ComponentId, label: string }> = [
   { value: "button", label: "Button" },
   { value: "card", label: "Card" },
   { value: "category-tabs", label: "Category Tabs" },
-  { value: "choice-chip", label: "Choice Chip" },
   { value: "cursor-blast", label: "Cursor Blast Effect" },
   { value: "data-grid", label: "Data Grid" },
   { value: "data-table", label: "Data Table" },
@@ -99,10 +91,8 @@ const COMPONENT_LIST: Array<{ value: ComponentId, label: string }> = [
   { value: "input", label: "Input" },
   { value: "list-item-row", label: "List Item Row" },
   { value: "menu", label: "Menu" },
-  { value: "metric-delta", label: "Metric Delta" },
   { value: "pill-toggle", label: "Pill Toggle" },
   { value: "selector-dropdown", label: "Selector Dropdown" },
-  { value: "setup-timeline", label: "Setup Timeline" },
   { value: "user-list", label: "User List" },
 ];
 
@@ -519,17 +509,6 @@ export default function PageClient() {
   const [menuActionStyle, setMenuActionStyle] = useState<"default" | "destructive">("destructive");
   const [menuLastAction, setMenuLastAction] = useState("");
 
-  // Metric Delta
-  const [chipSelectedId, setChipSelectedId] = useState<string | null>("b");
-  const [chipInteractive, setChipInteractive] = useState(true);
-  const [chipWithDescription, setChipWithDescription] = useState(false);
-
-  const [mdLabel, setMdLabel] = useState("New signups");
-  const [mdValue, setMdValue] = useState("1,284");
-  const [mdComparison, setMdComparison] = useState("vs. the 14 days before");
-  // Kept as a string so the field can be emptied (empty = null = "not computable" state).
-  const [mdDeltaText, setMdDeltaText] = useState("12.4");
-
   // Pill Toggle
   const [pillSize, setPillSize] = useState<Size3>("md");
   const [pillGlass, setPillGlass] = useState<boolean | undefined>(false);
@@ -543,12 +522,6 @@ export default function PageClient() {
   const [selValue, setSelValue] = useState("option-a");
   const [selPlaceholder, setSelPlaceholder] = useState("Select");
   const [selDisableOptionB, setSelDisableOptionB] = useState(false);
-
-  // Setup Timeline
-  const [timelineStepCount, setTimelineStepCount] = useState(4);
-  const [timelineCurrentIndex, setTimelineCurrentIndex] = useState(1);
-  const [timelineBlockLast, setTimelineBlockLast] = useState(false);
-  const [timelineShowActions, setTimelineShowActions] = useState(true);
 
   // User List
   const [userClickable, setUserClickable] = useState(true);
@@ -646,20 +619,6 @@ export default function PageClient() {
   }, [gridMode]);
 
   // ─── Preview renderer ────────────────────────────────────────────────────
-
-  /**
-   * Derives the four step states from the two controls, so the preview and the generated code can
-   * never disagree about what's being shown.
-   */
-  function buildDemoTimelineSteps(): Array<{ id: string, title: string, state: SetupTimelineStepState }> {
-    return Array.from({ length: timelineStepCount }, (_unused, index) => {
-      const isLast = index === timelineStepCount - 1;
-      const state: SetupTimelineStepState = timelineBlockLast && isLast
-        ? "blocked"
-        : index < timelineCurrentIndex ? "done" : index === timelineCurrentIndex ? "current" : "todo";
-      return { id: `step-${index}`, title: `Step ${index + 1}`, state };
-    });
-  }
 
   function renderPreview() {
     if (selected === "alert") {
@@ -1272,57 +1231,6 @@ export default function PageClient() {
         />
       );
     }
-    if (selected === "choice-chip") {
-      const chipOptions = [
-        { id: "a", label: "1,200" },
-        { id: "b", label: "620" },
-        { id: "c", label: "310" },
-        { id: "d", label: "95" },
-      ];
-      return (
-        <div className="w-full max-w-md space-y-5">
-          <div className="flex flex-col gap-1.5">
-            {chipOptions.map((option) => (
-              <DesignChoiceChip
-                key={option.id}
-                label={option.label}
-                description={chipWithDescription ? "Signups in the last 30 days" : null}
-                selected={chipSelectedId === option.id}
-                interactive={chipInteractive}
-                onToggle={() => setChipSelectedId(option.id)}
-              />
-            ))}
-          </div>
-          {/* Fixed reference states: the graded pair is what the Growth quiz renders after an answer,
-              and both markers are shapes as well as colours so they survive a colour-blind reader. */}
-          <div className="flex flex-col gap-1.5">
-            <DesignChoiceChip label="The right answer" selected={false} interactive={false} state="correct" />
-            <DesignChoiceChip label="What they picked" selected interactive={false} state="incorrect" />
-            <DesignChoiceChip label="Neither" selected={false} interactive={false} state="neutral" />
-          </div>
-        </div>
-      );
-    }
-    if (selected === "metric-delta") {
-      const parsedDelta = mdDeltaText.trim().length === 0 ? null : Number(mdDeltaText);
-      return (
-        <div className="w-full max-w-2xl space-y-4">
-          <DesignMetricDelta
-            label={mdLabel || "Metric"}
-            value={mdValue || "0"}
-            comparisonLabel={mdComparison.length === 0 ? undefined : mdComparison}
-            delta={parsedDelta != null && Number.isNaN(parsedDelta) ? null : parsedDelta}
-          />
-          {/* Fixed reference states so every delta semantic (positive / negative / zero / null) is visible at once. */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <DesignMetricDelta label="Positive" value="342" comparisonLabel="vs. 305 before" delta={12.1} />
-            <DesignMetricDelta label="Negative" value="87" comparisonLabel="vs. 96 before" delta={-9.4} />
-            <DesignMetricDelta label="No change" value="120" comparisonLabel="vs. 120 before" delta={0} />
-            <DesignMetricDelta label="No baseline" value="18" comparisonLabel="Baseline preview" delta={null} />
-          </div>
-        </div>
-      );
-    }
     if (selected === "pill-toggle") {
       return (
         <DesignPillToggle
@@ -1353,27 +1261,6 @@ export default function PageClient() {
             placeholder={selPlaceholder}
             size={selSize}
             disabled={selDisabled}
-          />
-        </div>
-      );
-    }
-    if (selected === "setup-timeline") {
-      return (
-        <div className="w-full max-w-3xl">
-          <SetupTimeline
-            steps={buildDemoTimelineSteps().map((step) => ({
-              ...step,
-              description: step.state === "blocked" ? "Something needs your attention." : undefined,
-              content: (
-                <Typography variant="secondary" type="footnote">
-                  Content for {step.title.toLowerCase()}. Steps that haven&apos;t been reached are dimmed
-                  rather than hidden, so you can see what&apos;s coming.
-                </Typography>
-              ),
-              action: timelineShowActions && step.state !== "done"
-                ? { label: step.state === "blocked" ? "Fix it" : "Do it", onClick: () => {} }
-                : undefined,
-            }))}
           />
         </div>
       );
@@ -2259,36 +2146,6 @@ export default function PageClient() {
         </div>
       );
     }
-    if (selected === "choice-chip") {
-      return (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4 items-end">
-          <PropField label="Interactive">
-            <BoolToggle value={chipInteractive} onChange={setChipInteractive} on="Yes" off="No" />
-          </PropField>
-          <PropField label="Description">
-            <BoolToggle value={chipWithDescription} onChange={setChipWithDescription} on="Show" off="Hide" />
-          </PropField>
-        </div>
-      );
-    }
-    if (selected === "metric-delta") {
-      return (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4 items-end">
-          <PropField label="Label">
-            <DesignInput size="sm" value={mdLabel} onChange={(e) => setMdLabel(e.target.value)} />
-          </PropField>
-          <PropField label="Value">
-            <DesignInput size="sm" value={mdValue} onChange={(e) => setMdValue(e.target.value)} />
-          </PropField>
-          <PropField label="Comparison Label">
-            <DesignInput size="sm" value={mdComparison} onChange={(e) => setMdComparison(e.target.value)} />
-          </PropField>
-          <PropField label="Delta % (empty = null)">
-            <DesignInput size="sm" value={mdDeltaText} onChange={(e) => setMdDeltaText(e.target.value)} placeholder="e.g. 12.4 or -9" />
-          </PropField>
-        </div>
-      );
-    }
     if (selected === "pill-toggle") {
       return (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4 items-end">
@@ -2337,48 +2194,6 @@ export default function PageClient() {
           </PropField>
           <PropField label="Disable Option B">
             <BoolToggle value={selDisableOptionB} onChange={setSelDisableOptionB} on="Yes" off="No" />
-          </PropField>
-        </div>
-      );
-    }
-    if (selected === "setup-timeline") {
-      return (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4 items-end">
-          <PropField label="Steps">
-            <DesignSelectorDropdown
-              value={String(timelineStepCount)}
-              onValueChange={(v) => {
-                const parsed = Number(v);
-                if (!Number.isInteger(parsed) || parsed < 2 || parsed > 6) throw new Error(`Unknown step count "${v}"`);
-                setTimelineStepCount(parsed);
-                // Keep the highlighted step inside the list when it shrinks, otherwise every step
-                // would read as "done" and the current-step circle would vanish.
-                setTimelineCurrentIndex((current) => Math.min(current, parsed - 1));
-              }}
-              options={[2, 3, 4, 5, 6].map((count) => ({ value: String(count), label: String(count) }))}
-              size="sm"
-            />
-          </PropField>
-          <PropField label="Current Step">
-            <DesignSelectorDropdown
-              value={String(timelineCurrentIndex)}
-              onValueChange={(v) => {
-                const parsed = Number(v);
-                if (!Number.isInteger(parsed) || parsed < 0 || parsed >= timelineStepCount) throw new Error(`Unknown step index "${v}"`);
-                setTimelineCurrentIndex(parsed);
-              }}
-              options={Array.from({ length: timelineStepCount }, (_unused, index) => ({
-                value: String(index),
-                label: `Step ${index + 1}`,
-              }))}
-              size="sm"
-            />
-          </PropField>
-          <PropField label="Block Last Step">
-            <BoolToggle value={timelineBlockLast} onChange={setTimelineBlockLast} on="Yes" off="No" />
-          </PropField>
-          <PropField label="Show Actions">
-            <BoolToggle value={timelineShowActions} onChange={setTimelineShowActions} on="Show" off="Hide" />
           </PropField>
         </div>
       );
@@ -2700,27 +2515,6 @@ export default function PageClient() {
   ]}
 />`;
     }
-    if (selected === "choice-chip") {
-      return `<DesignChoiceChip
-  label="620"${chipWithDescription ? '\n  description="Signups in the last 30 days"' : ""}
-  selected={${chipSelectedId === "b"}}
-  interactive={${chipInteractive}}
-  onToggle={() => setSelected("b")}
-/>
-
-// After grading:
-<DesignChoiceChip label="620" selected interactive={false} state="correct" />`;
-    }
-    if (selected === "metric-delta") {
-      const parsedDelta = mdDeltaText.trim().length === 0 ? null : Number(mdDeltaText);
-      const deltaLiteral = parsedDelta == null || Number.isNaN(parsedDelta) ? "null" : String(parsedDelta);
-      const comparisonLine = mdComparison.length === 0 ? "" : `\n  comparisonLabel="${escapeAttr(mdComparison)}"`;
-      return `<DesignMetricDelta
-  label="${escapeAttr(mdLabel || "Metric")}"
-  value="${escapeAttr(mdValue || "0")}"${comparisonLine}
-  delta={${deltaLiteral}}
-/>`;
-    }
     if (selected === "pill-toggle") {
       const iconSuffix = pillWithIcons ? ", icon: Envelope" : "";
       const iconSuffix2 = pillWithIcons ? ", icon: HardDrive" : "";
@@ -2749,20 +2543,6 @@ export default function PageClient() {
   placeholder="${escapeAttr(selPlaceholder)}"
   size="${selSize}"
   disabled={${selDisabled}}
-/>`;
-    }
-    if (selected === "setup-timeline") {
-      const stepLines = buildDemoTimelineSteps()
-        .map((step) => `    { id: "${step.id}", title: "${escapeAttr(step.title)}", state: "${step.state}"${
-          timelineShowActions && step.state !== "done"
-            ? `, action: { label: "${step.state === "blocked" ? "Fix it" : "Do it"}", onClick: handleStep } `
-            : ""
-        }},`)
-        .join("\n");
-      return `<SetupTimeline
-  steps={[
-${stepLines}
-  ]}
 />`;
     }
     // user-list

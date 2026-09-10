@@ -1,9 +1,9 @@
 import { useMemo } from "react";
 import { clsx } from "clsx";
-import type { McpCallLogRow } from "../types";
+import type { McpCallLogRow, QaEntriesRow } from "../types";
 import { toDate } from "../utils";
 
-export function Analytics({ rows }: { rows: McpCallLogRow[] }) {
+export function Analytics({ rows, qaEntries }: { rows: McpCallLogRow[], qaEntries: QaEntriesRow[] }) {
   const stats = useMemo(() => {
     const reviewed = rows.filter(r => r.qaOverallScore != null);
     const scores = reviewed.map(r => r.qaOverallScore ?? 0);
@@ -11,8 +11,8 @@ export function Analytics({ rows }: { rows: McpCallLogRow[] }) {
 
     const needsReview = rows.filter(r => r.qaNeedsHumanReview && !r.humanReviewedAt).length;
     const humanReviewed = rows.filter(r => r.humanReviewedAt != null).length;
-    const publishedCount = rows.filter(r => r.publishedToQa).length;
-    const draftCount = rows.filter(r => r.humanCorrectedAnswer != null && r.humanCorrectedAnswer !== "" && !r.publishedToQa).length;
+    const publishedCount = qaEntries.filter(r => r.published).length;
+    const draftCount = qaEntries.filter(r => !r.published).length;
 
     // Score buckets
     const scoreBuckets = [
@@ -100,7 +100,7 @@ export function Analytics({ rows }: { rows: McpCallLogRow[] }) {
       maxDuration,
       toolUsage,
     };
-  }, [rows]);
+  }, [rows, qaEntries]);
 
   const humanReviewRate = stats.total > 0 ? Math.round((stats.humanReviewed / stats.total) * 100) : 0;
   const reviewRate = stats.total > 0 ? Math.round((stats.reviewed / stats.total) * 100) : 0;
