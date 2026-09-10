@@ -40,6 +40,7 @@ TEST_ORIGIN_FILE = Path("/boot/firmware/hexclave-tv-box-test-origin.txt")
 QUICK_TUNNEL_HOSTNAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$")
 MAX_AGENT_REQUEST_BYTES = 16_384
 MAX_KIOSK_HEALTH_BYTES = 256
+SAVED_PROFILE_RETRY_INTERVAL_S = 30
 TEST_SETUP_PASSWORD_LENGTH = 8
 TEST_SETUP_PASSWORD_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
@@ -580,7 +581,7 @@ class TvBoxNetworkAgent:
                     and not self.controller.connected()
                     and (
                         self._last_saved_activation is None
-                        or self.monotonic() - self._last_saved_activation >= 30
+                        or self.monotonic() - self._last_saved_activation >= SAVED_PROFILE_RETRY_INTERVAL_S
                     )
                 ):
                     self.controller.activate_saved_connections()
