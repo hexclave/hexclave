@@ -36,10 +36,14 @@ def reject_special_payload_inputs(repository: Path) -> None:
     def inspection_failed(error: OSError) -> None:
         raise error
 
-    # Git does not list untracked FIFOs/sockets/devices, but cp -a preserves
-    # them. Inspect those independently, without following directory links.
+    # Git does not list untracked FIFOs/sockets/devices or nested .git entries, but cp -a preserves them.
     for source in PAYLOAD_SOURCES:
-        for directory, _directories, files in os.walk(repository / source, followlinks=False, onerror=inspection_failed):
+        for directory, directories, files in os.walk(repository / source, followlinks=False, onerror=inspection_failed):
+            for name in (*directories, *files):
+                if name == ".git":
+                    raise ValueError(
+                        f"Image payload contains a nested Git entry: {str((Path(directory) / name).relative_to(repository))!r}."
+                    )
             for name in files:
                 path = Path(directory) / name
                 mode = path.lstat().st_mode

@@ -190,6 +190,38 @@ class ImageSourceTests(unittest.TestCase):
                     image_source.verify_ignored_payload_inputs(second_repository)
                 command.assert_not_called()
 
+    def test_nested_git_entries_are_rejected_before_git_inspection(self) -> None:
+        def assert_rejected(repository: Path) -> None:
+            with patch.object(image_source.subprocess, "run", side_effect=AssertionError("git must not run")) as command:
+                with self.assertRaisesRegex(ValueError, "nested Git entry") as rejected:
+                    image_source.verify_ignored_payload_inputs(repository)
+                command.assert_not_called()
+            self.assertNotIn(str(repository.resolve()), str(rejected.exception))
+
+        nested_directory = self.repository / image_source.PAYLOAD_SOURCES[0] / ".git"
+        nested_directory.mkdir()
+        (nested_directory / "config").write_text("gitdir-fixture", encoding="utf-8")
+        assert_rejected(self.repository)
+
+        with tempfile.TemporaryDirectory(suffix=".untracked") as second_directory:
+            second_repository = Path(second_directory)
+            for relative in image_source.PAYLOAD_SOURCES:
+                (second_repository / relative).mkdir(parents=True)
+            (second_repository / image_source.PAYLOAD_SOURCES[2] / ".git").write_text(
+                "gitfile-fixture", encoding="utf-8"
+            )
+            assert_rejected(second_repository)
+
+        with tempfile.TemporaryDirectory(suffix=".untracked") as third_directory:
+            third_repository = Path(third_directory)
+            for relative in image_source.PAYLOAD_SOURCES:
+                (third_repository / relative).mkdir(parents=True)
+            target = third_repository.parent / f"{third_repository.name}-git-target"
+            self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+            target.mkdir()
+            (third_repository / image_source.RUNTIME_SOURCE / ".git").symlink_to(target, target_is_directory=True)
+            assert_rejected(third_repository)
+
     def test_allowed_bytecode_is_removed_by_the_actual_layer_cleanup(self) -> None:
         runtime = self.repository / image_source.RUNTIME_SOURCE
         cache = runtime / "__pycache__"
