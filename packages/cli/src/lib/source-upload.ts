@@ -14,7 +14,9 @@
 //
 // The deadline that matters is the SLOT's: the presigned URL expires, and
 // nothing can be written to a dead URL, so there is no reason to keep pushing
-// past that moment and no reason to give up before it.
+// past that moment and no reason to give up before it. That budget covers the
+// upload as a whole, retries included — see DEFAULT_MAX_ATTEMPTS for why a
+// retry re-sends everything rather than resuming.
 
 import http from "node:http";
 import https from "node:https";
@@ -57,6 +59,58 @@ const WRITE_CHUNK_BYTES = 64 * 1024;
 // problem, never enough to be worth streaming.
 const MAX_ERROR_BODY_BYTES = 8 * 1024;
 
+// How many times the whole PUT may be re-sent.
+//
+// WHY THE WHOLE THING AND NOT JUST THE MISSING PART. The slot is a SigV4-signed
+// `PutObjectCommand` URL (Marshal's `createUploadSlot`), which is one URL for
+// one whole-object PUT. Real multipart needs `CreateMultipartUpload`, a signed
+// URL per part carrying `uploadId`/`partNumber`, and `CompleteMultipartUpload`
+// — and those query parameters are inside the signature, so a client cannot
+// forge them onto this URL. Resuming a part therefore needs Marshal to expose
+// multipart; re-sending does not, and is what turns a link that drops one
+// connection in six into one that finishes.
+//
+// Re-sending is safe to do blindly: an aborted PUT stores nothing (the object
+// only appears when the store has all of it), and a repeat writes the same key,
+// so no attempt can leave a partial or orphaned object behind.
+const DEFAULT_MAX_ATTEMPTS = 5;
+// Backoff between attempts, doubling. Short at the start because the common
+// case is a single dropped connection rather than an outage, and capped so a
+// late attempt does not spend more of the deadline waiting than uploading.
+const DEFAULT_RETRY_BASE_DELAY_MS = 1_000;
+const MAX_RETRY_DELAY_MS = 15 * 1_000;
+
+/**
+ * An attempt's failure, and whether re-sending could plausibly do better.
+ *
+ * Retryable: the connection died, stalled, or the store 5xx'd — none of which
+ * the same bytes will provoke again. Not retryable: the deadline (no budget
+ * left), a 4xx (a bad signature or an oversize body is deterministic), and a
+ * middlebox that answers 2xx without taking the body (re-sending just feeds it
+ * again).
+ */
+class UploadAttemptError extends CliError {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+    // Deliberately not a distinct name: this is an implementation detail of the
+    // retry loop, and every caller handles it as the CliError it is.
+    this.name = "CliError";
+  }
+}
+
+function retryDelayMs(attempt: number, baseDelayMs: number): number {
+  return Math.min(MAX_RETRY_DELAY_MS, baseDelayMs * 2 ** (attempt - 1));
+}
+
+/** What `onRetry` is told, so the CLI can say why it is going round again. */
+export type UploadRetryInfo = {
+  /** The attempt that just failed, 1-based. */
+  attempt: number,
+  maxAttempts: number,
+  error: CliError,
+  delayMs: number,
+};
+
 export type UploadSourceOptions = {
   uploadUrl: string,
   contentType: string,
@@ -72,8 +126,17 @@ export type UploadSourceOptions = {
    * The deadline to enforce, bypassing `expiresAtMillis` and its clamps.
    * Overridable for tests — the clamp floor is a minute, which no test can wait
    * for, and the deadline's teardown is exactly what needs covering.
+   *
+   * This is the budget for the upload as a whole, retries included: it is when
+   * the slot dies, and no attempt can write to a dead URL.
    */
   deadlineMs?: number,
+  /** Total attempts, retries included. Overridable for tests; see DEFAULT_MAX_ATTEMPTS. */
+  maxAttempts?: number,
+  /** Overridable for tests; see DEFAULT_RETRY_BASE_DELAY_MS. */
+  retryBaseDelayMs?: number,
+  /** Called before each retry, so the caller can report the wait rather than looking hung. */
+  onRetry?: (info: UploadRetryInfo) => void,
 };
 
 /**
@@ -144,28 +207,55 @@ function progressSummary(sent: number, total: number, elapsedMillis: number): st
 
 const TOO_LARGE_HINT = "Check your .gitignore/.dockerignore — build outputs and large assets shouldn't be uploaded.";
 
-/**
- * PUTs `bytes` to the presigned URL, or throws a CliError that says what went
- * wrong in the terms the user can act on.
- *
- * Every failure path here used to surface as an unwrapped `TypeError: fetch
- * failed` printed by the CLI's top-level handler, which named neither the
- * upload, nor its size, nor the deadline it hit.
- */
-export async function uploadSource(options: UploadSourceOptions): Promise<void> {
-  const { uploadUrl, contentType, bytes } = options;
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(uploadUrl);
-  } catch {
-    throw new CliError("The Hexclave API returned an invalid object-storage upload URL.");
-  }
-  const transport = parsedUrl.protocol === "https:" ? https : parsedUrl.protocol === "http:" ? http : null;
+/** One HTTP exchange against the object store, as the retry loop needs to see it. */
+type RequestSpec = {
+  url: URL,
+  method: "PUT" | "POST" | "DELETE",
+  /** Signed into the presigned URL where it matters; null sends no header. */
+  contentType: string | null,
+  bytes: Uint8Array,
+};
+
+/** Everything the retry loop needs that is not the request itself. */
+type RetrySettings = {
+  deadlineMs: number,
+  deadlineAt: number,
+  slotExpiryIsTheDeadline: boolean,
+  stallTimeoutMs: number,
+  maxAttempts: number,
+  baseDelayMs: number,
+  onRetry?: (info: UploadRetryInfo) => void,
+};
+
+type AttemptResult = {
+  /** The store's ETag for what it stored — a multipart complete needs it per part. */
+  etag: string | null,
+  body: string,
+};
+
+function transportFor(url: URL): typeof http | typeof https {
+  const transport = url.protocol === "https:" ? https : url.protocol === "http:" ? http : null;
   if (transport === null) {
     throw new CliError("The Hexclave API returned an upload URL with an unsupported protocol.");
   }
+  return transport;
+}
 
-  const total = bytes.byteLength;
+function parseStoreUrl(rawUrl: string): URL {
+  try {
+    return new URL(rawUrl);
+  } catch {
+    throw new CliError("The Hexclave API returned an invalid object-storage upload URL.");
+  }
+}
+
+/**
+ * The one shared budget and the retry policy, derived from a slot's expiry.
+ *
+ * Computed ONCE per upload, so a multipart upload's parts, its complete and its
+ * abort all draw down the same clock rather than each getting a fresh one.
+ */
+function retrySettingsFor(options: UploadSourceOptions): RetrySettings {
   // Two clocks on purpose. The DEADLINE is derived from a wall-clock instant the
   // server chose (`expires_at_millis`), so it has to be compared against the
   // wall clock. Everything measured here is a duration, so it uses the monotonic
@@ -173,35 +263,245 @@ export async function uploadSource(options: UploadSourceOptions): Promise<void> 
   // for an NTP step or a resume-from-suspend to invent a negative elapsed time.
   const deadlineWallClock = Date.now();
   const deadlineMs = options.deadlineMs ?? uploadDeadlineMs(options.expiresAtMillis, deadlineWallClock);
-  const slotExpiryIsTheDeadline = options.deadlineMs === undefined
-    && deadlineIsSlotExpiry(options.expiresAtMillis, deadlineWallClock, deadlineMs);
+  return {
+    deadlineMs,
+    // The deadline belongs to the upload, not to an attempt: it is when the URL
+    // dies, so every retry shares the one budget and the last attempt gets
+    // whatever is left of it.
+    deadlineAt: performance.now() + deadlineMs,
+    slotExpiryIsTheDeadline: options.deadlineMs === undefined
+      && deadlineIsSlotExpiry(options.expiresAtMillis, deadlineWallClock, deadlineMs),
+    stallTimeoutMs: options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS,
+    maxAttempts: Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS),
+    baseDelayMs: options.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS,
+    onRetry: options.onRetry,
+  };
+}
+
+/**
+ * Sends `request`, re-sending it while the failure is one a fresh connection
+ * could survive and the shared deadline still has room.
+ */
+async function sendWithRetry(request: RequestSpec, settings: RetrySettings): Promise<AttemptResult> {
+  let lastError: UploadAttemptError | undefined;
+  let attemptsMade = 0;
+  for (let attempt = 1; attempt <= settings.maxAttempts; attempt++) {
+    attemptsMade = attempt;
+    try {
+      return await attemptUpload(request, settings);
+    } catch (error) {
+      if (!(error instanceof UploadAttemptError)) throw error;
+      lastError = error;
+      if (!error.retryable || attempt === settings.maxAttempts) break;
+      const delayMs = retryDelayMs(attempt, settings.baseDelayMs);
+      // Waiting only to run out of clock mid-attempt would replace a useful
+      // error with the deadline's, so stop here and report what actually failed.
+      if (settings.deadlineAt - performance.now() - delayMs <= 0) break;
+      settings.onRetry?.({ attempt, maxAttempts: settings.maxAttempts, error, delayMs });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  /* istanbul ignore next -- the loop cannot exit without setting this */
+  if (lastError === undefined) throw new CliError("The source upload failed for an unknown reason.");
+  // The count is the diagnosis when it is more than one: a link that dropped
+  // five connections in a row is a different problem from one that 403'd once.
+  throw attemptsMade > 1
+    ? new CliError(`${lastError.message}\nGave up after ${attemptsMade} attempts.`)
+    : lastError;
+}
+
+/**
+ * PUTs `bytes` to the presigned URL in ONE request, or throws a CliError that
+ * says what went wrong in the terms the user can act on.
+ *
+ * Every failure path here used to surface as an unwrapped `TypeError: fetch
+ * failed` printed by the CLI's top-level handler, which named neither the
+ * upload, nor its size, nor the deadline it hit.
+ */
+export async function uploadSource(options: UploadSourceOptions): Promise<void> {
+  const url = parseStoreUrl(options.uploadUrl);
+  transportFor(url);
+  await sendWithRetry(
+    { url, method: "PUT", contentType: options.contentType, bytes: options.bytes },
+    retrySettingsFor(options),
+  );
+}
+
+/** The presigned multipart lifecycle, exactly as the API hands it over. */
+export type MultipartUploadSlot = {
+  part_size_bytes: number,
+  part_urls: string[],
+  complete_url: string,
+  abort_url: string,
+};
+
+export type UploadSourceMultipartOptions = UploadSourceOptions & {
+  multipart: MultipartUploadSlot,
+  /** Called as each part lands, so a long upload shows progress. */
+  onPartUploaded?: (info: { part: number, partCount: number }) => void,
+};
+
+// How many parts are in flight at once. Enough to keep a link busy while one
+// part is retrying, few enough that a shared uplink is not the bottleneck and a
+// failure does not discard much concurrent work.
+const PART_CONCURRENCY = 3;
+
+/**
+ * Uploads the source in parts, then asks the store to assemble it.
+ *
+ * WHY THIS EXISTS. A single PUT has to hold one connection for the whole source,
+ * so on a link that drops every few seconds a big source can never land — the
+ * measured case was a 30 MB tarball against a median connection life of ~9s,
+ * which failed 15 attempts out of 15. A part is a fraction of that on the wire
+ * and retries on its own, so a drop costs one part rather than everything.
+ *
+ * Every URL here is presigned, so this talks to the object store directly: no
+ * part, complete or abort call goes through the Hexclave API.
+ */
+export async function uploadSourceMultipart(options: UploadSourceMultipartOptions): Promise<void> {
+  const { multipart, bytes, contentType } = options;
+  const settings = retrySettingsFor(options);
+  const partCount = multipart.part_urls.length;
+  const expectedParts = Math.ceil(bytes.byteLength / multipart.part_size_bytes);
+  if (partCount !== expectedParts) {
+    throw new CliError(`The Hexclave API offered ${partCount} upload parts for a source that needs ${expectedParts}.`);
+  }
+
+  const etags = new Array<string | null>(partCount).fill(null);
+  let nextPart = 0;
+  let uploaded = 0;
+  const uploadNextParts = async (): Promise<void> => {
+    for (;;) {
+      const index = nextPart++;
+      if (index >= partCount) return;
+      const start = index * multipart.part_size_bytes;
+      // subarray, not slice: a view costs nothing, and the tarball is already
+      // wholly in memory — copying each part would double the peak.
+      const partBytes = bytes.subarray(start, Math.min(start + multipart.part_size_bytes, bytes.byteLength));
+      const result = await withPartContext(index + 1, partCount, async () => await sendWithRetry(
+        { url: parseStoreUrl(multipart.part_urls[index]), method: "PUT", contentType, bytes: partBytes },
+        // Renamed per part so the retry line says which one is going again.
+        { ...settings, onRetry: (info) => options.onRetry?.({ ...info, error: prefixPart(index + 1, partCount, info.error) }) },
+      ));
+      if (result.etag === null) {
+        // Without it the part list cannot be assembled, and a complete built
+        // from a missing ETag fails far less legibly than this does.
+        throw new CliError(`The object store accepted part ${index + 1} of ${partCount} without returning an ETag, so the source cannot be assembled.`);
+      }
+      etags[index] = result.etag;
+      uploaded += 1;
+      options.onPartUploaded?.({ part: uploaded, partCount });
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(PART_CONCURRENCY, partCount) }, async () => await uploadNextParts()));
+    await completeMultipartUpload(multipart, etags as string[], settings);
+  } catch (error) {
+    // Best-effort: the parts are billed until something removes them, and the
+    // bucket's AbortIncompleteMultipartUpload lifecycle rule is only the
+    // backstop for a client that never got the chance to say so.
+    await abortMultipartUpload(multipart, settings);
+    throw error;
+  }
+}
+
+/** Runs `body`, tagging whatever it throws with which part failed. */
+async function withPartContext<T>(part: number, partCount: number, body: () => Promise<T>): Promise<T> {
+  try {
+    return await body();
+  } catch (error) {
+    if (error instanceof CliError) throw prefixPart(part, partCount, error);
+    throw error;
+  }
+}
+
+function prefixPart(part: number, partCount: number, error: CliError): CliError {
+  return new CliError(`Part ${part} of ${partCount}: ${error.message}`);
+}
+
+function escapeXml(value: string): string {
+  return value.replace(/[<>&"']/g, (character) => `&#${character.codePointAt(0)};`);
+}
+
+/**
+ * Asks the store to assemble the parts into the object the deploy will consume.
+ *
+ * Two traps, both found the hard way against R2: the POST must declare
+ * `application/xml` or the store answers 415, and a FAILED assembly can come
+ * back as 200 with an `<Error>` document rather than an error status — so the
+ * body has to be read on success too.
+ */
+async function completeMultipartUpload(multipart: MultipartUploadSlot, etags: string[], settings: RetrySettings): Promise<void> {
+  const xml = `<CompleteMultipartUpload>${etags
+    .map((etag, index) => `<Part><PartNumber>${index + 1}</PartNumber><ETag>${escapeXml(etag)}</ETag></Part>`)
+    .join("")}</CompleteMultipartUpload>`;
+  const result = await sendWithRetry({
+    url: parseStoreUrl(multipart.complete_url),
+    method: "POST",
+    contentType: "application/xml",
+    bytes: Buffer.from(xml, "utf-8"),
+  }, settings);
+  if (result.body.includes("<Error>")) {
+    throw new CliError(`The object store could not assemble the uploaded source: ${result.body.slice(0, 500)}`);
+  }
+}
+
+async function abortMultipartUpload(multipart: MultipartUploadSlot, settings: RetrySettings): Promise<void> {
+  try {
+    await sendWithRetry({
+      url: parseStoreUrl(multipart.abort_url),
+      method: "DELETE",
+      contentType: null,
+      bytes: new Uint8Array(0),
+    }, { ...settings, maxAttempts: 1, onRetry: undefined });
+  } catch {
+    // Nothing useful to say and nothing to do: the upload has already failed,
+    // and the lifecycle rule sweeps what this would have removed.
+  }
+}
+
+/**
+ * One request. Resolves when the store has confirmed all of it, and otherwise
+ * throws an `UploadAttemptError` saying whether going again is worth anything.
+ */
+async function attemptUpload(request: RequestSpec, settings: RetrySettings): Promise<AttemptResult> {
+  const { url: parsedUrl, method, contentType, bytes } = request;
+  const { deadlineMs, deadlineAt, slotExpiryIsTheDeadline, stallTimeoutMs } = settings;
+  const transport = transportFor(parsedUrl);
+  const total = bytes.byteLength;
   const startedAt = performance.now();
-  const stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   const elapsed = () => performance.now() - startedAt;
   // Bytes the stream has confirmed it flushed, not bytes handed to write() —
   // the difference is a socket buffer, and overstating progress in a timeout
   // message is exactly the wrong direction.
   let sent = 0;
 
-  await new Promise<void>((resolve, reject) => {
+  return await new Promise<AttemptResult>((resolve, reject) => {
     const request = transport.request(parsedUrl, {
-      method: "PUT",
+      method,
       headers: {
-        // Signed into the R2/S3 URL: it must match exactly or the store 403s.
-        "content-type": contentType,
+        // Signed into the R2/S3 URL where it is signed at all: it must then
+        // match exactly or the store 403s. An abort sends no body and no type.
+        ...(contentType === null ? {} : { "content-type": contentType }),
         "content-length": String(total),
       },
     });
 
     let settled = false;
+    // What is LEFT of the shared budget, not the whole of it: an earlier attempt
+    // has already spent some, and re-arming the full deadline per attempt would
+    // let a retrying upload run for a multiple of the slot's life.
     let deadlineTimer: NodeJS.Timeout | undefined = setTimeout(() => {
-      fail(new CliError([
+      // Never retryable: the budget it names is the whole upload's, so there is
+      // nothing left for another attempt to use.
+      fail(new UploadAttemptError([
         `Uploading the packaged source timed out after ${formatDuration(deadlineMs)}: ${progressSummary(sent, total, elapsed())}.`,
         slotExpiryIsTheDeadline
           ? `The upload slot expires after that, so a slower upload cannot finish. ${TOO_LARGE_HINT}`
           : `Your connection may be too slow for a source this size. ${TOO_LARGE_HINT}`,
-      ].join("\n")));
-    }, deadlineMs);
+      ].join("\n"), false));
+    }, Math.max(0, deadlineAt - performance.now()));
     // Never let the deadline hold the event loop open on its own; the request
     // does that, and the timer is cleared with it.
     deadlineTimer.unref();
@@ -236,8 +536,11 @@ export async function uploadSource(options: UploadSourceOptions): Promise<void> 
       if (settled || bodyWritten) return;
       disarmStall();
       stallTimer = setTimeout(() => {
-        fail(new CliError(
+        // A connection that died without a reset. A fresh one is exactly what it
+        // needs, so this is the most retryable failure there is.
+        fail(new UploadAttemptError(
           `The source upload stalled: no data was sent for ${formatDuration(stallTimeoutMs)}, after ${progressSummary(sent, total, elapsed())}. Check your network connection and try again.`,
+          true,
         ));
       }, stallTimeoutMs);
       stallTimer.unref();
@@ -250,8 +553,13 @@ export async function uploadSource(options: UploadSourceOptions): Promise<void> 
       // How far it got is the diagnosis when it got somewhere; on a connection
       // that never opened it is just "0 B of 39.0 MB in 0s", which says nothing.
       const progress = sent === 0 ? "" : ` after ${progressSummary(sent, total, elapsed())}`;
-      fail(new CliError(
-        `The source upload failed${code}${progress}: ${error.message}. Check your network connection and try again.`,
+      // Trimmed: OpenSSL's messages end in a newline, which otherwise strands
+      // the sentence below on a line of its own starting with a full stop.
+      const cause = error.message.trim();
+      // A dropped, reset or refused connection — the failure a retry exists for.
+      fail(new UploadAttemptError(
+        `The source upload failed${code}${progress}: ${cause}. Check your network connection and try again.`,
+        true,
       ));
     });
 
@@ -261,7 +569,7 @@ export async function uploadSource(options: UploadSourceOptions): Promise<void> 
     // with no output, and a deploy that uploaded nothing would read as success.
     // No known path reaches this; that is exactly why it is cheap to keep.
     request.on("close", () => {
-      fail(new CliError(`The source upload connection closed unexpectedly after ${progressSummary(sent, total, elapsed())}. Check your network connection and try again.`));
+      fail(new UploadAttemptError(`The source upload connection closed unexpectedly after ${progressSummary(sent, total, elapsed())}. Check your network connection and try again.`, true));
     });
 
     request.on("response", (response) => {
@@ -270,14 +578,18 @@ export async function uploadSource(options: UploadSourceOptions): Promise<void> 
       const chunks: Buffer[] = [];
       let bodyBytes = 0;
       response.on("data", (chunk: Buffer) => {
-        // A success body is discarded; a failure body is kept up to the cap so
-        // the store's own explanation survives into the error.
-        if (ok || bodyBytes >= MAX_ERROR_BODY_BYTES) return;
+        // Kept up to the cap whether or not the status is ok: a failure body
+        // carries the store's own explanation, and a SUCCESS body matters too —
+        // CompleteMultipartUpload answers 200 with an <Error> document when the
+        // assembly fails, so discarding it would read as a completed upload.
+        if (bodyBytes >= MAX_ERROR_BODY_BYTES) return;
         bodyBytes += chunk.length;
         chunks.push(chunk);
       });
       response.on("error", (error: NodeJS.ErrnoException) => {
-        fail(new CliError(`The source upload failed while reading the object store's reply: ${error.message}.`));
+        // The body may well be in the store already, but nothing confirmed it,
+        // so the only safe reading is "unknown" — and re-sending settles it.
+        fail(new UploadAttemptError(`The source upload failed while reading the object store's reply: ${error.message.trim()}.`, true));
       });
       response.on("end", () => {
         if (ok) {
@@ -289,19 +601,28 @@ export async function uploadSource(options: UploadSourceOptions): Promise<void> 
           // upload. Destroyed rather than left to the agent pool: the request
           // was never ended, so the socket is not reusable.
           if (!bodyWritten || sent < total) {
-            fail(new CliError(
+            // Not retryable: whatever answered early will answer early again,
+            // and each retry would feed it the whole tarball to no purpose.
+            fail(new UploadAttemptError(
               `The object store answered ${status} after only ${progressSummary(sent, total, elapsed())} — it did not receive the whole source. Check for a proxy or upload size limit between you and the object store, then try again.`,
+              false,
             ));
             return;
           }
+          const etag = response.headers.etag;
           settle(() => {
             request.destroy();
-            resolve();
+            resolve({
+              etag: typeof etag === "string" ? etag : null,
+              body: Buffer.concat(chunks).toString("utf-8"),
+            });
           });
           return;
         }
         const body = Buffer.concat(chunks).toString("utf-8").slice(0, 1000);
-        fail(new CliError(`Source upload failed (${status} from object storage): ${body}`));
+        // 5xx and 429 are the store having a moment; a 4xx is the request being
+        // wrong (a bad signature, an oversize body) and says the same every time.
+        fail(new UploadAttemptError(`Source upload failed (${status} from object storage): ${body}`, status >= 500 || status === 429));
       });
     });
 

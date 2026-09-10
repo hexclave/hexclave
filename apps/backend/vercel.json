@@ -19,8 +19,8 @@
       "schedule": "* * * * *"
     },
     {
-      "path": "/api/latest/internal/growth-watchdog-step",
-      "schedule": "*/5 * * * *"
+      "path": "/api/latest/internal/deployments-parking-sweep",
+      "schedule": "*/10 * * * *"
     }
   ],
   "github": {

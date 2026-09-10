@@ -23,6 +23,7 @@ export type SignUpRuleOptions = {
   ipAddress: string | null,
   ipTrusted: boolean | null,
   countryCode: string | null,
+  oauthAccountCreatedAtMillis: number | null,
   requestContext?: BestEffortEndUserRequestContext | null,
   turnstileAssessment: SignUpTurnstileAssessment,
 };
@@ -208,6 +209,8 @@ export async function createOrUpgradeAnonymousUserWithRules(
     oauthProvider: signUpRuleOptions.oauthProvider,
     ipAddress: requestIpAddress,
     ipTrusted: requestIpTrusted,
+    countryCode: countryCodeToPersist,
+    oauthAccountCreatedAtMillis: signUpRuleOptions.oauthAccountCreatedAtMillis,
     turnstileAssessment: signUpRuleOptions.turnstileAssessment,
   });
   const riskScores = riskAssessment.scores;

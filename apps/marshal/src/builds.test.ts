@@ -3,38 +3,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_BUILD_ENV_BYTES } from "./config.js";
-import { INTERNAL_COMPLETE_PATH_PREFIX, buildEnvByteLength, buildHarnessScript, buildTimeEnv, createFlyBuilder, createMockBuilder } from "./builds.js";
-import { validateDeploymentRequest, validateServiceSpec } from "./services.js";
+import { BASE_IMAGE, MAX_BUILD_ENV_BYTES } from "./config.js";
+import { buildEnvByteLength, buildHarnessScript, buildTimeEnv, createMockBuilder, generatedDockerfile, type BuildTarget } from "./builds.js";
+import { providerFor } from "./provider.js";
+import { deploymentLogRedactionValues, validateDeploymentRequest, validateServiceSpec } from "./services.js";
+import { targetIsBuilt, targetUsesGeneratedDockerfile } from "./types.js";
 
-// startBuild reaches for Marshal's Fly client, config, and object store through module
-// singletons, so the machine-config assertions below need all three stubbed. Only getConfig
-// and resolveNamespaceOrg are overridden in config — the module's pinned constants
-// (BUILDER_IMAGE, the railpack pins) are the real ones, which is the point of the test.
-const createMachine = vi.fn(async () => ({ id: "machine-1" }));
+// The mock builder needs only the webhook secret. The real GCP builder is covered by the
+// Compute Engine startup-script and client tests, without provisioning a VM in unit tests.
 vi.mock("./config.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./config.js")>(),
-  getConfig: () => ({
-    envId: "test",
-    publicUrl: "https://marshal.example.com",
-    webhookSecret: "webhook-secret",
-    fly: { region: "iad", registryHost: "registry.fly.io", token: "FlyV1 org-token" },
-  }),
-  resolveNamespaceOrg: () => ({ orgSlug: "org", token: "FlyV1 org-token" }),
-}));
-vi.mock("./fly/client.js", () => ({
-  flyClientForNamespaceOrg: () => ({
-    ensureApp: async () => {},
-    createMachine,
-    registryAuthBase64: () => "registry-auth-blob",
-  }),
+  getConfig: () => ({ webhookSecret: "webhook-secret" }),
 }));
 vi.mock("./store.js", () => ({
-  presignValidatedUploadGet: async () => "https://bucket.example.com/src.tar.gz?X-Amz-Signature=deadbeef",
   readSpec: async () => null,
 }));
 
-// The harness script itself only runs on a real Fly builder machine, so these tests pin its
+// The harness script itself only runs on a real GCP builder VM, so these tests pin its
 // shape (both build modes, credential stripping, checksum verification) rather than its
 // behavior — a regression here means the real builder changed in a way QA must re-verify.
 describe("buildHarnessScript", () => {
@@ -50,8 +35,14 @@ describe("buildHarnessScript", () => {
     // The line is read whole and cut by hand; the executed test below is what pins WHY.
     expect(script).toContain("while IFS= read -r TARGET_LINE; do");
     expect(script).toContain("done < /marshal-targets.tsv");
-    expect(script).toContain('if [ -n "$DOCKERFILE_PATH" ]; then');
-    expect(script).toContain('--opt "filename=$DOCKERFILE_PATH"');
+    // Three build kinds, selected by what Marshal injected for the target: a
+    // generated Dockerfile, the author's own, or Railpack.
+    expect(script).toContain('if [ -f "$GEN_DIR/Dockerfile" ]; then');
+    expect(script).toContain('elif [ -n "$DOCKERFILE_PATH" ]; then');
+    // The author's Dockerfile is built by name — from /ctx, or from the scratch
+    // copy with the appended build command.
+    expect(script).toContain('--opt "filename=$DOCKERFILE_NAME"');
+    expect(script).toContain('DOCKERFILE_NAME="$DOCKERFILE_PATH"');
     // ${VAR:-} rather than $VAR: if the env var is ever dropped (empty values are the most
     // likely casualty of a serializer), `set -u` must not kill the script before fail()
     // can report — that failure mode is a silent 20-minute hang.
@@ -82,9 +73,9 @@ describe("buildHarnessScript", () => {
     fs.writeFileSync(manifestPath, [
       // Both optional fields set, then BOTH empty (Railpack from the upload root), then only
       // root_directory set — the case that shifted fields.
-      "web\tregistry.fly.io/web:tag\tweb/Dockerfile\tapps/web",
-      "api\tregistry.fly.io/api:tag\t\t",
-      "db\tregistry.fly.io/db:tag\t\tservices/db",
+      "web\tus-central1-docker.pkg.dev/project/marshal/web:tag\tweb/Dockerfile\tapps/web",
+      "api\tus-central1-docker.pkg.dev/project/marshal/api:tag\t\t",
+      "db\tus-central1-docker.pkg.dev/project/marshal/db:tag\t\tservices/db",
       "",
     ].join("\n"));
 
@@ -93,9 +84,9 @@ describe("buildHarnessScript", () => {
 done < ${JSON.stringify(manifestPath)}`], { encoding: "utf8" });
 
     expect(output.trim().split("\n")).toEqual([
-      "[web][registry.fly.io/web:tag][web/Dockerfile][apps/web]",
-      "[api][registry.fly.io/api:tag][][]",
-      "[db][registry.fly.io/db:tag][][services/db]",
+      "[web][us-central1-docker.pkg.dev/project/marshal/web:tag][web/Dockerfile][apps/web]",
+      "[api][us-central1-docker.pkg.dev/project/marshal/api:tag][][]",
+      "[db][us-central1-docker.pkg.dev/project/marshal/db:tag][][services/db]",
     ]);
   });
 
@@ -116,7 +107,7 @@ done < ${JSON.stringify(manifestPath)}`], { encoding: "utf8" });
 
   it("mounts a tmpfs for the buildkit snapshotter when sized", () => {
     // Without this, the overlayfs rootfs forces buildkit's native (full-copy) snapshotter
-    // and large base-image extraction alone exceeds the build timeout (real-Fly QA).
+    // and large base-image extraction alone exceeds the build timeout (real-provider QA).
     expect(script).toContain("mount -t tmpfs");
     expect(script).toContain("/var/lib/buildkit");
   });
@@ -162,103 +153,6 @@ describe("buildHarnessScript build-time env", () => {
   });
 });
 
-describe("createFlyBuilder machine configuration", () => {
-  const startOptions = {
-    ns: "ns",
-    deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-    uploadId: "00000000-0000-4000-8000-000000000001",
-    targets: [{
-      serviceKey: "web",
-      pushTarget: "registry.fly.io/hx-test-ns-web:01hzzzzzzzzzzzzzzzzzzzzzzz",
-      dockerfilePath: null,
-      rootDirectory: null,
-      buildEnv: { NEXT_PUBLIC_API_URL: "https://api.example.com", OPENAI_API_KEY: "sk-secret" },
-    }],
-  };
-  const lease = { assertOwned: async () => {} } as any;
-
-  it("delivers tenant values as files and never in the machine env block", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild(startOptions, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-
-    const files = Object.fromEntries(config.files.map((file: any) => [file.guest_path, Buffer.from(file.raw_value, "base64").toString("utf8")]));
-    // Per TARGET, because one machine builds every service of the deployment: a
-    // value belonging to one service must not be offered to another's build.
-    expect(files["/marshal-build-env/web/NEXT_PUBLIC_API_URL"]).toBe("https://api.example.com");
-    expect(files["/marshal-build-env/web/OPENAI_API_KEY"]).toBe("sk-secret");
-    expect(files["/marshal-build.sh"]).toContain("MARSHAL_BUILD_START");
-    // The manifest the harness loops over, one tab-separated line per target.
-    expect(files["/marshal-targets.tsv"]).toBe("web\tregistry.fly.io/hx-test-ns-web:01hzzzzzzzzzzzzzzzzzzzzzzz\t\t\n");
-
-    // The env block is Marshal's own credentials plus pointers. A tenant value landing
-    // here would sit next to the org token and reach `railpack prepare`, which runs
-    // unsandboxed in the harness — so assert the absence, not just the files' presence.
-    expect(config.env.BUILD_ENV_DIR).toBe("/marshal-build-env");
-    expect(Object.values(config.env)).not.toContain("sk-secret");
-    expect(Object.values(config.env)).not.toContain("https://api.example.com");
-    expect(Object.keys(config.env)).not.toContain("OPENAI_API_KEY");
-  });
-
-  it("skips an empty value rather than sending an ambiguous empty file", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ...startOptions,
-      targets: [{ ...startOptions.targets[0], buildEnv: { SET: "x", UNSET: "" } }],
-    }, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-    const paths = config.files.map((file: any) => file.guest_path);
-    expect(paths).toContain("/marshal-build-env/web/SET");
-    expect(paths).not.toContain("/marshal-build-env/web/UNSET");
-  });
-});
-
-describe("a deployment with several targets", () => {
-  const lease = { assertOwned: async () => {} } as any;
-
-  it("gives every target its own env directory and one manifest line", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ns: "ns",
-      deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-      uploadId: "00000000-0000-4000-8000-000000000001",
-      targets: [
-        { serviceKey: "web", pushTarget: "registry.fly.io/web:rev", dockerfilePath: "apps/web/Dockerfile", rootDirectory: "apps/web", buildEnv: { WEB_ONLY: "w" } },
-        { serviceKey: "api", pushTarget: "registry.fly.io/api:rev", dockerfilePath: null, rootDirectory: "apps/api", buildEnv: { API_ONLY: "a" } },
-      ],
-    }, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-    const files = Object.fromEntries(config.files.map((file: any) => [file.guest_path, Buffer.from(file.raw_value, "base64").toString("utf8")]));
-    expect(files["/marshal-targets.tsv"]).toBe([
-      "web\tregistry.fly.io/web:rev\tapps/web/Dockerfile\tapps/web",
-      "api\tregistry.fly.io/api:rev\t\tapps/api",
-      "",
-    ].join("\n"));
-    // Neither target can see the other's values.
-    expect(files["/marshal-build-env/web/WEB_ONLY"]).toBe("w");
-    expect(files["/marshal-build-env/api/API_ONLY"]).toBe("a");
-    expect(files["/marshal-build-env/web/API_ONLY"]).toBeUndefined();
-    expect(files["/marshal-build-env/api/WEB_ONLY"]).toBeUndefined();
-  });
-
-  it("sizes the machine for Railpack when ANY target auto-detects", async () => {
-    // One machine builds them all, so the largest requirement wins: a
-    // Dockerfile-only guest would time out the railpack target's build.
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ns: "ns",
-      deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-      uploadId: "00000000-0000-4000-8000-000000000001",
-      targets: [
-        { serviceKey: "web", pushTarget: "registry.fly.io/web:rev", dockerfilePath: "Dockerfile", rootDirectory: null, buildEnv: {} },
-        { serviceKey: "api", pushTarget: "registry.fly.io/api:rev", dockerfilePath: null, rootDirectory: null, buildEnv: {} },
-      ],
-    }, lease);
-    const config = (createMachine.mock.calls[0] as any)[1].config;
-    expect(config.env.BUILDKIT_TMPFS_SIZE).toBeDefined();
-  });
-});
-
 describe("buildTimeEnv", () => {
   it("takes plain values and drops refs", () => {
     // One channel: every declared var goes to the build AND the runtime, secrets included.
@@ -267,7 +161,15 @@ describe("buildTimeEnv", () => {
       PLAIN: { value: "keep-me" },
       SECRET: { value: "sk-also-keep-me" },
       CONNECTION: { ref: "api.internal_url" },
-    })).toEqual({ PLAIN: "keep-me", SECRET: "sk-also-keep-me" });
+    })).toEqual({ CI: "true", PLAIN: "keep-me", SECRET: "sk-also-keep-me" });
+  });
+
+  it("sets CI=true, and lets a declared CI win", () => {
+    // Every build is a non-interactive one, so the tools that read CI should see
+    // it whether or not the deploy file says so — but a service that sets its
+    // own value has said what it means and must keep it.
+    expect(buildTimeEnv({})).toEqual({ CI: "true" });
+    expect(buildTimeEnv({ CI: { value: "false" } })).toEqual({ CI: "false" });
   });
 
   it("measures keys and values in utf-8 bytes", () => {
@@ -275,30 +177,36 @@ describe("buildTimeEnv", () => {
   });
 });
 
-describe("the build completion webhook", () => {
-  // The gate in marshal-app.ts authenticates /internal/* BEFORE any handler runs and 404s a path it
-  // does not recognize, so a webhook URL the gate cannot match means no real Fly build can
-  // ever complete — and nothing in e2e notices, because the mock builder completes in
-  // process without crossing HTTP. Both sides derive from buildCompletionPath; this pins
-  // that they still agree.
-  const INTERNAL_COMPLETE_PATH_REGEX = new RegExp(`^${INTERNAL_COMPLETE_PATH_PREFIX}([^/]+)/complete$`);
+describe("deploymentLogRedactionValues", () => {
+  const deployment = (env: Record<string, { value: string }>) => ({
+    id: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+    ns: "ns",
+    targets: [{ service_key: "web", spec: { env } }],
+  }) as any;
 
-  it("posts to a path the app's pre-handler auth gate accepts", async () => {
-    createMachine.mockClear();
-    await createFlyBuilder().startBuild({
-      ns: "ns",
-      deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-      uploadId: "00000000-0000-4000-8000-000000000001",
-      targets: [{ serviceKey: "web", pushTarget: "registry.fly.io/hx-test-ns-web:tag", dockerfilePath: null, rootDirectory: null, buildEnv: {} }],
-    }, { assertOwned: async () => {} } as any);
-    const webhookUrl = new URL((createMachine.mock.calls[0] as any)[1].config.env.WEBHOOK_URL);
+  it("scrubs tenant env values but never CI provenance", () => {
+    // The CI values are the deploy's own commit, which is what the build log
+    // exists to show. Scrubbing them would black out the revision the build
+    // prints — and, because these are matched as plain substrings, an 8-hex
+    // short sha would take every unrelated 8-hex run in the log with it.
+    const values = deploymentLogRedactionValues(providerFor("gcp"), deployment({
+      DATABASE_URL: { value: "postgres://user:hunter2@db:5432/app" },
+      CI_COMMIT_SHA: { value: "0123456789abcdef0123456789abcdef01234567" },
+      CI_COMMIT_SHORT_SHA: { value: "01234567" },
+      CI_REPOSITORY_URL: { value: "https://github.com/acme/app.git" },
+    }));
+    expect(values).toContain("postgres://user:hunter2@db:5432/app");
+    expect(values).not.toContain("0123456789abcdef0123456789abcdef01234567");
+    expect(values).not.toContain("01234567");
+    expect(values).not.toContain("https://github.com/acme/app.git");
+  });
 
-    const match = INTERNAL_COMPLETE_PATH_REGEX.exec(webhookUrl.pathname);
-    expect(match).not.toBeNull();
-    // The gate verifies the token against the id it reads out of the path, so the captured
-    // group has to BE the deployment id, not merely match something.
-    expect(match?.[1]).toBe("01HZZZZZZZZZZZZZZZZZZZZZZZ");
-    expect(webhookUrl.searchParams.get("ns")).toBe("ns");
+  it("still scrubs a service's OWN env var that merely starts with CI", () => {
+    // The exemption is the CI_ namespace the control plane admits for ci_env,
+    // not "any name beginning with CI" — CIPHER_KEY is an ordinary secret.
+    expect(deploymentLogRedactionValues(providerFor("gcp"), deployment({
+      CIPHER_KEY: { value: "sk-cipher-key-value" },
+    }))).toContain("sk-cipher-key-value");
   });
 });
 
@@ -314,8 +222,9 @@ describe("createMockBuilder", () => {
       deploymentId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
       uploadId: "00000000-0000-4000-8000-000000000001",
       targets: ["web", "api", "worker-queue"].map((serviceKey) => ({
-        serviceKey, pushTarget: `registry.fly.io/hx-test-ns-${serviceKey}:tag`, dockerfilePath: null, rootDirectory: null, buildEnv: {},
+        serviceKey, pushTarget: `us-central1-docker.pkg.dev/project/marshal/hx-test-ns-${serviceKey}:tag`, dockerfilePath: null, rootDirectory: null, baseImage: null, buildCommand: null, buildEnv: {},
       })),
+      builderMemoryMb: null,
     }, { assertOwned: async () => {} } as any);
     await vi.waitFor(() => expect(completions.length).toBe(1));
 
@@ -427,9 +336,13 @@ describe("validateDeploymentRequest paths", () => {
     expect(target({ image: "postgres" })).toThrow(/explicit tag or digest/);
     expect(target({ image: "postgres:16@sha256:" + "a".repeat(64) })).toThrow(/tag or a digest, not both/);
     expect(target({ image: "https://ghcr.io/org/app:1" })).toThrow(/scheme/);
-    // A target either takes part in the build or names an image to run.
-    expect(target({ image: "postgres:16", dockerfile_path: "Dockerfile" })).toThrow(/names an image and a source build/);
-    expect(target({ image: "postgres:16", root_directory: "database" })).toThrow(/names an image and a source build/);
+    // `image` and `dockerfile_path` each say what the build starts from.
+    expect(target({ image: "postgres:16", dockerfile_path: "Dockerfile" })).toThrow(/names an image and a dockerfile_path/);
+    // An image with no build command is not built from the upload at all, so a
+    // directory within it means nothing — but WITH one it is a base, and the
+    // root directory is where the command runs.
+    expect(target({ image: "postgres:16", root_directory: "database" })).toThrow(/root_directory within it means nothing/);
+    expect(() => validateDeploymentRequest(request({ image: "postgres:16", root_directory: "database", build_command: "make" }))).not.toThrow();
   });
 
   it("rejects paths that could escape or break the builder's manifest", () => {
@@ -460,5 +373,203 @@ describe("validateDeploymentRequest paths", () => {
     expect(() => validateDeploymentRequest(request({
       spec: { config: { type: "serverless", public: true, min_instances: 0, max_instances: 1, ports: { "3000": { protocol: "http" }, "5432": { protocol: "tcp" } } }, env: {} },
     }))).toThrow(/may not declare a "tcp" port/);
+  });
+});
+
+describe("build and start commands", () => {
+  const spec = (extra: Record<string, unknown> = {}) => ({
+    config: { type: "serverless", min_instances: 0, max_instances: 1, ports: { "3000": { protocol: "http" } }, ...extra },
+    env: {},
+  });
+  const request = (target: Record<string, unknown>) => ({
+    upload_id: "00000000-0000-4000-8000-000000000001",
+    targets: [{ service_key: "web", spec: spec(), ...target }],
+    order: [["web"]],
+  });
+
+  it("refuses a command that could not survive the file it is written into", () => {
+    // A newline is a second Dockerfile instruction and a second argv entry; both
+    // are refused rather than escaped, at the boundary that turns a request into
+    // a build.
+    for (const invalid of ["build\nrm -rf /", "build\ttab", "", "   ", "x".repeat(2049), 42]) {
+      expect(() => validateDeploymentRequest(request({ build_command: invalid, image: "node:22" })), String(invalid))
+        .toThrow(/build_command/);
+      expect(() => validateDeploymentRequest({
+        ...request({}),
+        targets: [{ service_key: "web", spec: spec({ start_command: invalid }) }],
+      }), String(invalid)).toThrow(/start_command/);
+    }
+  });
+
+  it("requires a start command when the base image is Marshal's own", () => {
+    // node:22-bookworm starts a REPL: a service built on it with nothing to run
+    // would deploy, boot and exit.
+    expect(() => validateDeploymentRequest(request({ build_command: "npm ci" })))
+      .toThrow(/has no command of its own/);
+    // A base that DOES have a command of its own needs none.
+    expect(() => validateDeploymentRequest(request({ build_command: "npm ci", image: "node:22" }))).not.toThrow();
+    expect(() => validateDeploymentRequest(request({ build_command: "npm ci", dockerfile_path: "Dockerfile" }))).not.toThrow();
+    expect(() => validateDeploymentRequest({
+      ...request({}),
+      targets: [{ service_key: "web", build_command: "npm ci", spec: spec({ start_command: "npm start" }) }],
+    })).not.toThrow();
+  });
+
+  it("counts an image with a build command as BUILT, so the deployment needs its upload", () => {
+    // The whole point of the pairing: an image alone is not built, and adding a
+    // build command turns it into a base — which means an upload, a builder
+    // machine, and a build log.
+    expect(() => validateDeploymentRequest({
+      targets: [{ service_key: "db", image: "postgres:16", build_command: "make extensions", spec: spec() }],
+      order: [["db"]],
+    })).toThrow(/upload_id is required/);
+    // ...while a START command alone leaves it prebuilt: it is applied by the
+    // runtime, so it builds nothing.
+    expect(() => validateDeploymentRequest({
+      targets: [{ service_key: "db", image: "postgres:16", spec: spec({ start_command: "postgres -c fsync=off" }) }],
+      order: [["db"]],
+    })).not.toThrow();
+  });
+});
+
+describe("generatedDockerfile", () => {
+  const target = (extra: Partial<BuildTarget> = {}): BuildTarget => ({
+    serviceKey: "web",
+    pushTarget: "us-central1-docker.pkg.dev/project/marshal/web:tag",
+    dockerfilePath: null,
+    rootDirectory: null,
+    baseImage: null,
+    buildCommand: null,
+    buildEnv: {},
+    ...extra,
+  });
+
+  it("generates nothing for the builds that describe themselves", () => {
+    // Railpack, and a plain Dockerfile build: the harness keys off the absence.
+    expect(generatedDockerfile(target())).toBeNull();
+    expect(generatedDockerfile(target({ dockerfilePath: "Dockerfile" }))).toBeNull();
+  });
+
+  it("copies the whole upload onto the base and runs the command in the root directory", () => {
+    const generated = generatedDockerfile(target({
+      baseImage: "docker.io/library/node:22-bookworm",
+      rootDirectory: "apps/web",
+      buildCommand: "pnpm install && pnpm build",
+      buildEnv: { NEXT_PUBLIC_API_URL: "https://api.example.com", B: "b" },
+    }));
+    expect(generated).toEqual({
+      path: "Dockerfile",
+      contents: [
+        "FROM docker.io/library/node:22-bookworm",
+        // One ARG per build-visible var, sorted: that is how the values reach
+        // the command, and sorting keeps two builds of one target identical.
+        "ARG B",
+        "ARG NEXT_PUBLIC_API_URL",
+        // The whole upload, so a monorepo service can reach shared code above
+        // its own directory — the same rule the build context follows.
+        "COPY . /app",
+        "WORKDIR /app/apps/web",
+        `RUN ["/bin/sh", "-c", "pnpm install && pnpm build"]`,
+        "",
+      ].join("\n"),
+    });
+  });
+
+  it("leaves the working directory at the upload root when the service is the whole tree", () => {
+    for (const rootDirectory of [null, ".", ""]) {
+      const generated = generatedDockerfile(target({ baseImage: "base:1", rootDirectory, buildCommand: "make" }));
+      expect(generated?.contents, String(rootDirectory)).toContain("WORKDIR /app\n");
+    }
+  });
+
+  it("makes pnpm real on the runtime's own base image, and assumes nothing about anyone else's", () => {
+    // node:22-bookworm ships corepack but no pnpm binary, so the promise that
+    // pnpm is preinstalled is exactly one line — and it is only safe to make on
+    // OUR image: `corepack enable` on a base without corepack would fail the
+    // build before the author's command ever ran.
+    expect(generatedDockerfile(target({ baseImage: BASE_IMAGE, buildCommand: "pnpm i" }))?.contents)
+      .toContain("FROM " + BASE_IMAGE + "\nRUN corepack enable\n");
+    expect(generatedDockerfile(target({ baseImage: "python:3.12-slim", buildCommand: "pip install ." }))?.contents)
+      .not.toContain("corepack");
+  });
+
+  it("never bakes a start command into the image", () => {
+    // The start command is machine configuration, applied as the machine's init,
+    // so nothing about it belongs in a layer — an image built here starts
+    // whatever its base started.
+    const generated = generatedDockerfile(target({ baseImage: "base:1", buildCommand: "make" }));
+    expect(generated?.contents).toBe("FROM base:1\nCOPY . /app\nWORKDIR /app\nRUN [\"/bin/sh\", \"-c\", \"make\"]\n");
+    expect(generated?.contents).not.toContain("CMD");
+    expect(generated?.contents).not.toContain("ENTRYPOINT");
+  });
+
+  it("declares the build env on the APPENDED path too, or the command cannot see it", () => {
+    // `--opt build-arg:KEY=value` reaches a stage only if that stage declares
+    // `ARG KEY`, and an author's own Dockerfile has no reason to have declared
+    // Hexclave's variables — so without these lines the appended command would
+    // silently build with every env var unset.
+    const generated = generatedDockerfile(target({
+      dockerfilePath: "Dockerfile",
+      buildCommand: "npm run build",
+      buildEnv: { NEXT_PUBLIC_API_URL: "https://api.example.com", DATABASE_URL: "postgres://x" },
+    }));
+    expect(generated).toEqual({
+      path: "suffix",
+      contents: `\nARG DATABASE_URL\nARG NEXT_PUBLIC_API_URL\nRUN ["/bin/sh", "-c", "npm run build"]\n`,
+    });
+  });
+
+  it("escapes a root directory the Dockerfile parser would otherwise expand", () => {
+    // A WORKDIR expands variables, and the ARG lines just above put every
+    // build-visible name in scope — so a directory really named `apps/$APP`
+    // would resolve to something else, or to nothing.
+    const generated = generatedDockerfile(target({
+      baseImage: "base:1", rootDirectory: "apps/$APP", buildCommand: "make", buildEnv: { APP: "other" },
+    }));
+    expect(generated?.contents).toContain("WORKDIR /app/apps/\\$APP\n");
+  });
+
+  it("appends to the author's Dockerfile without gluing onto its last line", () => {
+    // The leading newline is the point: the author's file is not guaranteed to
+    // end in one.
+    const generated = generatedDockerfile(target({ dockerfilePath: "Dockerfile", buildCommand: "npm run postbuild" }));
+    expect(generated).toEqual({ path: "suffix", contents: `\nRUN ["/bin/sh", "-c", "npm run postbuild"]\n` });
+  });
+
+  it("encodes a command that would otherwise break the file it is written into", () => {
+    // A quote, a backslash and a trailing `\` are all things shell-form RUN would
+    // mangle (the last continues onto the next instruction). Exec form with JSON
+    // encoding is what makes them ordinary characters.
+    const generated = generatedDockerfile(target({ baseImage: "base:1", buildCommand: `echo "a\\b" && ls \\` }));
+    expect(generated?.contents).toContain(`RUN ["/bin/sh", "-c", "echo \\"a\\\\b\\" && ls \\\\"]`);
+    // One line, whatever the command contained.
+    expect(generated?.contents.split("\n").filter((line) => line.startsWith("RUN")).length).toBe(1);
+  });
+});
+
+describe("what a start command does NOT change", () => {
+  const spec = (extra: Record<string, unknown> = {}) => ({
+    config: { type: "serverless", min_instances: 0, max_instances: 1, ports: { "3000": { protocol: "http" } }, ...extra },
+    env: {},
+  });
+
+  it("leaves an auto-detected build auto-detected", () => {
+    // The whole reason the start command is applied by the runtime: saying "run
+    // it this way" must not silently throw away the install and compile steps
+    // Railpack was doing, which would build a clean image with no node_modules
+    // in it and then fail at startup.
+    //
+    // Read off the VALIDATED target, so this covers the request shape a start
+    // command actually arrives in rather than a hand-written struct.
+    const [target] = validateDeploymentRequest({
+      upload_id: "00000000-0000-4000-8000-000000000001",
+      targets: [{ service_key: "web", spec: spec({ start_command: "npm start" }) }],
+      order: [["web"]],
+    }).targets;
+    expect(target.spec.config.start_command).toBe("npm start");
+    expect(targetIsBuilt(target)).toBe(true);
+    expect(targetUsesGeneratedDockerfile(target)).toBe(false);
+    // A BUILD command is what selects the generated Dockerfile.
+    expect(targetUsesGeneratedDockerfile({ ...target, build_command: "npm ci" })).toBe(true);
   });
 });

@@ -4,21 +4,19 @@ import { useMemo } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { format } from "date-fns";
-import { useMcpCallLogs } from "../../hooks/useSpacetimeDB";
+import { usePublishedQa } from "../../hooks/useSpacetimeDB";
 import { toDate } from "../../utils";
 import { markdownComponents } from "../../components/markdown-components";
 
 export default function QuestionsPage() {
-  const { rows, connectionState } = useMcpCallLogs();
+  const { rows, connectionState } = usePublishedQa();
 
   const publishedQa = useMemo(() => {
-    return rows
-      .filter(r => r.publishedToQa)
-      .sort((a, b) => {
-        const aTime = a.publishedAt ? Number(toDate(a.publishedAt)) : 0;
-        const bTime = b.publishedAt ? Number(toDate(b.publishedAt)) : 0;
-        return bTime - aTime;
-      });
+    return [...rows].sort((a, b) => {
+      const aTime = a.publishedAt ? Number(toDate(a.publishedAt)) : 0;
+      const bTime = b.publishedAt ? Number(toDate(b.publishedAt)) : 0;
+      return bTime - aTime;
+    });
   }, [rows]);
 
   if (connectionState === "connecting") {
@@ -50,18 +48,17 @@ export default function QuestionsPage() {
         <div className="space-y-8">
           {publishedQa.map(row => (
             <article key={String(row.id)} className="border-b border-gray-200 pb-8 last:border-b-0">
-              <h2 className="text-lg font-semibold text-gray-900 mb-3">{row.humanCorrectedQuestion ?? row.question}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 mb-3">{row.question}</h2>
               <div className="prose prose-sm max-w-none text-gray-700">
                 <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                  {row.humanCorrectedAnswer ?? row.response}
+                  {row.answer}
                 </Markdown>
               </div>
-              <div className="mt-3 flex items-center gap-3 text-xs text-gray-400">
-                <span>{row.toolName}</span>
-                {row.publishedAt && (
-                  <span>{format(toDate(row.publishedAt), "MMM d, yyyy")}</span>
-                )}
-              </div>
+              {row.publishedAt && (
+                <div className="mt-3 text-xs text-gray-400">
+                  {format(toDate(row.publishedAt), "MMM d, yyyy")}
+                </div>
+              )}
             </article>
           ))}
         </div>

@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/mock-oauth-server",
-  "version": "1.0.104",
+  "version": "1.0.119",
   "repository": "https://github.com/hexclave/hexclave",
   "private": true,
   "main": "index.js",

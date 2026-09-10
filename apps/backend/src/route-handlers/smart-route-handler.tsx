@@ -1,6 +1,7 @@
 import "../polyfills";
 
 import { recordRequestStats } from "@/lib/dev-request-stats";
+import { getInboundRequestHost } from "@/lib/request-api-url";
 import { requestContextALS } from "@/lib/runtime/request-context";
 import { isRequestBodyTooLargeError } from "@/server/request-body-limit";
 import * as Sentry from "@sentry/node";
@@ -92,6 +93,7 @@ export function handleApiRequest(handler: (req: Request, options: any, requestId
       // The route pattern (not the concrete path — see RequestContext.normalizedPath for why).
       // Optional access because unit tests may invoke handlers outside the server dispatcher.
       const normalizedPath = requestContextALS.getStore()?.normalizedPath;
+      const host = getInboundRequestHost(req);
       // Sentry's httpIntegration already forks an isolation scope per incoming request (which is
       // what keeps concurrent requests on Fluid Compute / Cloud Run from leaking context into each
       // other), so we only need to attach the request context to that scope — error events must be
@@ -99,16 +101,22 @@ export function handleApiRequest(handler: (req: Request, options: any, requestId
       // values, or the concrete request path here; the former routinely contain credentials and
       // path params can contain customer identifiers. The route pattern is safe (it's the same
       // shape as the http.route span attribute) and is what triage uses to locate the endpoint.
+      // `host` is the inbound API hostname (api vs api2), not a customer identifier.
+      if (host != null) {
+        Sentry.getIsolationScope().setTag("host", host);
+      }
       Sentry.getIsolationScope().setContext("stack-request", {
         requestId,
         method: req.method,
         ...(normalizedPath == null ? {} : { route: normalizedPath }),
+        ...(host == null ? {} : { host }),
       });
       return await traceSpan({
         description: 'handling API request',
         attributes: {
           "stack.request.request-id": requestId,
           "stack.request.method": req.method,
+          ...(host == null ? {} : { "stack.request.host": host }),
           "stack.process.id": processId,
           "stack.process.concurrent-requests": concurrentRequestsInProcess,
         },

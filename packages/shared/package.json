@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/shared",
-  "version": "1.0.104",
+  "version": "1.0.119",
   "repository": "https://github.com/hexclave/hexclave",
   "scripts": {
     "build": "rimraf dist && tsdown",

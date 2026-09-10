@@ -1,5 +1,5 @@
-import { getConfig, MOCK_FLY_TOKEN } from "../config.js";
-import { FLY_MUTATION_TIMEOUT_MS, FLY_READ_TIMEOUT_MS, MutationOutcomeUnknownError } from "../mutation-safety.js";
+import { flyConfig, MOCK_FLY_TOKEN } from "../config.js";
+import { PROVIDER_MUTATION_TIMEOUT_MS, PROVIDER_READ_TIMEOUT_MS, MutationOutcomeUnknownError } from "../mutation-safety.js";
 
 // Thin client for the three Fly API surfaces Marshal talks to, plus the Docker registry.
 // One instance per (org, token) — resolved per namespace via resolveNamespaceOrg.
@@ -73,6 +73,42 @@ export type FlyCertificate = {
   issued: { nodes: { type: string, expiresAt: string }[] },
 };
 
+/**
+ * What Fly itself says a hostname needs, from the Machines REST certificate resource.
+ *
+ * This is the AUTHORITATIVE answer and the only place Fly hands back the `_fly-ownership`
+ * TXT record — the GraphQL certificate type has no field for it. Deriving the record set
+ * from the app's IPs instead (which is what Marshal used to do) silently omits that record,
+ * and a hostname behind a CDN proxy can then never verify: the proxy answers the A/AAAA
+ * with its own addresses and terminates TLS, so neither the AAAA proof nor TLS-ALPN-01
+ * works and the ownership TXT is the only proof left.
+ */
+export type FlyCertificateRequirements = {
+  hostname: string,
+  configured: boolean,
+  // Fly's own wording, mirroring GraphQL's clientStatus: "Awaiting configuration",
+  // "Awaiting certificates", "Ready".
+  status: string,
+  validation: {
+    dns_configured: boolean,
+    alpn_configured: boolean,
+    http_configured: boolean,
+    ownership_txt_configured: boolean,
+  },
+  dns_requirements: {
+    a: string[],
+    aaaa: string[],
+    // Fly's per-app CNAME target (a hashed `<id>.<app>.fly.dev`), not `<app>.fly.dev`.
+    cname: string,
+    acme_challenge: { name: string, target: string },
+    // `app_value` scopes the proof to THIS app; `org_value` scopes it to the whole Fly org.
+    // Only app_value may ever be shown to a tenant — every tenant app lives in one org, so
+    // publishing org_value would let any other tenant's app claim the same hostname.
+    ownership: { name: string, app_value: string, org_value: string },
+  },
+  validation_errors: { code: string, message: string, remediation: string }[],
+};
+
 export type FlyVolume = {
   id: string,
   name: string,
@@ -120,12 +156,12 @@ export class FlyClient {
 
   private async fetchWithReadRetry(url: string, init: RequestInit & { method: string }): Promise<Response> {
     if (init.method === "GET" || init.method === "HEAD") {
-      // Reads are bounded too — see FLY_READ_TIMEOUT_MS. A fresh signal per attempt, because
+      // Reads are bounded too — see PROVIDER_READ_TIMEOUT_MS. A fresh signal per attempt, because
       // an AbortSignal.timeout that already fired would abort the retry instantly.
-      return await this.retryReadOnSocketReset(() => fetch(url, { ...init, signal: AbortSignal.timeout(FLY_READ_TIMEOUT_MS) }));
+      return await this.retryReadOnSocketReset(() => fetch(url, { ...init, signal: AbortSignal.timeout(PROVIDER_READ_TIMEOUT_MS) }));
     }
     try {
-      return await fetch(url, { ...init, signal: AbortSignal.timeout(FLY_MUTATION_TIMEOUT_MS) });
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(PROVIDER_MUTATION_TIMEOUT_MS) });
     } catch (error) {
       // A failed write request can have reached Fly even when no response reached Marshal.
       // Keep the lease until expiry+drain so a replacement cannot overlap that operation.
@@ -145,7 +181,7 @@ export class FlyClient {
   }
 
   private async fetchMachinesApi<T>(path: string, init?: { method?: string, body?: unknown, allow404?: boolean }): Promise<T | null> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     const method = init?.method ?? "GET";
     const response = await this.fetchWithReadRetry(`${fly.machinesApiUrl}/v1${path}`, {
       method,
@@ -178,14 +214,14 @@ export class FlyClient {
   // "Could not find App" GraphQL error (not a null app); the read paths treat
   // that as "no data" so a service without an app reads as empty.
   private async fetchGraphql<T>(query: string, variables: Record<string, unknown>, options?: { allowNotFound?: boolean, read?: boolean }): Promise<T | null> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     const doFetch = () => fetch(fly.graphqlApiUrl, {
       method: "POST",
       headers: { "authorization": `Bearer ${this.token}`, "content-type": "application/json" },
       body: JSON.stringify({ query, variables }),
       // Both are bounded, at different limits: a write's timeout is what the reconciliation
       // takeover grace is derived from, while a read only has to not hang forever.
-      signal: AbortSignal.timeout(options?.read ? FLY_READ_TIMEOUT_MS : FLY_MUTATION_TIMEOUT_MS),
+      signal: AbortSignal.timeout(options?.read ? PROVIDER_READ_TIMEOUT_MS : PROVIDER_MUTATION_TIMEOUT_MS),
     });
     // Read queries get the same one-shot socket-reset retry the REST reads get.
     let response: Response;
@@ -382,7 +418,22 @@ export class FlyClient {
   }
 
   // -------------------------------------------------------------------------
-  // Certificates (GraphQL)
+  // Certificates
+  //
+  // Split across both APIs on purpose: only GraphQL can add or delete one, and only the
+  // Machines REST resource reports what DNS the hostname actually needs (see
+  // FlyCertificateRequirements).
+
+  /**
+   * The DNS Fly requires for a hostname, and how much of it Fly has already seen.
+   * Null when the app or the certificate does not exist.
+   */
+  async getCertificateRequirements(app: string, hostname: string): Promise<FlyCertificateRequirements | null> {
+    return await this.fetchMachinesApi<FlyCertificateRequirements>(
+      flyPath`/apps/${app}/certificates/${hostname}`,
+      { allow404: true },
+    );
+  }
 
   private static readonly CERTIFICATE_FIELDS = `
     id hostname configured acmeDnsConfigured clientStatus
@@ -433,7 +484,7 @@ export class FlyClient {
   // Logs API
 
   async getLogs(app: string, options?: { nextToken?: string, instance?: string }): Promise<{ entries: FlyLogEntry[], nextToken: string | null }> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     const params = new URLSearchParams();
     if (options?.nextToken !== undefined) params.set("next_token", options.nextToken);
     if (options?.instance !== undefined) params.set("instance", options.instance);
@@ -491,7 +542,7 @@ export class FlyClient {
   }
 
   async resolveImageDigest(app: string, tag: string): Promise<string | null> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     // The registry has no mock; when the mock Fly token is in use, don't send a real HTTPS
     // request to registry.fly.io with a sentinel credential (surprising egress + a 401 that
     // surfaces as "digest could not be resolved"). Mock builds always supply the digest in
@@ -510,7 +561,7 @@ export class FlyClient {
   }
 
   async deleteImageManifest(app: string, digest: string): Promise<void> {
-    const { fly } = getConfig();
+    const fly = flyConfig();
     if (this.token === MOCK_FLY_TOKEN) return; // no mock registry — see resolveImageDigest
     const response = await fetch(`https://${fly.registryHost}/v2/${encodeURIComponent(app)}/manifests/${digest}`, {
       method: "DELETE",

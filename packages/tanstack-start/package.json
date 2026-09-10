@@ -1,7 +1,7 @@
 {
   "//": "THIS FILE IS AUTO-GENERATED FROM TEMPLATE. DO NOT EDIT IT DIRECTLY UNLESS YOU ALSO EDIT THE CORRESPONDING FILE IN packages/template (FOR package.json FILES, PLEASE EDIT package-template.json)",
   "name": "@hexclave/tanstack-start",
-  "version": "1.0.104",
+  "version": "1.0.119",
   "repository": "https://github.com/hexclave/hexclave",
   "sideEffects": false,
   "main": "./dist/index.js",

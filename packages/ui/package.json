@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/ui",
-  "version": "1.0.104",
+  "version": "1.0.119",
   "repository": "https://github.com/hexclave/hexclave",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

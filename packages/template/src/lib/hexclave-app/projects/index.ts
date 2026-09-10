@@ -3,11 +3,11 @@ import { AdminUserProjectsCrud, ProjectsCrud } from "@hexclave/shared/dist/inter
 import { ProjectOnboardingStatus } from "@hexclave/shared/dist/schema-fields";
 
 import { CompleteConfig, EnvironmentConfigNormalizedOverride, EnvironmentConfigOverrideOverride } from "@hexclave/shared/dist/config/schema";
-import type { AdminDeploymentDomainJson, AdminDeploymentJson, AdminDeploymentServiceOutcomeJson, AdminProjectSecretJson, AdminDeploymentServiceJson } from "@hexclave/shared/dist/interface/admin-interface";
+import type { AdminDeploymentDomainJson, AdminDeploymentJson, AdminDeploymentServiceLogLineJson, AdminDeploymentServiceOutcomeJson, AdminProjectSecretJson, AdminDeploymentServiceJson } from "@hexclave/shared/dist/interface/admin-interface";
 import { StackAdminApp } from "../apps/interfaces/admin-app";
 import { AdminProjectConfig, AdminProjectConfigUpdateOptions, ProjectConfig } from "../project-configs";
 
-export type { AdminDeploymentDomainJson, AdminDeploymentEnvVarJson, AdminDeploymentJson, AdminDeploymentServiceOutcomeJson, AdminProjectSecretJson, AdminDeploymentServiceJson } from "@hexclave/shared/dist/interface/admin-interface";
+export type { AdminDeploymentDomainJson, AdminDeploymentEnvVarJson, AdminDeploymentJson, AdminDeploymentServiceLogLineJson, AdminDeploymentServiceOutcomeJson, AdminProjectSecretJson, AdminDeploymentServiceJson } from "@hexclave/shared/dist/interface/admin-interface";
 
 /**
  * SDK type for pushed config source (camelCase for SDK).
@@ -146,9 +146,9 @@ export type AdminProject = {
 
   /**
    * Lists the project's deployment services (definitions as synced from the
-   * config file's `services` export by `hexclave deploy`, merged with their
+   * deploy file's `deploy` export by `hexclave deploy`, merged with their
    * operational state: deploy status, env vars, domains). Definitions are
-   * read-only through the SDK — the config file is the source of truth.
+   * read-only through the SDK — the deploy file is the source of truth.
    */
   listDeploymentServices(this: AdminProject): Promise<AdminDeploymentServiceJson[]>,
 
@@ -187,6 +187,23 @@ export type AdminProject = {
    * one log covers every service it shipped.
    */
   getDeploymentBuildLogs(this: AdminProject, deploymentId: string, options?: { signal?: AbortSignal }): Promise<string>,
+
+  /**
+   * Follows a service's RUNTIME logs (what the container printed while running,
+   * not what its build printed), calling `onLine` per line as it arrives.
+   *
+   * A runtime log has no end, so this resolves when the server stops following
+   * — after a few minutes — rather than when the service stops. Call again with
+   * the largest `at_millis` seen to resume exactly where it left off; omit it to
+   * start at the tail. These lines are NOT redacted.
+   */
+  getDeploymentServiceLogs(this: AdminProject, serviceId: string, options: {
+    sinceMillis?: number,
+    /** False returns what is available right now instead of following. */
+    follow?: boolean,
+    signal?: AbortSignal,
+    onLine: (line: AdminDeploymentServiceLogLineJson) => void,
+  }): Promise<void>,
 
   /**
    * Adds a custom domain to a deployment service.

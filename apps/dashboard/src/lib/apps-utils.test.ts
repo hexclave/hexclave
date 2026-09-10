@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ALL_APPS } from "@hexclave/shared/dist/apps/apps-config";
 
-import { getAppEnableConfigUpdate, getAppIdsForListing } from "./apps-utils";
+import { getAppEnableConfigUpdate, getAppIdsForListing, getEnabledAppIds, isAppEnabled } from "./apps-utils";
 
 describe("getAppIdsForListing", () => {
   it("hides alpha apps unless they are enabled", () => {
@@ -27,5 +27,24 @@ describe("getAppEnableConfigUpdate", () => {
     expect(getAppEnableConfigUpdate("analytics")).toEqual({
       "apps.installed.analytics.enabled": true,
     });
+  });
+});
+
+describe("sub-app enablement", () => {
+  it("continues to use the parent app in the dashboard", () => {
+    const independentlyEnabledClickmaps = {
+      analytics: { enabled: false },
+      clickmaps: { enabled: true },
+    };
+
+    expect(isAppEnabled(independentlyEnabledClickmaps, "clickmaps")).toBe(false);
+    expect(getEnabledAppIds(independentlyEnabledClickmaps)).not.toContain("clickmaps");
+
+    const enabledThroughParent = {
+      analytics: { enabled: true },
+      clickmaps: { enabled: false },
+    };
+    expect(isAppEnabled(enabledThroughParent, "clickmaps")).toBe(true);
+    expect(getEnabledAppIds(enabledThroughParent)).toContain("clickmaps");
   });
 });

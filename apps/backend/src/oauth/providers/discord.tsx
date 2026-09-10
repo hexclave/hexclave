@@ -1,4 +1,4 @@
-import { OAuthUserInfo, validateUserInfo } from "../utils";
+import { getDiscordAccountCreatedAtMillis, OAuthUserInfo, validateUserInfo } from "../utils";
 import { OAuthBaseProvider, TokenSet } from "./base";
 
 export class DiscordProvider extends OAuthBaseProvider {
@@ -37,6 +37,7 @@ export class DiscordProvider extends OAuthBaseProvider {
       email: info.email,
       profileImageUrl: info.avatar ? `https://cdn.discordapp.com/avatars/${info.id}/${info.avatar}.${info.avatar.startsWith("a_") ? "gif" : "png"}` : null,
       emailVerified: info.verified,
+      accountCreatedAtMillis: getDiscordAccountCreatedAtMillis(info.id),
     });
   }
 

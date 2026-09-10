@@ -362,17 +362,38 @@ export async function bulldozerWriteManualTransaction(
 /**
  * Prisma-then-Bulldozer dual-write for a refund manual transaction. Shared by
  * the subscription and OTP refund handlers so field updates stay in sync.
+ *
+ * Upsert is the retry path for a *reused* `txnId` (see `makeRefundTxnId`):
+ * same-payload retries after Prisma-ok / Bulldozer-fail converge on one row.
+ * A freshly minted random id would create a second Prisma row instead.
+ *
+ * On conflict the first persisted row is immutable — `update: {}` keeps
+ * effectiveAt / entries / createdAt from the original attempt. We then
+ * dual-write *that* persisted row to Bulldozer (not the newly computed
+ * retry payload), so a late retry cannot shift ledger timestamps or
+ * recompute revocation/expiry entries under the same txnId.
  */
 export async function persistRefundManualTransaction(
   prisma: { manualTransaction: { upsert: (args: {
     where: { tenancyId_txnId: { tenancyId: string, txnId: string } },
     create: ReturnType<typeof manualTransactionToPrismaRow>,
-    update: Omit<ReturnType<typeof manualTransactionToPrismaRow>, "tenancyId" | "txnId" | "createdAt">,
-  }) => Promise<unknown> } },
+    // Empty on purpose: conflict = keep the canonical first row.
+    update: Record<string, never>,
+  }) => Promise<{
+    tenancyId: string,
+    txnId: string,
+    type: string,
+    customerId: string,
+    customerType: string,
+    paymentProvider: string | null,
+    effectiveAt: Date,
+    createdAt: Date,
+    entries: unknown,
+  }> } },
   refundRow: ManualTransactionRow,
 ): Promise<void> {
   const refundPrismaRow = manualTransactionToPrismaRow(refundRow);
-  await prisma.manualTransaction.upsert({
+  const persisted = await prisma.manualTransaction.upsert({
     where: {
       tenancyId_txnId: {
         tenancyId: refundPrismaRow.tenancyId,
@@ -380,17 +401,12 @@ export async function persistRefundManualTransaction(
       },
     },
     create: refundPrismaRow,
-    update: {
-      type: refundPrismaRow.type,
-      customerId: refundPrismaRow.customerId,
-      customerType: refundPrismaRow.customerType,
-      paymentProvider: refundPrismaRow.paymentProvider,
-      effectiveAt: refundPrismaRow.effectiveAt,
-      // Preserve original create time on conflict (idempotent re-refund / retry).
-      entries: refundPrismaRow.entries,
-    },
+    update: {},
   });
-  await bulldozerWriteManualTransaction(refundRow.txnId, refundRow);
+  await bulldozerWriteManualTransaction(
+    persisted.txnId,
+    prismaManualTransactionToBulldozerRow(persisted),
+  );
 }
 
 // ── Batch dual-write executors (backfill only) ────────────────────────

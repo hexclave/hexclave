@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/sc",
-  "version": "1.0.104",
+  "version": "1.0.119",
   "repository": "https://github.com/hexclave/hexclave",
   "exports": {
     "./force-react-server": {

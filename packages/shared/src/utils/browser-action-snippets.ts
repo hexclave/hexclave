@@ -1,8 +1,8 @@
-import { deindent } from "./strings";
 import {
   CLICKMAP_OVERLAY_TOKEN_STORAGE_KEY,
   CLICKMAP_OVERLAY_TOKEN_UPDATED_EVENT,
 } from "./analytics-clickmap-overlay";
+import { deindent } from "./strings";
 
 export const BROWSER_ACTION_QUERY_PARAM = "hexclave_action_id";
 

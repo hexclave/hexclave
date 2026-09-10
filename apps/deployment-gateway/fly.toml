@@ -1,0 +1,33 @@
+# Pass --app <gateway-app> to deploy to the app created during initial setup.
+primary_region = "iad"
+kill_signal = "SIGQUIT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 2
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 1000
+    hard_limit = 2000
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+    [http_service.checks.headers]
+      Host = "gateway-health.internal"
+      X-Forwarded-Proto = "https"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

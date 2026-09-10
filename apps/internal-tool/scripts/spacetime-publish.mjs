@@ -1,23 +1,23 @@
 #!/usr/bin/env node
-// Cross-platform SpacetimeDB publish that injects the token, publishes, and
-// always restores the original file — even on failure.
+// Cross-platform SpacetimeDB publish that injects the allowed-issuers/audience
+// auth config, publishes, and always restores the original file — even on
+// failure.
 
 import { spawnSync } from "node:child_process";
 
 const target = process.argv[2]; // "local" or "prod"
 
-function resolveHexclaveStackEnvVar(hexclaveName, stackName) {
-  const hexclaveValue = process.env[hexclaveName];
-  const stackValue = process.env[stackName];
-  if (hexclaveValue && stackValue && hexclaveValue !== stackValue) {
-    throw new Error(`Environment variables ${hexclaveName} and ${stackName} are both set to different values. Remove one of them or set them to the same value.`);
-  }
-  return hexclaveValue || stackValue || undefined;
+const DEFAULT_DB_NAME = "hexclave-ai-analytics";
+function resolveDbName() {
+  const value = (process.env.NEXT_PUBLIC_SPACETIMEDB_DB_NAME ?? "").trim();
+  if (value === "" || value === "REPLACE_ME") return DEFAULT_DB_NAME;
+  return value;
 }
+const dbName = resolveDbName();
 
 /** HTTP API for 'spacetime publish' (matches docker/dependencies/docker.compose.yaml host port ...39). */
 function localPublishServerUrl() {
-  const publishUrl = resolveHexclaveStackEnvVar("HEXCLAVE_SPACETIME_PUBLISH_URL", "STACK_SPACETIME_PUBLISH_URL");
+  const publishUrl = process.env.HEXCLAVE_SPACETIME_PUBLISH_URL;
   if (publishUrl) {
     return publishUrl;
   }
@@ -28,7 +28,7 @@ function localPublishServerUrl() {
 const configs = {
   local: [
     "publish",
-    "stack-auth-llm",
+    dbName,
     "--server",
     localPublishServerUrl(),
     "-p",
@@ -37,7 +37,7 @@ const configs = {
     "--no-config",
     "--delete-data=on-conflict",
   ],
-  prod: ["publish", "stack-auth-llm", "--server", "maincloud", "-p", "spacetimedb", "--yes", "--no-config"],
+  prod: ["publish", dbName, "--server", "maincloud", "-p", "spacetimedb", "--no-config"],
 };
 
 const args = configs[target];
@@ -46,22 +46,30 @@ if (!args) {
   process.exit(1);
 }
 
-if (target === "prod" && !resolveHexclaveStackEnvVar("HEXCLAVE_MCP_LOG_TOKEN", "STACK_MCP_LOG_TOKEN")) {
-  console.error("Error: HEXCLAVE_MCP_LOG_TOKEN (or legacy STACK_MCP_LOG_TOKEN) must be set for prod publish");
+if (target === "prod" && !process.env.HEXCLAVE_SPACETIMEDB_ALLOWED_ISSUERS && !process.env.HEXCLAVE_INTERNAL_TOOL_BASE_URL) {
+  console.error("Error: HEXCLAVE_INTERNAL_TOOL_BASE_URL must be set for prod publish");
   process.exit(1);
 }
+const LOCAL_PUBLISH_TIMEOUT_MS = 60_000;
 
 let exitCode = 1;
 try {
-  const inject = spawnSync("node", ["scripts/spacetime-token.mjs", "inject"], { stdio: "inherit" });
+  const inject = spawnSync("node", ["scripts/spacetime-auth-config.mjs", "inject"], { stdio: "inherit" });
   if (inject.status !== 0) {
     exitCode = inject.status ?? 1;
   } else {
-    const publish = spawnSync("spacetime", args, { stdio: "inherit" });
+    const publish = spawnSync("spacetime", args, {
+      stdio: "inherit",
+      ...(target === "local" ? { timeout: LOCAL_PUBLISH_TIMEOUT_MS } : {}),
+    });
+    if (publish.error?.code === "ETIMEDOUT") {
+      console.error(`[spacetime-publish] 'spacetime publish' did not finish within ${LOCAL_PUBLISH_TIMEOUT_MS / 1000}s and was killed. The SpacetimeDB container may be unresponsive — try 'pnpm restart-deps'.`);
+    }
+    // On timeout (or any kill-by-signal) status is null, which maps to 1 here.
     exitCode = publish.status ?? 1;
   }
 } finally {
-  const restore = spawnSync("node", ["scripts/spacetime-token.mjs", "restore"], { stdio: "inherit" });
+  const restore = spawnSync("node", ["scripts/spacetime-auth-config.mjs", "restore"], { stdio: "inherit" });
   if (restore.status !== 0 && exitCode === 0) {
     exitCode = restore.status ?? 1;
   }

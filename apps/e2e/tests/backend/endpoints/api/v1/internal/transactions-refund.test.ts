@@ -327,20 +327,38 @@ it("refunds a live-mode OTP fully (money + end_action='now'), surfaces refund ro
 it("supports multiple partial refunds capped at remaining amount", async () => {
   const { purchaseTransaction } = await createLiveModeOneTimePurchaseTransaction();
 
-  // Partial $20.00 refund — succeeds.
+  // Two intentional partials of the *same* dollar amount must get distinct
+  // refund txn ids — prior advances after the first commit, so the
+  // deterministic fingerprint changes. (A same-payload *retry* before prior
+  // advances would reuse the id; that is covered by unit tests on
+  // makeRefundTxnId.)
   const refund1 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
     accessType: "admin",
     method: "POST",
     body: {
       type: "one-time-purchase",
       id: purchaseTransaction.id,
-      amount_usd: "20.00",
+      amount_usd: "10.00",
     },
   });
   expect(refund1.status).toBe(200);
+  expect(refund1.body.refund_transaction_id).toMatch(/^refund:otp:/);
 
-  // Partial $30.00 refund — succeeds (total now $50.00).
   const refund2 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "one-time-purchase",
+      id: purchaseTransaction.id,
+      amount_usd: "10.00",
+    },
+  });
+  expect(refund2.status).toBe(200);
+  expect(refund2.body.refund_transaction_id).toMatch(/^refund:otp:/);
+  expect(refund2.body.refund_transaction_id).not.toBe(refund1.body.refund_transaction_id);
+
+  // Remaining is $30.00 — a $30.00 refund should succeed and exhaust the cap.
+  const refund3 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
     accessType: "admin",
     method: "POST",
     body: {
@@ -349,10 +367,12 @@ it("supports multiple partial refunds capped at remaining amount", async () => {
       amount_usd: "30.00",
     },
   });
-  expect(refund2.status).toBe(200);
+  expect(refund3.status).toBe(200);
+  expect(refund3.body.refund_transaction_id).not.toBe(refund1.body.refund_transaction_id);
+  expect(refund3.body.refund_transaction_id).not.toBe(refund2.body.refund_transaction_id);
 
-  // Third $0.01 refund — exceeds remaining ($0).
-  const refund3 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+  // Fourth $0.01 refund — exceeds remaining ($0).
+  const refund4 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
     accessType: "admin",
     method: "POST",
     body: {
@@ -361,9 +381,85 @@ it("supports multiple partial refunds capped at remaining amount", async () => {
       amount_usd: "0.01",
     },
   });
-  expect(refund3.status).toBe(400);
-  expect(refund3.body.code).toBe("SCHEMA_ERROR");
-  expect(refund3.body.error).toMatch(/cannot exceed the remaining refundable amount/);
+  expect(refund4.status).toBe(400);
+  expect(refund4.body.code).toBe("SCHEMA_ERROR");
+  expect(refund4.body.error).toMatch(/cannot exceed the remaining refundable amount/);
+});
+
+it("refunds fractional dollar amounts (2.39 then 2.50) with distinct txn ids", async () => {
+  // moneyAmountToStripeUnits turns these into integer cents (239 / 250)
+  // before makeRefundTxnId fingerprints them — so fractional USD must work
+  // end-to-end and must not collide with each other.
+  const { purchaseTransaction } = await createLiveModeOneTimePurchaseTransaction();
+
+  const refund239 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "one-time-purchase",
+      id: purchaseTransaction.id,
+      amount_usd: "2.39",
+    },
+  });
+  expect(refund239.status).toBe(200);
+  expect(refund239.body.refund_transaction_id).toMatch(/^refund:otp:.+:[0-9a-f]{32}$/);
+
+  const refund250 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "one-time-purchase",
+      id: purchaseTransaction.id,
+      amount_usd: "2.50",
+    },
+  });
+  expect(refund250.status).toBe(200);
+  expect(refund250.body.refund_transaction_id).toMatch(/^refund:otp:.+:[0-9a-f]{32}$/);
+  expect(refund250.body.refund_transaction_id).not.toBe(refund239.body.refund_transaction_id);
+
+  // Also accept the shorter "2.5" form (same cents as "2.50") as a later
+  // partial once prior has advanced — distinct from the first 2.50 because
+  // priorRefundedStripeUnits changed.
+  const refund25Again = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "one-time-purchase",
+      id: purchaseTransaction.id,
+      amount_usd: "2.5",
+    },
+  });
+  expect(refund25Again.status).toBe(200);
+  expect(refund25Again.body.refund_transaction_id).not.toBe(refund250.body.refund_transaction_id);
+});
+
+it("rejects a full-amount money refund replay once the cap is exhausted", async () => {
+  const { purchaseTransaction } = await createLiveModeOneTimePurchaseTransaction();
+
+  const refund1 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "one-time-purchase",
+      id: purchaseTransaction.id,
+      amount_usd: "50.00",
+    },
+  });
+  expect(refund1.status).toBe(200);
+  expect(refund1.body.refund_transaction_id).toMatch(/^refund:otp:.+:[0-9a-f]{32}$/);
+
+  const refund2 = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "one-time-purchase",
+      id: purchaseTransaction.id,
+      amount_usd: "50.00",
+    },
+  });
+  expect(refund2.status).toBe(400);
+  expect(refund2.body.code).toBe("SCHEMA_ERROR");
+  expect(refund2.body.error).toMatch(/cannot exceed the remaining refundable amount/);
 });
 
 it("rejects ending product access twice on the same OTP (productRevoked short-circuit)", async () => {
@@ -727,6 +823,72 @@ it("rejects end_action='now' on a subscription that already ended naturally", as
   expect(refundRes.status).toBe(400);
   expect(refundRes.body.code).toBe("SCHEMA_ERROR");
   expect(refundRes.body.error).toMatch(/already ended/);
+
+  // Same for at-period-end — the sub already has endedAt from the product-line
+  // switch, so scheduling another end is rejected.
+  const atPeriodEndRes = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "subscription",
+      id: subscriptionId,
+      amount_usd: "0",
+      end_action: "at-period-end",
+    },
+  });
+  expect(atPeriodEndRes.status).toBe(400);
+  expect(atPeriodEndRes.body.code).toBe("SCHEMA_ERROR");
+  expect(atPeriodEndRes.body.error).toMatch(/already scheduled to end|already ended/i);
+
+  // Money-only must get past the lifecycle guards (not "already ended") and
+  // fail for the money reason instead. API_GRANT has no Stripe payment, so
+  // this is as far as e2e can go without invoice.payments on stripe-mock —
+  // live-mode money-after-end is covered by manual QA.
+  const moneyOnlyRes = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "subscription",
+      id: subscriptionId,
+      amount_usd: "10.00",
+    },
+  });
+  expect(moneyOnlyRes.status).toBe(400);
+  expect(moneyOnlyRes.body.code).toBe("SCHEMA_ERROR");
+  expect(moneyOnlyRes.body.error).toMatch(/granted, not purchased/);
+  expect(moneyOnlyRes.body.error).not.toMatch(/already ended/);
+});
+
+it("allows a money-only refund attempt after end_action='now' (not blocked as already-ended)", async () => {
+  // After a refund-driven immediate end, `productRevokedAt` is set so the
+  // natural-end guard must not fire. Money-only should reach the test-mode
+  // money check instead of "already ended".
+  const { subscriptionId } = await createTestModeSubscription();
+
+  const endNowRes = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "subscription",
+      id: subscriptionId,
+      amount_usd: "0",
+      end_action: "now",
+    },
+  });
+  expect(endNowRes.status).toBe(200);
+
+  const moneyOnlyRes = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "subscription",
+      id: subscriptionId,
+      amount_usd: "10.00",
+    },
+  });
+  expect(moneyOnlyRes.status).toBe(400);
+  // Reaches the money path (not the natural-end lifecycle guard).
+  expect(moneyOnlyRes.body.code).toBe("TEST_MODE_PURCHASE_NON_REFUNDABLE");
 });
 
 it("refunds a test-mode subscription with end_action='at-period-end' (no money)", async () => {
@@ -900,8 +1062,10 @@ async function createLiveModeSubscriptionWithRenewal(): Promise<{
 
   const purchaseTxn = txnsRes.body.transactions.find((tx: any) => tx.type === "purchase");
   expect(purchaseTxn).toBeDefined();
+  expect(purchaseTxn.renewal_target_subscription_id).toBeNull();
   const renewalTxn = txnsRes.body.transactions.find((tx: any) => tx.type === "subscription-renewal");
   expect(renewalTxn).toBeDefined();
+  expect(renewalTxn.renewal_target_subscription_id).toBe(purchaseTxn.id);
 
   return {
     userId,
@@ -961,10 +1125,30 @@ it("refunds a renewal invoice (invoice_id path) without money or revoke — sour
   expect(startTxn?.adjusted_by ?? []).toEqual([]);
 
   // Refund row's listed `id` must match the linkage carried by adjusted_by.
+  // Money-less renewal refunds have no money_transfer entry on the refund row.
   const refundRow = txnsAfter.body.transactions.find(
     (tx: any) => tx.type === "refund" && tx.id === refundRes.body.refund_transaction_id,
   );
   expect(refundRow).toBeDefined();
+  expect(refundRow.entries.some((e: { type: string }) => e.type === "money_transfer")).toBe(false);
+});
+
+it("rejects a no-op renewal refund (amount=0, no end_action)", { timeout: 120_000 }, async () => {
+  const { subscriptionId, renewalInvoiceId } = await createLiveModeSubscriptionWithRenewal();
+
+  const refundRes = await niceBackendFetch("/api/latest/internal/payments/transactions/refund", {
+    accessType: "admin",
+    method: "POST",
+    body: {
+      type: "subscription",
+      id: subscriptionId,
+      invoice_id: renewalInvoiceId,
+      amount_usd: "0",
+    },
+  });
+  expect(refundRes.status).toBe(400);
+  expect(refundRes.body.code).toBe("SCHEMA_ERROR");
+  expect(refundRes.body.error).toMatch(/Refund must do something/);
 });
 
 it("rejects end_action='now' when invoice_id targets a renewal invoice", { timeout: 120_000 }, async () => {

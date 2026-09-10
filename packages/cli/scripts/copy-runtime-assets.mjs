@@ -84,6 +84,48 @@ const EXCLUDED_RUNTIME_PACKAGES = new Set([
   "@img/colour",
 ]);
 
+// Packages whose staged copy must be the complete published package rather
+// than the file-traced subset. Next's trace resolves @swc/helpers subpath
+// exports to the cjs/ files, but Node runtimes with require(esm) match the
+// "module-sync"/"import" conditions first and load the esm/ files, so a
+// traced (partial) copy crashes the dashboard server at startup with
+// MODULE_NOT_FOUND on @swc/helpers/esm/*.js.
+const FULLY_COPIED_RUNTIME_PACKAGES = ["@swc/helpers"];
+
+function findWorkspaceStorePackageDir(packageName, version) {
+  const pnpmDir = join(repoRoot, "node_modules/.pnpm");
+  if (!existsSync(pnpmDir)) {
+    return undefined;
+  }
+  const prefix = `${packageName.replace("/", "+")}@${version}`;
+  for (const entry of readdirSync(pnpmDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || (entry.name !== prefix && !entry.name.startsWith(`${prefix}_`))) {
+      continue;
+    }
+    const candidate = join(pnpmDir, entry.name, "node_modules", ...packageName.split("/"));
+    if (existsSync(join(candidate, "package.json"))) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function completeTracedPackages(nodeModulesDir) {
+  for (const packageName of FULLY_COPIED_RUNTIME_PACKAGES) {
+    const stagedDir = join(nodeModulesDir, ...packageName.split("/"));
+    const stagedPackageJsonPath = join(stagedDir, "package.json");
+    if (!existsSync(stagedPackageJsonPath)) {
+      continue;
+    }
+    const version = JSON.parse(readFileSync(stagedPackageJsonPath, "utf8")).version;
+    const source = findWorkspaceStorePackageDir(packageName, version);
+    if (source == null) {
+      throw new Error(`Could not find ${packageName}@${version} in the workspace pnpm store to complete the staged runtime copy.`);
+    }
+    cpSync(source, stagedDir, { recursive: true, dereference: true });
+  }
+}
+
 function hoistPnpmNodeModules(pnpmDir) {
   // The pnpm store keeps a shared `node_modules/` directory for hoisted
   // packages that peer-dep symlinks resolve through. After we dereference all
@@ -305,6 +347,7 @@ function copyDashboardAssets() {
   // same package to top-level would create a second copy after .pnpm removal.
   removePnpmStore(dashboardNodeModules, materializedPackageNames);
   removeExcludedPackages(dashboardNodeModules);
+  completeTracedPackages(dashboardNodeModules);
   removeNftJsonFiles(join(dashboardDist, "apps/dashboard/.next"));
   removeMapFiles(dashboardDist);
 
