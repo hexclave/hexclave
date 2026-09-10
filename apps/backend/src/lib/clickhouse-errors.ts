@@ -8,6 +8,8 @@ const SAFE_CLICKHOUSE_ERROR_CODES = [
   158, // TOO_MANY_ROWS
   396, // TOO_MANY_ROWS_OR_BYTES
   636, // CANNOT_EXTRACT_TABLE_STRUCTURE
+  // User/AI SQL omitted a JOIN subquery alias. Message only echoes their query text.
+  206, // ALIAS_REQUIRED
 ];
 
 const UNSAFE_CLICKHOUSE_ERROR_CODES = [
