@@ -16,8 +16,9 @@ export class TvRequestTimeoutError extends Error {
  * @returns {Promise<T>}
  */
 export async function withTvRequestDeadline(operation, timeoutMilliseconds, parentSignal = null) {
-  const getAbortReason = (signal) => signal.reason
-    ?? new DOMException("Aborted", "AbortError");
+  const getAbortReason = (signal) => signal.reason === undefined
+    ? new DOMException("Aborted", "AbortError")
+    : signal.reason;
   if (parentSignal?.aborted) throw getAbortReason(parentSignal);
   const controller = new AbortController();
   let timeout;

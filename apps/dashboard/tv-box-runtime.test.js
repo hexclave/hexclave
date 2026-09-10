@@ -270,6 +270,19 @@ describe("TV Box runtime contract", () => {
     expect(rejection.name).toBe("AbortError");
     expect(rejection.message).toMatch(/aborted/i);
   });
+
+  it("preserves an explicit null caller abort reason", async () => {
+    const parent = new AbortController();
+    let requestSignal;
+    const pending = withTvRequestDeadline((signal) => {
+      requestSignal = signal;
+      return new Promise(() => {});
+    }, 10_000, parent.signal);
+    parent.abort(null);
+    await expect(pending).rejects.toBe(null);
+    expect(requestSignal.aborted).toBe(true);
+    expect(requestSignal.reason).toBe(null);
+  });
 });
 
 describe("TV Box transport and playback helpers", () => {
