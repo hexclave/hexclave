@@ -14,18 +14,20 @@ RUNTIME_ROOT = Path("/run/hexclave-tv-box")
 
 def atomic_write(path: Path, value: str, mode: int = 0o600) -> None:
     missing: list[Path] = []
-    current = path.parent
-    while True:
+    first_missing = False
+    for current in reversed(path.parents):
+        if first_missing:
+            missing.append(current)
+            continue
         try:
             metadata = os.lstat(current)
         except FileNotFoundError:
+            first_missing = True
             missing.append(current)
-            current = current.parent
             continue
         if os.path.islink(current) or not stat.S_ISDIR(metadata.st_mode):
             raise ValueError(f"TV Box state parent must be a real directory: {current}")
-        break
-    for directory in reversed(missing):
+    for directory in missing:
         os.mkdir(directory, 0o700)
     try:
         metadata = os.lstat(path.parent)

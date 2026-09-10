@@ -118,8 +118,11 @@ class FirstBootTests(unittest.TestCase):
             nested_parent = base / "nested"
             nested_parent.mkdir()
             (nested_parent / "linked").symlink_to(target, target_is_directory=True)
+            (target / "child").mkdir()
+            escaped_path = nested_parent / "linked" / "child" / "value"
             with self.assertRaisesRegex(ValueError, "directory"):
-                atomic_write(nested_parent / "linked" / "value", "secret")
+                atomic_write(escaped_path, "secret")
+            self.assertFalse((target / "child" / "value").exists())
             with self.assertRaisesRegex(ValueError, "linked"):
                 require_exact_child(nested_parent / "linked" / "browser", nested_parent, "browser")
 
