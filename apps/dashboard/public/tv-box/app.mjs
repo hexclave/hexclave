@@ -235,20 +235,21 @@ function glassPanel(tone, children, extraClass = "") {
 }
 
 function insight(screen, tone) {
-  const fallback = {
-    "live-pulse": screen.sourceStatus === "insufficient-data"
+  const fallback = new Map([
+    ["live-pulse", screen.sourceStatus === "insufficient-data"
       ? "A validated recent baseline is required before live activity can be compared."
-      : "Comparable live-activity analysis will appear when a validated recent baseline is available.",
-    "audience-momentum": screen.sourceStatus === "insufficient-data"
+      : "Comparable live-activity analysis will appear when a validated recent baseline is available."],
+    ["audience-momentum", screen.sourceStatus === "insufficient-data"
       ? "More qualifying audience activity is required before a reliable lifecycle insight can be identified."
-      : "No evidence-qualified audience lifecycle insight was identified for this seven-day window.",
-    "revenue-payments": screen.sourceStatus === "insufficient-data"
+      : "No evidence-qualified audience lifecycle insight was identified for this seven-day window."],
+    ["revenue-payments", screen.sourceStatus === "insufficient-data"
       ? "At least 10 completed payment outcomes are required before Payment Success can be assessed."
-      : "No evidence-qualified revenue or payment insight was identified for this 30-day window.",
-    "email-health": screen.sourceStatus === "insufficient-data"
+      : "No evidence-qualified revenue or payment insight was identified for this 30-day window."],
+    ["email-health", screen.sourceStatus === "insufficient-data"
       ? "At least 20 confirmed delivery outcomes are required before delivery health can be assessed."
-      : "No evidence-qualified email delivery insight was identified for this seven-day window.",
-  }[screen.id];
+      : "No evidence-qualified email delivery insight was identified for this seven-day window."],
+  ]).get(screen.id);
+  if (fallback === undefined) throw new Error(`TV Box has no insight fallback for screen ${screen.id}`);
   const message = screen.sourceStatus === "stale"
     ? "Insight analysis will resume when a fresh snapshot is available."
     : screen.insight?.message ?? fallback;
@@ -365,11 +366,11 @@ function stackedBars(points, colors, labels) {
 }
 
 function sourceState(screen) {
-  const content = {
-    empty: ["Waiting for Activity", "No qualifying activity yet.", "This screen will update automatically when activity arrives."],
-    unavailable: ["Source Unavailable", "This data source isn’t connected yet.", "Connect the required app to show this screen."],
-    error: ["Data Temporarily Unavailable", "We couldn’t refresh this data right now.", "TV Mode will retry automatically while the rest of the presentation continues."],
-  }[screen.sourceStatus];
+  const content = new Map([
+    ["empty", ["Waiting for Activity", "No qualifying activity yet.", "This screen will update automatically when activity arrives."]],
+    ["unavailable", ["Source Unavailable", "This data source isn’t connected yet.", "Connect the required app to show this screen."]],
+    ["error", ["Data Temporarily Unavailable", "We couldn’t refresh this data right now.", "TV Mode will retry automatically while the rest of the presentation continues."]],
+  ]).get(screen.sourceStatus);
   if (content == null) return null;
   const panel = createElement("div", "tv-source-state");
   panel.append(
