@@ -259,6 +259,29 @@ class ImageVerificationTests(unittest.TestCase):
                     path.write_bytes(b"x" * (1024 * 1024 - split - 1) + b"\n" + record)
                     image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
 
+    def test_certificate_scan_accepts_noncanonical_base64_padding_bits(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        padding = len(encoded) - len(encoded.rstrip(b"="))
+        unused_bits = {1: 2, 2: 4}.get(padding, 0)
+        self.assertIn(unused_bits, (2, 4))
+        last = alphabet.index(encoded.rstrip(b"=")[-1:])
+        variant_last = (last & ~((1 << unused_bits) - 1)) | 1
+        variant_encoded = encoded.rstrip(b"=")[:-1] + bytes((alphabet[variant_last],)) + b"=" * padding
+        self.assertEqual(
+            base64.b64decode(variant_encoded, validate=True),
+            base64.b64decode(encoded, validate=True),
+        )
+        self.assertNotEqual(variant_encoded, encoded)
+        path = self.boot / "noncanonical-certificate.untracked.txt"
+        path.write_bytes(certificate)
+        with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        path.write_bytes(algorithm + b" " + variant_encoded + b"\n")
+        with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
     def test_certificate_scan_keeps_comment_and_token_boundaries_across_chunks(self) -> None:
         certificate = self.certificate_record()
         algorithm, encoded = certificate.split()[:2]

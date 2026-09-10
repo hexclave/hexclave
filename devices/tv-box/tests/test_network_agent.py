@@ -190,6 +190,7 @@ class AgentServerTests(unittest.TestCase):
             self.assertTrue(self.handlers.wait_for(lambda: self.active_handlers == count, timeout=3))
 
     def test_actual_server_caps_active_handlers_and_releases_slots_after_completion(self) -> None:
+        self.server.lock_wait_seconds = 30
         with self.agent.lock:
             clients = []
             for count in range(1, 9):

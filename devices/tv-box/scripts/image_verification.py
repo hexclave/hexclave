@@ -251,9 +251,7 @@ class CertificateToken:
         except (ValueError, binascii.Error):
             self.valid_payload = False
             return
-        if base64.b64encode(decoded) != encoded:
-            self.valid_payload = False
-            return
+        # OpenSSH accepts non-canonical unused base64 pad bits, so the scanner must inspect every encoding it decodes.
         header_size = min(4 - len(self.wire_header), len(decoded))
         self.wire_header += decoded[:header_size]
         decoded = decoded[header_size:]

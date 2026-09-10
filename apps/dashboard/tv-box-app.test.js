@@ -149,16 +149,14 @@ describe("TV Box actual renderer orchestration", () => {
     expect(document.querySelector(".tv-pairing-code")?.textContent).toBe("2345-ABCD");
   });
 
-  it("restores the received cookie after a consumed pairing body stalls, without overlapping recovery", async () => {
+  it("retries auth with credentials after a consumed pairing body stalls, without overlapping recovery", async () => {
     const stalled = deferredBody();
     const restored = deferredBody();
-    const cookie = "hexclave-tv-display-refresh=example-refresh-token; Path=/api/latest/tv-displays; HttpOnly; Secure";
-    stalled.response.headers.set("set-cookie", cookie);
     fetchMock
       .mockResolvedValueOnce(jsonResponse(null, 401))
       .mockResolvedValueOnce(jsonResponse(challenge))
       .mockImplementationOnce(async (_url, options) => {
-        // The browser stores the HttpOnly refresh cookie from the response headers before the JSON body completes, so a body timeout must not discard it; the app never sees the cookie, it only has to retry auth/refresh with credentials included.
+        // The browser holds the HttpOnly cookie; the app never sees it and must retry auth/refresh with credentials: "include" without discarding the pairing.
         expect(options.credentials).toBe("include");
         return stalled.response;
       })
