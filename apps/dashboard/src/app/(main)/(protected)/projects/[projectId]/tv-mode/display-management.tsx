@@ -253,7 +253,7 @@ export function TvDisplayManagement({
           <div className="grid gap-4 md:grid-cols-3">
             <div className="space-y-2">
               <label htmlFor="new-tv-display-code" className="text-xs font-medium text-foreground">Pairing Code</label>
-              <DesignInput id="new-tv-display-code" aria-label="Pairing code" value={pairingCode} onChange={(event) => setPairingCode(formatTvDisplayPairingCode(event.target.value))} placeholder="ABCD-EFGH" maxLength={9} size="lg" className="font-mono uppercase tracking-widest" />
+              <DesignInput id="new-tv-display-code" aria-label="Pairing code" value={pairingCode} onChange={(event) => setPairingCode(formatTvDisplayPairingCode(event.target.value))} placeholder="ABCD-EFGH" size="lg" className="font-mono uppercase tracking-widest" />
             </div>
             <div className="space-y-2">
               <label htmlFor="new-tv-display-name" className="text-xs font-medium text-foreground">Display Name</label>

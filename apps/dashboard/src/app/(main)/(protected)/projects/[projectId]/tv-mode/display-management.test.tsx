@@ -134,6 +134,7 @@ describe("TV display pairing feedback", () => {
   it("formats typed and pasted pairing codes consistently", () => {
     expect(formatTvDisplayPairingCode("abcd")).toBe("ABCD");
     expect(formatTvDisplayPairingCode("abcde")).toBe("ABCD-E");
+    expect(formatTvDisplayPairingCode("AB CD EF GH")).toBe("ABCD-EFGH");
     expect(formatTvDisplayPairingCode("abcd efgh extra")).toBe("ABCD-EFGH");
   });
 
