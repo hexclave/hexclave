@@ -334,6 +334,16 @@ def verify_receipt(image: Path, output: Path) -> None:
         raise ValueError("Verification receipt does not match the qualified image-builder revision.")
 
 
+def verify_readback(output: Path, device: Path) -> None:
+    receipt = json.loads((output / "verification.json").read_text(encoding="utf-8"))
+    image_bytes = receipt.get("image_bytes")
+    image_sha256 = receipt.get("image_sha256")
+    if type(image_bytes) is not int or type(image_sha256) is not str:
+        raise ValueError("Verification receipt is missing the image extent or checksum.")
+    if digest(device, image_bytes) != image_sha256:
+        raise ValueError("Flashed image read-back checksum mismatch; do not ship or boot as qualified.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("runtime", "public-key", "legacy-inputs", "begin-output", "final", "receipt", "readback"))
@@ -353,9 +363,7 @@ def main() -> None:
         elif args.mode == "receipt" and len(args.paths) == 2:
             verify_receipt(*args.paths)
         elif args.mode == "readback" and len(args.paths) == 2:
-            image, device = args.paths
-            if digest(image) != digest(device, image.stat().st_size):
-                raise ValueError("Flashed image read-back checksum mismatch; do not ship or boot as qualified.")
+            verify_readback(*args.paths)
         else:
             raise ValueError("Incorrect argument count for verification mode.")
     except (OSError, ValueError, subprocess.SubprocessError) as error:

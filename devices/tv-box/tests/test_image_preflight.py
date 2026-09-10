@@ -63,6 +63,13 @@ def mount_command_environment(image: Path, rootfs: Path, state: Path, temporary_
 
 
 class ImagePreflightTests(unittest.TestCase):
+    def test_manufacture_pins_image_source_for_every_destructive_read(self) -> None:
+        manufacture = (ROOT / "scripts/manufacture.sh").read_text(encoding="utf-8")
+        self.assertIn('exec 3< "$image"', manufacture)
+        self.assertIn('dd if="$image_source"', manufacture)
+        self.assertNotIn('dd if="$image"', manufacture)
+        self.assertNotIn('readback "$image"', manufacture)
+
     def test_complete_mount_preflight_requires_boot_from_the_same_readonly_image(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

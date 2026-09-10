@@ -285,8 +285,13 @@ class ImageVerificationTests(unittest.TestCase):
     def test_readback_requires_every_image_byte_and_ignores_unused_card_tail(self) -> None:
         image, target = self.root / "image.img", self.root / "card"
         image.write_bytes(b"qualified-image")
+        output = self.root / "verification"
+        output.mkdir()
+        for name in ("image-manifest.txt", "rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+            (output / name).write_text("fixture\n", encoding="ascii")
+        image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
         target.write_bytes(image.read_bytes() + b"unused-card-space")
-        command = [sys.executable, "-B", str(ROOT / "scripts/image_verification.py"), "readback", str(image), str(target)]
+        command = [sys.executable, "-B", str(ROOT / "scripts/image_verification.py"), "readback", str(output), str(target)]
         self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
         target.write_bytes(b"wrong-image" + b"unused-card-space")
         rejected = subprocess.run(command, text=True, capture_output=True)
@@ -296,6 +301,29 @@ class ImageVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ended before"):
             image_verification.digest(target, image.stat().st_size)
 
+    def test_readback_verifies_against_receipt_not_current_image_file(self) -> None:
+        output, image, target = (self.root / name for name in ("verification", "image.img", "card"))
+        original = b"qualified-image"
+        swapped = b"swapped-image!"
+        image.write_bytes(original)
+        output.mkdir()
+        for name in ("image-manifest.txt", "rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+            (output / name).write_text("fixture\n", encoding="ascii")
+        image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
+        target.write_bytes(original + b"unused-card-space")
+        image.write_bytes(swapped)
+        image_verification.verify_readback(output, target)
+
+        target.write_bytes(swapped + b"unused-card-space")
+        with self.assertRaisesRegex(ValueError, "read-back checksum mismatch"):
+            image_verification.verify_readback(output, target)
+
+        receipt_file = output / "verification.json"
+        receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+        del receipt["image_bytes"]
+        receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "missing the image extent"):
+            image_verification.verify_readback(output, target)
 
 if __name__ == "__main__":
     unittest.main()
