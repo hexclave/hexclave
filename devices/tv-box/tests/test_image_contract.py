@@ -414,25 +414,21 @@ class ImageContractTests(unittest.TestCase):
                 HEXCLAVE_TV_BOX_TEST_ROOT_UID=str(os.getuid()),
                 HEXCLAVE_TV_BOX_TEST_ROOT_GID=str(os.getgid()),
             )
-            ownership_find = Path("/usr/bin/find")
-            if os.getuid() != 0:
-                # The non-root fixture needs ownership predicates normalized to
-                # the test user; rejection cases override those predicates.
-                ownership_find = Path(environment["PATH"].split(":", maxsplit=1)[0]) / "find"
-                ownership_find.write_text(
-                    "#!/usr/bin/env python3\n"
-                    "import os\n"
-                    "import sys\n"
-                    "arguments = sys.argv[1:]\n"
-                    "for index in range(len(arguments) - 1):\n"
-                    "    if arguments[index] == '-uid' and arguments[index + 1] == '0':\n"
-                    "        arguments[index + 1] = os.environ['HEXCLAVE_TV_BOX_TEST_ROOT_UID']\n"
-                    "    elif arguments[index] == '-gid' and arguments[index + 1] == '0':\n"
-                    "        arguments[index + 1] = os.environ['HEXCLAVE_TV_BOX_TEST_ROOT_GID']\n"
-                    "os.execv('/usr/bin/find', ['find', *arguments])\n",
-                    encoding="utf-8",
-                )
-                ownership_find.chmod(0o755)
+            ownership_find = Path(environment["PATH"].split(":", maxsplit=1)[0]) / "find"
+            ownership_find.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os\n"
+                "import sys\n"
+                "arguments = sys.argv[1:]\n"
+                "for index in range(len(arguments) - 1):\n"
+                "    if arguments[index] == '-uid' and arguments[index + 1] == '0':\n"
+                "        arguments[index + 1] = os.environ['HEXCLAVE_TV_BOX_TEST_ROOT_UID']\n"
+                "    elif arguments[index] == '-gid' and arguments[index + 1] == '0':\n"
+                "        arguments[index + 1] = os.environ['HEXCLAVE_TV_BOX_TEST_ROOT_GID']\n"
+                "os.execv('/usr/bin/find', ['find', *arguments])\n",
+                encoding="utf-8",
+            )
+            ownership_find.chmod(0o755)
 
             def run_verifier(run_environment: dict[str, str] = environment) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(command, env=run_environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

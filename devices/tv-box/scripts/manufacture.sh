@@ -29,9 +29,8 @@ if [ "$(stat -Lc '%t:%T' "$device")" != "$device_rdev" ]; then
   printf 'Manufacturing target changed while it was being opened: %s\n' "$device" >&2
   exit 1
 fi
-device_node=/dev/block/$(printf '%d:%d' "0x${device_rdev%%:*}" "0x${device_rdev##*:}")
-# Use the node derived from the held descriptor so path replacement cannot redirect checks.
-test -b "$device_node" || { printf 'Manufacturing target is not a block device: %s\n' "$device" >&2; exit 1; }
+# Use the held descriptor for target checks so path replacement cannot redirect them.
+device_node=$device_target
 test "$(lsblk -dn -o TYPE "$device_node")" = disk || { printf 'Manufacturing target is not a whole disk: %s\n' "$device" >&2; exit 1; }
 
 root_source=$(findmnt -n -o SOURCE /)
