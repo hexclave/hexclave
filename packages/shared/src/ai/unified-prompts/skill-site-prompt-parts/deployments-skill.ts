@@ -208,7 +208,7 @@ export const deploymentsSkillSection = deindent`
      return p.getDeploymentServiceDomain('api', 'app.example.com');"
   \`\`\`
 
-  The returned \`dns_records\` are what the user must create at their DNS provider; poll \`getDeploymentServiceDomain\` to see verification flip. A hostname can only be attached to one service across all of Hexclave. Humans can also add domains in the dashboard (service → Domains). Agents should not do that in a browser.
+  The returned \`dns_records\` are what the user must create at their DNS provider; poll \`getDeploymentServiceDomain\` to see verification flip. Cloudflare users must either create the records as DNS-only (proxy off) or set the zone's SSL/TLS mode to Full (strict): a proxied hostname under Flexible mode fails with Cloudflare 520 errors. A hostname can only be attached to one service across all of Hexclave. Humans can also add domains in the dashboard (service → Domains). Agents should not do that in a browser.
 
   ## Removing a service
 
