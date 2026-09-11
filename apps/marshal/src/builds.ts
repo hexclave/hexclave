@@ -158,6 +158,8 @@ export type StartBuildOptions = {
   // decide. One value per build, because there is one machine — see
   // builderMachineFor, which also applies the floor this must not skip.
   builderMemoryMb: number | null,
+  // What `prepare` returned for this deployment, if the builder has one.
+  prepared?: PreparedBuild | null,
 };
 
 // ONE env channel, Vercel-style: every declared env var goes to both the build and the
@@ -192,8 +194,25 @@ export function buildEnvByteLength(env: Record<string, string>): number {
   return total;
 }
 
+/**
+ * SPIKE: work a builder can start BEFORE the deployment is validated or leased,
+ * so it overlaps with the upload read/copy instead of following it. Everything
+ * here must be idempotent and safe to throw away: `dispose` runs when the
+ * deployment never reaches startBuild (validation failed, lease lost).
+ */
+export type PreparedBuild = {
+  dispose: () => Promise<void>,
+};
+
+export type PrepareBuildOptions = {
+  ns: string,
+  serviceKeys: string[],
+  isRailpackBuild: boolean,
+};
+
 export type Builder = {
   name: string,
+  prepare?: (options: PrepareBuildOptions) => PreparedBuild,
   startBuild: (options: StartBuildOptions, lease: ReconciliationLeaseGuard) => Promise<{ builderApp: string | null, builderMachineId: string | null }>,
 };
 
@@ -232,10 +251,17 @@ webhook() {
   wget -qO- --header "Authorization: Bearer $WEBHOOK_TOKEN" --header "Content-Type: $2" \\
     --post-file "$3" "$WEBHOOK_URL&status=$1" || true
 }
+depot_release() {
+  [ -n "\${DEPOT_BUILD_ID:-}" ] || return 0
+  wget -qO- --header "Authorization: Bearer $DEPOT_BUILD_TOKEN" --header "Content-Type: application/json" \\
+    --post-data "{\\"buildId\\":\\"$DEPOT_BUILD_ID\\",\\"platform\\":\\"PLATFORM_AMD64\\"}" \\
+    https://api.depot.dev/depot.buildkit.v1.BuildKitService/ReleaseEndpoint >/dev/null 2>&1 || true
+}
 fail() {
   echo "MARSHAL_BUILD_FAILED: $1"
   printf '%s' "$1" > /tmp/error.txt
   webhook failed text/plain /tmp/error.txt
+  depot_release
   exit 1
 }
 ( sleep "$BUILD_TIMEOUT_SECONDS"
@@ -244,6 +270,42 @@ fail() {
   webhook failed text/plain /tmp/timeout.txt
   kill -9 -1 ) &
 echo "MARSHAL_BUILD_START"
+# SPIKE: remote BuildKit daemon (Depot). When BUILDKIT_ADDR is set this machine runs no
+# buildkitd and never touches the source: buildctl talks TLS to the remote daemon, which
+# fetches the build context itself from TARBALL_URL. The client-side pieces that still
+# matter — registry auth (served over the session from /root/.docker/config.json), secret
+# mounts, build args, the metadata file — all work unchanged.
+BUILDCTL="buildctl"
+# The remote endpoint arrives AFTER this machine was created (it boots while the
+# remote builder is still coming up), as a shell fragment Marshal writes once the
+# endpoint is active. Polled until it exists; the build watchdog above bounds it.
+if [ -n "\${BUILDKIT_HANDOFF_URL:-}" ]; then
+  i=0
+  until wget -q -O /tmp/handoff.sh "$BUILDKIT_HANDOFF_URL" 2>/dev/null && [ -s /tmp/handoff.sh ]; do
+    i=$((i+1)); [ $i -gt 300 ] && fail "the remote builder endpoint never arrived (a build-infrastructure problem, not an issue with your code)"
+    sleep 1
+  done
+  . /tmp/handoff.sh
+  mkdir -p "$BUILDKIT_TLS_DIR"
+  printf '%s' "$BUILDKIT_TLS_CA_B64" | base64 -d > "$BUILDKIT_TLS_DIR/ca.pem"
+  printf '%s' "$BUILDKIT_TLS_CERT_B64" | base64 -d > "$BUILDKIT_TLS_DIR/cert.pem"
+  printf '%s' "$BUILDKIT_TLS_KEY_B64" | base64 -d > "$BUILDKIT_TLS_DIR/key.pem"
+  rm -f /tmp/handoff.sh
+  echo "MARSHAL_BUILDKIT_HANDOFF received after \${i}s"
+fi
+if [ -n "\${BUILDKIT_ADDR:-}" ]; then
+  echo "MARSHAL_BUILDKIT_REMOTE $BUILDKIT_ADDR"
+  BUILDCTL="buildctl --addr $BUILDKIT_ADDR --tlsservername $BUILDKIT_TLS_SERVER_NAME --tlscacert $BUILDKIT_TLS_DIR/ca.pem --tlscert $BUILDKIT_TLS_DIR/cert.pem --tlskey $BUILDKIT_TLS_DIR/key.pem"
+  # Depot reclaims an endpoint after 5 minutes without a health report.
+  if [ -n "\${DEPOT_BUILD_ID:-}" ]; then
+    ( while true; do
+        wget -qO- --header "Authorization: Bearer $DEPOT_BUILD_TOKEN" --header "Content-Type: application/json" \\
+          --post-data "{\\"buildId\\":\\"$DEPOT_BUILD_ID\\",\\"platform\\":\\"PLATFORM_AMD64\\"}" \\
+          https://api.depot.dev/depot.buildkit.v1.BuildKitService/ReportHealth >/dev/null 2>&1
+        sleep 30
+      done ) &
+  fi
+fi
 # Buildkit's overlayfs snapshotter needs an upperdir that is not itself an overlayfs, and the
 # machine rootfs IS one — so without help buildkit silently falls back to the native
 # (full-copy-per-layer) snapshotter, slow enough that large base images time the build out.
@@ -266,7 +328,9 @@ echo "MARSHAL_BUILD_START"
 BUILDKIT_DISK_DIR="\${BUILDKIT_DISK_DIR:-/.marshal-buildkit-disk}"
 BUILDKIT_ROOT=""
 BUILDKIT_STORE_READY=""
-if [ -n "\${BUILDKIT_TMPFS_SIZE:-}" ]; then
+if [ -n "\${BUILDKIT_ADDR:-}" ]; then
+  : # remote daemon: no local store, no buildkitd, no source fetch
+elif [ -n "\${BUILDKIT_TMPFS_SIZE:-}" ]; then
   mkdir -p /var/lib/buildkit
   if mount -t tmpfs -o "size=$BUILDKIT_TMPFS_SIZE" tmpfs /var/lib/buildkit; then
     BUILDKIT_STORE_READY=1
@@ -278,24 +342,27 @@ fi
 # $2/$3 of /proc/mounts are the mount point and the fs type. Requiring an exact mount point
 # (not just a directory that exists) is what proves this is a separate filesystem rather than
 # a plain directory on the overlay, which would put us straight back on the native snapshotter.
-if [ -z "$BUILDKIT_STORE_READY" ] && awk -v dir="$BUILDKIT_DISK_DIR" '$2 == dir && $3 != "overlay" { ok = 1 } END { exit !ok }' /proc/mounts 2>/dev/null; then
+if [ -z "\${BUILDKIT_ADDR:-}" ] && [ -z "$BUILDKIT_STORE_READY" ] && awk -v dir="$BUILDKIT_DISK_DIR" '$2 == dir && $3 != "overlay" { ok = 1 } END { exit !ok }' /proc/mounts 2>/dev/null; then
   BUILDKIT_ROOT="$BUILDKIT_DISK_DIR/buildkit"
   mkdir -p "$BUILDKIT_ROOT"
   echo "MARSHAL_BUILDKIT_STORE disk $BUILDKIT_DISK_DIR"
 fi
-if [ -n "$BUILDKIT_ROOT" ]; then
-  buildkitd --root "$BUILDKIT_ROOT" >/tmp/buildkitd.log 2>&1 &
-else
-  buildkitd >/tmp/buildkitd.log 2>&1 &
+if [ -z "\${BUILDKIT_ADDR:-}" ]; then
+  if [ -n "$BUILDKIT_ROOT" ]; then
+    buildkitd --root "$BUILDKIT_ROOT" >/tmp/buildkitd.log 2>&1 &
+  else
+    buildkitd >/tmp/buildkitd.log 2>&1 &
+  fi
 fi
 i=0
-until buildctl debug workers >/dev/null 2>&1; do
+until $BUILDCTL debug workers >/dev/null 2>&1; do
   i=$((i+1)); [ $i -gt 60 ] && fail "buildkitd did not start"
   sleep 1
 done
+echo "MARSHAL_BUILDKIT_READY"
 # Which snapshotter buildkit actually chose. Echoed because the fallback is silent: on the
 # native one a build does not fail, it just gets slow enough to hit BUILD_TIMEOUT_SECONDS.
-grep -o "auto snapshotter: using [a-z]*" /tmp/buildkitd.log | head -n 1
+[ -f /tmp/buildkitd.log ] && grep -o "auto snapshotter: using [a-z]*" /tmp/buildkitd.log | head -n 1
 mkdir -p /ctx
 # Fetch and extract OUTSIDE the context dir, then extract INTO it — otherwise the tarball
 # itself sits in the build context and a plain \`COPY . .\` bakes a compressed copy of the
@@ -303,8 +370,20 @@ mkdir -p /ctx
 # Marshal validates the archive and copies it to an immutable, deployment-specific object
 # before this machine receives credentials. The original client-writable upload is never
 # extracted.
-wget -q -O /tmp/ctx.tar.gz "$TARBALL_URL" || fail "failed to fetch the source tarball"
-tar xzf /tmp/ctx.tar.gz -C /ctx || fail "the source tarball is not a valid gzipped tarball"
+# With a remote daemon a Dockerfile build never needs the source here: the daemon fetches
+# TARBALL_URL as its build context (a gzipped tarball is unpacked by the dockerfile
+# frontend itself). Everything that DOES need to read the tree on this machine — a
+# rootDirectory check, a Dockerfile to append to, Railpack's detection — fetches it on
+# demand, once.
+CTX_READY=""
+ensure_ctx() {
+  [ -n "$CTX_READY" ] && return 0
+  wget -q -O /tmp/ctx.tar.gz "$TARBALL_URL" || fail "failed to fetch the source tarball"
+  tar xzf /tmp/ctx.tar.gz -C /ctx || fail "the source tarball is not a valid gzipped tarball"
+  rm -f /tmp/ctx.tar.gz
+  CTX_READY=1
+}
+if [ -z "\${BUILDKIT_ADDR:-}" ]; then ensure_ctx; fi
 cd /ctx
 mkdir -p /root/.docker
 printf '{"auths":{"%s":{"auth":"%s"}}}' "$REGISTRY_HOST" "$REGISTRY_AUTH_B64" > /root/.docker/config.json
@@ -369,8 +448,22 @@ while IFS= read -r TARGET_LINE; do
   # should look for something to infer.
   DETECT_DIR="/ctx"
   if [ -n "$ROOT_DIRECTORY" ]; then
+    ensure_ctx
     [ -d "/ctx/$ROOT_DIRECTORY" ] || fail "$SERVICE_KEY: rootDirectory $ROOT_DIRECTORY does not exist in the uploaded source"
     DETECT_DIR="/ctx/$ROOT_DIRECTORY"
+  fi
+  # How the whole-upload build context reaches the daemon: extracted here for a local
+  # daemon; fetched by the daemon itself (presigned URL, unpacked by the frontend) for a
+  # remote one. Unquoted at the call sites on purpose — it is zero or two words.
+  # With a URL context the dockerfile frontend reads the Dockerfile out of the
+  # context itself and IGNORES a dockerfile local unless told which local to
+  # honour (dockerfilekey) — without it a generated Dockerfile would silently be
+  # replaced by whatever "Dockerfile" the upload root happens to hold.
+  CONTEXT_ARGS="--local context=/ctx"
+  DOCKERFILE_KEY_ARGS=""
+  if [ -n "\${BUILDKIT_ADDR:-}" ]; then
+    CONTEXT_ARGS="--opt context=$TARBALL_URL"
+    DOCKERFILE_KEY_ARGS="--opt dockerfilekey=dockerfile"
   fi
   # The Dockerfile-shaped build arguments, shared by both Dockerfile paths below:
   # every build-visible var as a secret mount (byte-exact, unbaked) and as a build
@@ -397,20 +490,28 @@ while IFS= read -r TARGET_LINE; do
     # and must not appear in their \`COPY . .\`), which is fine: \`filename\` is
     # resolved against the dockerfile local, and every COPY inside it against the
     # context local, which is still the whole upload.
-    if ! buildctl build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$GEN_DIR" \\
+    if ! $BUILDCTL build --frontend dockerfile.v0 $CONTEXT_ARGS --local dockerfile="$GEN_DIR" $DOCKERFILE_KEY_ARGS \\
         --opt "filename=Dockerfile" "$@" \\
         --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
       fail "$SERVICE_KEY: the build failed (see the build log above)"
     fi
   elif [ -n "$DOCKERFILE_PATH" ]; then
-    [ -f "/ctx/$DOCKERFILE_PATH" ] || fail "$SERVICE_KEY: no Dockerfile found at $DOCKERFILE_PATH in the uploaded source"
-    DOCKERFILE_DIR=/ctx
+    [ -n "\${BUILDKIT_ADDR:-}" ] || [ -f "/ctx/$DOCKERFILE_PATH" ] || fail "$SERVICE_KEY: no Dockerfile found at $DOCKERFILE_PATH in the uploaded source"
+    # Remote daemon: the Dockerfile is read out of the (remote) context itself, so no
+    # dockerfile local at all. Marshal already checked the path exists in the upload.
+    DOCKERFILE_LOCAL_ARGS="--local dockerfile=/ctx"
+    [ -n "\${BUILDKIT_ADDR:-}" ] && DOCKERFILE_LOCAL_ARGS=""
     DOCKERFILE_NAME="$DOCKERFILE_PATH"
     # A build command on a Dockerfile build is appended as a final RUN. Written to
     # a scratch directory rather than back into /ctx: the context is the author's
     # source, and a file added to it would land in their own \`COPY . .\`.
     if [ -f "$GEN_DIR/suffix" ]; then
       echo "MARSHAL_APPEND_BUILD_COMMAND $SERVICE_KEY"
+      # The author's Dockerfile has to be read to be appended to; with a remote
+      # daemon nothing has fetched the source yet, so fetch it now for exactly
+      # that (the daemon still fetches its own copy as the build context).
+      ensure_ctx
+      [ -f "/ctx/$DOCKERFILE_PATH" ] || fail "$SERVICE_KEY: no Dockerfile found at $DOCKERFILE_PATH in the uploaded source"
       mkdir -p "/tmp/dockerfiles/$SERVICE_KEY"
       cat "/ctx/$DOCKERFILE_PATH" "$GEN_DIR/suffix" > "/tmp/dockerfiles/$SERVICE_KEY/Dockerfile" \\
         || fail "$SERVICE_KEY: could not append the build command to $DOCKERFILE_PATH"
@@ -424,16 +525,21 @@ while IFS= read -r TARGET_LINE; do
         cp "/ctx/$DOCKERFILE_PATH.dockerignore" "/tmp/dockerfiles/$SERVICE_KEY/Dockerfile.dockerignore" \\
           || fail "$SERVICE_KEY: could not carry over $DOCKERFILE_PATH.dockerignore"
       fi
-      DOCKERFILE_DIR="/tmp/dockerfiles/$SERVICE_KEY"
+      DOCKERFILE_LOCAL_ARGS="--local dockerfile=/tmp/dockerfiles/$SERVICE_KEY $DOCKERFILE_KEY_ARGS"
       DOCKERFILE_NAME=Dockerfile
     fi
-    if ! buildctl build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$DOCKERFILE_DIR" \\
+    if ! $BUILDCTL build --frontend dockerfile.v0 $CONTEXT_ARGS $DOCKERFILE_LOCAL_ARGS \\
         --opt "filename=$DOCKERFILE_NAME" "$@" \\
         --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
       fail "$SERVICE_KEY: docker build failed (see the build log above)"
     fi
   else
     echo "MARSHAL_RAILPACK_DETECT $SERVICE_KEY"
+    # Detection reads the tree on THIS machine either way; with a remote daemon the
+    # source and the plan then travel to it as ordinary session-streamed locals,
+    # which is what lets the (large) railpack-builder base image be pulled and
+    # cached over there instead of extracted here.
+    ensure_ctx
     if [ ! -f /tmp/railpack-bin/railpack ]; then
       wget -q -O /tmp/railpack.tar.gz "$RAILPACK_CLI_URL" || wget -q -O /tmp/railpack.tar.gz "$RAILPACK_CLI_URL" || fail "failed to fetch the railpack CLI (a build-infrastructure problem, not an issue with your code)"
       echo "$RAILPACK_CLI_SHA256  /tmp/railpack.tar.gz" | sha256sum -c - >/dev/null 2>&1 || fail "the railpack CLI download failed checksum verification (a build-infrastructure problem, not an issue with your code)"
@@ -464,7 +570,7 @@ while IFS= read -r TARGET_LINE; do
     fi
     set -- $(secret_args "$ENV_DIR")
     if [ "$#" -gt 0 ]; then set -- "$@" --opt "build-arg:secrets-hash=$(secrets_hash "$ENV_DIR")"; fi
-    if ! buildctl build --frontend gateway.v0 --opt "source=$RAILPACK_FRONTEND_IMAGE" \\
+    if ! $BUILDCTL build --frontend gateway.v0 --opt "source=$RAILPACK_FRONTEND_IMAGE" \\
         --local context="$DETECT_DIR" --local dockerfile=/tmp/railpack-plan "$@" \\
         --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
       fail "$SERVICE_KEY: railpack build failed (see the build log above)"
@@ -480,6 +586,7 @@ while IFS= read -r TARGET_LINE; do
 done < /marshal-targets.tsv
 printf '{"targets":{%s}}' "$DIGESTS" > /tmp/result.json
 webhook succeeded application/json /tmp/result.json
+depot_release
 echo "MARSHAL_BUILD_DONE"
 `;
 }

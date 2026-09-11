@@ -11,7 +11,7 @@ import { redactBuildLogLines, redactBuildLogText } from "./redact-build-log.js";
 import { computeRevision } from "./revision.js";
 import { DEFAULT_RUNTIME, type DeploymentRuntime } from "./runtime.js";
 import { assertServiceCanHoldADomain, specIsPublic, standardPortsHolderFor } from "./spec-helpers.js";
-import { createDeployment, deleteSpecConditionally, deleteUpload, deleteValidatedUpload, listDomainClaimsForService, listSpecKeys, readDeployment, readDeploymentVersioned, readDomainClaimVersioned, readSpec, readSpecVersioned, readUpload, replaceDeployment, statUpload, writeDeploymentLog, writeSpec, writeValidatedUpload } from "./store.js";
+import { copyValidatedUpload, createDeployment, deleteBuilderHandoff, deleteSpecConditionally, deleteUpload, deleteValidatedUpload, listDomainClaimsForService, listSpecKeys, readDeployment, readDeploymentVersioned, readDomainClaimVersioned, readSpec, readSpecVersioned, readUpload, replaceDeployment, statUpload, writeDeploymentLog, writeSpec } from "./store.js";
 import { loadAndValidateSourceArchive } from "./source-archive.js";
 import { validateImageRef } from "./image-ref.js";
 import { portEntries, targetIsBuilt, targetUsesGeneratedDockerfile, type Deployment, type DeploymentServiceState, type DeploymentTarget, type EnvValue, type ParkState, type PortsConfig, type ServiceSpec, type ServiceState, type StoredDeployment, type StoredSpec, type VolumeConfig } from "./types.js";
@@ -856,7 +856,40 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
   // before it can run, say) changes only what fills these two lists.
   const buildTargets = targets.filter(targetIsBuilt);
   const prebuiltTargets = targets.filter((target) => !targetIsBuilt(target));
-  return await withReconciliationLease(ns, sourceLeaseKey(sourceId), async (lease) => {
+  // SPIKE: the builder's slow, idempotent setup (a remote BuildKit endpoint, the
+  // Fly apps the build pushes to) starts here, before the lease and the upload
+  // work, and is disposed of if this request never reaches startBuild.
+  const prepared = buildTargets.length > 0 && builder.prepare !== undefined
+    ? builder.prepare({
+      ns,
+      serviceKeys: buildTargets.map((target) => target.service_key),
+      isRailpackBuild: buildTargets.some((target) => target.dockerfile_path === undefined && !targetUsesGeneratedDockerfile(target)),
+    })
+    : null;
+  const buildState = { started: false };
+  const sdT0 = Date.now();
+  const sdT = (label: string) => console.log(`${new Date().toISOString()} timing startDeployment ${label} +${Date.now() - sdT0}ms`);
+  // SPIKE: the upload is read and validated BEFORE the lease: nothing here
+  // mutates, and the lease is first needed by the writes below. Started now so
+  // it overlaps with the builder's prepare work; awaited inside the lease.
+  const archivePending = uploadId === null ? null : (async () => {
+    const upload = await statUpload(ns, uploadId);
+    if (upload === null) throw badRequest(`upload ${JSON.stringify(uploadId)} does not exist (expired, already consumed, or never uploaded)`);
+    if (upload.sizeBytes > MAX_UPLOAD_BYTES) throw badRequest(`upload is ${upload.sizeBytes} bytes; the maximum is ${MAX_UPLOAD_BYTES}`);
+    const archive = await loadAndValidateSourceArchive(async () => await readUpload(ns, uploadId, upload.etag, MAX_UPLOAD_BYTES));
+    if (archive === null) throw badRequest(`upload ${JSON.stringify(uploadId)} disappeared, changed, or exceeded the size limit before it could be consumed`);
+    sdT("upload read+validated");
+    return upload.etag;
+  })();
+  archivePending?.catch(() => undefined);
+  try {
+    return await startSourceDeploymentWithPrepared();
+  } finally {
+    if (prepared !== null && !buildState.started) await prepared.dispose();
+  }
+
+  async function startSourceDeploymentWithPrepared(): Promise<Deployment> {
+    return await withReconciliationLease(ns, sourceLeaseKey(sourceId), async (lease) => {
     // A prebuilt target's image goes into the deployment exactly as the author
     // wrote it, normalized but NOT resolved: Marshal never contacts the image's
     // registry, and the runtime resolves whatever this names when it pulls.
@@ -876,135 +909,160 @@ export async function startSourceDeployment(ns: string, sourceId: string, body: 
     // of creating an own property — so the image would vanish and the deploy
     // would fail with "no image was built for __proto__". `lookup` already reads
     // through Object.hasOwn; this makes the WRITE agree with it.
-    const prebuiltImages: Record<string, string> = Object.create(null);
-    for (const target of prebuiltTargets) {
-      prebuiltImages[target.service_key] = validateImageRef(target.image, `target ${target.service_key} image`).canonical;
-    }
+      const prebuiltImages: Record<string, string> = Object.create(null);
+      for (const target of prebuiltTargets) {
+        prebuiltImages[target.service_key] = validateImageRef(target.image, `target ${target.service_key} image`).canonical;
+      }
 
-    // Validate the archive before anything else touches it: the presigned PUT the
-    // client used stays valid until it expires, so building from it directly would
-    // leave a validation-to-extraction race even after strict tar validation.
-    // Skipped entirely when nothing is built — there is no upload in that case
-    // (validateDeploymentRequest refuses one).
-    let validatedArchive: Uint8Array | null = null;
-    if (uploadId !== null) {
-      const upload = await statUpload(ns, uploadId);
-      if (upload === null) throw badRequest(`upload ${JSON.stringify(uploadId)} does not exist (expired, already consumed, or never uploaded)`);
-      if (upload.sizeBytes > MAX_UPLOAD_BYTES) throw badRequest(`upload is ${upload.sizeBytes} bytes; the maximum is ${MAX_UPLOAD_BYTES}`);
-      const archive = await loadAndValidateSourceArchive(async () => await readUpload(ns, uploadId, upload.etag, MAX_UPLOAD_BYTES));
-      if (archive === null) throw badRequest(`upload ${JSON.stringify(uploadId)} disappeared, changed, or exceeded the size limit before it could be consumed`);
-      validatedArchive = archive;
-    }
+      // Validate the archive before anything else touches it: the presigned PUT the
+      // client used stays valid until it expires, so building from it directly would
+      // leave a validation-to-extraction race even after strict tar validation.
+      // Skipped entirely when nothing is built — there is no upload in that case
+      // (validateDeploymentRequest refuses one).
+      // The etag of the upload object as validated; the copy below is fenced on it.
+      const validatedEtag = archivePending === null ? null : await archivePending;
 
-    const now = Date.now();
-    // Minted from `now` so the id's embedded time never runs ahead of
-    // started_at_millis.
-    const deploymentId = ulid(now);
-    // Nothing to build means nothing to wait for: the deployment opens straight
-    // in "deploying" and the first read advances it, rather than sitting in
-    // "building" for a webhook that no builder will ever call. It also has no
-    // build log, so `has_logs` says so instead of offering an empty one.
-    const buildsFromSource = buildTargets.length > 0;
-    const deployment: StoredDeployment = {
-      id: deploymentId,
-      ns,
-      source_id: sourceId,
-      status: buildsFromSource ? "building" : "deploying",
-      has_logs: buildsFromSource,
-      error: null,
-      started_at_millis: now,
-      finished_at_millis: null,
-      order,
-      targets,
-      services: Object.fromEntries(targets.map((target) => [target.service_key, {
-        service_key: target.service_key,
-        // A prebuilt target is never "building": its image already exists. It
-        // waits in "pending" like any service whose turn in the dependency order
-        // has not come — including while a SIBLING builds, since the applies of a
-        // mixed deployment all start once the build lands.
-        status: targetIsBuilt(target) ? "building" as const : "pending" as const,
-        revision: null,
-        url: null,
-        // Filled in by the apply. A prebuilt target's image is already known
-        // (it is in `images`), but this field says what RAN, not what will.
-        image: null,
-        error: null,
-      }])),
-      // Prebuilt targets are resolved before the deployment exists; the build
-      // fills in the rest.
-      images: prebuiltImages,
-      builder_app: null,
-      builder_machine_id: null,
-      builder_memory_mb: builderMemoryMb,
-      upload_id: uploadId,
-    };
-
-    // Copy the validated bytes to a deployment-specific key the client cannot
-    // overwrite, then record the deployment BEFORE starting the builder:
-    // completion may land at any moment after startBuild, and a blind write
-    // afterwards could clobber a terminal record.
-    await lease.assertOwned();
-    if (validatedArchive !== null) await writeValidatedUpload(ns, deploymentId, validatedArchive);
-    await lease.assertOwned();
-    if (await createDeployment(deployment) === null) throw new Error(`deployment id collision for ${deploymentId}`);
-
-    // No build, no builder machine, no upload to consume: the deployment is
-    // already "deploying" and the caller's next poll applies its first service.
-    if (!buildsFromSource) {
-      return deploymentToApiShape(await readDeployment(ns, deploymentId) ?? deployment);
-    }
-
-    // Not reachable: `buildsFromSource` is what got us past the early return, and
-    // it is exactly the condition under which validateDeploymentRequest requires
-    // an upload. Stated so the builder call needs no assertion.
-    if (uploadId === null) throw new Error("internal: a source build reached the builder without an upload");
-
-    try {
-      await lease.assertOwned();
-      const started = await builder.startBuild({
+      const now = Date.now();
+      // Minted from `now` so the id's embedded time never runs ahead of
+      // started_at_millis.
+      const deploymentId = ulid(now);
+      // Nothing to build means nothing to wait for: the deployment opens straight
+      // in "deploying" and the first read advances it, rather than sitting in
+      // "building" for a webhook that no builder will ever call. It also has no
+      // build log, so `has_logs` says so instead of offering an empty one.
+      const buildsFromSource = buildTargets.length > 0;
+      const deployment: StoredDeployment = {
+        id: deploymentId,
         ns,
-        deploymentId,
-        uploadId,
-        // Only the targets that are actually built. A prebuilt sibling has no
-        // Dockerfile, nothing to detect, and nothing to push.
-        targets: await Promise.all(buildTargets.map(async (target) => ({
-          serviceKey: target.service_key,
-          pushTarget: await provider.pushTarget(ns, target.service_key, deploymentId),
-          dockerfilePath: target.dockerfile_path ?? null,
-          rootDirectory: target.root_directory ?? null,
-          // Null unless the target builds from a GENERATED Dockerfile, which is
-          // also the only case where `image` is a base rather than the thing to
-          // run — so the builder never has to re-derive which of the two it is.
-          baseImage: targetUsesGeneratedDockerfile(target) ? target.image ?? BASE_IMAGE : null,
-          buildCommand: target.build_command ?? null,
-          buildEnv: buildTimeEnv(target.spec.env),
-        }))),
-        builderMemoryMb,
-      }, lease);
-      if (started.builderApp !== null || started.builderMachineId !== null) {
-        // Attach the builder coordinates (live-log proxy + stale-build backstop need
-        // them) — but only if the build hasn't already reached a terminal state.
+        source_id: sourceId,
+        status: buildsFromSource ? "building" : "deploying",
+        has_logs: buildsFromSource,
+        error: null,
+        started_at_millis: now,
+        finished_at_millis: null,
+        order,
+        targets,
+        services: Object.fromEntries(targets.map((target) => [target.service_key, {
+          service_key: target.service_key,
+          // A prebuilt target is never "building": its image already exists. It
+          // waits in "pending" like any service whose turn in the dependency order
+          // has not come — including while a SIBLING builds, since the applies of a
+          // mixed deployment all start once the build lands.
+          status: targetIsBuilt(target) ? "building" as const : "pending" as const,
+          revision: null,
+          url: null,
+          // Filled in by the apply. A prebuilt target's image is already known
+          // (it is in `images`), but this field says what RAN, not what will.
+          image: null,
+          error: null,
+        }])),
+        // Prebuilt targets are resolved before the deployment exists; the build
+        // fills in the rest.
+        images: prebuiltImages,
+        builder_app: null,
+        builder_machine_id: null,
+        builder_memory_mb: builderMemoryMb,
+        upload_id: uploadId,
+      };
+
+      // Copy the validated bytes to a deployment-specific key the client cannot
+      // overwrite, then record the deployment BEFORE starting the builder:
+      // completion may land at any moment after startBuild, and a blind write
+      // afterwards could clobber a terminal record.
+      // SPIKE: the two writes go to distinct keys and neither depends on the
+      // other's result; both are awaited before the builder starts, which is the
+      // ordering that matters. A failed copy next to a created record is failed
+      // the same way a failed startBuild is, below.
+      await lease.assertOwned();
+      const [copied, createdEtag] = await Promise.all([
+        validatedEtag === null || uploadId === null ? true : copyValidatedUpload(ns, uploadId, deploymentId, validatedEtag),
+        createDeployment(deployment),
+      ]);
+      sdT("validated copy + deployment record written");
+      if (createdEtag === null) throw new Error(`deployment id collision for ${deploymentId}`);
+      if (!copied) {
+        await lease.assertOwned();
+        await replaceDeployment(failDeployment(deployment, "the upload changed or vanished before the build could start"), createdEtag);
+        throw badRequest(`upload ${JSON.stringify(uploadId)} disappeared, changed, or exceeded the size limit before it could be consumed`);
+      }
+
+      // No build, no builder machine, no upload to consume: the deployment is
+      // already "deploying" and the caller's next poll applies its first service.
+      if (!buildsFromSource) {
+        return deploymentToApiShape(await readDeployment(ns, deploymentId) ?? deployment);
+      }
+
+      // Not reachable: `buildsFromSource` is what got us past the early return, and
+      // it is exactly the condition under which validateDeploymentRequest requires
+      // an upload. Stated so the builder call needs no assertion.
+      if (uploadId === null) throw new Error("internal: a source build reached the builder without an upload");
+
+      try {
+        await lease.assertOwned();
+        const started = await builder.startBuild({
+          ns,
+          deploymentId,
+          uploadId,
+          // Only the targets that are actually built. A prebuilt sibling has no
+          // Dockerfile, nothing to detect, and nothing to push.
+          targets: await Promise.all(buildTargets.map(async (target) => ({
+            serviceKey: target.service_key,
+            pushTarget: await provider.pushTarget(ns, target.service_key, deploymentId),
+            dockerfilePath: target.dockerfile_path ?? null,
+            rootDirectory: target.root_directory ?? null,
+            // Null unless the target builds from a GENERATED Dockerfile, which is
+            // also the only case where `image` is a base rather than the thing to
+            // run — so the builder never has to re-derive which of the two it is.
+            baseImage: targetUsesGeneratedDockerfile(target) ? target.image ?? BASE_IMAGE : null,
+            buildCommand: target.build_command ?? null,
+            buildEnv: buildTimeEnv(target.spec.env),
+          }))),
+          builderMemoryMb,
+          prepared,
+        }, lease);
+        buildState.started = true;
+        // SPIKE: attach the builder coordinates with the etag the create returned —
+        // the conditional write is still the arbiter: it loses (null) exactly when
+        // the record has already moved on, and only then is a read needed. The
+        // upload delete runs alongside: the build owns its copy once startBuild
+        // returned, and both must finish before the response (Vercel freezes it).
+        let attached = null as StoredDeployment | null;
+        const attach = async () => {
+          if (started.builderApp === null && started.builderMachineId === null) return;
+          const withBuilder = { ...deployment, builder_app: started.builderApp, builder_machine_id: started.builderMachineId };
+          if (await replaceDeployment(withBuilder, createdEtag) !== null) {
+            attached = withBuilder;
+            return;
+          }
+          // Attach the builder coordinates (live-log proxy + stale-build backstop need
+          // them) — but only if the build hasn't already reached a terminal state.
+          const current = await readDeploymentVersioned(ns, deploymentId);
+          if (current !== null && current.value.status === "building") {
+            await lease.assertOwned();
+            await replaceDeployment({ ...current.value, builder_app: started.builderApp, builder_machine_id: started.builderMachineId }, current.etag);
+          }
+        };
+        await Promise.all([attach(), deleteUploadBestEffort(ns, uploadId)]);
+      sdT("builder attached + upload consumed");
+      if (attached !== null) return deploymentToApiShape(attached);
+      } catch (error) {
+        if (isReconciliationFencingError(error)) throw error;
         const current = await readDeploymentVersioned(ns, deploymentId);
         if (current !== null && current.value.status === "building") {
           await lease.assertOwned();
-          await replaceDeployment({ ...current.value, builder_app: started.builderApp, builder_machine_id: started.builderMachineId }, current.etag);
+          await replaceDeployment(failDeployment(current.value, "starting the build failed"), current.etag);
         }
+        await deleteValidatedUploadBestEffort(ns, deploymentId);
+        throw error;
       }
-    } catch (error) {
-      if (isReconciliationFencingError(error)) throw error;
-      const current = await readDeploymentVersioned(ns, deploymentId);
-      if (current !== null && current.value.status === "building") {
-        await lease.assertOwned();
-        await replaceDeployment(failDeployment(current.value, "starting the build failed"), current.etag);
-      }
-      await deleteValidatedUploadBestEffort(ns, deploymentId);
-      throw error;
-    }
+    sdT("startBuild returned");
     // Consume the upload only once the build owns its own copy of the bytes.
     // (Non-null: an all-prebuilt deployment returned above, before the builder.)
     await deleteUploadBestEffort(ns, uploadId);
+    sdT("upload consumed");
     return deploymentToApiShape(await readDeployment(ns, deploymentId) ?? deployment);
-  });
+    });
+  }
 }
 
 /**
@@ -1342,7 +1400,7 @@ function truncateError(text: string | null): string | null {
 
 async function deleteValidatedUploadBestEffort(ns: string, deploymentId: string): Promise<void> {
   try {
-    await deleteValidatedUpload(ns, deploymentId);
+    await Promise.all([deleteValidatedUpload(ns, deploymentId), deleteBuilderHandoff(ns, deploymentId)]);
   } catch (error) {
     // The object contains already-validated source and expires with the bucket lifecycle;
     // cleanup must never prevent a terminal deployment record or its rollout from completing.

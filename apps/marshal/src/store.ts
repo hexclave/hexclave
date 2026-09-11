@@ -564,6 +564,33 @@ export async function deleteValidatedUpload(ns: string, buildId: string): Promis
   await deleteObject(validatedUploadObjectKey(ns, buildId));
 }
 
+// SPIKE: the remote BuildKit endpoint handed to an already-running harness machine.
+// Lives next to the validated upload (same lifecycle, same cleanup) and is fetched by
+// the harness through a presigned GET it polls until the object exists.
+function builderHandoffObjectKey(ns: string, buildId: string): string {
+  return `uploads/.validated/${ns}/${buildId}.handoff.sh`;
+}
+
+export async function writeBuilderHandoff(ns: string, buildId: string, contents: string): Promise<void> {
+  await withTransientRetry(async () => await s3().send(new PutObjectCommand({
+    Bucket: bucket(),
+    Key: storageKey(builderHandoffObjectKey(ns, buildId)),
+    Body: contents,
+    ContentType: "text/plain",
+  })));
+}
+
+export async function presignBuilderHandoffGet(ns: string, buildId: string, expiresInSeconds: number): Promise<string> {
+  return await getSignedUrl(s3(), new GetObjectCommand({
+    Bucket: bucket(),
+    Key: storageKey(builderHandoffObjectKey(ns, buildId)),
+  }), { expiresIn: expiresInSeconds });
+}
+
+export async function deleteBuilderHandoff(ns: string, buildId: string): Promise<void> {
+  await deleteObject(builderHandoffObjectKey(ns, buildId));
+}
+
 export async function deleteUpload(ns: string, id: string): Promise<void> {
   await deleteObject(uploadObjectKey(ns, id));
 }

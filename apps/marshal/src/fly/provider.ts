@@ -6,8 +6,9 @@
 // live app becomes an orphan. See fly/naming.ts.
 import { createHash } from "node:crypto";
 import { platformHostname } from "../platform-domain-names.js";
-import { BASE_IMAGE, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, FLY_DEFAULT_MEMORY_MB, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, RAILPACK_BUILDKIT_TMPFS_SIZE, SOFT_CONCURRENCY_LIMIT, flyBuilderGuestFor, flyConfig, flyGuestFor, flyVolumeName, getConfig, memorySizesFor, resolveNamespaceOrg, serviceMemoryMb } from "../config.js";
-import { buildCompletionPath, buildHarnessScript, computeWebhookToken, generatedDockerfile, type Builder } from "../builds.js";
+import { type FlyGuest, BASE_IMAGE, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, FLY_DEFAULT_MEMORY_MB, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, RAILPACK_BUILDKIT_TMPFS_SIZE, SOFT_CONCURRENCY_LIMIT, flyBuilderGuestFor, flyConfig, flyGuestFor, flyVolumeName, getConfig, memorySizesFor, resolveNamespaceOrg, serviceMemoryMb } from "../config.js";
+import { buildCompletionPath, buildHarnessScript, computeWebhookToken, generatedDockerfile, type Builder, type PrepareBuildOptions, type PreparedBuild } from "../builds.js";
+import { acquireDepotEndpoint, createDepotBuild, depotToken, ensureDepotProject, releaseDepotEndpoint, renderDepotHandoff, type DepotBuild } from "../depot.js";
 import { badRequest, conflict, notFound } from "../errors.js";
 import { isImageDigest, pinToDigest } from "../image-ref.js";
 import { MutationOutcomeUnknownError } from "../mutation-safety.js";
@@ -17,7 +18,7 @@ import { ensurePublicIps, reconcilePublicIps, releasePublicIpsIfUnused } from ".
 import { ReconciliationLeaseLostError, type ReconciliationLeaseGuard } from "../reconciliation-lock.js";
 import { redactBuildLogText } from "../redact-build-log.js";
 import { assertServiceCanHoldADomain, desiredMachineCount, pinnedMachineCount, soleHttpPort, specIsPublic, specVolume, standardPortsHolderFor } from "../spec-helpers.js";
-import { claimDomain, listDomainClaimsForService, presignValidatedUploadGet, readDomainClaim, readDomainClaimVersioned, readSpec, releaseDomainClaim, rewriteDomainClaim } from "../store.js";
+import { claimDomain, listDomainClaimsForService, presignBuilderHandoffGet, presignValidatedUploadGet, readDomainClaim, readDomainClaimVersioned, readSpec, releaseDomainClaim, rewriteDomainClaim, writeBuilderHandoff } from "../store.js";
 import { portEntries, type DnsRecord, type DomainStatus, type PortEntry, type ServiceDomainState, type ServiceSpec, type StoredDeployment, type StoredSpec, type VolumeConfig } from "../types.js";
 import { FlyApiError, FlyClient, flyClientForNamespaceOrg, type FlyCertificate, type FlyCertificateRequirements, type FlyMachine, type FlyVolume } from "./client.js";
 import { appNameForService, builderAppName, builderNetworkName, hostnameForService, networkForNamespace } from "./naming.js";
@@ -767,9 +768,82 @@ async function detachDomain(ns: string, hostname: string, expectedServiceKey?: s
 // ---------------------------------------------------------------------------
 // The builder
 
+// SPIKE: with the daemon remote, the harness machine only holds the BuildKit session and
+// streams the log, so it gets the smallest guest Fly offers. A Railpack build additionally
+// extracts the source (up to MAX_UNCOMPRESSED_SOURCE_BYTES) and runs `railpack prepare`
+// over it on this machine before streaming both to the daemon, so it gets some headroom.
+const DEPOT_HARNESS_GUEST: FlyGuest = { cpu_kind: "shared", cpus: 1, memory_mb: 256 };
+const DEPOT_RAILPACK_HARNESS_GUEST: FlyGuest = { cpu_kind: "shared", cpus: 1, memory_mb: 1024 };
+const DEPOT_TLS_DIR = "/marshal-depot-tls";
+
+type DepotEndpoint = Awaited<ReturnType<typeof acquireDepotEndpoint>>;
+
+// SPIKE: what the Fly builder starts before the deployment is validated. All of it is
+// idempotent (ensureApp) or disposable (a Depot build that never gets used is released).
+type FlyPreparedBuild = PreparedBuild & {
+  useDepot: boolean,
+  isRailpackBuild: boolean,
+  startedAt: number,
+  appsEnsured: Promise<void>,
+  // The build registration (fast) and its endpoint (the slow part), separately:
+  // the harness machine only needs the first to be created, and receives the
+  // second through a handoff object once it exists.
+  depotBuild: Promise<DepotBuild> | null,
+  depotEndpoint: Promise<DepotEndpoint> | null,
+};
+
+function prepareFlyBuild(options: PrepareBuildOptions): FlyPreparedBuild {
+  const config = getConfig();
+  const fly = flyFor(options.ns);
+  const serviceNetwork = networkForNamespace(config.envId, options.ns);
+  // SPIKE: every build runs on a remote Depot BuildKit daemon when a Depot token is
+  // configured — Railpack included: detection still runs on the harness, but the
+  // railpack-builder base image (the reason for the 16GB local guest) is pulled and
+  // cached on the remote daemon instead of extracted here.
+  const depot = depotToken();
+  const useDepot = depot !== null;
+  const depotBuild = useDepot
+    ? ensureDepotProject(depot, `marshal-${config.envId}-${options.ns}`).then((projectId) => createDepotBuild(depot, projectId))
+    : null;
+  const depotEndpoint = depotBuild === null ? null : depotBuild.then((build) => acquireDepotEndpoint(build));
+  // Fly's registry repositories are app-scoped: pushing
+  // registry.fly.io/<app>:<tag> fails with "app repository not found" until the app
+  // exists. Builds happen before applyMachines (which also ensures the app), so create
+  // every built target's app before starting BuildKit. A failed build may leave an
+  // empty app, but it remains owned by the synced service and the ordinary service-delete
+  // path removes it; the next deploy simply reuses it. All of them, and the builder's own
+  // app, in parallel: each is an independent create-if-missing.
+  const appsEnsured = Promise.all([
+    ...options.serviceKeys.map(async (key) => await fly.ensureApp(appNameForService(config.envId, options.ns, key), serviceNetwork)),
+    fly.ensureApp(builderAppName(config.envId), builderNetworkName(config.envId)),
+  ]).then(() => undefined);
+  // The awaits are a whole upload validation away; a rejection before then must not be
+  // an unhandled one (it took the process down once). The awaits still throw.
+  depotBuild?.catch(() => undefined);
+  depotEndpoint?.catch(() => undefined);
+  appsEnsured.catch(() => undefined);
+  return {
+    useDepot,
+    isRailpackBuild: options.isRailpackBuild,
+    startedAt: Date.now(),
+    appsEnsured,
+    depotBuild,
+    depotEndpoint,
+    async dispose() {
+      if (depotBuild === null) return;
+      try {
+        await releaseDepotEndpoint(await depotBuild);
+      } catch {
+        // Never registered, or already gone: nothing to release.
+      }
+    },
+  };
+}
+
 function createFlyBuilder(): Builder {
   return {
     name: "fly",
+    prepare: prepareFlyBuild,
     async startBuild(options, lease) {
       const config = getConfig();
       const flyConfiguration = flyConfig();
@@ -777,22 +851,34 @@ function createFlyBuilder(): Builder {
         throw new Error("MARSHAL_PUBLIC_URL must be set for real Fly builds — the builder machine calls the completion webhook on it");
       }
       const fly = flyFor(options.ns);
-      const serviceNetwork = networkForNamespace(config.envId, options.ns);
+      const sbT0 = Date.now();
+      const sbT = (label: string) => console.log(`${new Date().toISOString()} timing startBuild ${options.deploymentId} ${label} +${Date.now() - sbT0}ms`);
 
-      // Fly's registry repositories are app-scoped: pushing
-      // registry.fly.io/<app>:<tag> fails with "app repository not found" until the app
-      // exists. Builds happen before applyMachines (which also ensures the app), so create
-      // every built target's app here before starting BuildKit. A failed build may leave an
-      // empty app, but it remains owned by the synced service and the ordinary service-delete
-      // path removes it; the next deploy simply reuses it.
-      for (const target of options.targets) {
-        await lease.assertOwned();
-        await fly.ensureApp(appNameForService(config.envId, options.ns, target.serviceKey), serviceNetwork);
-      }
+      // A Railpack build needs the bigger guest; one machine builds every target,
+      // so ANY auto-detected target decides the size for the whole run.
+      //
+      // A GENERATED Dockerfile is not one of them: it is an ordinary
+      // FROM/COPY/RUN build like the author's own, with no railpack-builder base
+      // image to extract and no plan to compute — so it gets the ordinary guest,
+      // and a base-image target sitting next to a Railpack one still gets the big
+      // one, because the machine is shared.
+      const isRailpackBuild = options.targets.some((target) => target.dockerfilePath === null && target.baseImage === null);
+      // Prepared by the caller before validation, or (a caller that has no prepare
+      // step, like a test) right now — same work, just not overlapped.
+      const prepared = (options.prepared as FlyPreparedBuild | null | undefined)
+        ?? prepareFlyBuild({ ns: options.ns, serviceKeys: options.targets.map((target) => target.serviceKey), isRailpackBuild });
+      if (prepared.isRailpackBuild !== isRailpackBuild) throw new Error("internal: the prepared build's shape does not match its targets");
+      const useDepot = prepared.useDepot;
+      const depotStartedAt = prepared.startedAt;
+      // Only the registration is needed to CREATE the harness machine: the endpoint
+      // reaches it through the handoff object below, so the machine boots while
+      // Depot is still bringing the builder up.
+      const depotBuild = prepared.depotBuild === null ? null : await prepared.depotBuild;
 
-      const builderApp = builderAppName(config.envId);
       await lease.assertOwned();
-      await fly.ensureApp(builderApp, builderNetworkName(config.envId));
+      await prepared.appsEnsured;
+      sbT("service + builder apps ensured");
+      const builderApp = builderAppName(config.envId);
 
       const tarballUrl = await presignValidatedUploadGet(options.ns, options.deploymentId, BUILD_TIMEOUT_SECONDS + 60);
       const webhookToken = computeWebhookToken(options.deploymentId, options.ns);
@@ -805,16 +891,10 @@ function createFlyBuilder(): Builder {
       const targetsManifest = options.targets
         .map((target) => [target.serviceKey, target.pushTarget, target.dockerfilePath ?? "", target.rootDirectory ?? ""].join("\t"))
         .join("\n");
-      // A Railpack build needs the bigger guest; one machine builds every target,
-      // so ANY auto-detected target decides the size for the whole run.
-      //
-      // A GENERATED Dockerfile is not one of them: it is an ordinary
-      // FROM/COPY/RUN build like the author's own, with no railpack-builder base
-      // image to extract and no plan to compute — so it gets the ordinary guest,
-      // and a base-image target sitting next to a Railpack one still gets the big
-      // one, because the machine is shared.
-      const isRailpackBuild = options.targets.some((target) => target.dockerfilePath === null && target.baseImage === null);
-      const guest = flyBuilderGuestFor({ requestedMemoryMb: options.builderMemoryMb, isRailpackBuild });
+      const handoffUrl = depotBuild === null ? null : await presignBuilderHandoffGet(options.ns, options.deploymentId, BUILD_TIMEOUT_SECONDS + 60);
+      const guest = useDepot
+        ? (isRailpackBuild ? DEPOT_RAILPACK_HARNESS_GUEST : DEPOT_HARNESS_GUEST)
+        : flyBuilderGuestFor({ requestedMemoryMb: options.builderMemoryMb, isRailpackBuild });
       await lease.assertOwned();
       const machine = await fly.createMachine(builderApp, {
         name: `build-${options.deploymentId.toLowerCase()}`,
@@ -885,10 +965,31 @@ function createFlyBuilder(): Builder {
             RAILPACK_CLI_URL,
             RAILPACK_CLI_SHA256,
             RAILPACK_FRONTEND_IMAGE,
-            ...(isRailpackBuild ? { BUILDKIT_TMPFS_SIZE: RAILPACK_BUILDKIT_TMPFS_SIZE } : {}),
+            // Local daemon only, and Railpack only: a Dockerfile build was measured I/O-bound
+            // on the disk-backed store too, but a tmpfs sized to the 2GB default guest
+            // ENOSPCs on an ordinary Next.js build, so giving it one means raising that
+            // default first. With a remote daemon there is no local store at all.
+            ...(isRailpackBuild && depotBuild === null ? { BUILDKIT_TMPFS_SIZE: RAILPACK_BUILDKIT_TMPFS_SIZE } : {}),
+            ...(depotBuild === null || handoffUrl === null ? {} : {
+              BUILDKIT_HANDOFF_URL: handoffUrl,
+              BUILDKIT_TLS_DIR: DEPOT_TLS_DIR,
+              DEPOT_BUILD_ID: depotBuild.buildId,
+              DEPOT_BUILD_TOKEN: depotBuild.buildToken,
+            }),
           },
         },
       });
+      sbT(`builder machine created ${machine.id}`);
+      // The machine is booting; now the endpoint. Written where the harness is
+      // already polling for it. A Depot failure here fails the deployment the
+      // same way any startBuild failure does, and the machine's own watchdog
+      // reclaims it.
+      if (prepared.depotEndpoint !== null) {
+        const depotEndpoint = await prepared.depotEndpoint;
+        console.log(`${new Date().toISOString()} depot: endpoint ${depotEndpoint.endpoint} for build ${depotEndpoint.buildId} active after ${Date.now() - depotStartedAt}ms`);
+        await writeBuilderHandoff(options.ns, options.deploymentId, renderDepotHandoff(depotEndpoint));
+        sbT("handoff written");
+      }
       return { builderApp, builderMachineId: machine.id };
     },
   };
