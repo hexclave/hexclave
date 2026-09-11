@@ -1,0 +1,54 @@
+# METABEGIN
+# X-Env-Layer-Name: hexclave-tv-box-image
+# X-Env-Layer-Category: image
+# X-Env-Layer-Desc: Raspberry Pi MBR pilot image with bounded TV Box state and swap.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: image-base
+# X-Env-Layer-Provides: image
+#
+# X-Env-VarPrefix: image
+#
+# X-Env-Var-rootfs_type: ext4
+# X-Env-Var-rootfs_type-Desc: Root filesystem type
+# X-Env-Var-rootfs_type-Required: n
+# X-Env-Var-rootfs_type-Valid: keywords:ext4
+# X-Env-Var-rootfs_type-Set: y
+# X-Env-Var-rootfs_type-Triggers:
+#  set IGconf_fs_ext4_mkfs_args="-F -b ${IGconf_linux_page_size}" policy=lazy
+#
+# X-Env-Var-assetdir: ${DIRECTORY}
+# X-Env-Var-assetdir-Desc: TV Box image layout scripts and genimage template
+# X-Env-Var-assetdir-Required: n
+# X-Env-Var-assetdir-Valid: string
+# X-Env-Var-assetdir-Set: y
+#
+# X-Env-Var-boot_part_size: 256M
+# X-Env-Var-boot_part_size-Desc: Boot partition size
+# X-Env-Var-boot_part_size-Required: n
+# X-Env-Var-boot_part_size-Valid: size
+# X-Env-Var-boot_part_size-Set: y
+#
+# X-Env-Var-root_part_size: 6G
+# X-Env-Var-root_part_size-Desc: Writable pilot root partition size
+# X-Env-Var-root_part_size-Required: n
+# X-Env-Var-root_part_size-Valid: size
+# X-Env-Var-root_part_size-Set: y
+#
+# X-Env-Var-state_part_size: 1G
+# X-Env-Var-state_part_size-Desc: Persistent TV Box state partition size
+# X-Env-Var-state_part_size-Required: n
+# X-Env-Var-state_part_size-Valid: size
+# X-Env-Var-state_part_size-Set: y
+#
+# X-Env-Var-swap_part_size: 2G
+# X-Env-Var-swap_part_size-Desc: Disk-backed swap partition size
+# X-Env-Var-swap_part_size-Required: n
+# X-Env-Var-swap_part_size-Valid: size
+# X-Env-Var-swap_part_size-Set: y
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - dosfstools
+    - e2fsprogs
+    - initramfs-tools

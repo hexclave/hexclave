@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+# Filesystem tools are needed in the target for fsck and pilot recovery.
+chroot "$1" apt install -y dosfstools e2fsprogs util-linux

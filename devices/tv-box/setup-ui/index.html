@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Connect Hexclave TV Box</title>
+    <link rel="stylesheet" href="/setup.css">
+  </head>
+  <body>
+    <main class="setup-card">
+      <p class="eyebrow">Hexclave TV Box</p>
+      <h1>Connect to Wi-Fi</h1>
+      <p class="copy">Choose the network this display should use. Wi-Fi credentials stay on this TV Box and are never sent to Hexclave.</p>
+      <form id="wifi-form">
+        <label>Network<select id="network" required></select></label>
+        <label id="manual-name" hidden>Network name<input id="ssid" maxlength="32" autocomplete="off"></label>
+        <label id="manual-security" hidden>Security<select id="security"><option value="wpa-personal">WPA2/WPA3 Personal</option><option value="wpa3-personal">WPA3 Personal</option><option value="open">Open network</option></select></label>
+        <label id="password-row">Password<input id="password" type="password" minlength="8" maxlength="63" autocomplete="new-password"></label>
+        <label class="checkbox"><input id="hidden" type="checkbox"> Hidden network</label>
+        <button type="submit">Connect TV Box</button>
+      </form>
+      <p id="status" class="status" role="status">Looking for nearby networks…</p>
+    </main>
+    <script type="module" src="/setup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+/artifacts/
+/work/
+__pycache__/
+*.pyc
+*.img
+*.img.xz
+*.img.zst

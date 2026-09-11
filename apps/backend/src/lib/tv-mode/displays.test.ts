@@ -336,16 +336,16 @@ describe.sequential("independent TV display persistence", () => {
   });
 
   it("uses a rolling 30-day idle lifetime for refresh credentials", async () => {
-    const pairedAt = new Date("2026-08-31T12:00:00.000Z");
+    const pairedAt = new Date();
     const paired = await pairDisplay({ now: pairedAt });
     const initialPayload = await decodeDisplayAccessToken(paired.accessToken);
     if (initialPayload == null) throw new Error("Initial display access token was invalid.");
     await expect(globalPrismaClient.tvDisplayCredential.findUniqueOrThrow({
       where: { id: initialPayload.credentialId },
       select: { expiresAt: true },
-    })).resolves.toEqual({ expiresAt: new Date("2026-09-30T12:00:00.000Z") });
+    })).resolves.toEqual({ expiresAt: new Date(pairedAt.getTime() + 30 * 24 * 60 * 60 * 1000) });
 
-    const refreshAt = new Date("2026-09-29T12:00:00.000Z");
+    const refreshAt = new Date(pairedAt.getTime() + 29 * 24 * 60 * 60 * 1000);
     const rotated = await refreshTvDisplayCredential(paired.refreshToken, refreshAt);
     if (rotated == null) throw new Error("Active display credential did not renew.");
     const rotatedPayload = await decodeDisplayAccessToken(rotated.accessToken);
@@ -353,63 +353,67 @@ describe.sequential("independent TV display persistence", () => {
     await expect(globalPrismaClient.tvDisplayCredential.findUniqueOrThrow({
       where: { id: rotatedPayload.credentialId },
       select: { expiresAt: true },
-    })).resolves.toEqual({ expiresAt: new Date("2026-10-29T12:00:00.000Z") });
+    })).resolves.toEqual({ expiresAt: new Date(refreshAt.getTime() + 30 * 24 * 60 * 60 * 1000) });
 
     const idleDisplay = await pairDisplay({ now: pairedAt });
     await expect(refreshTvDisplayCredential(
       idleDisplay.refreshToken,
-      new Date("2026-09-30T12:00:00.001Z"),
+      new Date(pairedAt.getTime() + 30 * 24 * 60 * 60 * 1000 + 1),
     )).resolves.toBeNull();
   });
 
   it("keeps exactly 24 hours of replay detection without revoking older descendants", async () => {
-    const pairedAt = new Date("2026-08-31T12:00:00.000Z");
+    const pairedAt = new Date();
     const paired = await pairDisplay({ now: pairedAt });
-    const rotated = await refreshTvDisplayCredential(paired.refreshToken, new Date("2026-08-31T12:10:00.000Z"));
+    const rotationAt = new Date(pairedAt.getTime() + 10 * 60 * 1000);
+    const rotated = await refreshTvDisplayCredential(paired.refreshToken, rotationAt);
     if (rotated == null) throw new Error("Display credential did not rotate.");
 
     await expect(refreshTvDisplayCredential(
       paired.refreshToken,
-      new Date("2026-09-01T12:10:00.001Z"),
+      new Date(rotationAt.getTime() + 24 * 60 * 60 * 1000 + 1),
     )).resolves.toBeNull();
     await expect(refreshTvDisplayCredential(
       rotated.refreshToken,
-      new Date("2026-09-01T12:11:00.000Z"),
+      new Date(rotationAt.getTime() + 24 * 60 * 60 * 1000 + 60 * 1000),
     )).resolves.not.toBeNull();
 
     const replayProtected = await pairDisplay({ now: pairedAt });
     const replayProtectedRotation = await refreshTvDisplayCredential(
       replayProtected.refreshToken,
-      new Date("2026-08-31T12:10:00.000Z"),
+      rotationAt,
     );
     if (replayProtectedRotation == null) throw new Error("Replay-protected credential did not rotate.");
     await expect(refreshTvDisplayCredential(
       replayProtected.refreshToken,
-      new Date("2026-09-01T12:10:00.000Z"),
+      new Date(rotationAt.getTime() + 24 * 60 * 60 * 1000),
     )).resolves.toBeNull();
     await expect(getAuthorizedTvDisplay(replayProtectedRotation.accessToken)).resolves.toBeNull();
   });
 
   it("detects recent replay even after the used credential's original idle expiry", async () => {
-    const pairedAt = new Date("2026-08-01T12:00:00.000Z");
+    // Pairing fixtures must be anchored to wall-clock time: challenge creation
+    // opportunistically deletes challenges whose expiresAt is already in the
+    // past, so a challenge created at a fixed historical `now` can be removed
+    // by a concurrent test between approval and poll.
+    const pairedAt = new Date();
     const paired = await pairDisplay({ now: pairedAt });
-    const rotationAt = new Date("2026-08-31T11:00:00.000Z");
+    const rotationAt = new Date(pairedAt.getTime() + 30 * 24 * 60 * 60 * 1000 - 60 * 60 * 1000);
     const rotated = await refreshTvDisplayCredential(paired.refreshToken, rotationAt);
     if (rotated == null) throw new Error("Near-expiry display credential did not rotate.");
 
-    // The consumed token's Clock A ended at noon, but its independent replay
-    // window remains active until 24 hours after the successful rotation.
-    await expect(refreshTvDisplayCredential(
-      paired.refreshToken,
-      new Date("2026-08-31T13:00:00.000Z"),
-    )).resolves.toBeNull();
-    await expect(getAuthorizedTvDisplay(rotated.accessToken)).resolves.toBeNull();
-    await expect(refreshTvDisplayCredential(rotated.refreshToken)).resolves.toBeNull();
+    // The consumed token's Clock A ended an hour after rotation, but its
+    // independent replay window remains active until 24 hours after the
+    // successful rotation.
+    const replayAt = new Date(rotationAt.getTime() + 2 * 60 * 60 * 1000);
+    await expect(refreshTvDisplayCredential(paired.refreshToken, replayAt)).resolves.toBeNull();
+    await expect(getAuthorizedTvDisplay(rotated.accessToken, replayAt)).resolves.toBeNull();
+    await expect(refreshTvDisplayCredential(rotated.refreshToken, replayAt)).resolves.toBeNull();
   });
 
   it("bounds expired replay-history cleanup to the exact display and family", async () => {
-    const pairedAt = new Date("2026-08-31T12:00:00.000Z");
-    const now = new Date("2026-09-01T13:00:00.000Z");
+    const pairedAt = new Date();
+    const now = new Date(pairedAt.getTime() + 25 * 60 * 60 * 1000);
     const paired = await pairDisplay({ now: pairedAt });
     const sibling = await pairDisplay({ now: pairedAt });
     const currentCredential = await globalPrismaClient.tvDisplayCredential.findFirstOrThrow({
@@ -417,8 +421,8 @@ describe.sequential("independent TV display persistence", () => {
       select: { familyId: true },
     });
     const unrelatedFamilyId = randomUUID();
-    const oldUsedAt = new Date("2026-08-31T12:00:00.000Z");
-    const expiresAt = new Date("2026-09-30T12:00:00.000Z");
+    const oldUsedAt = pairedAt;
+    const expiresAt = new Date(pairedAt.getTime() + 30 * 24 * 60 * 60 * 1000);
     await globalPrismaClient.tvDisplayCredential.createMany({
       data: [
         ...Array.from({ length: 105 }, () => ({
