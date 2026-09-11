@@ -88,13 +88,11 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
             window.sessionStorage.setItem(reloadKey, String(Math.min(reloadCount + 1, maximumBackoffStep)));
           } catch (error) {
             allowUnavailableStorage(error);
-            // Without a persisted count, the next load would restart at 30 s, so a box that can read but not write storage gets the full cap per cycle, never beyond it.
-            timeout = window.setTimeout(() => window.location.reload(), maximumReloadDelay - reloadDelay);
-            if (reloadDelay === maximumReloadDelay) {
-              window.clearTimeout(timeout);
-              window.location.reload();
+            // Without a persisted count the next load would restart at 30 s, so a box that can read but not write storage is held to the full cap per cycle, never beyond it.
+            if (reloadDelay < maximumReloadDelay) {
+              timeout = window.setTimeout(() => window.location.reload(), maximumReloadDelay - reloadDelay);
+              return;
             }
-            return;
           }
           window.location.reload();
         }, reloadDelay);
