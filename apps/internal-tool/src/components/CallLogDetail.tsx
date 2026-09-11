@@ -1,13 +1,14 @@
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { format, formatDistanceToNow } from "date-fns";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
+import { useScheduledTimeout } from "../hooks/useScheduledTimeout";
 import type { FeedbackLogRow, McpCallLogRow, QaEntriesRow } from "../types";
 import { QA_REVIEW_FAILED_THRESHOLD_MS, qaReviewStartedAt, toDate } from "../utils";
 import { feedbackCategoryColor } from "../lib/feedback-category";
 import { FEATURE_REQUEST_FLAG_TYPE, featureRequestFromFlagsJson } from "../lib/feature-request-flag";
 import { AssistantBubble, ConversationReplay, type ToolCall } from "./ConversationReplay";
-import { DetailMetricStrip, DetailPanelTabs } from "./DetailPanelNavigation";
+import { DetailMetricStrip, DetailPanelTabs, DetailTabPanel } from "./DetailPanelNavigation";
 import { Alert, Badge, Button, cn, Input, Textarea } from "./design";
 import { CopyFullContextButton } from "./CopyFullContextButton";
 import { formatMcpCallContext } from "../lib/copy-log-context";
@@ -16,6 +17,7 @@ import { hasMcpContextValue } from "../lib/mcp-context";
 /** Panel surface for the detail cards, matching the design Card's tintable glass treatment. */
 const panelClasses = "overflow-hidden rounded-xl border border-black/[0.06] bg-card shadow-sm ring-1 ring-black/[0.04] dark:border-white/[0.06] dark:ring-white/[0.04]";
 const sectionLabelClasses = "text-[10px] font-medium uppercase tracking-wider text-muted-foreground";
+const ACTION_FLASH_MS = 3000;
 
 // ─── Main Component ────────────────────────────────────
 
@@ -32,6 +34,7 @@ export function CallLogDetail({ row, allRows, qaEntries, relatedFeedback, onClos
 }) {
   const linkedQa = qaEntries.find(q => q.sourceMcpCorrelationId === row.correlationId);
   const [activeSection, setActiveSection] = useState<"conversation" | "review" | "correction">("conversation");
+  const tabsId = useId();
   // Optimistic override while the reviewed-state roundtrip is in flight. Cleared
   // once the real subscription update catches up.
   const [optimisticReviewed, setOptimisticReviewed] = useState<boolean | null>(null);
@@ -107,6 +110,7 @@ export function CallLogDetail({ row, allRows, qaEntries, relatedFeedback, onClos
         ]} />
         <McpCallSummary row={row} />
         <DetailPanelTabs
+          id={tabsId}
           label="MCP call detail sections"
           value={activeSection}
           onChange={setActiveSection}
@@ -120,17 +124,19 @@ export function CallLogDetail({ row, allRows, qaEntries, relatedFeedback, onClos
 
       <div className="space-y-4 p-4 pb-8">
         {activeSection === "conversation" && (
-          <div role="tabpanel">
+          <DetailTabPanel id={tabsId} value="conversation">
             <ConversationReplay key={row.correlationId} row={row} allRows={allRows} />
-          </div>
+          </DetailTabPanel>
         )}
-        {activeSection === "review" && <div role="tabpanel" className="space-y-4">
+        {activeSection === "review" && <DetailTabPanel id={tabsId} value="review" className="space-y-4">
           <QaReviewCard row={row} onRetryReview={onRetryReview} />
           <RelatedFeedbackCard rows={relatedFeedback} onOpen={onOpenFeedback} />
-        </div>}
-        {activeSection === "correction" && (
-          <div role="tabpanel"><HumanCorrectionCard row={row} qa={linkedQa} onSave={onSaveCorrection} /></div>
-        )}
+        </DetailTabPanel>}
+        {/* Stays mounted while another tab is active so a half-written correction survives a
+            detour to the conversation or the QA review; the other panels hold no user input. */}
+        <DetailTabPanel id={tabsId} value="correction" hidden={activeSection !== "correction"}>
+          <HumanCorrectionCard row={row} qa={linkedQa} onSave={onSaveCorrection} />
+        </DetailTabPanel>
       </div>
     </div>
   );
@@ -216,6 +222,7 @@ function RetryReviewButton({ row, onRetryReview, label = "Retry review", tone = 
 }) {
   const [retrying, setRetrying] = useState(false);
   const [justTriggered, setJustTriggered] = useState(false);
+  const scheduleTimeout = useScheduledTimeout();
 
   return (
     <Button
@@ -228,7 +235,7 @@ function RetryReviewButton({ row, onRetryReview, label = "Retry review", tone = 
           Promise.resolve(onRetryReview(row.correlationId, { question: row.question, reason: row.reason, response: row.response }))
             .then(() => {
               setJustTriggered(true);
-              setTimeout(() => setJustTriggered(false), 3000);
+              scheduleTimeout(() => setJustTriggered(false), ACTION_FLASH_MS);
             })
             .catch(err => {
               captureError("call-log-retry-review", err);
@@ -437,6 +444,7 @@ function HumanCorrectionCard({ row, qa, onSave }: {
   const [lastAction, setLastAction] = useState<"published" | "saved" | "deepwiki-error" | "error" | null>(null);
   const [deepWikiLoading, setDeepWikiLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const scheduleTimeout = useScheduledTimeout();
 
   useEffect(() => {
     setQuestion(persistedQuestion);
@@ -449,10 +457,10 @@ function HumanCorrectionCard({ row, qa, onSave }: {
     try {
       await onSave?.(row.correlationId, question, answer, publish);
       setLastAction(publish ? "published" : "saved");
-      setTimeout(() => setLastAction(null), 3000);
+      scheduleTimeout(() => setLastAction(null), ACTION_FLASH_MS);
     } catch {
       setLastAction("error");
-      setTimeout(() => setLastAction(null), 3000);
+      scheduleTimeout(() => setLastAction(null), ACTION_FLASH_MS);
     } finally {
       setIsSaving(false);
     }
@@ -645,7 +653,9 @@ function QaConversationTimeline({ json }: { json: string }) {
       </button>
       {expanded && (
         <div className="mt-3 space-y-4">
-          {steps.map(step => (
+          {/* A step with neither text nor tool calls (the model just stopped) would render as a
+              bare avatar, so those are skipped. */}
+          {steps.filter(step => (step.text ?? "") !== "" || qaStepToolCalls(step).length > 0).map(step => (
             <AssistantBubble
               key={step.step}
               accent="indigo"

@@ -2,40 +2,25 @@ import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { useMemo, useState } from "react";
 import { useFilteredLogPages } from "../hooks/useFilteredLogPages";
 import type { McpReviewTableFilters, PageCursor } from "../hooks/useSpacetimeDB";
+import {
+  type McpHumanReviewState,
+  type McpQaState,
+  type McpStatusFilter,
+  type McpTimeRange,
+  parseHumanReviewState,
+  parseQaState,
+  parseStatusFilter,
+  parseTimeRange,
+  rangeStartMillis,
+} from "../lib/mcp-analytics-filters";
 import type { McpCallLogRow } from "../types";
 import { type HistoryPagingProps } from "./LoadOlderButton";
 import { McpCallDataGrid } from "./McpCallDataGrid";
-import { Alert, Button, Card, EmptyState, FieldLabel, Select } from "./design";
+import { Alert, Button, Card, EmptyState, FieldLabel, Input, Select } from "./design";
 
-type TimeRange = "all" | "24h" | "7d" | "30d";
-type StatusFilter = "all" | "ok" | "error";
-type QaFilter = "all" | "pending" | "review-failed" | "error" | "pass" | "warn" | "fail";
-type HumanReviewFilter = "all" | "required" | "reviewed" | "not-reviewed";
-
-function parseTimeRange(value: string): TimeRange {
-  if (value === "all" || value === "24h" || value === "7d" || value === "30d") return value;
-  throw new Error(`Unexpected MCP time range: ${value}`);
-}
-
-function parseStatusFilter(value: string): StatusFilter {
-  if (value === "all" || value === "ok" || value === "error") return value;
-  throw new Error(`Unexpected MCP status filter: ${value}`);
-}
-
-function parseQaFilter(value: string): QaFilter {
-  if (value === "all" || value === "pending" || value === "review-failed" || value === "error" || value === "pass" || value === "warn" || value === "fail") return value;
-  throw new Error(`Unexpected MCP QA filter: ${value}`);
-}
-
-function parseHumanReviewFilter(value: string): HumanReviewFilter {
-  if (value === "all" || value === "required" || value === "reviewed" || value === "not-reviewed") return value;
-  throw new Error(`Unexpected MCP human review filter: ${value}`);
-}
-
-function rangeStartMicros(range: TimeRange): bigint | undefined {
-  if (range === "all") return undefined;
-  const hours = range === "24h" ? 24 : range === "7d" ? 7 * 24 : 30 * 24;
-  return BigInt(new Date().getTime() - hours * 60 * 60 * 1000) * 1000n;
+function rangeStartMicros(range: McpTimeRange): bigint | undefined {
+  const startMillis = rangeStartMillis(range, Date.now());
+  return startMillis == null ? undefined : BigInt(startMillis) * 1000n;
 }
 
 function mcpRowId(row: McpCallLogRow): string {
@@ -62,12 +47,15 @@ export function CallLogList({
     nextBeforeId: bigint | undefined,
   }>,
 } & HistoryPagingProps) {
-  const [timeRange, setTimeRange] = useState<TimeRange>("all");
+  const [timeRange, setTimeRange] = useState<McpTimeRange>("all");
   const [toolName, setToolName] = useState("");
-  const [status, setStatus] = useState<StatusFilter>("all");
-  const [qaState, setQaState] = useState<QaFilter>("all");
-  const [humanReviewState, setHumanReviewState] = useState<HumanReviewFilter>("all");
+  const [status, setStatus] = useState<McpStatusFilter>("all");
+  const [qaState, setQaState] = useState<McpQaState | "all">("all");
+  const [humanReviewState, setHumanReviewState] = useState<McpHumanReviewState | "all">("all");
   const [snapshotVersion, setSnapshotVersion] = useState(0);
+  // Free-text search is client-side over whatever rows are on screen (the live list, or the
+  // loaded pages of a filtered snapshot); the server-side filters above are the categorical ones.
+  const [search, setSearch] = useState("");
   const toolNames = useMemo(() => Array.from(new Set(rows.map(row => row.toolName))).sort(), [rows]);
   const hasFilters = timeRange !== "all" || toolName !== "" || status !== "all" || qaState !== "all" || humanReviewState !== "all";
   const filters = useMemo<McpReviewTableFilters>(() => ({
@@ -135,7 +123,7 @@ export function CallLogList({
         </label>
         <label className="grid grid-cols-[auto_8rem] items-center gap-1.5">
           <FieldLabel>AI review</FieldLabel>
-          <Select value={qaState} onChange={event => setQaState(parseQaFilter(event.target.value))}>
+          <Select value={qaState} onChange={event => setQaState(parseQaState(event.target.value))}>
             <option value="all">All reviews</option>
             <option value="pending">Pending</option>
             <option value="review-failed">Failed</option>
@@ -147,12 +135,21 @@ export function CallLogList({
         </label>
         <label className="grid grid-cols-[auto_9rem] items-center gap-1.5">
           <FieldLabel>Human review</FieldLabel>
-          <Select value={humanReviewState} onChange={event => setHumanReviewState(parseHumanReviewFilter(event.target.value))}>
+          <Select value={humanReviewState} onChange={event => setHumanReviewState(parseHumanReviewState(event.target.value))}>
             <option value="all">All</option>
             <option value="required">Required</option>
             <option value="reviewed">Reviewed</option>
             <option value="not-reviewed">Not reviewed</option>
           </Select>
+        </label>
+        <label className="grid min-w-56 flex-1 grid-cols-[auto_1fr] items-center gap-1.5">
+          <FieldLabel>Search</FieldLabel>
+          <Input
+            type="search"
+            value={search}
+            onChange={event => setSearch(event.target.value)}
+            placeholder="Question, reason, response, user… (loaded rows)"
+          />
         </label>
         {hasFilters && <Button variant="ghost" onClick={() => {
           setTimeRange("all");
@@ -177,16 +174,21 @@ export function CallLogList({
         </Alert>
       )}
 
+      {/* A failed first page also has zero rows; only the retry alert above should speak for it,
+          not a "nothing matched" card that reads like a genuine empty result. */}
       {(hasFilters ? filteredPages.rows : rows).length === 0 && !filteredPages.isLoading ? (
-        <Card>
-          <EmptyState className="py-12">
-            <p className="text-lg">{hasFilters ? "No calls match these filters" : "No MCP calls logged yet"}</p>
-            {hasFilters && filteredPages.hasMore && <Button className="mt-3" onClick={() => runAsynchronously(filteredPages.loadMore)}>Continue searching</Button>}
-          </EmptyState>
-        </Card>
+        filteredPages.error != null ? null : (
+          <Card>
+            <EmptyState className="py-12">
+              <p className="text-lg">{hasFilters ? "No calls match these filters" : "No MCP calls logged yet"}</p>
+              {hasFilters && filteredPages.hasMore && <Button className="mt-3" onClick={() => runAsynchronously(filteredPages.loadMore)}>Continue searching</Button>}
+            </EmptyState>
+          </Card>
+        )
       ) : (
         <McpCallDataGrid
           rows={hasFilters ? filteredPages.rows : rows}
+          quickSearch={search}
           onSelect={onSelect}
           resetKey={hasFilters ? queryKey : "live"}
           hasMoreHistory={hasFilters ? filteredPages.hasMore : hasMoreHistory}

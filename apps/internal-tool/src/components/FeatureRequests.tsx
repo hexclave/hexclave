@@ -60,7 +60,7 @@ export function FeatureRequests({
     {
       id: "time",
       header: "Time",
-      accessor: row => Number(row.id),
+      accessor: row => toDate(row.createdAt).getTime(),
       width: 172,
       minWidth: 156,
       sortable: false,
@@ -69,6 +69,7 @@ export function FeatureRequests({
           {formatPacificTableTime(toDate(row.createdAt))}
         </span>
       ),
+      formatValue: value => formatPacificTimestamp(new Date(Number(value))),
     },
     {
       id: "featureRequest",
@@ -115,19 +116,24 @@ export function FeatureRequests({
       id: "source",
       header: "Source",
       accessor: row => row.toolName,
-      width: 172,
-      minWidth: 156,
+      width: 280,
+      minWidth: 220,
       sortable: false,
       renderCell: ({ row }) => (
-        <Button size="xs" onClick={() => onOpenConversation(row)}>
-          Open conversation
-        </Button>
+        <div className="flex items-center gap-2">
+          <Badge color="purple" mono>{row.toolName}</Badge>
+          <Button size="xs" onClick={() => onOpenConversation(row)}>
+            Open conversation
+          </Button>
+        </div>
       ),
     },
   ], [onOpenConversation]);
   const [state, setState] = useState<DataGridState>(() => createInitialState(columns));
-  // Reconnecting is the only thing that should re-run this query; the error
-  // banner's "Retry query" goes through pages.refresh instead of this key.
+  // Reconnecting is the only thing that re-runs this query on its own. The
+  // list is a snapshot — a QA review that flags a new request while this tab
+  // is open does not stream in — so the header offers an explicit refresh
+  // (and the error banner's "Retry query") through pages.refresh instead.
   const queryKey = connectionState;
   const pages = useFilteredLogPages({
     enabled: connectionState === "connected",
@@ -160,6 +166,9 @@ export function FeatureRequests({
           <p className="text-sm font-medium text-foreground">AI-scanned capability gaps</p>
           <p className="mt-0.5 text-xs text-muted-foreground">Snapshot results from completed MCP QA reviews.</p>
         </div>
+        <Button onClick={() => runAsynchronously(pages.refresh)} disabled={pages.isLoading || connectionState !== "connected"}>
+          Refresh results
+        </Button>
       </div>
 
       {pages.error != null && (

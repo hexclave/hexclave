@@ -150,8 +150,10 @@ describe("filterMcpCalls", () => {
 
   it("finds capability-gap flags", () => {
     const rows = [
-      row({ toolName: "gap", qaOverallScore: 74, qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request" }]) }),
+      row({ toolName: "gap", qaOverallScore: 74, qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request", severity: "low", explanation: "Asked for SAML" }]) }),
       row({ toolName: "plain", qaOverallScore: 74, qaFlagsJson: JSON.stringify([{ type: "incomplete_answer" }]) }),
+      // Type alone is not a renderable flag; it must not count as a feature request here either.
+      row({ toolName: "type-only", qaOverallScore: 74, qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request" }]) }),
     ];
     const kept = filterMcpCalls(rows, filters({ qaState: "feature-request" }), NOW_MILLIS);
     expect(kept.map(r => r.toolName)).toEqual(["gap"]);

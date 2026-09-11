@@ -127,6 +127,14 @@ describe("mcpLogMatches", () => {
     expect(mcpLogMatches(mcpRow({ qaOverallScore: 49 }), filters({ qaState: "fail" }), NOW_MICROS)).toBe(true);
   });
 
+  it("puts a row with both a score and a review error in `error` only, matching how the grid renders it", () => {
+    const scoredButErrored = mcpRow({ qaOverallScore: 92, qaErrorMessage: "reviewer crashed after scoring" });
+    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "error" }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "pass" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "warn" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "fail" }), NOW_MICROS)).toBe(false);
+  });
+
   it("distinguishes required, reviewed, and not-reviewed human states", () => {
     const required = mcpRow({ qaNeedsHumanReview: true });
     const reviewed = mcpRow({ qaNeedsHumanReview: true, humanReviewedAt: timestamp(NOW_MICROS) });
@@ -152,10 +160,14 @@ describe("mcpLogMatches", () => {
 
   it("finds AI-scanned feature requests without treating malformed flags as matches", () => {
     const featureRequest = mcpRow({
-      qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request", severity: "low" }]),
+      qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request", severity: "low", explanation: "Asked for SAML, which is unsupported" }]),
     });
     expect(mcpLogMatches(featureRequest, filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(true);
     expect(mcpLogMatches(mcpRow({ qaFlagsJson: "malformed" }), filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(false);
     expect(mcpLogMatches(mcpRow(), filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(false);
+    // Same parser as the browser: a flag the feature-request tab would refuse to render must not
+    // match the filter either, or the tab would show a blank row for it.
+    const typeOnly = mcpRow({ qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request" }]) });
+    expect(mcpLogMatches(typeOnly, filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(false);
   });
 });

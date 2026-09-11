@@ -116,7 +116,7 @@ export function FeedbackList({
       </div>
 
       {visibleRows.length === 0 ? (
-        <EmptyState className="rounded-xl border border-dashed border-border bg-card/40 px-4 py-12">
+        <EmptyState className="rounded-xl border border-dashed border-border bg-card px-4 py-12">
           <p className="font-medium text-foreground">{rows.length === 0 ? "No feedback yet" : "No matching feedback"}</p>
           <p className="mt-1 text-xs">{rows.length === 0 ? "New reports will appear here as they arrive." : "Try a different message or category filter."}</p>
         </EmptyState>

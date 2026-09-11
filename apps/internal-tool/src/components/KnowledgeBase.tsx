@@ -1,12 +1,11 @@
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { useState, useMemo, useId } from "react";
-import { createPortal } from "react-dom";
 import { format } from "date-fns";
 import { clsx } from "clsx";
 import type { QaEntriesRow } from "../types";
 import { toDate } from "../utils";
-import { Alert, Badge, Button, cn, EmptyState, FieldLabel, Input, Pill, Textarea } from "./design";
+import { Alert, Badge, Button, type ButtonVariant, EmptyState, FieldLabel, Input, ModalDialog, Pill, Textarea } from "./design";
 
 type KbFilter = "all" | "published" | "draft";
 
@@ -110,50 +109,35 @@ export function KnowledgeBase({ rows, connectionState, connectionErrorMessage, o
 
 type PendingAction = "publish" | "unpublish" | "delete" | null;
 
-function ConfirmDialog({ title, message, confirmLabel, confirmClassName, onConfirm, onCancel }: {
+/**
+ * `confirmVariant` picks a Button variant rather than taking a colour class: the design `cn` does
+ * not merge Tailwind classes, so an extra `bg-*` on top of the variant's own background would
+ * leave two competing declarations and let stylesheet order decide which wins.
+ */
+function ConfirmDialog({ title, message, confirmLabel, confirmVariant = "default", onConfirm, onCancel }: {
   title: string;
   message: string;
   confirmLabel: string;
-  confirmClassName?: string;
+  confirmVariant?: ButtonVariant;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const titleId = useId();
   const messageId = useId();
-  if (typeof document === "undefined") return null;
 
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4 sm:p-8"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) onCancel();
-      }}
-      onKeyDown={event => {
-        if (event.key === "Escape") onCancel();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={messageId}
-        className="w-full max-w-md rounded-xl border border-border bg-popover p-5 text-popover-foreground shadow-lg"
-      >
+  return (
+    <ModalDialog labelledBy={titleId} describedBy={messageId} onClose={onCancel} className="max-w-md">
+      <div className="p-5">
         <h2 id={titleId} className="text-base font-semibold text-foreground text-balance">{title}</h2>
         <p id={messageId} className="mt-2 max-w-[65ch] text-sm leading-5 text-muted-foreground text-pretty">{message}</p>
         <div className="mt-5 flex justify-end gap-2">
           <Button autoFocus onClick={onCancel}>Cancel</Button>
-          <Button
-            variant="default"
-            onClick={onConfirm}
-            className={cn(confirmClassName)}
-          >
+          <Button variant={confirmVariant} onClick={onConfirm}>
             {confirmLabel}
           </Button>
         </div>
       </div>
-    </div>,
-    document.body,
+    </ModalDialog>
   );
 }
 
@@ -206,14 +190,14 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
     ? { label: "Save Draft", publish: false, isDraft: true }
     : { label: row.published ? "Update" : "Publish", publish: true, isDraft: false };
 
-  const errorBanner = actionError && (
-    <Alert className="px-3 py-2 text-xs">{actionError}</Alert>
+  const errorBanner = actionError != null && (
+    <Alert size="sm">{actionError}</Alert>
   );
 
   if (isEditing) {
     return (
       <div className={clsx("space-y-3 rounded-xl border p-4 backdrop-blur-xl", cardTint)}>
-        <div>
+        <label className="block">
           <FieldLabel className="mb-1 block">Question</FieldLabel>
           <Input
             type="text"
@@ -221,15 +205,15 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
             value={editQuestion}
             onChange={(e) => setEditQuestion(e.target.value)}
           />
-        </div>
-        <div>
+        </label>
+        <label className="block">
           <FieldLabel className="mb-1 block">Answer</FieldLabel>
           <Textarea
             className="h-32 resize-y px-3 py-2 font-mono text-sm"
             value={editAnswer}
             onChange={(e) => setEditAnswer(e.target.value)}
           />
-        </div>
+        </label>
         {errorBanner}
         <div className="flex items-center gap-2 justify-end">
           <Button variant="ghost" onClick={onCancelEdit} disabled={busy != null}>Cancel</Button>
@@ -305,7 +289,6 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
           title="Publish this Q&A?"
           message="Publishing makes this Q&A visible on the public knowledge base."
           confirmLabel="Publish"
-          confirmClassName="bg-emerald-600 hover:bg-emerald-700"
           onCancel={() => setPending(null)}
           onConfirm={() => {
             setPending(null);
@@ -318,7 +301,6 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
           title="Unpublish this Q&A?"
           message="This Q&A will no longer appear on the public knowledge base."
           confirmLabel="Unpublish"
-          confirmClassName="bg-amber-600 hover:bg-amber-700"
           onCancel={() => setPending(null)}
           onConfirm={() => {
             setPending(null);
@@ -331,7 +313,7 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
           title="Delete this Q&A?"
           message="This permanently removes the entry. Telemetry from the originating call (if any) is preserved."
           confirmLabel="Delete"
-          confirmClassName="bg-red-600 hover:bg-red-700"
+          confirmVariant="destructive"
           onCancel={() => setPending(null)}
           onConfirm={() => {
             setPending(null);

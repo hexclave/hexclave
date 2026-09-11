@@ -1,8 +1,10 @@
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useClockTick } from "../hooks/useClockTick";
 import type { McpCallLogRow, QaEntriesRow } from "../types";
 import { toDate } from "../utils";
-import { canReportP95, formatMilliseconds, MIN_P95_SAMPLE_COUNT, nearestRankPercentile, percentage } from "../lib/stats";
+import { formatPacificTableTime } from "../lib/pacific-time";
+import { canReportP95, extent, formatMilliseconds, MIN_P95_SAMPLE_COUNT, nearestRankPercentile, percentage } from "../lib/stats";
 import { FEATURE_REQUEST_FLAG_TYPE } from "../lib/feature-request-flag";
 import {
   countActiveMcpFilters,
@@ -17,20 +19,13 @@ import {
 } from "../lib/mcp-analytics-filters";
 import { Badge, BarRow, Button, Card, chartColors, cn, EmptyState, FieldLabel, MetricCard, Pill, Select } from "./design";
 
-/**
- * How often the filtered view re-evaluates against the clock. Calls awaiting a
- * QA review flip from "pending" to "review-failed" after a fixed threshold, so
- * a stale `now` would quietly misreport those two buckets.
- */
-const CLOCK_TICK_MS = 60_000;
+const ACTIVITY_CHART_DAYS = 14;
 
 export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: McpCallLogRow[], qaEntries: QaEntriesRow[], hasMoreHistory: boolean }) {
   const [filters, setFilters] = useState<McpAnalyticsFilters>(DEFAULT_MCP_ANALYTICS_FILTERS);
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
+  // Calls awaiting a QA review flip from "pending" to "review-failed" after a fixed threshold, so
+  // the filtered view re-evaluates against a ticking clock rather than a stale `now`.
+  const now = useClockTick();
 
   const setFilter = <Key extends keyof McpAnalyticsFilters>(key: Key, value: McpAnalyticsFilters[Key]) => {
     setFilters(current => ({ ...current, [key]: value }));
@@ -79,12 +74,13 @@ export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: 
     const topFlags = Array.from(flagCounts.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8);
-    // Calls over time (last 14 days)
-    const now = new Date().getTime();
+    // Calls over time (last ACTIVITY_CHART_DAYS days). The chart's total, active-day count, and
+    // first/last timestamps all come from the rows inside that window — the filtered set as a
+    // whole can be much older (the default range is "all"), and describing it with a 14-day chart
+    // would report calls the chart does not show.
     const dayMs = 24 * 60 * 60 * 1000;
-    const daysBack = 14;
     const dayBuckets: Array<{ label: string; count: number; date: Date }> = [];
-    for (let i = daysBack - 1; i >= 0; i--) {
+    for (let i = ACTIVITY_CHART_DAYS - 1; i >= 0; i--) {
       const d = new Date(now - i * dayMs);
       d.setHours(0, 0, 0, 0);
       dayBuckets.push({
@@ -93,18 +89,28 @@ export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: 
         date: d,
       });
     }
+    const windowStart = dayBuckets[0].date.getTime();
+    const windowCallTimes: number[] = [];
     for (const row of rows) {
-      const rowDate = toDate(row.createdAt);
-      const dayStart = new Date(rowDate);
+      const rowTime = toDate(row.createdAt).getTime();
+      if (rowTime < windowStart) continue;
+      const dayStart = new Date(rowTime);
       dayStart.setHours(0, 0, 0, 0);
       const bucket = dayBuckets.find(b => b.date.getTime() === dayStart.getTime());
       if (bucket) bucket.count++;
+      windowCallTimes.push(rowTime);
     }
     const maxDayCount = Math.max(...dayBuckets.map(b => b.count), 1);
     const nonEmptyDayCount = dayBuckets.filter(bucket => bucket.count > 0).length;
-    const observedCallTimes = rows.map(row => toDate(row.createdAt).getTime()).filter(Number.isFinite);
-    const firstCallAt = observedCallTimes.length === 0 ? null : Math.min(...observedCallTimes);
-    const lastCallAt = observedCallTimes.length === 0 ? null : Math.max(...observedCallTimes);
+    const observed = extent(windowCallTimes);
+    const activity = {
+      total: windowCallTimes.length,
+      dayBuckets,
+      maxDayCount,
+      nonEmptyDayCount,
+      firstCallAt: observed?.min ?? null,
+      lastCallAt: observed?.max ?? null,
+    };
 
     // Duration stats
     const durations = rows.map(r => Number(r.durationMs)).filter(d => Number.isFinite(d) && d >= 0).sort((a, b) => a - b);
@@ -129,18 +135,14 @@ export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: 
       draftCount,
       scoreBuckets,
       topFlags,
-      dayBuckets,
-      maxDayCount,
-      nonEmptyDayCount,
-      firstCallAt,
-      lastCallAt,
+      activity,
       avgDuration,
       p95Duration,
       maxDuration,
       durationSampleCount: durations.length,
       toolUsage,
     };
-  }, [rows, qaEntries]);
+  }, [rows, qaEntries, now]);
 
   const reviewRate = percentage(stats.reviewed, stats.total);
 
@@ -249,14 +251,14 @@ export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: 
         />
       </div>
 
-      <Card title="MCP call activity · last 14 days">
+      <Card title={`MCP call activity · last ${ACTIVITY_CHART_DAYS} days`}>
         <McpCallActivity
-          total={stats.total}
-          buckets={stats.dayBuckets}
-          maxCount={stats.maxDayCount}
-          nonEmptyDayCount={stats.nonEmptyDayCount}
-          firstCallAt={stats.firstCallAt}
-          lastCallAt={stats.lastCallAt}
+          total={stats.activity.total}
+          buckets={stats.activity.dayBuckets}
+          maxCount={stats.activity.maxDayCount}
+          nonEmptyDayCount={stats.activity.nonEmptyDayCount}
+          firstCallAt={stats.activity.firstCallAt}
+          lastCallAt={stats.activity.lastCallAt}
         />
       </Card>
 
@@ -377,12 +379,12 @@ function McpCallActivity({
   firstCallAt: number | null,
   lastCallAt: number | null,
 }) {
-  if (total === 0) return <EmptyState>No MCP calls in this window</EmptyState>;
+  if (total === 0) return <EmptyState>No matching MCP calls in the last {ACTIVITY_CHART_DAYS} days</EmptyState>;
 
   if (nonEmptyDayCount < 2) {
     const observedAt = firstCallAt == null
       ? "Unknown observation time"
-      : new Date(firstCallAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+      : formatPacificTableTime(new Date(firstCallAt));
     return (
       <div className="flex min-h-32 items-center justify-between gap-6 rounded-lg border border-dashed border-border/80 bg-muted/20 px-5 py-4">
         <div>

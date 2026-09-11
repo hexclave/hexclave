@@ -35,6 +35,7 @@ const ALL_MUTATING_REDUCERS: Array<{ name: string, args: unknown[] }> = [
     args: ["corr", opt(null), "bug", "message", "mcp-ask-hexclave", opt(null), opt(null), opt(null), opt(null), opt(null)],
   },
   { name: "delete_feedback", args: ["corr"] },
+  { name: "clear_demo_seed", args: [] },
 ];
 
 describe.skipIf(!canRun)("SpacetimeDB reducer auth", () => {
@@ -44,6 +45,19 @@ describe.skipIf(!canRun)("SpacetimeDB reducer auth", () => {
   });
   afterEach(async () => {
     await scope.cleanup();
+  });
+
+  it("log_mcp_call rejects oversized caller metadata even when the reducer is called directly", async ({ expect }) => {
+    // The ingest route caps these too; this guards the path that bypasses it (seeder, direct calls).
+    const memberToken = await signMemberToken();
+    const marker = uniqueMarker("reducer-auth-too-long");
+    scope.trackMcpQuestion(marker);
+    const res = await callReducer(memberToken, "log_mcp_call", [
+      marker, opt(null), "tool", "reason", "prompt", marker, "response", 0, "[]", 0n, "model",
+      opt(null), opt("c".repeat(2_001)), opt(null), opt(null),
+    ]);
+    expect(res.ok).toBe(false);
+    expect(res.body).toContain("context must be at most 2000 characters");
   });
 
   it("an identity without Stack Auth claims sees zero rows in my_visible_mcp_call_log", async ({ expect }) => {

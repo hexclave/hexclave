@@ -138,11 +138,14 @@ export function useFilteredLogPages<Row, Filters>({
   }, [enabled, state.cursor, state.status]);
 
   const refresh = useCallback(async () => {
+    // Same guard as loadMore: a retry clicked after the filters were cleared must not repopulate
+    // the disabled (empty) state with a page of stale results or an error.
+    if (!enabled) return;
     generationRef.current += 1;
     const generation = generationRef.current;
     setState({ ...createInitialState<Row>(), status: "loading" });
     await loadFirstPage(generation);
-  }, [loadFirstPage]);
+  }, [enabled, loadFirstPage]);
 
   return {
     ...state,

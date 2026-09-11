@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FEATURE_REQUEST_FLAG_TYPE, featureRequestFromFlagsJson, normalizeQaFlags } from "./feature-request-flag";
+import { FEATURE_REQUEST_FLAG_TYPE, featureRequestFromFlagsJson, isCompleteFeatureRequestVerdict, normalizeQaFlags } from "./feature-request-flag";
 
 describe("feature request QA flags", () => {
   it("stores a capability gap without changing unrelated QA flags", () => {
@@ -44,11 +44,13 @@ describe("feature request QA flags", () => {
     expect(featureRequestFromFlagsJson(JSON.stringify([{ type: FEATURE_REQUEST_FLAG_TYPE }]))).toBeNull();
   });
 
-  it("rejects detected requests without evidence", () => {
-    expect(() => normalizeQaFlags([], {
-      detected: true,
-      summary: "Add exports",
-      evidence: "",
-    })).toThrow("must include a summary and supporting evidence");
+  it("drops a detected request that lacks a summary or evidence instead of failing the review", () => {
+    const incomplete = { detected: true, summary: "Add exports", evidence: "  " };
+    expect(isCompleteFeatureRequestVerdict(incomplete)).toBe(false);
+    expect(normalizeQaFlags([
+      { type: "off_topic", severity: "high", explanation: "Answered a different question" },
+    ], incomplete)).toEqual([
+      { type: "off_topic", severity: "high", explanation: "Answered a different question" },
+    ]);
   });
 });

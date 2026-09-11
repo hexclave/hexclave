@@ -1,13 +1,29 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { cn } from "./design";
 
+/**
+ * Tabs and panels are rendered by different components (the tabs sit in the sticky header, the
+ * panels in the scroll body), so they agree on element ids through these two helpers instead of a
+ * shared context. `id` is the caller's `useId()`.
+ */
+export function detailTabId(id: string, value: string): string {
+  return `${id}-tab-${value}`;
+}
+
+export function detailPanelId(id: string, value: string): string {
+  return `${id}-panel-${value}`;
+}
+
 export function DetailPanelTabs<T extends string>({
+  id,
   label,
   items,
   value,
   onChange,
 }: {
+  id: string,
   label: string,
   items: ReadonlyArray<{ value: T, label: string }>,
   value: T,
@@ -18,9 +34,13 @@ export function DetailPanelTabs<T extends string>({
       {items.map(item => (
         <button
           key={item.value}
+          id={detailTabId(id, item.value)}
           type="button"
           role="tab"
           aria-selected={value === item.value}
+          // Only the active tab's panel is guaranteed to be in the DOM (inactive panels are
+          // unmounted unless a caller keeps one hidden), and aria-controls must not dangle.
+          aria-controls={value === item.value ? detailPanelId(id, item.value) : undefined}
           tabIndex={value === item.value ? 0 : -1}
           onClick={() => onChange(item.value)}
           onKeyDown={event => {
@@ -49,6 +69,31 @@ export function DetailPanelTabs<T extends string>({
           {item.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * The panel a tab controls. `hidden` keeps a panel mounted but out of the layout, for panels whose
+ * state must survive switching away (a half-written correction); everything else is simply not
+ * rendered while another tab is active.
+ */
+export function DetailTabPanel({ id, value, hidden = false, className, children }: {
+  id: string,
+  value: string,
+  hidden?: boolean,
+  className?: string,
+  children: ReactNode,
+}) {
+  return (
+    <div
+      role="tabpanel"
+      id={detailPanelId(id, value)}
+      aria-labelledby={detailTabId(id, value)}
+      hidden={hidden}
+      className={className}
+    >
+      {children}
     </div>
   );
 }

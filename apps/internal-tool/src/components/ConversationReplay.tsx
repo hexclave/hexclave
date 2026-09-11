@@ -341,8 +341,9 @@ export function ConversationReplay({ row, allRows }: { row: McpCallLogRow; allRo
       </div>
 
       <div ref={containerRef} className="space-y-4">
-        {Array.from({ length: phase === "done" ? conversationRows.length : completedCalls }).map((_, i) => {
-          const completedRow = conversationRows[i];
+        {/* Sliced from the rows themselves rather than counted up to `completedCalls`, which can
+            exceed the row count if the live subscription drops a row mid-replay. */}
+        {(phase === "done" ? conversationRows : conversationRows.slice(0, completedCalls)).map((completedRow, i) => {
           const completedCall = parseCallData(completedRow);
           return (
             <div key={String(completedRow.id)} className="space-y-4">

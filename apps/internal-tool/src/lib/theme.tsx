@@ -1,6 +1,7 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
+import { readLocalStorage, writeLocalStorage } from "./browser-storage";
 
 /**
  * Local port of apps/dashboard/src/lib/theme.tsx (minus the dashboard-only preview-mode default),
@@ -14,13 +15,20 @@ const STORAGE_KEY = "theme";
 
 let currentTheme: Theme = "system";
 
+function parseStoredTheme(stored: string | null): Theme | null {
+  return stored === "dark" || stored === "light" || stored === "system" ? stored : null;
+}
+
 if (typeof window !== "undefined") {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "dark" || stored === "light" || stored === "system") {
-      currentTheme = stored;
-    }
-  } catch { /* localStorage unavailable (eg. private browsing) */ }
+  currentTheme = parseStoredTheme(readLocalStorage(STORAGE_KEY)) ?? "system";
+  // The key is shared with the dashboard, and a theme switch in another tab (or in the dashboard)
+  // fires `storage` here; without this the open tab would stay on the old theme until reloaded.
+  window.addEventListener("storage", event => {
+    if (event.key !== STORAGE_KEY) return;
+    currentTheme = parseStoredTheme(event.newValue) ?? "system";
+    applyThemeToDOM(resolve(currentTheme, getSystemSnapshot()));
+    notifyThemeListeners();
+  });
 }
 
 const themeListeners = new Set<() => void>();
@@ -100,9 +108,7 @@ function resolve(theme: Theme, system: ResolvedTheme): ResolvedTheme {
 
 export function setTheme(theme: Theme) {
   currentTheme = theme;
-  try {
-    localStorage.setItem(STORAGE_KEY, theme);
-  } catch { /* localStorage unavailable */ }
+  writeLocalStorage(STORAGE_KEY, theme);
   applyThemeToDOM(resolve(theme, getSystemSnapshot()));
   notifyThemeListeners();
 }

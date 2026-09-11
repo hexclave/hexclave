@@ -22,8 +22,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <title>Hexclave — MCP Review Tool</title>
         {/* Applies the stored theme (shared `theme` key with the dashboard) before first paint, so
-            a dark-mode user never sees a light flash. Mirrors the dashboard's inline script. */}
-        <script dangerouslySetInnerHTML={{ __html: "(function(){try{var t=localStorage.getItem('theme');var d=document.documentElement;var r=t==='dark'||t==='light'?t:window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';d.classList.add(r);d.style.colorScheme=r}catch(e){}})()" }} />
+            a dark-mode user never sees a light flash. Mirrors the dashboard's inline script. Only a
+            blocked localStorage (a DOMException) falls back to the system theme; anything else is
+            rethrown so it surfaces in the console instead of being swallowed. */}
+        <script dangerouslySetInnerHTML={{ __html: "(function(){var t=null;try{t=localStorage.getItem('theme')}catch(e){if(!(e instanceof DOMException))throw e}var d=document.documentElement;var r=t==='dark'||t==='light'?t:window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';d.classList.add(r);d.style.colorScheme=r})()" }} />
       </head>
       <body suppressHydrationWarning>
         {app == null ? (

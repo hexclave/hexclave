@@ -13,5 +13,6 @@ describe("Pacific time formatting", () => {
     const date = new Date("2026-01-08T02:29:40.000Z");
 
     expect(formatPacificTableTime(date)).toBe("Jan 7, 6:29 PM PST");
+    expect(formatPacificTimestamp(date)).toBe("January 7, 2026 at 6:29:40 PM PST");
   });
 });

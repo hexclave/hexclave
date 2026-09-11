@@ -4,7 +4,12 @@
 
 /* The internal operations surface uses a restrained neutral palette in both themes. Keeping these
    tokens local lets the tool follow the compact iMessage-agent visual language without coupling
-   its shell to the customer-facing dashboard theme. */
+   its shell to the customer-facing dashboard theme.
+
+   `--card` carries its own alpha channel (as the dashboard's does) so every `bg-card` surface is
+   translucent glass. That means it must never be combined with a Tailwind opacity modifier:
+   `bg-card/60` compiles to `hsl(0 0% 100% / 0.82 / 0.6)`, which is invalid CSS and is dropped,
+   leaving the element with no background at all. */
 @layer base {
   :root {
     --background: 240 5% 96%;

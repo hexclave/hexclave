@@ -1,45 +1,10 @@
-/**
- * Fills a local internal-tool instance with demo data: `pnpm seed:demo`.
- *
- * Why this exists: every table behind this app is populated by real MCP
- * traffic, so a fresh development environment renders empty grids and empty
- * charts. That makes the UI impossible to work on without either pointing at
- * production or manually driving the MCP server. This writes a representative
- * corpus instead (see demo-dataset.ts for the content).
- *
- * How it talks to SpacetimeDB: it signs a member token with the same
- * dev signing seed the app itself mints with, then calls the same public
- * reducers the backend ingest routes call. It deliberately does NOT go through
- * `/api/backend/*` — those routes require a backend assertion signed by the
- * Stack Auth project keys, which would make seeding depend on a running
- * backend, and they cover only ingest (no QA review, human review, or
- * knowledge-base curation).
- *
- * Two properties worth knowing before you read the output:
- *
- *  - Row timestamps are always "now". `createdAt` is stamped server-side from
- *    `ctx.timestamp` inside each reducer and there is no argument to override
- *    it, so a seeded corpus lands in a single day. Per-row detail, the grids,
- *    the score/flag distributions, and the filters are all faithful; the
- *    14-day "calls over time" chart in Analytics will show one tall bar.
- *  - Rows seeded without a QA review read as `pending` for two minutes and as
- *    `review-failed` after that. That is the module's own definition (see
- *    QA_REVIEW_FAILED_THRESHOLD_MICROS in spacetimedb/src/log-filters.ts):
- *    an unreviewed row that has been waiting longer than the threshold is
- *    treated as a review that never came back. Both states are worth seeing,
- *    so this is left alone rather than worked around.
- *
- * Re-running is safe: everything written here carries a `demo-seed-` prefix,
- * and the script deletes its own previous rows before inserting. It never
- * touches rows it did not create. Pass `--clear` to delete without reseeding.
- */
-
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as jose from "jose";
 import { derivePrivateJwkFromSeed, SPACETIMEDB_SIGNING_KEY_DERIVATION_PURPOSE } from "../src/lib/derive-private-jwk-from-seed";
 import { SPACETIMEDB_TOKEN_AUDIENCE, spacetimeDbName } from "../src/lib/spacetimedb-constants";
 import { spacetimedbHttpBase } from "../src/lib/spacetimedb-http";
+import { DEMO_SEED_PREFIX } from "../spacetimedb/src/demo-seed";
 import {
   DEMO_AI_QUERIES,
   DEMO_FEEDBACK,
@@ -48,8 +13,8 @@ import {
   type DemoToolCall,
 } from "./demo-dataset";
 
-/** Everything this script writes is prefixed with this, and only rows carrying it are ever deleted. */
-const DEMO_PREFIX = "demo-seed-";
+/** Everything this script writes is prefixed with this; `clear_demo_seed` deletes exactly these rows. */
+const DEMO_PREFIX = DEMO_SEED_PREFIX;
 const SEED_ACTOR_NAME = "Demo Seed Script";
 const TOKEN_TTL = "10m";
 
@@ -65,7 +30,7 @@ const TOKEN_TTL = "10m";
  */
 function loadEnvFiles(): void {
   // Lowest precedence first; earlier files never overwrite later ones.
-  const files = [".env", ".env.development", ".env.local"];
+  const files = [".env", ".env.development", ".env.local", ".env.development.local"];
   const loaded = new Map<string, string>();
   for (const file of files) {
     const path = resolve(process.cwd(), file);
@@ -131,8 +96,15 @@ function opt<T>(value: T | null | undefined): { some: T } | { none: [] } {
 
 type Transport = {
   callReducer: (reducer: string, args: unknown[]) => Promise<void>,
-  sql: (query: string) => Promise<Array<Record<string, unknown>>>,
 };
+
+function jsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value !== "bigint") return value;
+  if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < -BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Refusing to serialize ${value} as a JSON number: it is outside the safe integer range`);
+  }
+  return Number(value);
+}
 
 function createTransport(token: string): Transport {
   const base = spacetimedbHttpBase();
@@ -143,100 +115,13 @@ function createTransport(token: string): Transport {
       const res = await fetch(`${base}/v1/database/${db}/call/${encodeURIComponent(reducer)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-        body: JSON.stringify(args, (_key, value) => (typeof value === "bigint" ? Number(value) : value)),
+        body: JSON.stringify(args, jsonReplacer),
       });
       if (!res.ok) {
         throw new Error(`Reducer ${reducer} failed: HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
       }
     },
-    async sql(query) {
-      const res = await fetch(`${base}/v1/database/${db}/sql`, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain", "Authorization": `Bearer ${token}` },
-        body: query,
-      });
-      if (!res.ok) {
-        throw new Error(`SQL ${JSON.stringify(query)} failed: HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
-      }
-      const payload = await res.json() as Array<{
-        schema: { elements: Array<{ name: { some: string } | { none: null } }> },
-        rows: unknown[][],
-      }>;
-      if (payload.length === 0) return [];
-      const [first] = payload;
-      const columns = first.schema.elements.map(el => ("some" in el.name ? el.name.some : ""));
-      return first.rows.map((tuple) => {
-        const row: Record<string, unknown> = {};
-        columns.forEach((column, i) => {
-          row[column] = tuple[i];
-        });
-        return row;
-      });
-    },
   };
-}
-
-/** SpacetimeDB's /sql returns snake_case columns; the reducer API speaks camelCase. */
-function column(row: Record<string, unknown>, snake: string, camel: string): unknown {
-  return row[snake] ?? row[camel];
-}
-
-/**
- * Optional columns come back from /sql as a tagged sum — `[0, value]` for some
- * and `[1, []]` for none — with object and bare encodings seen across versions.
- */
-function decodeOptional<T>(value: unknown): T | undefined {
-  if (value == null) return undefined;
-  if (Array.isArray(value)) return value[0] === 0 ? value[1] as T : undefined;
-  if (typeof value === "object") {
-    if ("some" in value) return (value as { some: T }).some;
-    return undefined;
-  }
-  return value as T;
-}
-
-function toBigInt(value: unknown): bigint {
-  if (typeof value === "bigint") return value;
-  if (typeof value === "number") return BigInt(value);
-  if (typeof value === "string") return BigInt(value);
-  throw new Error(`Expected a u64 id from SpacetimeDB, received ${typeof value}: ${JSON.stringify(value)}`);
-}
-
-// ---------------------------------------------------------------------------
-// Clearing previously seeded rows
-// ---------------------------------------------------------------------------
-
-async function clearPreviousSeed(transport: Transport): Promise<number> {
-  let deleted = 0;
-
-  // QA entries first: an entry curated from a call holds a foreign reference to
-  // the call's correlation id, so removing it before the call keeps the
-  // knowledge base from briefly pointing at a row that no longer exists.
-  const qaRows = await transport.sql("SELECT * FROM my_visible_qa_entries");
-  for (const row of qaRows) {
-    const source = decodeOptional<string>(column(row, "source_mcp_correlation_id", "sourceMcpCorrelationId"));
-    const requestId = decodeOptional<string>(column(row, "request_id", "requestId"));
-    const isDemo = (source?.startsWith(DEMO_PREFIX) ?? false) || (requestId?.startsWith(DEMO_PREFIX) ?? false);
-    if (!isDemo) continue;
-    await transport.callReducer("delete_qa_entry", [toBigInt(row.id)]);
-    deleted++;
-  }
-
-  const tables = [
-    { view: "my_visible_mcp_call_log", reducer: "delete_mcp_call_log" },
-    { view: "my_visible_ai_query_log", reducer: "delete_ai_query_log" },
-    { view: "my_visible_feedback_log", reducer: "delete_feedback" },
-  ];
-  for (const { view, reducer } of tables) {
-    const rows = await transport.sql(`SELECT * FROM ${view}`);
-    for (const row of rows) {
-      const correlationId = column(row, "correlation_id", "correlationId");
-      if (typeof correlationId !== "string" || !correlationId.startsWith(DEMO_PREFIX)) continue;
-      await transport.callReducer(reducer, [correlationId]);
-      deleted++;
-    }
-  }
-  return deleted;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,8 +275,8 @@ async function main(): Promise<void> {
   // an HTTP caller has to enrol itself.
   await transport.callReducer("touch_session", []);
 
-  const removed = await clearPreviousSeed(transport);
-  console.log(`Removed ${removed} previously seeded row(s).`);
+  await transport.callReducer("clear_demo_seed", []);
+  console.log("Removed previously seeded rows.");
 
   if (clearOnly) {
     console.log("--clear given; not reseeding.");

@@ -69,4 +69,29 @@ describe("useFilteredLogPages", () => {
 
     expect(result.current.rows.map(candidate => candidate.id)).toEqual(["new"]);
   });
+
+  it("ignores a refresh once the query has been disabled", async () => {
+    const fetchPage = vi.fn(async () => ({ rows: [row("1")], nextBeforeCreatedAtMicros: undefined, nextBeforeId: undefined }));
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useFilteredLogPages({
+        enabled,
+        queryKey: "error",
+        filters: { status: "error" },
+        fetchPage,
+        getRowId: candidate => candidate.id,
+      }),
+      { initialProps: { enabled: true } },
+    );
+    await waitFor(() => expect(result.current.rows.map(candidate => candidate.id)).toEqual(["1"]));
+
+    // Clearing the filters disables the query; a retry click that lands afterwards must not
+    // bring rows (or an error) back into the now-idle state.
+    rerender({ enabled: false });
+    expect(result.current.rows).toEqual([]);
+    await act(async () => await result.current.refresh());
+
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+    expect(result.current.rows).toEqual([]);
+    expect(result.current.status).toBe("idle");
+  });
 });

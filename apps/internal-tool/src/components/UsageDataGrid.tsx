@@ -14,15 +14,26 @@ import { toDate } from "../utils";
 import type { HistoryPagingProps } from "./LoadOlderButton";
 import { InternalDataGridFooter } from "./InternalDataGridFooter";
 import { Badge, SelectionToolbar } from "./design";
+import { formatSignedUsd, formatUsd } from "../lib/format-usd";
 import { formatPacificTableTime, formatPacificTimestamp } from "../lib/pacific-time";
 
 function columnHeader(label: string, title: string): () => ReactNode {
   return () => <span title={title}>{label}</span>;
 }
 
-function formatUsd(value: number): string {
-  if (value === 0) return "$0";
-  return `$${value.toFixed(4)}`;
+/**
+ * Nullable numeric columns use a sentinel in `accessor` so the grid can sort them, and `formatValue`
+ * turns the sentinel back into the same placeholder `renderCell` shows — otherwise a CSV export
+ * would contain `-1` or `-Infinity` where the grid shows "—".
+ */
+const MISSING_PLACEHOLDER = "—";
+
+function formatOptionalCount(value: unknown): string {
+  return Number(value) < 0 ? MISSING_PLACEHOLDER : Number(value).toLocaleString();
+}
+
+function formatOptionalUsd(value: unknown): string {
+  return Number.isFinite(Number(value)) ? formatUsd(Number(value)) : MISSING_PLACEHOLDER;
 }
 
 function messageContentToText(content: unknown): string {
@@ -82,6 +93,7 @@ const columns: readonly DataGridColumnDef<AiQueryLogRow>[] = [
         {formatPacificTableTime(toDate(row.createdAt))}
       </span>
     ),
+    formatValue: value => formatPacificTimestamp(new Date(Number(value))),
   },
   {
     id: "inputMessage",
@@ -133,8 +145,8 @@ const columns: readonly DataGridColumnDef<AiQueryLogRow>[] = [
     align: "right",
     type: "number",
     sortable: false,
-    renderCell: ({ row }) => <span className="font-mono tabular-nums">{row.inputTokens == null ? "—" : row.inputTokens.toLocaleString()}</span>,
-    formatValue: value => Number(value) < 0 ? "—" : Number(value).toLocaleString(),
+    renderCell: ({ row }) => <span className="font-mono tabular-nums">{row.inputTokens == null ? MISSING_PLACEHOLDER : row.inputTokens.toLocaleString()}</span>,
+    formatValue: formatOptionalCount,
   },
   {
     id: "outputTokens",
@@ -145,8 +157,8 @@ const columns: readonly DataGridColumnDef<AiQueryLogRow>[] = [
     align: "right",
     type: "number",
     sortable: false,
-    renderCell: ({ row }) => <span className="font-mono tabular-nums">{row.outputTokens == null ? "—" : row.outputTokens.toLocaleString()}</span>,
-    formatValue: value => Number(value) < 0 ? "—" : Number(value).toLocaleString(),
+    renderCell: ({ row }) => <span className="font-mono tabular-nums">{row.outputTokens == null ? MISSING_PLACEHOLDER : row.outputTokens.toLocaleString()}</span>,
+    formatValue: formatOptionalCount,
   },
   {
     id: "cachedInputTokens",
@@ -159,7 +171,8 @@ const columns: readonly DataGridColumnDef<AiQueryLogRow>[] = [
     sortable: false,
     renderCell: ({ row }) => row.cachedInputTokens != null && row.cachedInputTokens > 0
       ? <span className="font-mono text-emerald-600 dark:text-emerald-400">{row.cachedInputTokens.toLocaleString()}</span>
-      : <span className="text-muted-foreground">—</span>,
+      : <span className="text-muted-foreground">{MISSING_PLACEHOLDER}</span>,
+    formatValue: formatOptionalCount,
   },
   {
     id: "cacheCreationTokens",
@@ -172,7 +185,8 @@ const columns: readonly DataGridColumnDef<AiQueryLogRow>[] = [
     sortable: false,
     renderCell: ({ row }) => row.cacheCreationTokens != null && row.cacheCreationTokens > 0
       ? <span className="font-mono text-orange-600 dark:text-orange-400">{row.cacheCreationTokens.toLocaleString()}</span>
-      : <span className="text-muted-foreground">—</span>,
+      : <span className="text-muted-foreground">{MISSING_PLACEHOLDER}</span>,
+    formatValue: formatOptionalCount,
   },
   {
     id: "cacheSavingsUsd",
@@ -185,11 +199,11 @@ const columns: readonly DataGridColumnDef<AiQueryLogRow>[] = [
     sortable: false,
     renderCell: ({ row }) => {
       const savings = row.cacheDiscountUsd;
-      if (savings == null) return <span className="text-muted-foreground">—</span>;
-      const sign = savings >= 0 ? "+" : "−";
+      if (savings == null) return <span className="text-muted-foreground">{MISSING_PLACEHOLDER}</span>;
       const color = savings >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400";
-      return <span className={`font-mono ${color}`}>{sign}{formatUsd(Math.abs(savings))}</span>;
+      return <span className={`font-mono ${color}`}>{formatSignedUsd(savings)}</span>;
     },
+    formatValue: value => Number.isFinite(Number(value)) ? formatSignedUsd(Number(value)) : MISSING_PLACEHOLDER,
   },
   {
     id: "costUsd",
@@ -200,7 +214,8 @@ const columns: readonly DataGridColumnDef<AiQueryLogRow>[] = [
     align: "right",
     type: "number",
     sortable: false,
-    renderCell: ({ row }) => <span className="font-mono">{row.costUsd == null ? "—" : formatUsd(row.costUsd)}</span>,
+    renderCell: ({ row }) => <span className="font-mono">{row.costUsd == null ? MISSING_PLACEHOLDER : formatUsd(row.costUsd)}</span>,
+    formatValue: formatOptionalUsd,
   },
   {
     id: "durationMs",

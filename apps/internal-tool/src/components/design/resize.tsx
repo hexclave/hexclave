@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { readLocalStorage, writeLocalStorage } from "../../lib/browser-storage";
 import { cn } from "./cn";
 
 const KEYBOARD_STEP = 16;
@@ -33,14 +34,14 @@ export function useResizableWidth({
 }) {
   const [width, setWidth] = useState(() => {
     if (typeof window === "undefined") return defaultWidth;
-    const persistedWidth = window.localStorage.getItem(storageKey);
+    const persistedWidth = readLocalStorage(storageKey);
     if (persistedWidth == null) return defaultWidth;
     return normalize(Number(persistedWidth));
   });
   const [isResizing, setIsResizing] = useState(false);
 
   useEffect(() => {
-    window.localStorage.setItem(storageKey, width.toString());
+    writeLocalStorage(storageKey, width.toString());
   }, [storageKey, width]);
 
   return {
@@ -80,7 +81,10 @@ export function Resizer({
       title="Drag to resize · double-click to reset"
       onDoubleClick={() => setWidth(defaultWidth)}
       onPointerDown={event => {
+        // preventDefault stops the text-selection drag but also suppresses the focus a mousedown
+        // would give; focusing explicitly keeps the arrow keys working right after a drag.
         event.preventDefault();
+        event.currentTarget.focus();
         event.currentTarget.setPointerCapture(event.pointerId);
         setIsResizing(true);
       }}

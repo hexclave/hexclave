@@ -28,5 +28,6 @@ export function spacetimedbHttpBase(): string {
   if (host == null || host.trim() === "" || host === "REPLACE_ME") {
     throw new HexclaveAssertionError("NEXT_PUBLIC_SPACETIMEDB_HOST is not configured for the internal tool.");
   }
-  return wsHostToHttpBase(host);
+  // Trimmed so the value that passed validation is the value that gets used.
+  return wsHostToHttpBase(host.trim());
 }

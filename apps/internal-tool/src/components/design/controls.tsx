@@ -65,6 +65,7 @@ export function Pill({
   return (
     <button
       {...props}
+      aria-pressed={active}
       className={cn(
         "rounded-full px-2 py-0.5 text-[11px] font-medium leading-tight",
         "transition-colors hover:transition-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",

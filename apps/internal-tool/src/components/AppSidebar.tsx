@@ -180,7 +180,7 @@ export function AppSidebar({
     <aside
       style={{ width: sidebarWidth }}
       className={cn(
-        "relative flex shrink-0 flex-col border-r border-black/[0.06] bg-card/80 backdrop-blur-xl max-lg:!w-[4.25rem] dark:border-white/[0.06]",
+        "relative flex shrink-0 flex-col border-r border-black/[0.06] bg-card backdrop-blur-xl max-lg:!w-[4.25rem] dark:border-white/[0.06]",
         isResizing && "select-none",
       )}
     >

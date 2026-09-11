@@ -1,10 +1,13 @@
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useClockTick } from "../hooks/useClockTick";
 import { useFilteredLogPages } from "../hooks/useFilteredLogPages";
 import type { AiUsageTableFilters, PageCursor } from "../hooks/useSpacetimeDB";
+import { formatSignedUsd, formatUsd } from "../lib/format-usd";
+import { formatPacificTimestamp } from "../lib/pacific-time";
 import type { AiQueryLogRow } from "../types";
 import { toDate } from "../utils";
-import { canReportP95, MIN_P95_SAMPLE_COUNT, nearestRankPercentile, percentage } from "../lib/stats";
+import { canReportP95, extent, MIN_P95_SAMPLE_COUNT, nearestRankPercentile, percentage } from "../lib/stats";
 import { type HistoryPagingProps } from "./LoadOlderButton";
 import { UsageDataGrid } from "./UsageDataGrid";
 import {
@@ -118,11 +121,7 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
     getRowId: usageRowId,
   });
 
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(id);
-  }, []);
+  const now = useClockTick();
   const rangeStart = useMemo(() => {
     switch (timeRange) {
       case "24h": {
@@ -171,16 +170,17 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
     const avgDuration = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null;
     const p95Duration = nearestRankPercentile(durations, 0.95);
 
+    // One pass over the (possibly very large, once older pages are loaded) row set; spreading
+    // every timestamp into Math.min/Math.max would hit the argument-count limit and throw.
+    const observed = extent(filtered.map(r => toDate(r.createdAt).getTime()));
+    const firstCallAt = observed?.min ?? null;
+    const lastCallAt = observed?.max ?? null;
+
     let seriesStart: number;
     let seriesEnd: number;
-    if (timeRange === "all" && filtered.length > 0) {
-      seriesStart = Infinity;
-      seriesEnd = -Infinity;
-      for (const r of filtered) {
-        const ts = toDate(r.createdAt).getTime();
-        if (ts < seriesStart) seriesStart = ts;
-        if (ts > seriesEnd) seriesEnd = ts;
-      }
+    if (timeRange === "all" && observed != null) {
+      seriesStart = observed.min;
+      seriesEnd = observed.max;
     } else {
       seriesStart = rangeStart;
       seriesEnd = now;
@@ -215,12 +215,6 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
     }
     const maxCalls = Math.max(...timeBuckets.map(b => b.calls), 1);
     const nonEmptyTimeBucketCount = timeBuckets.filter(b => b.calls > 0).length;
-    const firstCallAt = filtered.length === 0
-      ? null
-      : Math.min(...filtered.map(r => toDate(r.createdAt).getTime()));
-    const lastCallAt = filtered.length === 0
-      ? null
-      : Math.max(...filtered.map(r => toDate(r.createdAt).getTime()));
 
     // Distributions
     const sysPromptCounts = new Map<string, number>();
@@ -433,7 +427,7 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
             />
             <MetricCard
               label="Cache Savings"
-              value={stats.cacheSavingsReportedCalls === 0 ? "—" : `${stats.cacheSavingsUsd >= 0 ? "+" : "−"}${formatUsd(Math.abs(stats.cacheSavingsUsd))}`}
+              value={stats.cacheSavingsReportedCalls === 0 ? "—" : formatSignedUsd(stats.cacheSavingsUsd)}
               valueClassName={stats.cacheSavingsReportedCalls === 0 ? undefined : stats.cacheSavingsUsd >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}
               subtitle={`${stats.cacheSavingsReportedCalls} of ${stats.totalCalls} calls reported`}
               tooltip="Sum of cache_discount values across filtered requests. Positive (green) means caching net-saved money; negative (red) means cold-start writes outweighed reads. Filter by systemPromptId to judge whether caching is worth keeping on a specific flow."
@@ -610,13 +604,17 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
               </div>
             </Alert>
           )}
+          {/* A failed first page also has zero rows; only the retry alert above should speak for
+              it, not a "nothing matched" card that reads like a genuine empty result. */}
           {(hasLogFilters ? filteredPages.rows : rows).length === 0 && !filteredPages.isLoading ? (
-            <Card>
-              <EmptyState className="py-12">
-                <p className="text-lg">{hasLogFilters ? "No requests match these filters" : "No AI requests logged yet"}</p>
-                {hasLogFilters && filteredPages.hasMore && <Button className="mt-3" onClick={() => runAsynchronously(filteredPages.loadMore)}>Continue searching</Button>}
-              </EmptyState>
-            </Card>
+            filteredPages.error != null ? null : (
+              <Card>
+                <EmptyState className="py-12">
+                  <p className="text-lg">{hasLogFilters ? "No requests match these filters" : "No AI requests logged yet"}</p>
+                  {hasLogFilters && filteredPages.hasMore && <Button className="mt-3" onClick={() => runAsynchronously(filteredPages.loadMore)}>Continue searching</Button>}
+                </EmptyState>
+              </Card>
+            )
           ) : (
             <UsageDataGrid
               rows={hasLogFilters ? filteredPages.rows : rows}
@@ -633,11 +631,6 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
     </div>
   );
 }
-function formatUsd(value: number): string {
-  if (value === 0) return "$0";
-  return `$${value.toFixed(4)}`;
-}
-
 function DistributionBars({ items, color, total }: { items: Array<[string, number]>, color: string, total: number }) {
   if (items.length === 0) {
     return <EmptyState>No data</EmptyState>;
@@ -714,7 +707,7 @@ function RequestActivity({ totalCalls, buckets, maxCalls, nonEmptyBucketCount, f
         </p>
         {observedAt != null && (
           <p className="mt-3 font-mono text-[10px] text-muted-foreground">
-            First {observedAt.toLocaleString()}{observedSpanMs > 0 ? ` · ${Math.max(1, Math.round(observedSpanMs / 60_000))} min observed span` : ""}
+            First {formatPacificTimestamp(observedAt)}{observedSpanMs > 0 ? ` · ${Math.max(1, Math.round(observedSpanMs / 60_000))} min observed span` : ""}
           </p>
         )}
       </div>

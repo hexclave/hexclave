@@ -39,7 +39,10 @@ function fakeIndex(rows: Row[]): {
       return at >= lo && (hiInclusive ? at <= hi : at < hi);
     });
   };
-  const probe: OlderRowProbe = (hi) => rows.some(r => r.createdAt.microsSinceUnixEpoch < hi);
+  const probe: OlderRowProbe = (hi, lo) => rows.some(r => {
+    const at = r.createdAt.microsSinceUnixEpoch;
+    return at >= lo && at < hi;
+  });
   return { scan, probe, slices };
 }
 
@@ -175,6 +178,29 @@ describe("pageByCreatedAt", () => {
     expect(labels(page.rows)).toEqual(["inside"]);
     expect(slices.every(slice => slice.lo >= lowerBound)).toBe(true);
     expect(page.resumeBeforeMicros).toBeUndefined();
+  });
+
+  it("does not offer a resume cursor for rows that exist only below the lower bound", () => {
+    // The lower bound is further back than one call's widening budget reaches, so the loop
+    // exhausts its budget before hitting the bound. The only older row is below the bound: a
+    // resume cursor here would send the client on a round trip that returns nothing.
+    const lowerBound = NOW - HOUR * ((2n ** BigInt(PAGE_MAX_WIDENINGS + 2)) - 1n);
+    const { scan, probe } = fakeIndex([row(1, lowerBound - 1n, "too old")]);
+
+    const page = pageByCreatedAt(scan, probe, cursorAt(NOW), 10, { createdAtOrAfterMicros: lowerBound });
+
+    expect(page.rows).toEqual([]);
+    expect(page.resumeBeforeMicros).toBeUndefined();
+  });
+
+  it("offers a resume cursor for a row that is past the budget but inside the lower bound", () => {
+    const lowerBound = NOW - HOUR * ((2n ** BigInt(PAGE_MAX_WIDENINGS + 2)) - 1n);
+    const { scan, probe } = fakeIndex([row(1, lowerBound + 1n, "reachable on the next page")]);
+
+    const page = pageByCreatedAt(scan, probe, cursorAt(NOW), 10, { createdAtOrAfterMicros: lowerBound });
+
+    expect(page.rows).toEqual([]);
+    expect(page.resumeBeforeMicros).toBeDefined();
   });
 
   it("visits a row on a slice boundary exactly once", () => {

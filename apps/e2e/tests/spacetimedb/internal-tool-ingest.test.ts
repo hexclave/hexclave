@@ -233,6 +233,18 @@ describe.skipIf(!canRun)("internal tool ingest validation", () => {
     expect(stored?.project).toBe(body.project);
   });
 
+  it("log-mcp-call rejects caller metadata over the length caps", async ({ expect }) => {
+    const res = await postIngest("/api/backend/log-mcp-call", {
+      ...validMcpCallBody(uniqueMarker("ingest-too-long")),
+      context: "c".repeat(2_001),
+      user: "u".repeat(257),
+      project: "p".repeat(257),
+    });
+    expect(res.status).toBe(400);
+    const issues = (JSON.parse(res.body) as { issues: Array<{ path: string }> }).issues.map(issue => issue.path).sort();
+    expect(issues).toEqual(["context", "project", "user"]);
+  });
+
   it("log-ai-query rejects malformed JSON payload fields", async ({ expect }) => {
     const correlationId = crypto.randomUUID();
     const res = await postIngest("/api/backend/log-ai-query", {

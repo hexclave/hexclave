@@ -35,6 +35,7 @@ import {
 
 // Import all reducer arg schemas
 import AddManualQaReducer from "./add_manual_qa_reducer";
+import ClearDemoSeedReducer from "./clear_demo_seed_reducer";
 import ClearMcpQaReviewReducer from "./clear_mcp_qa_review_reducer";
 import DeleteAiQueryLogReducer from "./delete_ai_query_log_reducer";
 import DeleteFeedbackReducer from "./delete_feedback_reducer";
@@ -106,6 +107,7 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("add_manual_qa", AddManualQaReducer),
+  __reducerSchema("clear_demo_seed", ClearDemoSeedReducer),
   __reducerSchema("clear_mcp_qa_review", ClearMcpQaReviewReducer),
   __reducerSchema("delete_ai_query_log", DeleteAiQueryLogReducer),
   __reducerSchema("delete_feedback", DeleteFeedbackReducer),

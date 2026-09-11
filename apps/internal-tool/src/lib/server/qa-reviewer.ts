@@ -47,16 +47,11 @@ export const qaReviewSchema = z.object({
     severity: z.string(),
     explanation: z.string(),
   })),
-  // Same reasoning as `improvementSuggestions` below: the model tends to drop
-  // "nothing to report" objects, and a missing verdict must mean "no feature
-  // request detected", not a failed review that leaves the row unreviewed.
   featureRequest: z.object({
     detected: z.boolean(),
     summary: z.string().default(""),
     evidence: z.string().default(""),
   }).default({ detected: false, summary: "", evidence: "" }),
-  // Optional in practice: the model omits this for good answers with nothing to suggest.
-  // Defaulting (rather than requiring) avoids turning those into structured-output failures.
   improvementSuggestions: z.string().default(""),
   overallScore: z.number(),
 });

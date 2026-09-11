@@ -1,12 +1,13 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatAiRequestContext } from "../lib/copy-log-context";
+import { formatSignedUsd } from "../lib/format-usd";
 import type { AiQueryLogRow } from "../types";
 import { toDate } from "../utils";
 import { AssistantBubble, ToolCallCard, UserBubble } from "./ConversationReplay";
 import { CopyFullContextButton } from "./CopyFullContextButton";
-import { DetailMetricStrip, DetailPanelTabs } from "./DetailPanelNavigation";
+import { DetailMetricStrip, DetailPanelTabs, DetailTabPanel } from "./DetailPanelNavigation";
 import { Alert, Badge, Button } from "./design";
 import { markdownComponents } from "./markdown-components";
 
@@ -41,6 +42,7 @@ function messageContentToText(content: unknown): string {
 
 export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () => void }) {
   const [activeSection, setActiveSection] = useState<"conversation" | "request">("conversation");
+  const tabsId = useId();
   const messages: MessageIn[] = useMemo(() => {
     try {
       const parsed = JSON.parse(row.messagesJson);
@@ -114,6 +116,7 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
           { label: "Cost", value: row.costUsd == null ? "Unpriced" : `$${row.costUsd.toFixed(4)}` },
         ]} />
         <DetailPanelTabs
+          id={tabsId}
           label="AI request detail sections"
           value={activeSection}
           onChange={setActiveSection}
@@ -126,13 +129,13 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
 
       <div className="flex-1 p-4">
         {isError && (
-          <Alert className="mb-4 p-3">
+          <Alert className="mb-4">
             <p className="mb-1 text-[10px] font-medium uppercase tracking-wider">Request error</p>
             <pre className="whitespace-pre-wrap break-words font-mono text-xs">{row.errorMessage}</pre>
           </Alert>
         )}
 
-        {activeSection === "conversation" && <div role="tabpanel" className="space-y-3 pb-6">
+        {activeSection === "conversation" && <DetailTabPanel id={tabsId} value="conversation" className="space-y-3 pb-6">
           <h3 className={sectionLabelClasses}>Input messages</h3>
           {messages.length === 0 && (
             <p className="text-xs text-muted-foreground">No input messages.</p>
@@ -195,9 +198,9 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
               </div>
             </>
           )}
-        </div>}
+        </DetailTabPanel>}
 
-        {activeSection === "request" && <div role="tabpanel" className="pb-6">
+        {activeSection === "request" && <DetailTabPanel id={tabsId} value="request" className="pb-6">
           <section>
             <h3 className="mb-2 text-xs font-semibold text-foreground">Routing</h3>
             <div className="divide-y divide-black/[0.06] border-y border-black/[0.06] dark:divide-white/[0.06] dark:border-white/[0.06]">
@@ -215,7 +218,9 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
               <MetaRow label="Authentication" value={row.isAuthenticated ? "Authenticated" : "Anonymous"} />
               {row.projectId && <MetaRow label="Project" value={row.projectId} />}
               {row.userId && <MetaRow label="User" value={row.userId} />}
-              {row.conversationId && <MetaRow label="Conversation" value={row.conversationId} />}
+              {/* Nullish, not truthy: the header's MCP badge uses the same check, and `log-ai-query`
+                  stores "" as a present value, so the two must not disagree on an empty id. */}
+              {row.conversationId != null && <MetaRow label="Conversation" value={row.conversationId} />}
             </div>
           </section>
           {(row.cachedInputTokens != null || row.cacheCreationTokens != null || row.cacheDiscountUsd != null) && (
@@ -224,11 +229,11 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
               <div className="divide-y divide-black/[0.06] border-y border-black/[0.06] dark:divide-white/[0.06] dark:border-white/[0.06]">
                 <MetaRow label="Cache read" value={`${(row.cachedInputTokens ?? 0).toLocaleString()} tok`} />
                 <MetaRow label="Cache write" value={`${(row.cacheCreationTokens ?? 0).toLocaleString()} tok`} />
-                {row.cacheDiscountUsd != null && <MetaRow label="Savings" value={`$${row.cacheDiscountUsd.toFixed(4)}`} />}
+                {row.cacheDiscountUsd != null && <MetaRow label="Savings" value={formatSignedUsd(row.cacheDiscountUsd)} />}
               </div>
             </section>
           )}
-        </div>}
+        </DetailTabPanel>}
       </div>
     </div>
   );

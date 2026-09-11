@@ -1,3 +1,5 @@
+import { featureRequestFromFlagsJson } from './feature-request-flag';
+
 export const QA_REVIEW_FAILED_THRESHOLD_MICROS = 2n * 60n * 1000n * 1000n;
 
 type TimestampLike = { microsSinceUnixEpoch: bigint };
@@ -37,26 +39,6 @@ export type McpLogFilters = {
   humanReviewState: string | undefined,
 };
 
-const FEATURE_REQUEST_FLAG_TYPE = 'unsupported_feature_request';
-
-function hasFeatureRequestFlag(flagsJson: string | undefined): boolean {
-  if (flagsJson == null || flagsJson === '') return false;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(flagsJson);
-  } catch (error) {
-    if (error instanceof SyntaxError) return false;
-    throw error;
-  }
-  if (!Array.isArray(parsed)) return false;
-  return parsed.some(candidate => (
-    candidate != null
-    && typeof candidate === 'object'
-    && 'type' in candidate
-    && candidate.type === FEATURE_REQUEST_FLAG_TYPE
-  ));
-}
-
 function hasErrorMessage(value: string | undefined): boolean {
   return value != null && value !== '';
 }
@@ -67,14 +49,17 @@ function mcpQaStateMatches(row: McpFilterableRow, state: string, nowMicros: bigi
     ? row.qaReviewRequestedAt.microsSinceUnixEpoch
     : row.createdAt.microsSinceUnixEpoch;
   const reviewFailed = row.qaOverallScore == null && !hasQaError && nowMicros - reviewStartedAtMicros > QA_REVIEW_FAILED_THRESHOLD_MICROS;
+  // The score bands exclude errored rows so the states partition every row the way the grid
+  // renders them: a row with both a score and a review error shows the error badge, not the score.
+  const score = hasQaError ? undefined : row.qaOverallScore;
   switch (state) {
     case 'pending': return row.qaOverallScore == null && !hasQaError && !reviewFailed;
     case 'review-failed': return reviewFailed;
     case 'error': return hasQaError;
-    case 'pass': return row.qaOverallScore != null && row.qaOverallScore >= 80;
-    case 'warn': return row.qaOverallScore != null && row.qaOverallScore >= 50 && row.qaOverallScore < 80;
-    case 'fail': return row.qaOverallScore != null && row.qaOverallScore < 50;
-    case 'feature-request': return hasFeatureRequestFlag(row.qaFlagsJson);
+    case 'pass': return score != null && score >= 80;
+    case 'warn': return score != null && score >= 50 && score < 80;
+    case 'fail': return score != null && score < 50;
+    case 'feature-request': return featureRequestFromFlagsJson(row.qaFlagsJson) != null;
     default: throw new Error(`Unexpected QA state after validation: ${state}`);
   }
 }

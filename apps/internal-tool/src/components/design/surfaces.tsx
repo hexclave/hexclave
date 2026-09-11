@@ -99,28 +99,45 @@ export function Tooltip({
   );
 }
 
-export type AlertVariant = "error" | "warning" | "info";
+export type AlertVariant = "error" | "warning" | "info" | "success";
 
 const alertVariantClasses = new Map<AlertVariant, string>([
   ["error", "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300"],
   ["warning", "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"],
   ["info", "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"],
+  ["success", "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"],
 ]);
 
-/** Inline status/error panel. Uses alerts (not toasts) per repo convention for blocking errors. */
+/** `md` is the standalone panel; `sm` is the compact strip used inside forms and cards. */
+export type AlertSize = "sm" | "md";
+
+const alertSizeClasses = new Map<AlertSize, string>([
+  ["sm", "px-3 py-1.5 text-xs font-medium"],
+  ["md", "p-4 text-sm"],
+]);
+
+/**
+ * Inline status/error panel. Uses alerts (not toasts) per repo convention for blocking errors.
+ * Padding and type size come from `size`, not `className` — `cn` does not merge Tailwind classes,
+ * so a caller-supplied `p-3` would compete with the default instead of replacing it.
+ */
 export function Alert({
   variant = "error",
+  size = "md",
   children,
   className,
 }: {
   variant?: AlertVariant,
+  size?: AlertSize,
   children: React.ReactNode,
   className?: string,
 }) {
   const variantClasses = alertVariantClasses.get(variant)
     ?? throwErr(`No alert classes for variant ${variant}; alertVariantClasses must cover every AlertVariant`);
+  const sizeClasses = alertSizeClasses.get(size)
+    ?? throwErr(`No alert classes for size ${size}; alertSizeClasses must cover every AlertSize`);
   return (
-    <div className={cn("rounded-xl border p-4 text-sm", variantClasses, className)}>{children}</div>
+    <div className={cn("rounded-xl border", sizeClasses, variantClasses, className)}>{children}</div>
   );
 }
 

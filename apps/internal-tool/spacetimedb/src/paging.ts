@@ -11,7 +11,11 @@ export type SliceScanner<Row extends PageableRow> = (
 export type PageCursor = { beforeCreatedAtMicros: bigint, beforeId: bigint | undefined };
 
 
-export type OlderRowProbe = (hiMicros: bigint) => boolean;
+/**
+ * "Is there at least one row with `lo <= createdAt < hi`?" Takes the lower bound so a filtered
+ * query with a time range never advertises a resume cursor for rows it would refuse to return.
+ */
+export type OlderRowProbe = (hiMicros: bigint, loMicrosInclusive: bigint) => boolean;
 
 export const PAGE_INITIAL_WINDOW_MICROS = 60n * 60n * 1000n * 1000n; // 1 hour
 export const PAGE_MAX_WIDENINGS = 14;
@@ -86,7 +90,7 @@ export function pageByCreatedAt<Row extends PageableRow>(
     hiMicros = loMicros;
     windowMicros *= 2n;
 
-    if (widening === PAGE_MAX_WIDENINGS && hiMicros > createdAtOrAfterMicros && anyOlderThan(hiMicros)) {
+    if (widening === PAGE_MAX_WIDENINGS && hiMicros > createdAtOrAfterMicros && anyOlderThan(hiMicros, createdAtOrAfterMicros)) {
       resumeBeforeMicros = hiMicros - 1n;
     }
   }

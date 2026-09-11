@@ -132,7 +132,7 @@ export default function App() {
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-black/[0.06] bg-card/60 px-4 backdrop-blur-xl dark:border-white/[0.06] md:px-6">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-black/[0.06] bg-card px-4 backdrop-blur-xl dark:border-white/[0.06] md:px-6">
           <div>
             <h2 className="text-sm font-semibold tracking-tight text-foreground">{appTabLabel(tab)}</h2>
             <p className="text-[10px] text-muted-foreground">AI operations and quality review</p>

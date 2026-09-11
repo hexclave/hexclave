@@ -31,10 +31,12 @@ export function DetailSidebar({ children, onClose, label }: { children: ReactNod
       <aside
         aria-label={label}
         // Below `lg` the pane is an overlay sized to the viewport, so the persisted desktop width is
-        // overridden there rather than letting a wide drag push it off screen.
+        // overridden there rather than letting a wide drag push it off screen. On desktop the width
+        // is additionally capped relative to the viewport: a width persisted on a large monitor
+        // must not squeeze the list out of view on a narrower one.
         style={{ width }}
         className={cn(
-          "absolute inset-y-0 right-0 z-30 flex shrink-0 flex-col border-l border-black/[0.08] bg-background shadow-[-8px_0_24px_hsl(var(--foreground)/0.08)] dark:border-white/[0.08] lg:relative lg:shadow-none",
+          "absolute inset-y-0 right-0 z-30 flex shrink-0 flex-col border-l border-black/[0.08] bg-background shadow-[-8px_0_24px_hsl(var(--foreground)/0.08)] dark:border-white/[0.08] lg:relative lg:max-w-[calc(100vw-24rem)] lg:shadow-none",
           "max-lg:!w-[min(34rem,calc(100%_-_1rem))]",
           isResizing && "select-none",
         )}
