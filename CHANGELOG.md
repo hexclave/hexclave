@@ -2,6 +2,10 @@
 
 ---
 
+## 9/18/26
+
+- _(entries added throughout the week)_
+
 ## 9/4/26
 
 - Microsoft sign-in no longer asks for admin consent on every login.
