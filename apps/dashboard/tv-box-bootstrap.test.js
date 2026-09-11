@@ -136,7 +136,7 @@ describe("TV Box document bootstrap recovery", () => {
     expect(navigationErrors).toEqual([]);
   });
 
-  it.each(["", "  ", "garbage", "-1", "Infinity", "999999999999999999999", "2junk"])(
+  it.each(["", "  ", "01", "007", "garbage", "-1", "Infinity", "999999999999999999999", "2junk"])(
     "uses bounded recovery for invalid persisted counts (%s)", async (count) => {
       openBrowser((window) => {
         window.sessionStorage.setItem("hexclave-tv-box-bootstrap-reloads", count);

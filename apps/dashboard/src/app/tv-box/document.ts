@@ -74,7 +74,7 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
           // Only the canonical decimal form this script writes is trusted; anything else is corrupted state and gets the capped delay.
           reloadCount = storedReloadCount == null
             ? 0
-            : /^[0-9]+$/.test(storedReloadCount) ? Number(storedReloadCount) : maximumBackoffStep;
+            : /^(?:0|[1-9][0-9]*)$/.test(storedReloadCount) ? Number(storedReloadCount) : maximumBackoffStep;
         } catch (error) {
           allowUnavailableStorage(error);
           // Storage is only a backoff hint, not a prerequisite for recovery.
