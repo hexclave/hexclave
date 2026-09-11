@@ -16,6 +16,7 @@ import {
   ClockIcon,
   FileIcon,
   FolderIcon,
+  InfoIcon,
   LinkSimpleIcon,
   LockSimpleIcon,
   PlusIcon,
@@ -1093,6 +1094,12 @@ function DomainDetails({ project, serviceId, hostname, onVerifiedChange, onStatu
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+      {!details.verified && (
+        <div className="flex items-start gap-1.5 rounded-lg bg-blue-500/[0.06] px-2.5 py-1.5 text-[11px] text-blue-700 ring-1 ring-blue-500/20 dark:text-blue-300">
+          <InfoIcon className="mt-px h-3.5 w-3.5 shrink-0" />
+          <span>Using Cloudflare? Either set these records to DNS only (proxy off) or set the zone&apos;s SSL/TLS mode to Full (strict). A proxied hostname under Flexible mode fails with Cloudflare 520 errors.</span>
         </div>
       )}
       <div className="flex items-center justify-between gap-2">

@@ -10,6 +10,7 @@
 
 import { assertDataEncryptionKeyIsSafe, parseDataEncryptionRootKey } from "./spec-crypto.js";
 import { validateImageRef } from "./image-ref.js";
+import { DEVELOPMENT_PLATFORM_HOSTNAME_KEY, platformHostnameKey } from "./platform-domain-names.js";
 import type { ServiceKind } from "./types.js";
 
 export const MOCK_FLY_TOKEN = "mock_hexclave_fly_key";
@@ -115,6 +116,16 @@ function readFlyConfig(): FlyConfig | null {
   if (flyToken === "") return null;
   const isMockFly = flyToken === MOCK_FLY_TOKEN;
   if (isMockFly) assertMocksExplicitlyAllowed("the mock Fly token");
+  // Every public Fly service gets a gateway hostname signed with this key, so a missing or
+  // malformed one must fail here rather than on a customer's first deploy.
+  try {
+    platformHostnameKey();
+  } catch (error) {
+    throw new Error(`marshal refuses to start: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  if ((process.env.HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY ?? "").toLowerCase() === DEVELOPMENT_PLATFORM_HOSTNAME_KEY) {
+    assertMocksExplicitlyAllowed("the public development platform-hostname key");
+  }
   // The fly-mock docker service serves all three API surfaces on one port.
   const flyMockUrl = `http://localhost:${portPrefix()}48`;
   return {

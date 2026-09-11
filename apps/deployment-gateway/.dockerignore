@@ -3,3 +3,4 @@
 !nginx.conf
 !gateway.conf.template
 !15-platform-domain.envsh
+!gateway.js

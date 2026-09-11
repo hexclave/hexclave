@@ -330,7 +330,11 @@ if [[ "$USE_WIF" == "1" ]]; then
   gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" --project="$PLATFORM_PROJECT" \
     --member="$PRINCIPAL" --role=roles/iam.workloadIdentityUser >/dev/null
   echo "  bound $PRINCIPAL"
+  # Two audiences, on purpose: the STS exchange is addressed to the provider resource, but the
+  # assertion Vercel mints carries VERCEL_AUDIENCE as its `aud` (the provider's allowed
+  # audience above). Marshal must be told both, or it discards every real production header.
   WIF_ENV="  HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_AUDIENCE=//iam.googleapis.com/projects/${PLATFORM_NUMBER}/locations/global/workloadIdentityPools/vercel/providers/vercel
+  HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE=${VERCEL_AUDIENCE}
   HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT=${SA_EMAIL}
 "
 else

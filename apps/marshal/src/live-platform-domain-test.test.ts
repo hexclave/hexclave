@@ -6,6 +6,7 @@ const credentials = {
   FLY_API_TOKEN: "test-fly-token", FLY_ORG_SLUG: "test-org",
   S3_ACCESS_KEY_ID: "test-access", S3_SECRET_ACCESS_KEY: "test-secret",
   S3_API_ENDPOINT: "https://s3.example.com", S3_BUCKET_NAME: "test-bucket",
+  GATEWAY_HOSTNAME_KEY: "f".repeat(64),
 };
 
 afterEach(() => {
@@ -21,6 +22,7 @@ describe("live test setup (no provider calls)", () => {
     expect(settings.MARSHAL_S3_BUCKET).toBe(credentials.S3_BUCKET_NAME);
     expect(() => liveCredentialSettings({ ...credentials, FLY_API_TOKEN: "" })).toThrow("FLY_API_TOKEN");
     expect(() => liveCredentialSettings({ ...credentials, S3_API_ENDPOINT: "http://localhost" })).toThrow("HTTPS");
+    expect(() => liveCredentialSettings({ ...credentials, GATEWAY_HOSTNAME_KEY: "" })).toThrow("HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY");
   });
 
   it("validates recovery identity and account scope before cleanup", () => {
@@ -31,8 +33,9 @@ describe("live test setup (no provider calls)", () => {
     expect(() => parseLiveRun({ ...run, encryptionKey: "bad" }, settings)).toThrow("Recovery file");
     expect(() => parseLiveRun(run, { ...settings, MARSHAL_FLY_ORG_SLUG: "other-org" })).toThrow("different Fly");
     expect(() => parseLiveRun(run, { ...settings, MARSHAL_S3_BUCKET: "other-bucket" })).toThrow("different Fly");
+    vi.stubEnv("HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY", credentials.GATEWAY_HOSTNAME_KEY);
     const identity = liveRunIdentity(run);
-    expect(identity.hostname).toMatch(/^[a-z0-9-]+\.deploy\.built-with-hexclave\.com$/);
+    expect(identity.hostname).toMatch(/^[a-z0-9-]+-[0-9a-f]{16}\.deploy\.built-with-hexclave\.com$/);
     expect(liveRunIdentity(newLiveRun(settings))).not.toEqual(identity);
   });
 

@@ -265,6 +265,64 @@ export function reportedDigest(machine: FlyMachine): string | null {
 // ---------------------------------------------------------------------------
 // Machine reconciliation
 
+// Machine states in which `/start` is accepted. Anything else is a transition (`replacing`,
+// `starting`, `stopping`, `suspending`, ...) that Fly rejects a start against.
+const STARTABLE_MACHINE_STATES = new Set(["stopped", "suspended", "created"]);
+
+/**
+ * Starts a machine that is not running, tolerating the transition Fly puts it through first.
+ *
+ * `/start` is rejected while a machine is mid-transition (real Fly: `412 unable to start
+ * machine from current state: 'replacing'`), and a stopped or suspended machine that was JUST
+ * updated is exactly that for a few seconds — the update answers before Fly has finished
+ * swapping the image, and it deliberately leaves the new version stopped ("machine was in a
+ * non-started state prior to the update"). Firing `/start` once at that moment gets it
+ * rejected, nothing ever boots, and the started-wait that follows burns its whole budget on a
+ * machine nobody asked to start: that is how every redeploy onto an autosuspended
+ * `min_instances: 0` server failed with "did not start in time" while the same image booted
+ * fine seconds later on the first inbound request.
+ *
+ * So: poll until the machine is either already coming up or in a state a start is accepted
+ * from, then start it, retrying a rejected start until `budgetMillis` runs out. Gives up
+ * quietly after that — the caller's started-wait remains the arbiter of whether the boot
+ * actually happened, and this only decides whether one was requested.
+ */
+export async function startMachineWhenSettled(
+  fly: Pick<FlyClient, "getMachine" | "startMachine">,
+  appName: string,
+  machineId: string,
+  lease: ReconciliationLeaseGuard,
+  options?: { budgetMillis?: number, pollMillis?: number },
+): Promise<void> {
+  const deadline = Date.now() + (options?.budgetMillis ?? 30_000);
+  const pollMillis = options?.pollMillis ?? 1000;
+  let lastError: unknown = null;
+  for (;;) {
+    const machine = await fly.getMachine(appName, machineId);
+    // Destroyed underneath us: nothing to start; the wait will report it.
+    if (machine === null) return;
+    if (machine.state === "started" || machine.state === "starting") return;
+    if (STARTABLE_MACHINE_STATES.has(machine.state)) {
+      try {
+        await lease.assertOwned();
+        await fly.startMachine(appName, machineId);
+        return;
+      } catch (error) {
+        if (isReconciliationFencingError(error)) throw error;
+        // A rejected start is the transition race above, or Fly already booting it (the next
+        // poll sees `starting`). Anything else is worth a record, since the wait's eventual
+        // timeout is all the caller will otherwise ever see of it.
+        lastError = error;
+      }
+    }
+    if (Date.now() >= deadline) {
+      console.error(`gave up requesting a start for ${appName}/${machineId} (last state ${JSON.stringify(machine.state)})`, lastError);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMillis));
+  }
+}
+
 /**
  * Rolls the service's machines onto `imageRef`, and reports the image Fly says
  * slot 0 is actually running.
@@ -364,13 +422,7 @@ async function applyMachines(fly: FlyClient, stored: StoredSpec, imageRef: strin
     }
     if (existing !== undefined && existing.config.metadata?.hexclave_config_hash === desiredHash) {
       // Hash matches but a pinned machine is stopped: just start it, no config churn.
-      try {
-        await lease.assertOwned();
-        await fly.startMachine(appName, existing.id);
-      } catch (error) {
-        if (isReconciliationFencingError(error)) throw error;
-        // Already booting / raced — the wait below arbitrates.
-      }
+      await startMachineWhenSettled(fly, appName, existing.id, lease);
       await fly.waitForMachineState(appName, existing.id, "started", { instanceId: existing.instance_id, totalTimeoutSeconds: 120 });
       if (slot === 0) runningDigest = reportedDigest(existing);
       continue;
@@ -380,15 +432,11 @@ async function applyMachines(fly: FlyClient, stored: StoredSpec, imageRef: strin
       await lease.assertOwned();
       const updated = await fly.updateMachine(appName, existing.id, desired);
       if (wasStopped) {
-        // Updating a stopped machine doesn't reliably boot it; start explicitly so the
-        // started-wait below actually gates the roll (autostop re-stops it when idle).
-        try {
-          await lease.assertOwned();
-          await fly.startMachine(appName, updated.id);
-        } catch (error) {
-          if (isReconciliationFencingError(error)) throw error;
-          // Racing the update-triggered boot is fine — the wait below is the arbiter.
-        }
+        // Updating a stopped (or autosuspended) machine leaves it stopped; start explicitly so
+        // the started-wait below actually gates the roll (autostop re-stops it when idle).
+        // Not a bare `/start`: the update is still settling when it answers, and Fly rejects
+        // a start until it has — see startMachineWhenSettled.
+        await startMachineWhenSettled(fly, appName, updated.id, lease);
       }
       await fly.waitForMachineState(appName, updated.id, "started", { instanceId: updated.instance_id, totalTimeoutSeconds: 120 });
       if (slot === 0) runningDigest = reportedDigest(updated);

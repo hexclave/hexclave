@@ -7,5 +7,6 @@ ENV NGINX_ENVSUBST_FILTER=^HEXCLAVE_GATEWAY_ \
 COPY 15-platform-domain.envsh /docker-entrypoint.d/15-platform-domain.envsh
 RUN chmod +x /docker-entrypoint.d/15-platform-domain.envsh
 COPY nginx.conf /etc/nginx/nginx.conf
+COPY gateway.js /etc/nginx/njs/gateway.js
 COPY gateway.conf.template /etc/nginx/templates/default.conf.template
 EXPOSE 8080
