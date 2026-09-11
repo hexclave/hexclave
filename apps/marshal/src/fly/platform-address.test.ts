@@ -14,7 +14,7 @@ vi.mock("./client.js", async (original) => ({
 }));
 
 import { createFlyProvider } from "./provider.js";
-import { platformHostname } from "../platform-domain-names.js";
+import { DEVELOPMENT_PLATFORM_HOSTNAME_KEY, platformHostname } from "../platform-domain-names.js";
 
 const stored: StoredSpec = {
   ns: "project", key: "web", revision: "one", created_at_millis: 1, updated_at_millis: 1, last_apply_error: null,
@@ -23,6 +23,7 @@ const stored: StoredSpec = {
 
 beforeEach(() => {
   certificates.mockClear();
+  vi.stubEnv("HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY", DEVELOPMENT_PLATFORM_HOSTNAME_KEY);
 });
 
 describe("public Fly addresses", () => {

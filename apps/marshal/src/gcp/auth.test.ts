@@ -7,10 +7,16 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+// The STS audience: the pool provider's resource name, which the token exchange is addressed to.
 const AUDIENCE = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/vercel/providers/vercel";
+// The `aud` Vercel mints into its assertion, which is what the provider's allowed-audiences
+// accepts (bootstrap-gcp.sh creates it with exactly this). Deliberately NOT the same string as
+// AUDIENCE: conflating the two is precisely the bug that dropped every production header.
+const ASSERTION_AUDIENCE = "https://vercel.com/my-team";
 
 function stubFederationEnv(): void {
   vi.stubEnv("HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_AUDIENCE", AUDIENCE);
+  vi.stubEnv("HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE", ASSERTION_AUDIENCE);
   vi.stubEnv("HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT", "marshal-controller@platform.iam.gserviceaccount.com");
   // Both of these are read by the module, so an ambient value in the shell of whoever runs the
   // suite (anyone with a real Marshal environment sourced) would otherwise decide the outcome.
@@ -27,12 +33,17 @@ function stubExchange(expiresInMillis = 3600_000) {
   return fetchMock;
 }
 
-// An assertion the way the platform mints one: a JWT whose `aud` is this pool provider.
-// recordHostIdentityAssertion only caches assertions that carry it, so an opaque string is no
-// longer a usable stand-in — an unauthenticated caller could otherwise post one at /health and
-// poison the credential every provider-backed route depends on.
+// An assertion the way Vercel mints one: a JWT whose `aud` is the team URL the provider was
+// told to allow. recordHostIdentityAssertion only caches assertions that carry it, so an opaque
+// string is no longer a usable stand-in — an unauthenticated caller could otherwise post one at
+// /health and poison the credential every provider-backed route depends on.
 function assertion(claims: Record<string, unknown> = {}): string {
-  const payload = Buffer.from(JSON.stringify({ aud: AUDIENCE, ...claims }), "utf8").toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    iss: "https://oidc.vercel.com/my-team",
+    sub: "owner:my-team:project:hexclave-marshal:environment:production",
+    aud: ASSERTION_AUDIENCE,
+    ...claims,
+  }), "utf8").toString("base64url");
   return `header.${payload}.signature`;
 }
 
@@ -53,7 +64,8 @@ describe("workload identity federation", () => {
     expect(stsUrl).toBe("https://sts.googleapis.com/v1/token");
     const exchange = new URLSearchParams(String(stsInit?.body));
     // The audience is the single most important value this module forwards: a wrong one is a
-    // 400 from STS that no other assertion here would catch.
+    // 400 from STS that no other assertion here would catch. It is the provider resource, NOT
+    // the `aud` inside the assertion — those are different values with different consumers.
     expect(exchange.get("audience")).toBe(AUDIENCE);
     expect(exchange.get("subject_token")).toBe(assertion({ sub: "build-time" }));
     expect(exchange.get("subject_token_type")).toBe("urn:ietf:params:oauth:token-type:jwt");
@@ -110,11 +122,59 @@ describe("workload identity federation", () => {
     const fetchMock = stubExchange();
 
     recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ sub: "real" }) }));
-    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ aud: "//iam.googleapis.com/projects/9/attacker" }) }));
+    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ aud: "https://vercel.com/attacker-team" }) }));
     recordHostIdentityAssertion(request({ "x-vercel-oidc-token": "not-even-a-jwt" }));
 
     await expect(googleAccessToken()).resolves.toBe("impersonated-token");
     expect(new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body)).get("subject_token")).toBe(assertion({ sub: "real" }));
+  });
+
+  it("matches the header against the audience the host mints, not the STS audience", async () => {
+    // A real Vercel assertion carries `aud: https://vercel.com/<team>`; the provider was created
+    // with that as its allowed audience. An assertion addressed to the STS audience (the
+    // provider resource) is one the provider would reject, so it is the one to ignore here.
+    // Getting this backwards silently drops every production header and Marshal has no
+    // credential at all on a hosted Function.
+    stubFederationEnv();
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "");
+    const fetchMock = stubExchange();
+
+    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ sub: "vercel-shaped" }) }));
+    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ sub: "sts-shaped", aud: AUDIENCE }) }));
+
+    await expect(googleAccessToken()).resolves.toBe("impersonated-token");
+    expect(new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body)).get("subject_token")).toBe(assertion({ sub: "vercel-shaped" }));
+  });
+
+  it("expects the assertion's aud to be the provider resource when no assertion audience is configured", async () => {
+    // Google's default allowed audience for a provider created without --allowed-audiences is
+    // the provider resource itself, so that is the only sensible default for the check.
+    stubFederationEnv();
+    vi.stubEnv("HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE", "");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "");
+    const fetchMock = stubExchange();
+
+    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ sub: "vercel-shaped" }) }));
+    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ sub: "sts-shaped", aud: AUDIENCE }) }));
+
+    await expect(googleAccessToken()).resolves.toBe("impersonated-token");
+    expect(new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body)).get("subject_token")).toBe(assertion({ sub: "sts-shaped", aud: AUDIENCE }));
+  });
+
+  it("accepts the https: spelling of the provider resource when no assertion audience is configured", async () => {
+    // Google's default allowed audience is the provider resource with or without the scheme, and
+    // most hosts that mint one use the https: form. Marshal's own STS audience is the bare form.
+    stubFederationEnv();
+    vi.stubEnv("HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE", "");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "");
+    const fetchMock = stubExchange();
+
+    recordHostIdentityAssertion(request({ "x-vercel-oidc-token": assertion({ sub: "https-shaped", aud: `https:${AUDIENCE}` }) }));
+
+    await expect(googleAccessToken()).resolves.toBe("impersonated-token");
+    const exchange = new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body));
+    expect(exchange.get("subject_token")).toBe(assertion({ sub: "https-shaped", aud: `https:${AUDIENCE}` }));
+    expect(exchange.get("audience")).toBe(AUDIENCE);
   });
 
   it("reads the assertion from the env var the host is configured to use", async () => {
