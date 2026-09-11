@@ -63,6 +63,7 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
         // Bound the retry rate, not the number of attempts: an unattended box
         // must still recover when module delivery resumes after a long outage.
         const maximumBackoffStep = 4;
+        const maximumReloadDelay = 300000;
         const allowUnavailableStorage = (error) => {
           if (!(error instanceof DOMException) ||
               (error.name !== "SecurityError" && error.name !== "QuotaExceededError")) throw error;
@@ -81,16 +82,22 @@ export function createTvBoxDocument(options: TvBoxDocumentOptions): string {
         }
         if (!Number.isSafeInteger(reloadCount) || reloadCount < 0) reloadCount = maximumBackoffStep;
         reloadCount = Math.min(reloadCount, maximumBackoffStep);
+        const reloadDelay = Math.min(maximumReloadDelay, 30000 * 2 ** reloadCount);
         let timeout = window.setTimeout(() => {
           try {
             window.sessionStorage.setItem(reloadKey, String(Math.min(reloadCount + 1, maximumBackoffStep)));
           } catch (error) {
             allowUnavailableStorage(error);
-            timeout = window.setTimeout(() => window.location.reload(), 300000);
+            // Without a persisted count, the next load would restart at 30 s, so a box that can read but not write storage gets the full cap per cycle, never beyond it.
+            timeout = window.setTimeout(() => window.location.reload(), maximumReloadDelay - reloadDelay);
+            if (reloadDelay === maximumReloadDelay) {
+              window.clearTimeout(timeout);
+              window.location.reload();
+            }
             return;
           }
           window.location.reload();
-        }, Math.min(300000, 30000 * 2 ** reloadCount));
+        }, reloadDelay);
         const cancel = () => {
           window.clearTimeout(timeout);
           try {

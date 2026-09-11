@@ -76,7 +76,7 @@ describe("TV Box document bootstrap recovery", () => {
     expect(navigationErrors).toEqual([]);
   });
 
-  it("keeps a conservative retry when session storage cannot be accessed", async () => {
+  it("caps total recovery delay at five minutes when session storage cannot be accessed", async () => {
     openBrowser((window) => {
       Object.defineProperty(window, "sessionStorage", {
         get() { throw new window.DOMException("Storage is unavailable", "SecurityError"); },
@@ -85,8 +85,6 @@ describe("TV Box document bootstrap recovery", () => {
     await vi.advanceTimersByTimeAsync(299_999);
     expect(navigationErrors).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
-    expect(navigationErrors).toEqual([]);
-    await vi.advanceTimersByTimeAsync(300_000);
     expect(navigationErrors).toEqual(["Not implemented: navigation (except hash changes)"]);
   });
 
@@ -96,9 +94,22 @@ describe("TV Box document bootstrap recovery", () => {
         throw new window.DOMException("Storage is full", "QuotaExceededError");
       };
     });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(299_999);
     expect(navigationErrors).toEqual([]);
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(navigationErrors).toEqual(["Not implemented: navigation (except hash changes)"]);
+  });
+
+  it("reloads immediately at the cap when persisting the retry count fails after the longest delay", async () => {
+    openBrowser((window) => {
+      window.sessionStorage.setItem("hexclave-tv-box-bootstrap-reloads", "4");
+      window.Storage.prototype.setItem = () => {
+        throw new window.DOMException("Storage is full", "QuotaExceededError");
+      };
+    });
+    await vi.advanceTimersByTimeAsync(299_999);
+    expect(navigationErrors).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
     expect(navigationErrors).toEqual(["Not implemented: navigation (except hash changes)"]);
   });
 
