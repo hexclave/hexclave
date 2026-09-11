@@ -43,6 +43,8 @@ export function liveCredentialSettings(values: Record<string, string | undefined
     MARSHAL_S3_SECRET_ACCESS_KEY: required(values, "MARSHAL_S3_SECRET_ACCESS_KEY", "S3_SECRET_ACCESS_KEY"),
     MARSHAL_S3_ENDPOINT: required(values, "MARSHAL_S3_ENDPOINT", "S3_API_ENDPOINT"),
     MARSHAL_S3_BUCKET: required(values, "MARSHAL_S3_BUCKET", "S3_BUCKET_NAME"),
+    // The gateway under test only routes hostnames signed with its own key.
+    HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY: required(values, "HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY", "GATEWAY_HOSTNAME_KEY"),
     MARSHAL_S3_REGION: values.MARSHAL_S3_REGION ?? "auto",
     MARSHAL_S3_FORCE_PATH_STYLE: values.MARSHAL_S3_FORCE_PATH_STYLE ?? "0",
     MARSHAL_FLY_REGION: values.MARSHAL_FLY_REGION ?? "iad",

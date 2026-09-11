@@ -170,7 +170,7 @@ type MockApp = {
   name: string,
   sharedIpv4: string | null,
   dedicatedIps: { id: string, address: string, type: string }[],
-  machines: { id: string, image: string, metadata: Record<string, string>, env: Record<string, string>, mounts: { volume: string, path: string }[], init: { exec?: string[] } | null }[],
+  machines: { id: string, state: string, image: string, metadata: Record<string, string>, env: Record<string, string>, mounts: { volume: string, path: string }[], init: { exec?: string[] } | null }[],
   volumes: { id: string, name: string, size_gb: number, attached_machine_id: string | null }[],
   certificates: { hostname: string, clientStatus: string }[],
 };
@@ -1430,13 +1430,14 @@ describe("deploys against the Marshal runtime", () => {
 
     const first = await syncServiceAndUpload(serviceId, { public: true, ports: { 3000: { protocol: "http" } } });
     const publicRun = await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
-    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/[^.]+\.deploy\.built-with-hexclave\.com$/);
+    // <app suffix>-<16 hex signature>: the gateway routes only hostnames Marshal signed.
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/[a-z0-9-]+-[0-9a-f]{16}\.deploy\.built-with-hexclave\.com$/);
     const publicService = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
     expect((publicService.body as any).public).toBe(true);
     expect((publicService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
     expect((publicService.body as any).url).toBe(serviceOutcome(publicRun, serviceId).url);
     const publicApp = await findMockApp(serviceId);
-    expect(serviceOutcome(publicRun, serviceId).url).toBe(`https://${publicApp.name.slice(4)}.deploy.built-with-hexclave.com`);
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(new RegExp(`^https://${publicApp.name.slice(4)}-[0-9a-f]{16}\\.deploy\\.built-with-hexclave\\.com$`));
     expect(publicApp.certificates).toEqual([]);
     expect(publicApp.sharedIpv4).not.toBeNull();
     expect(publicApp.dedicatedIps.some((ip) => ip.type === "v6")).toBe(true);
@@ -1687,6 +1688,38 @@ describe("deploys against the Marshal runtime", () => {
     const redeployedEnv = (await findMockApp(serviceId)).machines[0].env;
     expect(redeployedEnv).toMatchObject({ KEEP: "yes" });
     expect(Object.hasOwn(redeployedEnv, "DROP")).toBe(false);
+  });
+
+  it("redeploys a server that autostop has suspended", { timeout: 120_000 }, async ({ expect }) => {
+    // A `min_instances: 0` server is suspended by Fly once idle, and a deploy onto a
+    // suspended machine leaves it stopped after a transition during which a start is
+    // refused. This is how every redeploy of an idle server failed with "did not start in
+    // time" while the same image booted fine on the next request: the one start Marshal
+    // fired was rejected mid-transition and silently dropped.
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("idle");
+    const definition = { type: "server", min_instances: 0, ports: { 3000: { protocol: "http" } }, env: {} };
+    const { syncId: sync1, sourceId } = await syncServices({ [serviceId]: definition });
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: (await createUpload()).uploadId, definitionSyncId: sync1, levels: [[serviceId]] }), "deployed");
+    const before = await findMockApp(serviceId);
+    expect(before.machines[0].state).toBe("started");
+
+    // Park it the way autostop does.
+    const suspend = await fetch(`${FLY_MOCK_URL}/v1/apps/${before.name}/machines/${before.machines[0].id}/suspend`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${FLY_MOCK_TOKEN}` },
+    });
+    expect(suspend.status).toBe(200);
+    expect((await findMockApp(serviceId)).machines[0].state).toBe("suspended");
+
+    const { syncId: sync2 } = await syncServices({ [serviceId]: { ...definition, env: { CHANGED: { value: "yes" } } } }, sourceId);
+    const deployment = await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: (await createUpload()).uploadId, definitionSyncId: sync2, levels: [[serviceId]] }), "deployed");
+    expect(serviceOutcome(deployment, serviceId).status).toBe("deployed");
+    const after = await findMockApp(serviceId);
+    // Same machine, new config, and actually running — not left stopped by the update.
+    expect(after.machines[0].id).toBe(before.machines[0].id);
+    expect(after.machines[0].env).toMatchObject({ CHANGED: "yes" });
+    expect(after.machines[0].state).toBe("started");
   });
 
   // Skipped: Marshal serializes concurrent applies with a lease built on conditional writes

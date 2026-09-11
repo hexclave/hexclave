@@ -109,8 +109,10 @@ Cloud Run has no equivalent of Fly's request-triggered VM suspend/resume for a p
 
 ## Fly deployment platform domains
 
-Public HTTP services advertise `https://<suffix>.deploy.built-with-hexclave.com`, where
-`hxc-<suffix>` is the existing Fly app name. The name remains stable across redeploys.
+Public HTTP services advertise `https://<suffix>-<mac>.deploy.built-with-hexclave.com`, where
+`hxc-<suffix>` is the existing Fly app name and `<mac>` signs it under
+`HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY`, shared with the gateway, so the gateway routes only names
+this Marshal minted. The name remains stable across redeploys.
 The dedicated Fly gateway in [apps/deployment-gateway](../deployment-gateway/README.md)
 proxies HTTP, streaming, and WebSockets to the existing `.fly.dev` origin. Provision its
 wildcard DNS/TLS before deploying this Marshal version. Hosted components remain on Vercel.
@@ -161,7 +163,14 @@ Credentials resolve in three ways, in this order: workload identity federation, 
 Prefer federation for any hosted deployment; it is required on a host with no metadata server
 (Vercel). Set `HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_AUDIENCE` to the provider resource and
 `HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_SERVICE_ACCOUNT` to the controller service account it
-impersonates — setting only one of the two is a startup error rather than a fallback. Marshal
+impersonates — setting only one of the two is a startup error rather than a fallback. Also set
+`HEXCLAVE_MARSHAL_GCP_WORKLOAD_IDENTITY_ASSERTION_AUDIENCE` to the `aud` the host mints into
+its assertion (`https://vercel.com/<team-slug>` on Vercel; the provider's `--allowed-audiences`
+value, which `bootstrap-gcp.sh` prints). It is a different value from the STS audience: the
+exchange is addressed to the provider resource, but the assertion is addressed to the team URL,
+and Marshal filters incoming assertion headers by the latter. Left unset it defaults to the
+provider resource, with or without the `https:` scheme, matching a provider created without
+`--allowed-audiences`. Marshal
 exchanges the host's OIDC assertion for a federated token and impersonates the service account
 with it, so no long-lived key exists anywhere. This matters more here than it usually does: the
 controller identity can create, bill, and delete every tenant project, so a static key for it
@@ -215,7 +224,9 @@ pnpm -C apps/marshal test:platform-domains:live
 
 The runner reads real Fly and S3 credentials from `apps/marshal/.env.local`, accepting either
 the `MARSHAL_*` names or `FLY_API_TOKEN`, `FLY_ORG_SLUG`, `S3_ACCESS_KEY_ID`,
-`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`. No Vercel API token is required.
+`S3_SECRET_ACCESS_KEY`, `S3_API_ENDPOINT`, and `S3_BUCKET_NAME`, plus the gateway's hostname
+signing key as `HEXCLAVE_DEPLOYMENT_HOSTNAME_KEY` (or `GATEWAY_HOSTNAME_KEY`) — the gateway
+routes only hostnames signed with its own key. No Vercel API token is required.
 Configure the dedicated gateway and wildcard DNS/TLS first, following its README.
 For an isolated test gateway on a separate domain, pass
 `HEXCLAVE_DEPLOYMENT_PLATFORM_DOMAIN=deploy.example.net` to the command and configure the
