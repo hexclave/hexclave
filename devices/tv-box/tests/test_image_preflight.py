@@ -184,6 +184,10 @@ class ImagePreflightTests(unittest.TestCase):
                     (fs if location == "fs" else device)[field] = value
                     with self.assertRaises(ValueError):
                         verify(fs, device)
+            with self.assertRaisesRegex(ValueError, r'mount options: "ro"; one of "noload"/"norecovery"\.$'):
+                verify({**filesystem, "options": "rw,relatime"}, loop)
+            with self.assertRaisesRegex(ValueError, r'mount options: one of "noload"/"norecovery"\.$'):
+                verify({**filesystem, "options": "ro,relatime"}, loop)
 
     def test_verifier_does_not_accept_plain_directories_as_image_mounts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
