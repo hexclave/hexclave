@@ -465,7 +465,7 @@ export function HexclaveCompanion({ className, glassBg = false }: { className?: 
     >
       {/* The Handle Pill */}
       <div className={cn(
-        "flex flex-col items-center gap-3 px-2 py-3 border border-black/[0.06] dark:border-foreground/5 shadow-md transition-all duration-300 select-none",
+        "flex flex-col items-center gap-3 px-2 py-3 w-14 border border-black/[0.06] dark:border-foreground/5 shadow-md transition-all duration-300 select-none",
         glassBg
           ? "bg-slate-50/90 dark:bg-background/40 backdrop-blur-xl"
           : "bg-white dark:bg-foreground/[0.03] dark:backdrop-blur-xl",
@@ -507,13 +507,22 @@ export function HexclaveCompanion({ className, glassBg = false }: { className?: 
           </Tooltip>
         ))}
 
-        {versionCheckResult && (
-          <div className={cn(
-            "mt-auto pt-2 px-2 py-1 text-[10px] rounded-full font-mono font-medium opacity-60 hover:opacity-100 transition-opacity",
-            versionCheckResult.severe ? "text-red-500" : "text-orange-500"
-          )}>
-            v{packageJson.version}
-          </div>
+        {isOpen && versionCheckResult && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                className={cn(
+                  "mt-auto w-10 overflow-hidden text-ellipsis whitespace-nowrap text-center font-mono text-[9px] leading-tight opacity-60 hover:opacity-100 hover:transition-none transition-opacity",
+                  versionCheckResult.severe ? "text-red-500" : "text-orange-500"
+                )}
+              >
+                {packageJson.version}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="left" className="z-[60] mr-2">
+              v{packageJson.version}
+            </TooltipContent>
+          </Tooltip>
         )}
       </div>
     </div>

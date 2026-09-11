@@ -2,22 +2,24 @@
 
 import {
   DesignBadge,
-  type DesignBadgeColor,
   DesignButton,
   DesignCard,
 } from "@/components/design-components";
-import { cn, Skeleton } from "@/components/ui";
+import { ActionCell, Skeleton } from "@/components/ui";
 import { useAdminApp } from "@/app/(main)/(protected)/projects/[projectId]/use-admin-app";
 import { UserPageMetricCard } from "@/app/(main)/(protected)/projects/[projectId]/users/[userId]/user-page-metric-card";
 import { UserPageTableSection } from "@/app/(main)/(protected)/projects/[projectId]/users/[userId]/user-page-table-section";
-import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
-import { ArrowClockwiseIcon, ArrowCounterClockwiseIcon, CoinsIcon, GearIcon, PlusMinusIcon, ProhibitIcon, QuestionIcon, ShoppingCartIcon, ShuffleIcon } from "@phosphor-icons/react";
+import { CoinsIcon, PlusMinusIcon } from "@phosphor-icons/react";
 import type { DataGridColumnDef } from "@hexclave/dashboard-ui-components";
-import type { Transaction, TransactionEntry, TransactionType } from "@hexclave/shared/dist/interface/crud/transactions";
+import type { Transaction, TransactionEntry } from "@hexclave/shared/dist/interface/crud/transactions";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
+import { useRouter } from "@/components/router";
 import { Suspense, useMemo, useState } from "react";
 import type { CustomerType } from "./customer-selector";
 import { ItemQuantityChangeDialog } from "./item-quantity-change-dialog";
+import { getTransactionSummary, transactionPageHref } from "./transaction-actions";
+import { SubscriptionCancelDialog, useTransactionDialog } from "./transaction-row-actions";
+import { TransactionAmountCell, TransactionEventCell } from "./transaction-table-cells";
 
 // Re-export so existing consumers of this module keep working, while the
 // canonical definition lives in customer-selector.tsx.
@@ -32,7 +34,6 @@ const DATE_LONG = new Intl.DateTimeFormat(undefined, { month: "short", day: "num
 
 type MoneyTransferEntry = Extract<TransactionEntry, { type: "money_transfer" }>;
 type ProductGrantEntry = Extract<TransactionEntry, { type: "product_grant" }>;
-type ItemQuantityChangeEntry = Extract<TransactionEntry, { type: "item_quantity_change" }>;
 type ProductRevocationEntry = Extract<TransactionEntry, { type: "product_revocation" }>;
 
 function isMoneyTransferEntry(entry: TransactionEntry): entry is MoneyTransferEntry {
@@ -40,9 +41,6 @@ function isMoneyTransferEntry(entry: TransactionEntry): entry is MoneyTransferEn
 }
 function isProductGrantEntry(entry: TransactionEntry): entry is ProductGrantEntry {
   return entry.type === "product_grant";
-}
-function isItemQuantityChangeEntry(entry: TransactionEntry): entry is ItemQuantityChangeEntry {
-  return entry.type === "item_quantity_change";
 }
 function isProductRevocationEntry(entry: TransactionEntry): entry is ProductRevocationEntry {
   return entry.type === "product_revocation";
@@ -63,32 +61,6 @@ function formatUsd(amount: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
-}
-
-function formatTransactionTypeLabel(type: TransactionType | null): { label: string, Icon: PhosphorIcon } {
-  switch (type) {
-    case "purchase": {
-      return { label: "Purchase", Icon: ShoppingCartIcon };
-    }
-    case "subscription-renewal": {
-      return { label: "Subscription renewal", Icon: ArrowClockwiseIcon };
-    }
-    case "subscription-cancellation": {
-      return { label: "Subscription cancellation", Icon: ProhibitIcon };
-    }
-    case "chargeback": {
-      return { label: "Chargeback", Icon: ArrowCounterClockwiseIcon };
-    }
-    case "manual-item-quantity-change": {
-      return { label: "Item quantity change", Icon: GearIcon };
-    }
-    case "product-change": {
-      return { label: "Product change", Icon: ShuffleIcon };
-    }
-    default: {
-      return { label: "-", Icon: QuestionIcon };
-    }
-  }
 }
 
 /**
@@ -147,7 +119,7 @@ function CustomerPaymentsContent({ customerType, customerId }: { customerType: C
 
       <div className="flex flex-col gap-6">
         <ProductsTableSection customerType={customerType} customerId={customerId} transactions={transactions} />
-        <TransactionsTableSection customerType={customerType} customerId={customerId} transactions={transactions} />
+        <TransactionsTableSection customerType={customerType} transactions={transactions} />
       </div>
 
       <ItemsCard customerType={customerType} customerId={customerId} itemIds={itemIds} />
@@ -157,6 +129,7 @@ function CustomerPaymentsContent({ customerType, customerId }: { customerType: C
 
 type ActiveGrant = {
   key: string,
+  transactionId: string,
   productDisplayName: string,
   quantity: number,
   subscriptionId: string | undefined,
@@ -198,6 +171,7 @@ function deriveActiveGrants(transactions: Transaction[], customerType: CustomerT
 
       grants.push({
         key: `${transaction.id}:${entryIndex}`,
+        transactionId: transaction.id,
         productDisplayName: entry.product.display_name,
         quantity: entry.quantity,
         subscriptionId: entry.subscription_id,
@@ -291,6 +265,8 @@ function MetricsRow({ customerType, customerId, transactions, truncated }: { cus
 }
 
 function ProductsTableSection({ customerType, customerId, transactions }: { customerType: CustomerType, customerId: string, transactions: Transaction[] }) {
+  const app = useAdminApp();
+  const router = useRouter();
   const grants = useMemo(() => deriveActiveGrants(transactions, customerType, customerId), [transactions, customerType, customerId]);
   const columns = useMemo<DataGridColumnDef<ActiveGrant>[]>(() => [
     {
@@ -340,88 +316,80 @@ function ProductsTableSection({ customerType, customerId, transactions }: { cust
         <span className="text-sm text-muted-foreground">{DATE_SHORT.format(row.grantedAt)}</span>
       ),
     },
+    {
+      id: "actions",
+      header: "",
+      width: 50,
+      minWidth: 50,
+      maxWidth: 50,
+      align: "right",
+      sortable: false,
+      hideable: false,
+      resizable: false,
+      renderCell: ({ row }) => (
+        <ActionCell
+          items={[{
+            item: "Cancel subscription…",
+            danger: true,
+            disabled: row.subscriptionId == null,
+            // One-time products have no subscription to cancel; access is
+            // revoked from the purchase transaction in the history below.
+            disabledTooltip: "This is a one-time product. To revoke access, use “Revoke access” on its purchase in the transaction history.",
+            onClick: () => setCancelTarget(row),
+          }]}
+        />
+      ),
+    },
   ], []);
 
+  const [cancelTarget, setCancelTarget] = useState<ActiveGrant | null>(null);
+
   return (
-    <UserPageTableSection
-      title="Products & subscriptions"
-      urlStateKey={`${customerType}subs`}
-      columns={columns}
-      rows={grants}
-      getRowId={(grant) => grant.key}
-      emptyLabel={`This ${customerNoun(customerType)} has no active products or subscriptions.`}
-    />
+    <>
+      <UserPageTableSection
+        title="Products & subscriptions"
+        urlStateKey={`${customerType}subs`}
+        columns={columns}
+        rows={grants}
+        getRowId={(grant) => grant.key}
+        emptyLabel={`This ${customerNoun(customerType)} has no active products or subscriptions.`}
+        onRowClick={(row) => {
+          router.push(transactionPageHref(app.projectId, {
+            id: row.transactionId,
+            customer_type: customerType,
+            customer_id: customerId,
+          }));
+        }}
+      />
+      {cancelTarget?.subscriptionId != null ? (
+        <SubscriptionCancelDialog
+          onClose={() => setCancelTarget(null)}
+          subscriptionId={cancelTarget.subscriptionId}
+          productDisplayName={cancelTarget.productDisplayName}
+        />
+      ) : null}
+    </>
   );
 }
 
-function transactionSignedUsd(transaction: Transaction, customerType: CustomerType, customerId: string): number | null {
-  let total = 0;
-  let hadAny = false;
-  for (const entry of transaction.entries) {
-    if (!isMoneyTransferEntry(entry)) continue;
-    if (entry.customer_type !== customerType || entry.customer_id !== customerId) continue;
-    const usd = entry.net_amount.USD;
-    if (typeof usd !== "string") continue;
-    const parsed = Number.parseFloat(usd);
-    if (!Number.isFinite(parsed)) continue;
-    total += parsed;
-    hadAny = true;
-  }
-  return hadAny ? total : null;
-}
-
-function transactionDetail(transaction: Transaction, customerType: CustomerType, customerId: string): string {
-  const productGrant = transaction.entries.find(
-    (e): e is ProductGrantEntry =>
-      isProductGrantEntry(e) && e.customer_type === customerType && e.customer_id === customerId,
-  );
-  if (productGrant) {
-    const name = productGrant.product.display_name;
-    return productGrant.quantity > 1 ? `${name} x${productGrant.quantity}` : name;
-  }
-  const itemChange = transaction.entries.find(
-    (e): e is ItemQuantityChangeEntry =>
-      isItemQuantityChangeEntry(e) && e.customer_type === customerType && e.customer_id === customerId,
-  );
-  if (itemChange) {
-    const delta = itemChange.quantity;
-    return `${itemChange.item_id} (${delta > 0 ? "+" : ""}${delta})`;
-  }
-  return "-";
-}
-
-function TransactionsTableSection({ customerType, customerId, transactions }: { customerType: CustomerType, customerId: string, transactions: Transaction[] }) {
+function TransactionsTableSection({ customerType, transactions }: { customerType: CustomerType, transactions: Transaction[] }) {
   const ordered = useMemo(
     () => [...transactions].sort((a, b) => b.created_at_millis - a.created_at_millis),
     [transactions],
   );
+  // No `onCompleted` reload needed: `transactions` comes from
+  // `useTransactions`, whose cache `refundTransaction` invalidates.
+  const transactionDialog = useTransactionDialog();
   const columns = useMemo<DataGridColumnDef<Transaction>[]>(() => [
     {
-      id: "type",
-      header: "Type",
-      width: 190,
+      id: "event",
+      header: "Event",
+      minWidth: 220,
+      flex: 1.4,
       sortable: false,
-      renderCell: ({ row }) => {
-        const { label, Icon } = formatTransactionTypeLabel(row.type);
-        return (
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground/[0.06]">
-              <Icon className="h-4 w-4 text-foreground/70" aria-hidden />
-            </div>
-            <span className="truncate text-sm font-medium text-foreground">{label}</span>
-          </div>
-        );
-      },
-    },
-    {
-      id: "detail",
-      header: "Detail",
-      width: 240,
-      flex: 1,
-      sortable: false,
-      renderCell: ({ row }) => (
-        <span className="truncate text-sm text-muted-foreground">{transactionDetail(row, customerType, customerId)}</span>
-      ),
+      hideable: false,
+      cellOverflow: "truncate",
+      renderCell: ({ row }) => <TransactionEventCell summary={getTransactionSummary(row)} />,
     },
     {
       id: "createdAt",
@@ -444,59 +412,26 @@ function TransactionsTableSection({ customerType, customerId, transactions }: { 
       width: 120,
       align: "right",
       sortable: false,
-      renderCell: ({ row }) => {
-        if (row.test_mode) {
-          return <span className="text-xs font-medium text-muted-foreground">Test</span>;
-        }
-        const signedUsd = transactionSignedUsd(row, customerType, customerId);
-        if (signedUsd == null) {
-          return <span className="text-xs text-muted-foreground">-</span>;
-        }
-        return (
-          <span
-            className={cn(
-              "text-sm font-medium tabular-nums",
-              signedUsd < 0 ? "text-muted-foreground" : "text-foreground",
-            )}
-          >
-            {signedUsd < 0 ? "-" : ""}
-            {formatUsd(Math.abs(signedUsd))}
-          </span>
-        );
-      },
+      renderCell: ({ row }) => <TransactionAmountCell summary={getTransactionSummary(row)} size="sm" />,
     },
-    {
-      id: "status",
-      header: "Status",
-      width: 110,
-      sortable: false,
-      renderCell: ({ row }) => {
-        const badge = transactionStatusBadge(row, row.adjusted_by.length > 0);
-        return badge ? <DesignBadge label={badge.label} color={badge.color} size="sm" /> : <span className="text-sm text-muted-foreground">-</span>;
-      },
-    },
-  ], [customerType, customerId]);
+    transactionDialog.actionsColumn,
+  ], [transactionDialog.actionsColumn]);
 
   return (
-    <UserPageTableSection
-      title="Transaction history"
-      urlStateKey={`${customerType}txns`}
-      columns={columns}
-      rows={ordered}
-      getRowId={(transaction) => transaction.id}
-      emptyLabel={`This ${customerNoun(customerType)} has no transactions.`}
-      paginated
-    />
+    <>
+      <UserPageTableSection
+        title="Transaction history"
+        urlStateKey={`${customerType}txns`}
+        columns={columns}
+        rows={ordered}
+        getRowId={(transaction) => transaction.id}
+        emptyLabel={`This ${customerNoun(customerType)} has no transactions.`}
+        paginated
+        onRowClick={transactionDialog.onRowClick}
+      />
+      {transactionDialog.dialog}
+    </>
   );
-}
-
-function transactionStatusBadge(
-  transaction: Transaction,
-  refunded: boolean,
-): { label: string, color: DesignBadgeColor } | null {
-  if (refunded) return { label: "Refunded", color: "orange" };
-  if (transaction.test_mode) return { label: "Test", color: "purple" };
-  return null;
 }
 
 function ItemsCard({ customerType, customerId, itemIds }: { customerType: CustomerType, customerId: string, itemIds: string[] }) {

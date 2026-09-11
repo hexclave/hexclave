@@ -1,7 +1,7 @@
 "use client";
 
-import { createDefaultDataGridState, DataGrid, type DataGridColumnDef, type DataGridSortModel, useDataGridUrlState, useDataSource } from "@hexclave/dashboard-ui-components";
-import { useState, type ReactNode } from "react";
+import { createDefaultDataGridState, DataGrid, type DataGridColumnDef, type DataGridSortModel, type DataGridState, useDataGridUrlState, useDataSource } from "@hexclave/dashboard-ui-components";
+import { useMemo, useState, type ReactNode } from "react";
 
 type UserPageTableSectionProps<TRow> = {
   title: string,
@@ -11,6 +11,8 @@ type UserPageTableSectionProps<TRow> = {
   getRowId: (row: TRow) => string,
   emptyLabel: string,
   onRowClick?: (row: TRow, rowId: string, event: React.MouseEvent) => void,
+  /** Highlights a row (no checkboxes) — used by the transaction inspector. */
+  highlightedRowId?: string | null,
   hasMore?: boolean,
   isLoadingMore?: boolean,
   onLoadMore?: () => void,
@@ -22,6 +24,19 @@ type UserPageTableSectionProps<TRow> = {
   error?: ReactNode | null,
   urlStateKey?: string,
 };
+
+function withHighlightedRow(state: DataGridState, rowId: string | null | undefined): DataGridState {
+  if (rowId == null) {
+    return state;
+  }
+  if (state.selection.selectedIds.size === 1 && state.selection.selectedIds.has(rowId)) {
+    return state;
+  }
+  return {
+    ...state,
+    selection: { selectedIds: new Set([rowId]), anchorId: rowId },
+  };
+}
 
 function useGridState<TRow>(columns: readonly DataGridColumnDef<TRow>[], urlStateKey?: string) {
   // Always call both hooks for rules-of-hooks; return whichever the caller opted into.
@@ -38,6 +53,7 @@ export function UserPageTableSection<TRow,>({
   getRowId,
   emptyLabel,
   onRowClick,
+  highlightedRowId,
   hasMore,
   isLoadingMore,
   onLoadMore,
@@ -59,6 +75,10 @@ export function UserPageTableSection<TRow,>({
   });
 
   const visibleColumns = columns.filter((column) => gridState.columnVisibility[column.id] !== false);
+  const displayState = useMemo(
+    () => withHighlightedRow(gridState, highlightedRowId),
+    [gridState, highlightedRowId],
+  );
 
   return (
     <section className="flex flex-col gap-3">
@@ -109,7 +129,7 @@ export function UserPageTableSection<TRow,>({
           rows={paginated ? gridData.rows : rows}
           getRowId={getRowId}
           onRowClick={onRowClick}
-          state={gridState}
+          state={displayState}
           onChange={setGridState}
           onSortChange={onSortChange}
           toolbar={false}
