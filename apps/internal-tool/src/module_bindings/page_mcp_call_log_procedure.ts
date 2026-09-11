@@ -18,5 +18,10 @@ export const params = {
   beforeCreatedAtMicros: __t.option(__t.u64()),
   beforeId: __t.option(__t.u64()),
   limit: __t.u32(),
+  createdAtOrAfterMicros: __t.option(__t.u64()),
+  toolName: __t.option(__t.string()),
+  hasError: __t.option(__t.bool()),
+  qaState: __t.option(__t.string()),
+  humanReviewState: __t.option(__t.string()),
 };
 export const returnType = McpCallLogPage
