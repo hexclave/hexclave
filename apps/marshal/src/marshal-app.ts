@@ -449,6 +449,10 @@ export function createMarshalApp() {
         status,
         metadataJson: status === "succeeded" ? bodyText : null,
         errorText: status === "failed" ? bodyText : null,
+        // SPIKE: apply the first service right here instead of waiting for the client's
+        // next poll to do it. The harness's wget simply waits; the deployment advances
+        // the same one-step-per-call way it always did, just without the poll gap.
+        applyFirst: true,
       });
       return { ok: true };
     }), { parse: "text" });

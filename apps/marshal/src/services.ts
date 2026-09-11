@@ -408,11 +408,14 @@ export async function applyServiceSpec(ns: string, key: string, spec: ServiceSpe
 }
 
 async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, key: string, spec: ServiceSpec, lease: ReconciliationLeaseGuard, knownTargets?: Map<string, KnownTarget>): Promise<ApplyResult> {
+  const asT0 = Date.now();
+  const asT = (label: string) => console.log(`${new Date().toISOString()} timing applyServiceSpec ${ns}/${key} ${label} +${Date.now() - asT0}ms`);
   // A domain-holding service must satisfy the domain port rule on every spec write, not just
   // at attach time. The domain's public ingress outlives the attach: a later PUT that adds a
   // private sibling port would hand it to the proxy on those IPs, so the whole rule is
   // re-checked here rather than only its HTTP-port half.
   const domainClaims = await currentDomainClaimsForService(ns, key);
+  asT("domain claims read");
   if (domainClaims.length > 0) {
     assertServiceCanHoldADomain(key, spec.config.ports, spec.config.public, "Detach the service's custom domains first if this port set is what you want.");
     if (provider.kind === "gcp") {
@@ -427,12 +430,16 @@ async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, 
   const revision = computeRevision(spec);
   const now = Date.now();
   const claimed = await claimDesiredSpec(ns, key, spec, revision, now);
+  asT("spec claimed");
   const { stored, changed } = claimed;
   const ownedSpecEtag = claimed.etag;
 
   // Unresolvable refs: persist the spec and report blocked WITHOUT touching runtime resources or
   // starting builds — the backend re-applies when the blocking output appears.
-  const resolved = await resolveEnv(ns, stored.spec.env, knownTargets);
+  // SPIKE: two reads that both have to land before the mutation; neither needs
+  // the other, so they go out together.
+  const [resolved, stillOwned] = await Promise.all([resolveEnv(ns, stored.spec.env, knownTargets, provider), specIsStillOwned(ns, key, ownedSpecEtag)]);
+  asT("env resolved + ownership re-checked");
   if (!resolved.ok) {
     return { revision, changed, state: await serviceStateWith(provider, ns, key, stored, knownTargets), imageRef: null };
   }
@@ -446,7 +453,7 @@ async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, 
   // report the service as stale in the dashboard, and offer a redeploy (Vercel makes the
   // redeploy mandatory — an env change never applies to an existing deployment).
 
-  if (!await specIsStillOwned(ns, key, ownedSpecEtag)) {
+  if (!stillOwned) {
     // Deliberately WITHOUT knownTargets: the spec being reported now belongs to whoever won the
     // race, and resolving someone else's refs against this deployment's targets would report
     // a state their own reads never agree with.
@@ -458,6 +465,7 @@ async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, 
     // apply has to know about it or it will tear that gateway down as though the service
     // were merely private.
     imageRef = await provider.applyService(stored, stored.spec.source.image, resolved.env, lease, domainClaims.length > 0);
+    asT("provider.applyService done");
     stored.last_apply_error = null;
   } catch (error) {
     if (isReconciliationFencingError(error)) throw error;
@@ -467,7 +475,9 @@ async function applyServiceSpecWithLease(provider: RuntimeProvider, ns: string, 
     console.error(`apply failed for service ${stored.ns}/${stored.key}`, error);
     stored.last_apply_error = `deploy failed: ${applyErrorMessage(error)}`;
   }
-  return { revision, changed, state: await stateAfterSpecWrite(provider, ns, key, stored, ownedSpecEtag, knownTargets), imageRef };
+  const state = await stateAfterSpecWrite(provider, ns, key, stored, ownedSpecEtag, knownTargets);
+  asT("state after spec write");
+  return { revision, changed, state, imageRef };
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,31 +1078,36 @@ export async function completeBuild(options: {
   ns: string,
   deploymentId: string,
   status: "succeeded" | "failed",
+  // On success: the JSON the harness posts, `{"targets":{"<service_key>":"sha256:..."}}`.
   metadataJson: string | null,
   errorText: string | null,
+  // SPIKE: apply the first service in this call, under the lease it already holds.
+  applyFirst?: boolean,
 }): Promise<void> {
   const existing = await readDeployment(options.ns, options.deploymentId);
   if (existing === null) return;
   const provider = await providerForNamespace(options.ns);
+  // SPIKE timing
+  const t0 = Date.now();
+  const t = (label: string) => console.log(`${new Date().toISOString()} timing completeBuild ${options.deploymentId} ${label} +${Date.now() - t0}ms`);
+  // SPIKE: only the status transition happens under the source lease. Persisting the
+  // build log (paging Fly's log API) and deleting the upload used to sit inside it too,
+  // which kept the first apply — which needs the same lease — waiting on housekeeping.
+  let completed = null as StoredDeployment | null;
   try {
     await withReconciliationLease(options.ns, sourceLeaseKey(existing.source_id), async (lease) => {
+      t("lease acquired");
       const current = await readDeploymentVersioned(options.ns, options.deploymentId);
-      // Terminal already (a retried webhook, or the stale-build backstop got there
-      // first): the first outcome wins.
       if (current === null || current.value.status !== "building") return;
       await lease.assertOwned();
 
       if (options.status === "failed") {
         await replaceDeployment(failDeployment(current.value, options.errorText ?? "the build failed"), current.etag);
-        await persistDeploymentLog(provider, current.value);
-        await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
+        completed = current.value;
         return;
       }
 
       const images = parseBuildImages(provider, options.metadataJson, current.value);
-      // Only the targets that were BUILT need a digest from the build. A prebuilt
-      // target was resolved when the deployment was created and is already in
-      // `images`; asking the build for one would fail every mixed deployment.
       const missing = current.value.targets
         .filter((target) => targetIsBuilt(target) && lookup(images, target.service_key) === undefined)
         .map((target) => target.service_key);
@@ -1101,24 +1116,40 @@ export async function completeBuild(options: {
         // ended in a state Marshal cannot map to images, which is a failure rather
         // than something to half-apply.
         await replaceDeployment(failDeployment(current.value, `the build reported no image for ${missing.join(", ")}`), current.etag);
-        await persistDeploymentLog(provider, current.value);
-        await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
+        completed = current.value;
         return;
       }
 
-      await replaceDeployment({
+      const deploying: StoredDeployment = {
         ...current.value,
         status: "deploying",
         // MERGED, not replaced: the prebuilt entries were resolved before the build
         // started and the build knows nothing about them.
         images: { ...current.value.images, ...images },
         services: Object.fromEntries(Object.entries(current.value.services).map(([key, service]) => [key, { ...service, status: "pending" as const }])),
-      }, current.etag);
-      await persistDeploymentLog(provider, current.value);
-      await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
+      };
+      const deployingEtag = await replaceDeployment(deploying, current.etag);
+      t("status=deploying written");
+      completed = current.value;
+      // SPIKE: the first apply runs right here, under the source lease this call
+      // already holds and with the etag its own write just returned — instead of
+      // releasing, letting a poll re-acquire the same lease and re-read the same
+      // record. It runs BEFORE the housekeeping below for the same reason: the
+      // apply is what the user is waiting on; the log can be paged out afterwards.
+      if (options.applyFirst === true && deployingEtag !== null) {
+        await applyNextService(options.ns, deploying, lease, deployingEtag);
+        t("first service applied");
+      }
     });
+    if (completed !== null) {
+      await persistDeploymentLog(provider, completed);
+      t("log persisted");
+      await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
+      t("upload deleted");
+    }
   } finally {
     await provider.deleteBuilder(existing);
+    t("builder deleted");
   }
 }
 
@@ -1196,7 +1227,7 @@ export async function advanceDeployment(ns: string, deploymentId: string): Promi
  * Applies the next pending service of the current level, or closes the
  * deployment when everything has been applied.
  */
-async function applyNextService(ns: string, deployment: StoredDeployment, lease: ReconciliationLeaseGuard): Promise<StoredDeployment> {
+async function applyNextService(ns: string, deployment: StoredDeployment, lease: ReconciliationLeaseGuard, knownEtag?: string): Promise<StoredDeployment> {
   // The PORTS AND VISIBILITY of every target in this deployment, so a reference
   // to one of them resolves without waiting for it to be applied first — which is
   // what keeps a private `url(5432)` independent of deploy order.
@@ -1235,7 +1266,9 @@ async function applyNextService(ns: string, deployment: StoredDeployment, lease:
     await lease.assertOwned();
     let state: DeploymentServiceState;
     try {
+      const applyStartedAt = Date.now();
       const applied = await applyServiceSpec(ns, next.service_key, { ...target.spec, source: { image } }, { knownTargets });
+      console.log(`${new Date().toISOString()} timing applyNextService ${deployment.id} ${next.service_key} apply took ${Date.now() - applyStartedAt}ms`);
       state = deploymentStateForApply(next.service_key, image, applied);
     } catch (error) {
       if (isReconciliationFencingError(error)) throw error;
@@ -1245,9 +1278,14 @@ async function applyNextService(ns: string, deployment: StoredDeployment, lease:
     }
     const updated: StoredDeployment = { ...deployment, services: { ...deployment.services, [next.service_key]: state } };
     if (state.status === "failed") {
-      return await writeDeployment(ns, deployment, failDeployment(updated, state.error ?? `${next.service_key} failed to deploy`));
+      return await writeDeployment(ns, deployment, failDeployment(updated, state.error ?? `${next.service_key} failed to deploy`), knownEtag);
     }
-    return await writeDeployment(ns, deployment, updated);
+    // SPIKE: close in the same write when this was the last service, instead of
+    // leaving "succeeded" for the caller's next poll to discover.
+    if (Object.values(updated.services).every((service) => service.status === "deployed")) {
+      return await writeDeployment(ns, deployment, { ...updated, status: "succeeded", finished_at_millis: updated.finished_at_millis ?? Date.now() }, knownEtag);
+    }
+    return await writeDeployment(ns, deployment, updated, knownEtag);
   }
 
   // Nothing left pending: every service of every level is deployed.
@@ -1258,7 +1296,14 @@ async function applyNextService(ns: string, deployment: StoredDeployment, lease:
   });
 }
 
-async function writeDeployment(ns: string, previous: StoredDeployment, next: StoredDeployment): Promise<StoredDeployment> {
+async function writeDeployment(ns: string, previous: StoredDeployment, next: StoredDeployment, knownEtag?: string): Promise<StoredDeployment> {
+  // SPIKE: a caller that wrote the record itself under the lease it still holds
+  // passes the etag back; the conditional write stays the arbiter, and a loss
+  // falls through to the read it would have done anyway.
+  if (knownEtag !== undefined) {
+    const etag = await replaceDeployment(next, knownEtag);
+    if (etag !== null) return next;
+  }
   const current = await readDeploymentVersioned(ns, previous.id);
   if (current === null) return next;
   const etag = await replaceDeployment(next, current.etag);
@@ -1444,7 +1489,7 @@ async function serviceStateWith(provider: RuntimeProvider, ns: string, key: stri
     // from stored specs alone and report `blocked` for a private `url(port)` naming a target
     // of this deployment that has not been applied yet — failing the deployment over the
     // very ordering independence knownTargets exists to provide.
-    resolveEnv(ns, stored.spec.env, knownTargets),
+    resolveEnv(ns, stored.spec.env, knownTargets, provider),
     provider.domains.statesFor(ns, key, stored),
   ]);
 

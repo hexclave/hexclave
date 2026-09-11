@@ -54,7 +54,24 @@ async function acquireLease(ns: string, key: string, ownerId: string, timings: L
       console.warn(`marshal lease acquired for ${JSON.stringify(key)} after ${Math.round(performance.now() - startedAt)}ms following contention`);
     }
   };
+  const noteLostWrite = (): void => {
+    if (lostWriteLogged) return;
+    console.warn(`lost conditional lease write for ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)}: another marshal replica created the lease first`);
+    lostWriteLogged = true;
+  };
   const deadline = Date.now() + timings.acquireTimeoutMs;
+  // SPIKE: the uncontended case is the common one, so the first attempt creates
+  // blindly and only reads on a loss; the read-then-decide loop below handles
+  // everything the blind create could not (a live holder, an expired one).
+  {
+    const now = Date.now();
+    const desired = { owner_id: ownerId, expires_at_millis: now + timings.durationMs } satisfies ReconciliationLease;
+    const etag = await createReconciliationLease(ns, key, desired);
+    if (etag !== null) return { etag, value: desired };
+    // Lost to a holder that already exists (the usual reason) or to a racing
+    // create; the loop below finds out which, and the diagnostic stays the same.
+    noteLostWrite();
+  }
   for (;;) {
     const now = Date.now();
     const desired = { owner_id: ownerId, expires_at_millis: now + timings.durationMs } satisfies ReconciliationLease;
@@ -65,10 +82,7 @@ async function acquireLease(ns: string, key: string, ownerId: string, timings: L
         logAcquiredAfterContention();
         return { etag, value: desired };
       }
-      if (!lostWriteLogged) {
-        console.warn(`lost conditional lease write for ${JSON.stringify(key)} in namespace ${JSON.stringify(ns)}: another marshal replica created the lease first`);
-        lostWriteLogged = true;
-      }
+      noteLostWrite();
     } else if (current.value.expires_at_millis + timings.takeoverGraceMs <= now) {
       // Conditional replacement is the distributed arbiter: exactly one Marshal replica can
       // take over an expired lease. The grace period also drains every bounded provider write the

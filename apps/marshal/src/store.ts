@@ -1,4 +1,4 @@
-import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client, UploadPartCommand, type ListObjectsV2CommandOutput } from "@aws-sdk/client-s3";
+import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CopyObjectCommand, CreateMultipartUploadCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client, UploadPartCommand, type ListObjectsV2CommandOutput } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { logicalStorageKey, storageKey } from "./storage-prefix.js";
 import { getConfig, MAX_UPLOAD_BYTES, MULTIPART_UPLOAD_THRESHOLD_BYTES, UPLOAD_EXPIRY_SECONDS, UPLOAD_PART_SIZE_BYTES } from "./config.js";
@@ -517,6 +517,31 @@ export async function presignUploadGet(ns: string, id: string, expiresInSeconds:
 
 function validatedUploadObjectKey(ns: string, buildId: string): string {
   return `uploads/.validated/${ns}/${buildId}.tar.gz`;
+}
+
+/**
+ * SPIKE: the validated copy as a server-side copy of the upload object, fenced on
+ * the SAME etag the validating read was fenced on — so the copy is byte-identical
+ * to what was validated even though the client's presigned PUT is still live.
+ * The bytes never come back through Marshal. Returns false when the fence fails
+ * (the upload changed or vanished), which the caller reports exactly as a failed
+ * validating read.
+ */
+export async function copyValidatedUpload(ns: string, uploadId: string, buildId: string, expectedEtag: string): Promise<boolean> {
+  try {
+    await withTransientRetry(async () => await s3().send(new CopyObjectCommand({
+      Bucket: bucket(),
+      Key: storageKey(validatedUploadObjectKey(ns, buildId)),
+      CopySource: `${bucket()}/${storageKey(uploadObjectKey(ns, uploadId))}`,
+      CopySourceIfMatch: expectedEtag,
+      ContentType: "application/gzip",
+      MetadataDirective: "REPLACE",
+    })));
+    return true;
+  } catch (error) {
+    if (isNoSuchKey(error) || isPreconditionFailed(error)) return false;
+    throw error;
+  }
 }
 
 export async function writeValidatedUpload(ns: string, buildId: string, bytes: Uint8Array): Promise<void> {

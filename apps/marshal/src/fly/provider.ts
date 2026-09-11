@@ -342,12 +342,19 @@ async function applyMachines(fly: FlyClient, stored: StoredSpec, imageRef: strin
   const flyConfiguration = flyConfig();
   const appName = appNameForService(config.envId, stored.ns, stored.key);
   const network = networkForNamespace(config.envId, stored.ns);
+  const t0 = Date.now();
+  const t = (label: string) => console.log(`${new Date().toISOString()} timing applyMachines ${stored.ns}/${stored.key} ${label} +${Date.now() - t0}ms`);
   await lease.assertOwned();
   await fly.ensureApp(appName, network);
+  t("ensureApp");
   await lease.assertOwned();
-  await fly.ensureFlycastIp(appName, network);
-  await lease.assertOwned();
-  await reconcilePublicIps(fly, appName, specIsPublic(stored.spec) ? "public" : "private");
+  // SPIKE: the two address reconciliations only need the app to exist; neither the
+  // machine nor the other one depends on them, so they run side by side.
+  await Promise.all([
+    fly.ensureFlycastIp(appName, network),
+    reconcilePublicIps(fly, appName, specIsPublic(stored.spec) ? "public" : "private"),
+  ]);
+  t("flycast + public IPs reconciled");
 
   const specVolumeEntry = specVolume(stored.spec);
   const volumeId = specVolumeEntry === null
@@ -447,7 +454,9 @@ async function applyMachines(fly: FlyClient, stored: StoredSpec, imageRef: strin
         region: flyConfiguration.region,
         config: desired,
       });
+      t(`createMachine ${created.id}`);
       await fly.waitForMachineState(appName, created.id, "started", { instanceId: created.instance_id, totalTimeoutSeconds: 120 });
+      t("machine started");
       if (slot === 0) runningDigest = reportedDigest(created);
     }
   }

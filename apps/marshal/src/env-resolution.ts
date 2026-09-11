@@ -2,7 +2,7 @@
 // Its own module because both the generic layer (services.ts) and a provider's domain flow
 // need it, and a provider must not import services.ts (which imports the providers).
 import { badRequest } from "./errors.js";
-import { providerForNamespace, type RuntimeAddress } from "./provider.js";
+import { providerForNamespace, type RuntimeAddress, type RuntimeProvider } from "./provider.js";
 import { soleHttpPort, standardPortsHolderFor } from "./spec-helpers.js";
 import { readSpec } from "./store.js";
 import { portEntries, type EnvValue, type PortsConfig, type ServiceKind } from "./types.js";
@@ -26,7 +26,7 @@ export type ResolvedEnv =
 // know that port's protocol and whether it is public — from the deployment's own targets
 // when the target is part of this deploy (which is what keeps a private url() from
 // depending on deploy ORDER), and otherwise from the target's stored spec.
-export async function resolveEnv(ns: string, env: Record<string, EnvValue>, knownTargets?: Map<string, KnownTarget>): Promise<ResolvedEnv> {
+export async function resolveEnv(ns: string, env: Record<string, EnvValue>, knownTargets?: Map<string, KnownTarget>, knownProvider?: RuntimeProvider): Promise<ResolvedEnv> {
   const resolved = new Map<string, string>();
   const blockedRefs: string[] = [];
   const addressCache = new Map<string, RuntimeAddress | null>();
@@ -44,7 +44,9 @@ export async function resolveEnv(ns: string, env: Record<string, EnvValue>, know
     }
     return targetCache.get(targetKey) ?? null;
   };
-  const provider = await providerForNamespace(ns);
+  // SPIKE: callers on the apply path already resolved the provider; passing it
+  // saves the tenant-record read this would otherwise repeat.
+  const provider = knownProvider ?? await providerForNamespace(ns);
   const addressOf = async (targetKey: string): Promise<RuntimeAddress | null> => {
     if (!addressCache.has(targetKey)) {
       const stored = await readSpec(ns, targetKey);
