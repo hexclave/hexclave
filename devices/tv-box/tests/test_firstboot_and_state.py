@@ -38,10 +38,15 @@ class SimulatedRootOwnership:
         for patch in reversed(self._patches):
             patch.stop()
 
-    def _scoped_path(self, path: object) -> Path | None:
+    def _absolute_path(self, path: object) -> Path | None:
         try:
-            absolute = Path(os.path.abspath(os.fsdecode(os.fspath(path))))
+            return Path(os.path.abspath(os.fsdecode(os.fspath(path))))
         except (TypeError, ValueError):
+            return None
+
+    def _scoped_path(self, path: object) -> Path | None:
+        absolute = self._absolute_path(path)
+        if absolute is None:
             return None
         try:
             absolute.relative_to(self.scope)
@@ -50,13 +55,14 @@ class SimulatedRootOwnership:
         return absolute
 
     def _metadata_with_owner(self, path: object, metadata: os.stat_result) -> os.stat_result:
-        scoped_path = self._scoped_path(path)
+        absolute = self._absolute_path(path)
+        if absolute is None:
+            return metadata
         try:
-            absolute = Path(os.path.abspath(os.fsdecode(os.fspath(path))))
-        except (TypeError, ValueError):
-            return metadata
-        if scoped_path is None and absolute not in self.scope_ancestors:
-            return metadata
+            absolute.relative_to(self.scope)
+        except ValueError:
+            if absolute not in self.scope_ancestors:
+                return metadata
         uid, gid = self.owners.get((metadata.st_dev, metadata.st_ino), (0, 0))
         return os.stat_result((
             metadata.st_mode,
