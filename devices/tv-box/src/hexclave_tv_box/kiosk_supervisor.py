@@ -41,10 +41,11 @@ SAFE_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
 TOKEN_RENDERER_DIAGNOSTIC_PATTERN = re.compile(
     r"^(?:https?://|kiosk-renderer-[a-z0-9-]+|renderer-[a-z0-9-]+)"
 )
+# Fail closed on credential keywords regardless of the native logger's separator.
 SENSITIVE_RENDERER_VALUE_PATTERN = re.compile(
-    r"(?i)(?:authorization|proxy[-_ ]?authorization|(?:set[-_ ]?)?cookie|password|passwd|"
+    r"(?i)(?<![a-z0-9])(?:authorization|proxy[-_ ]?authorization|(?:set[-_ ]?)?cookie|password|passwd|"
     r"client[-_ ]?secret|(?:access|refresh)[-_ ]?token|token|api[-_ ]?key|session|secret|"
-    r"credential(?:s)?|pairing[-_ ]?code)[\"']?\s*[:=]"
+    r"credential(?:s)?|pairing[-_ ]?code)(?![a-z0-9])"
 )
 URL_USERINFO_PATTERN = re.compile(r"(https?://)(?:[^/\s@]+@)([^/\s?#]+)")
 URL_QUERY_PATTERN = re.compile(r"(https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?")

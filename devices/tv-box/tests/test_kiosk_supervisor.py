@@ -146,8 +146,10 @@ class KioskSupervisorTests(unittest.TestCase):
             "PASSWORD : example-sensitive-value",
             "passwd=example-sensitive-value",
             "Authorization: Bearer example-sensitive-value",
+            "Authorization Bearer example-sensitive-value",
             "Proxy-Authorization: Basic example-sensitive-value",
             "Cookie: session=example-sensitive-value",
+            "cookie hexclave_tv_refresh=example-sensitive-value",
             "Set-Cookie: session=example-sensitive-value; HttpOnly",
             "client-secret=example-sensitive-value",
             "client_secret = example-sensitive-value",
@@ -158,8 +160,10 @@ class KioskSupervisorTests(unittest.TestCase):
             "pairing-code=example-sensitive-value",
             "pairing_code=example-sensitive-value",
             "pairing code=example-sensitive-value",
+            "pairing code example-sensitive-value",
             "token=example-sensitive-value",
             "api-key=example-sensitive-value",
+            "api key example-sensitive-value",
             "session=example-sensitive-value",
             "secret=example-sensitive-value",
             "credential=example-sensitive-value",
@@ -176,6 +180,10 @@ class KioskSupervisorTests(unittest.TestCase):
         self.assertEqual(
             _sanitize_renderer_output(b"(cog:12): Cog-WARNING **: tokenizer ready\n"),
             "(cog:12): Cog-WARNING **: tokenizer ready",
+        )
+        self.assertEqual(
+            _sanitize_renderer_output(b"(cog:12): Cog-WARNING **: tokenizer and sessions ready\n"),
+            "(cog:12): Cog-WARNING **: tokenizer and sessions ready",
         )
 
     def test_renderer_tail_preserves_useful_diagnostics_and_existing_redaction(self) -> None:
