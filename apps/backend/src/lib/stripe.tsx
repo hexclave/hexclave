@@ -580,9 +580,17 @@ export async function applyStripeInvoiceOutcome(
     voidedAtIsExact,
     paymentOutcomeEventAt,
   } = options.outcome;
-  // Stripe does not guarantee webhook ordering. The watermark records only the
-  // newest exact outcome event applied; inferred fields must remain repairable
-  // by an exact event even when that exact event was created earlier.
+  // Stripe does not guarantee webhook ordering, so outcome writes are ordered by
+  // Stripe's event creation time rather than delivery order: an event only applies
+  // when it is at least as new as the last one applied. A field still unset is
+  // always filled, so an out-of-order event never leaves a gap.
+  //
+  // Known limitation: the watermark is a single timestamp and does not record which
+  // fields were exact versus inferred from surrounding data. An exact event created
+  // *before* the watermark therefore cannot overwrite an inferred timestamp that is
+  // already stored — the value stays inferred. Correcting that needs per-field
+  // exactness persisted alongside the timestamps; it affects precision only, not
+  // which outcome an invoice is classified as.
   const shouldApply = Prisma.sql`
     ${paymentOutcomeEventAt}::TIMESTAMP IS NOT NULL
     AND (
