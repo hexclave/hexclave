@@ -48,7 +48,7 @@ BEGIN
     OR existing.has_no_predicate IS DISTINCT FROM FALSE
     OR existing.has_no_expressions IS DISTINCT FROM TRUE
     OR existing.index_definition NOT LIKE '%("tenancyId", "paidAt") WHERE%'
-    OR regexp_replace(regexp_replace(existing.predicate_definition, '"[^\"]+"\."PurchaseCreationSource"', '"PurchaseCreationSource"', 'g'), '[()\s]', '', 'g') IS DISTINCT FROM regexp_replace('"creationSource" = ''PURCHASE_PAGE''::"PurchaseCreationSource" AND "paidAt" IS NOT NULL', '[()\s]', '', 'g')
+    OR regexp_replace(regexp_replace(existing.predicate_definition, '("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\."PurchaseCreationSource"', '"PurchaseCreationSource"', 'g'), '[()\s]', '', 'g') IS DISTINCT FROM regexp_replace('"creationSource" = ''PURCHASE_PAGE''::"PurchaseCreationSource" AND "paidAt" IS NOT NULL', '[()\s]', '', 'g')
     OR existing.access_method IS DISTINCT FROM 'btree'
     OR existing.first_key_is_desc IS DISTINCT FROM FALSE
     OR existing.second_key_is_desc IS DISTINCT FROM FALSE
@@ -109,7 +109,7 @@ BEGIN
     OR existing.has_no_predicate IS DISTINCT FROM FALSE
     OR existing.has_no_expressions IS DISTINCT FROM TRUE
     OR existing.index_definition NOT LIKE '%("tenancyId", "paidAt") WHERE%'
-    OR regexp_replace(regexp_replace(existing.predicate_definition, '"[^\"]+"\."PurchaseCreationSource"', '"PurchaseCreationSource"', 'g'), '[()\s]', '', 'g') IS DISTINCT FROM regexp_replace('"creationSource" = ''PURCHASE_PAGE''::"PurchaseCreationSource" AND "paidAt" IS NOT NULL', '[()\s]', '', 'g')
+    OR regexp_replace(regexp_replace(existing.predicate_definition, '("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\."PurchaseCreationSource"', '"PurchaseCreationSource"', 'g'), '[()\s]', '', 'g') IS DISTINCT FROM regexp_replace('"creationSource" = ''PURCHASE_PAGE''::"PurchaseCreationSource" AND "paidAt" IS NOT NULL', '[()\s]', '', 'g')
     OR existing.access_method IS DISTINCT FROM 'btree'
     OR existing.first_key_is_desc IS DISTINCT FROM FALSE
     OR existing.second_key_is_desc IS DISTINCT FROM FALSE
@@ -160,7 +160,7 @@ BEGIN
       AND pg_index_column_has_property(idx.oid, 2, 'desc') IS FALSE
       AND access_method.amname = 'btree'
       AND pg_get_indexdef(idx.oid) LIKE '%("tenancyId", "paidAt") WHERE%'
-      AND regexp_replace(regexp_replace(pg_get_expr(i.indpred, i.indrelid), '"[^\"]+"\."PurchaseCreationSource"', '"PurchaseCreationSource"', 'g'), '[()\s]', '', 'g') = regexp_replace('"creationSource" = ''PURCHASE_PAGE''::"PurchaseCreationSource" AND "paidAt" IS NOT NULL', '[()\s]', '', 'g')
+      AND regexp_replace(regexp_replace(pg_get_expr(i.indpred, i.indrelid), '("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\."PurchaseCreationSource"', '"PurchaseCreationSource"', 'g'), '[()\s]', '', 'g') = regexp_replace('"creationSource" = ''PURCHASE_PAGE''::"PurchaseCreationSource" AND "paidAt" IS NOT NULL', '[()\s]', '', 'g')
 
       AND (
         SELECT array_agg(table_attribute.attname::text ORDER BY index_key.ordinality)

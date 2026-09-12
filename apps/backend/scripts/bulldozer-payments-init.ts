@@ -432,6 +432,33 @@ function oneTimePurchasePaymentColumnsSql(presence: PaymentOutcomeColumnPresence
   `;
 }
 
+function missingPaymentOutcomeColumns(presence: PaymentOutcomeColumnPresence): string[] {
+  const missing: string[] = [];
+  if (!presence.subscriptionInvoicePaidAt) missing.push("SubscriptionInvoice.paidAt");
+  if (!presence.subscriptionInvoiceMarkedUncollectibleAt) missing.push("SubscriptionInvoice.markedUncollectibleAt");
+  if (!presence.subscriptionInvoiceVoidedAt) missing.push("SubscriptionInvoice.voidedAt");
+  if (!presence.subscriptionInvoiceCurrency) missing.push("SubscriptionInvoice.currency");
+  if (!presence.subscriptionInvoiceAmountPaid) missing.push("SubscriptionInvoice.amountPaid");
+  if (!presence.oneTimePurchaseAmountReceived) missing.push("OneTimePurchase.amountReceived");
+  if (!presence.oneTimePurchaseCurrency) missing.push("OneTimePurchase.currency");
+  if (!presence.oneTimePurchasePaidAt) missing.push("OneTimePurchase.paidAt");
+  return missing;
+}
+
+function paymentOutcomeColumnPresenceChanged(
+  previous: PaymentOutcomeColumnPresence,
+  next: PaymentOutcomeColumnPresence,
+): boolean {
+  return previous.subscriptionInvoicePaidAt !== next.subscriptionInvoicePaidAt
+    || previous.subscriptionInvoiceMarkedUncollectibleAt !== next.subscriptionInvoiceMarkedUncollectibleAt
+    || previous.subscriptionInvoiceVoidedAt !== next.subscriptionInvoiceVoidedAt
+    || previous.subscriptionInvoiceCurrency !== next.subscriptionInvoiceCurrency
+    || previous.subscriptionInvoiceAmountPaid !== next.subscriptionInvoiceAmountPaid
+    || previous.oneTimePurchaseAmountReceived !== next.oneTimePurchaseAmountReceived
+    || previous.oneTimePurchaseCurrency !== next.oneTimePurchaseCurrency
+    || previous.oneTimePurchasePaidAt !== next.oneTimePurchasePaidAt;
+}
+
 async function fetchSubscriptionBatch(
   replica: PrismaReplica,
   cursor: Cursor | null,
@@ -749,14 +776,15 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
   let subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(paymentOutcomeColumnPresence);
   let oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(paymentOutcomeColumnPresence);
   const allPaymentOutcomeColumnsPresent = (presence: PaymentOutcomeColumnPresence) => Object.values(presence).every(Boolean);
+  const missingColumns = missingPaymentOutcomeColumns(paymentOutcomeColumnPresence);
+  if (missingColumns.length > 0) {
+    log(`WARNING: Payment outcome columns are missing: ${missingColumns.join(", ")}. This run mirrors NULL outcome values for those columns. Repeat this run after the payment outcome migrations are applied. Writes are idempotent.`);
+  }
   let paymentOutcomeColumnPresenceChangedLogged = false;
   const refreshPaymentOutcomeColumns = async () => {
     if (allPaymentOutcomeColumnsPresent(paymentOutcomeColumnPresence)) return;
     const nextPresence = await getPaymentOutcomeColumnPresence(replica);
-    const changed = Object.keys(paymentOutcomeColumnPresence).some((key) => (
-      paymentOutcomeColumnPresence[key as keyof PaymentOutcomeColumnPresence]
-      !== nextPresence[key as keyof PaymentOutcomeColumnPresence]
-    ));
+    const changed = paymentOutcomeColumnPresenceChanged(paymentOutcomeColumnPresence, nextPresence);
     if (changed) {
       paymentOutcomeColumnPresence = nextPresence;
       subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(nextPresence);

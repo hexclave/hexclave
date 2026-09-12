@@ -14,6 +14,41 @@ export const postMigration = async (sql: Sql) => {
     }
   };
 
+  const probeSchemas = ["cr6_unquoted", "cr6 quoted"];
+  try {
+    for (const probeSchema of probeSchemas) {
+      const quotedSchema = probeSchema === "cr6_unquoted" ? probeSchema : `"${probeSchema}"`;
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+      await sql.unsafe(`CREATE SCHEMA ${quotedSchema}`);
+      await sql.unsafe(`CREATE TYPE ${quotedSchema}."PurchaseCreationSource" AS ENUM ('PURCHASE_PAGE')`);
+      await sql.unsafe(`CREATE TABLE ${quotedSchema}."PredicateProbe" ("creationSource" ${quotedSchema}."PurchaseCreationSource")`);
+      await sql.unsafe(`CREATE INDEX CONCURRENTLY "PredicateProbe_${probeSchema === "cr6_unquoted" ? "unquoted" : "quoted"}" ON ${quotedSchema}."PredicateProbe" ("creationSource") WHERE "creationSource" = 'PURCHASE_PAGE'::${quotedSchema}."PurchaseCreationSource"`);
+    }
+    const predicateRows = await sql<{ schema: string, predicate: string }[]>`
+      SELECT n.nspname AS schema, pg_get_expr(i.indpred, i.indrelid) AS predicate
+      FROM pg_index i
+      JOIN pg_class idx ON idx.oid = i.indexrelid
+      JOIN pg_namespace n ON n.oid = idx.relnamespace
+      WHERE n.nspname IN ('cr6_unquoted', 'cr6 quoted')
+      ORDER BY n.nspname
+    `;
+    expect(predicateRows).toHaveLength(2);
+    const unquotedPredicate = predicateRows.find((row) => row.schema === "cr6_unquoted")?.predicate;
+    const quotedPredicate = predicateRows.find((row) => row.schema === "cr6 quoted")?.predicate;
+    if (unquotedPredicate == null || quotedPredicate == null) throw new Error("Predicate probe indexes were not created.");
+    const oldPattern = /"[^"]+"\."PurchaseCreationSource"/g;
+    const newPattern = /("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\."PurchaseCreationSource"/g;
+    const normalize = (predicate: string, pattern: RegExp) => predicate.replace(pattern, '"PurchaseCreationSource"').replace(/[()\s]/g, "");
+    expect(unquotedPredicate).toContain('cr6_unquoted."PurchaseCreationSource"');
+    expect(normalize(unquotedPredicate, oldPattern)).not.toBe(normalize(unquotedPredicate, newPattern));
+    expect(normalize(quotedPredicate, oldPattern)).toBe(normalize(quotedPredicate, newPattern));
+  } finally {
+    for (const probeSchema of probeSchemas) {
+      const quotedSchema = probeSchema === "cr6_unquoted" ? probeSchema : `"${probeSchema}"`;
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
+    }
+  }
+
   expect(await sql`
     SELECT 1
     FROM pg_index i
