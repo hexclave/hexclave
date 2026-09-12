@@ -294,6 +294,7 @@ function baselineIsQualified(baseline: TvEmailBaseline | null, evaluatedAt: Date
   return baseline?.medianDeliveryRatePercent != null
     && baseline.assessableSends >= 100
     && baseline.qualifiedDays >= 7
+    && evaluatedAt.getTime() - new Date(baseline.computedAt).getTime() >= 0
     && evaluatedAt.getTime() - new Date(baseline.computedAt).getTime() <= TV_EMAIL_BASELINE_STALE_MS;
 }
 

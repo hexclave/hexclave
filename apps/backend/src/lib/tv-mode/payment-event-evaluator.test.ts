@@ -222,6 +222,16 @@ describe("subscription collection evaluator", () => {
     }, null).ruleVersion).toBe(TV_PAYMENT_RULE_VERSION);
   });
 
+  it("drops incomplete persisted payment baselines", () => {
+    expect(readTvPaymentState({
+      ruleVersion: TV_PAYMENT_RULE_VERSION,
+      baseline: {
+        qualifiedWeeks: 4,
+        assessableOutcomes: 40,
+      },
+    }, null).baseline).toBeNull();
+  });
+
   it("uses the low-volume evidence window for low-volume critical breaches", () => {
     const paymentSample = sample({
       outcomes: 10,

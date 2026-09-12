@@ -343,7 +343,10 @@ export async function pollTvDisplayPairing(options: {
 
   if (challenge.approvedTenancyId == null || challenge.approvedProfileId == null
     || challenge.approvedDisplayName == null || challenge.approvedByAdminUserId == null) {
-    throw new Error("Approved TV pairing challenge has incomplete assignment data.");
+    throw new HexclaveAssertionError("Approved TV pairing challenge has incomplete assignment data.", {
+      challengeId: challenge.id,
+      approvedTenancyId: challenge.approvedTenancyId,
+    });
   }
   const approvedTenancyId = challenge.approvedTenancyId;
   const approvedProfileId = challenge.approvedProfileId;

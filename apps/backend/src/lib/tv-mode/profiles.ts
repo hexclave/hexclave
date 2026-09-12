@@ -251,7 +251,9 @@ export async function listTvProfiles(tenancy: Tenancy): Promise<{
   templates: TvBuiltInProfileResource[],
 }> {
   const persistenceReady = await tvProfilePersistenceIsReady(tenancy);
-  const rows = persistenceReady ? await querySavedProfileRows(tenancy) : [];
+  const rows = persistenceReady
+    ? await querySavedProfileRowsWithClient((await getPrismaClientForTenancy(tenancy)).$primary(), tenancy)
+    : [];
   return {
     persistenceReady,
     savedProfiles: await Promise.all(rows.map(rowToResource)),

@@ -14,16 +14,20 @@ import {
   claimEvaluator,
   loadTvSubscriptionCollectionOutcomes,
   persistEmailEvaluation,
+  persistPaymentEvaluation,
   readTvEmailState,
   synchronizeTvProfileAssignments,
   type TvEventOccurrenceRow,
 } from "@/lib/tv-mode/events";
 import {
   calculateTvEmailEvidenceRate,
+  createTvPaymentEvaluatorState,
   type TvEmailBaseline,
   type TvEmailEvaluationSample,
   type TvEmailEvaluatorState,
   type TvEmailEvidenceWindow,
+  type TvPaymentSample,
+  type TvPaymentEvaluatorState,
 } from "@/lib/tv-mode/event-evaluators";
 import {
   createTvProfile,
@@ -182,6 +186,40 @@ describe.sequential("TV presentation persistence (real DB)", () => {
       current: emailWindow(assessable, failures),
       lowVolume: emailWindow(assessable * 4, failures * 4),
       baseline: emailBaseline,
+    };
+  }
+
+  function paymentSample(at: Date, failures: number): TvPaymentSample {
+    const currentOutcomes = 50;
+    const lowVolumeOutcomes = 50;
+    const currentSuccesses = currentOutcomes - failures;
+    const lowVolumeSuccesses = lowVolumeOutcomes - failures;
+    return {
+      status: "fresh",
+      evaluatedAt: at.toISOString(),
+      observedAt: at.toISOString(),
+      current: {
+        startsAt: new Date(at.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+        endsAt: at.toISOString(),
+        outcomes: currentOutcomes,
+        successes: currentSuccesses,
+        failures,
+        successRatePercent: currentSuccesses / currentOutcomes * 100,
+      },
+      lowVolume: {
+        startsAt: new Date(at.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString(),
+        endsAt: at.toISOString(),
+        outcomes: lowVolumeOutcomes,
+        successes: lowVolumeSuccesses,
+        failures,
+        successRatePercent: lowVolumeSuccesses / lowVolumeOutcomes * 100,
+      },
+      baseline: {
+        computedAt: new Date(at.getTime() - 60_000).toISOString(),
+        qualifiedWeeks: 4,
+        assessableOutcomes: 40,
+        medianSuccessRatePercent: 99,
+      },
     };
   }
 
@@ -359,6 +397,50 @@ describe.sequential("TV presentation persistence (real DB)", () => {
       claim,
       previousState,
       sample: emailSample(now, 100, 0),
+      now,
+    })).rejects.toBeInstanceOf(HexclaveAssertionError);
+  });
+
+  it("fails loudly when payment escalation has no active occurrence", async () => {
+    const now = new Date("2026-07-29T12:03:00.000Z");
+    const claim = await claimEvaluator(firstTenancy, "subscription-collection", now);
+    if (claim == null) throw new Error("The payment evaluator claim was not acquired");
+    const previousState: TvPaymentEvaluatorState = {
+      ...createTvPaymentEvaluatorState({ activeClass: "incident" }),
+      candidate: {
+        rulePath: "critical",
+        presentationClass: "critical-incident",
+        accumulatedMs: 5 * 60_000,
+      },
+      recovery: null,
+      lastFreshEvaluatedAt: new Date(now.getTime() - 60_000).toISOString(),
+      baseline: paymentSample(now, 30).baseline,
+    };
+    await expect(persistPaymentEvaluation({
+      tenancy: firstTenancy,
+      claim,
+      state: previousState,
+      sample: paymentSample(now, 30),
+      now,
+    })).rejects.toBeInstanceOf(HexclaveAssertionError);
+  });
+
+  it("fails loudly when payment resolution has no active occurrence", async () => {
+    const now = new Date("2026-07-29T12:03:00.000Z");
+    const claim = await claimEvaluator(firstTenancy, "subscription-collection", now);
+    if (claim == null) throw new Error("The payment evaluator claim was not acquired");
+    const previousState: TvPaymentEvaluatorState = {
+      ...createTvPaymentEvaluatorState({ activeClass: "critical-incident" }),
+      candidate: null,
+      recovery: { window: "current", accumulatedMs: 30 * 60_000 },
+      lastFreshEvaluatedAt: new Date(now.getTime() - 60_000).toISOString(),
+      baseline: paymentSample(now, 0).baseline,
+    };
+    await expect(persistPaymentEvaluation({
+      tenancy: firstTenancy,
+      claim,
+      state: previousState,
+      sample: paymentSample(now, 0),
       now,
     })).rejects.toBeInstanceOf(HexclaveAssertionError);
   });
