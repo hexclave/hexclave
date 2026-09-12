@@ -32,7 +32,7 @@ type HexclaveAppInternals = {
 
 const PROJECT_ONBOARDING_STATUSES = projectOnboardingStatusValues;
 const NEW_DASHBOARD_URL = "https://hexclave.com/projects";
-const NEW_DASHBOARD_BANNER_START = new Date("2026-09-10T00:00:00-07:00");
+const NEW_DASHBOARD_BANNER_START = new Date("2026-09-17T00:00:00-07:00");
 
 function isStackAppInternals(value: unknown): value is HexclaveAppInternals {
   return (

@@ -1,8 +1,8 @@
-# hxc- leaves at most 59 characters for the suffix of a 63-character Fly app name.
-map $host $deployment_app {
-    default "";
-    "~^(?<deployment_suffix>[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)[.]${HEXCLAVE_GATEWAY_DOMAIN_PATTERN}$" hxc-$deployment_suffix;
-}
+# gateway.js verifies the hostname's signature and names the Fly app, or "" to refuse.
+# Evaluated once per request, on first use.
+js_path "/etc/nginx/njs";
+js_import gateway from gateway.js;
+js_set $deployment_app gateway.deploymentApp;
 map $http_upgrade $connection_upgrade {
     default upgrade;
     '' close;

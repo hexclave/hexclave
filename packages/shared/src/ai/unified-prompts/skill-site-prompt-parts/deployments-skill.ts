@@ -11,7 +11,7 @@ export const deploymentsSkillSection = deindent`
 
   Every service is either a \`"server"\` or a \`"serverless"\`. A \`server\` is a single instance that SUSPENDS when idle and resumes with its memory intact, and it is the only type that may have a persistent disk. A \`serverless\` scales out between \`minInstances\` and \`maxInstances\` and STOPS on scale-down, so each start is a cold start and it can have no disk. Use \`server\` for anything stateful (a database, a queue, anything writing to a volume) and \`serverless\` for stateless web apps and APIs.
 
-  Enable the app by adding \`"deploy"\` under \`apps.installed\` in your config (quote it — it contains a hyphen). Services themselves are NOT part of the \`config\` export and cannot be declared in \`hexclave.config.ts\`: they live in their own file, \`hexclave.deploy.ts\`, next to it.
+  Enable the app by adding \`deploy: { enabled: true }\` under \`apps.installed\` in your config, then run \`config push\`. The \`enabled: true\` is required: every app defaults to disabled, and an empty \`deploy: {}\` entry leaves it disabled. Services themselves are NOT part of the \`config\` export and cannot be declared in \`hexclave.config.ts\`: they live in their own file, \`hexclave.deploy.ts\`, next to it.
 
   ## The deploy export
 
@@ -208,7 +208,7 @@ export const deploymentsSkillSection = deindent`
      return p.getDeploymentServiceDomain('api', 'app.example.com');"
   \`\`\`
 
-  The returned \`dns_records\` are what the user must create at their DNS provider; poll \`getDeploymentServiceDomain\` to see verification flip. A hostname can only be attached to one service across all of Hexclave. Humans can also add domains in the dashboard (service → Domains). Agents should not do that in a browser.
+  The returned \`dns_records\` are what the user must create at their DNS provider; poll \`getDeploymentServiceDomain\` to see verification flip. Cloudflare users must either create the records as DNS-only (proxy off) or set the zone's SSL/TLS mode to Full (strict): a proxied hostname under Flexible mode fails with Cloudflare 520 errors. A hostname can only be attached to one service across all of Hexclave. Humans can also add domains in the dashboard (service → Domains). Agents should not do that in a browser.
 
   ## Removing a service
 

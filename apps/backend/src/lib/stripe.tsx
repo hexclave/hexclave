@@ -669,7 +669,8 @@ export async function upsertStripeInvoice(
   // without weakening the rest of the invoice contract.
   const outcome = getStripeInvoiceOutcomeTimestamps(invoice, event);
 
-  // dual write - prisma and bulldozer
+  // Keep shared Payments status provider-supplied, as before TV Mode. Ordered
+  // outcome facts below support reporting without reinterpreting this status.
   const upsertedInvoice = await prisma.subscriptionInvoice.upsert({
     where: {
       tenancyId_stripeInvoiceId: {
@@ -701,18 +702,6 @@ export async function upsertStripeInvoice(
     amountPaid: invoice.amount_paid,
     outcome,
   });
-  await prisma.$executeRaw`
-    UPDATE "SubscriptionInvoice"
-    SET "status" = CASE
-      WHEN "paidAt" IS NOT NULL AND "paidAt" = GREATEST("paidAt", "markedUncollectibleAt", "voidedAt") THEN 'paid'
-      -- Match the evaluator's deterministic tie order: paid, then void, then failure.
-      WHEN "voidedAt" IS NOT NULL AND "voidedAt" = GREATEST("paidAt", "markedUncollectibleAt", "voidedAt") THEN 'void'
-      WHEN "markedUncollectibleAt" IS NOT NULL AND "markedUncollectibleAt" = GREATEST("paidAt", "markedUncollectibleAt", "voidedAt") THEN 'uncollectible'
-      ELSE "status"
-    END
-    WHERE "tenancyId" = ${tenancy.id}::UUID
-      AND "id" = ${upsertedInvoice.id}::UUID
-  `;
   const normalizedInvoice = (await prisma.$queryRaw<Array<typeof upsertedInvoice & {
     paidAt: Date | null,
     markedUncollectibleAt: Date | null,
