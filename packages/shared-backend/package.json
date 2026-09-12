@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/shared-backend",
-  "version": "1.0.114",
+  "version": "1.0.122",
   "repository": "https://github.com/hexclave/hexclave",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

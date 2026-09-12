@@ -685,6 +685,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   private readonly _trustedParentDomainCache = createCache<[string], string | null>(
     async ([domain]) => await this._getTrustedParentDomain(domain)
   );
+  // Retain domains across token-store snapshots because a later update can see cookies already deleted by an earlier update.
+  private readonly _knownCustomRefreshCookieDomains = new Set<string>();
 
   private _anonymousSignUpInProgress: Promise<{ accessToken: string, refreshToken: string }> | null = null;
   private _prefetchedCrossDomainHandoffParams: CrossDomainHandoffParams | null = null;
@@ -1576,7 +1578,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       }
     });
   }
-  private _queueCustomRefreshCookieUpdate(refreshToken: string | null, updatedAt: number | null, context: "browser" | "server") {
+  private _queueCustomRefreshCookieUpdate(
+    refreshToken: string | null,
+    updatedAt: number | null,
+    context: "browser" | "server",
+    previousCustomDomains: string[],
+  ) {
     runAsynchronously(async () => {
       this._mostRecentQueuedCookieRefreshIndex++;
       const updateIndex = this._mostRecentQueuedCookieRefreshIndex;
@@ -1586,12 +1593,6 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       } else {
         hostname = await getServerRequestHost();
       }
-      if (!hostname) {
-        console.warn("No hostname found when queueing custom refresh cookie update");
-        return;
-      }
-      const domain = await this._trustedParentDomainCache.getOrWait([hostname], "read-write");
-
       const cookieOptions = { maxAge: 60 * 60 * 24 * 365, noOpIfServerComponent: true };
       const setCookie = async (targetDomain: string, value: string | null) => {
         const name = this._getCustomRefreshCookieName(targetDomain);
@@ -1603,11 +1604,27 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
       };
 
+      const value = refreshToken && updatedAt ? this._formatRefreshCookieValue(refreshToken, updatedAt) : null;
+      if (!hostname) {
+        // Server cookie writes can happen without request headers; use prior custom names to recover
+        // trusted domains, and retain the default cookie because the current host is unknown.
+        const domains = new Set<string>();
+        for (const previousDomain of new Set(previousCustomDomains)) {
+          const domain = await this._trustedParentDomainCache.getOrWait([`_.${previousDomain}`], "read-write");
+          if (updateIndex !== this._mostRecentQueuedCookieRefreshIndex) return;
+          if (domain.status !== "error" && domain.data != null) domains.add(domain.data);
+        }
+        if (updateIndex !== this._mostRecentQueuedCookieRefreshIndex) return;
+        await Promise.all([...domains].map((domain) => setCookie(domain, value)));
+        return;
+      }
+
+      const domain = await this._trustedParentDomainCache.getOrWait([hostname], "read-write");
       if (domain.status === "error" || !domain.data || updateIndex !== this._mostRecentQueuedCookieRefreshIndex) {
         return;
       }
-      const value = refreshToken && updatedAt ? this._formatRefreshCookieValue(refreshToken, updatedAt) : null;
       await setCookie(domain.data, value);
+      this._knownCustomRefreshCookieDomains.add(domain.data);
       const isSecure = await isSecureCookieContext();
       const defaultName = this._getRefreshTokenDefaultCookieNameForSecure(isSecure);
       if (context === "browser") {
@@ -1673,7 +1690,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
             const domain = this._getDomainFromCustomRefreshCookieName(name);
             deleteCookieClient(name, domain ? { domain } : {});
           });
-          this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "browser");
+          const previousCustomDomains = cookieNamesToDelete
+            .map((name) => this._getDomainFromCustomRefreshCookieName(name))
+            .filter((domain): domain is string => domain !== null);
+          previousCustomDomains.forEach((domain) => this._knownCustomRefreshCookieDomains.add(domain));
+          this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "browser", [...this._knownCustomRefreshCookieDomains]);
           hasSucceededInWriting = true;
         } catch (e) {
           if (!isBrowserLike()) {
@@ -1758,7 +1779,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
                   }),
                 );
               }
-              this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "server");
+              const previousCustomDomains = cookieNamesToDelete
+                .map((name) => this._getDomainFromCustomRefreshCookieName(name))
+                .filter((domain): domain is string => domain !== null);
+              previousCustomDomains.forEach((domain) => this._knownCustomRefreshCookieDomains.add(domain));
+              this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "server", [...this._knownCustomRefreshCookieDomains]);
             });
           });
           return store;

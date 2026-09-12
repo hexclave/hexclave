@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { FLY_MUTATION_TIMEOUT_MS, RECONCILIATION_TAKEOVER_GRACE_MS } from "./mutation-safety.js";
+import { PROVIDER_MUTATION_TIMEOUT_MS, RECONCILIATION_TAKEOVER_GRACE_MS } from "./mutation-safety.js";
 
-describe("Fly mutation fencing", () => {
+describe("provider mutation fencing", () => {
   it("never permits takeover while an old owner's bounded mutation may still be running", () => {
-    expect(RECONCILIATION_TAKEOVER_GRACE_MS).toBeGreaterThan(FLY_MUTATION_TIMEOUT_MS);
+    expect(RECONCILIATION_TAKEOVER_GRACE_MS).toBeGreaterThan(PROVIDER_MUTATION_TIMEOUT_MS);
   });
 });

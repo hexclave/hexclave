@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/cli",
-  "version": "1.0.114",
+  "version": "1.0.122",
   "repository": "https://github.com/hexclave/hexclave",
   "description": "The CLI for Hexclave. https://hexclave.com",
   "main": "dist/index.js",

@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const flyConfiguration = {
+  machinesApiUrl: "https://machines.example.com",
+  graphqlApiUrl: "https://graphql.example.com",
+};
 vi.mock("../config.js", () => ({
   MOCK_FLY_TOKEN: "mock_hexclave_fly_key",
-  getConfig: () => ({
-    fly: {
-      machinesApiUrl: "https://machines.example.com",
-      graphqlApiUrl: "https://graphql.example.com",
-    },
-  }),
+  getConfig: () => ({ fly: flyConfiguration }),
+  flyConfig: () => flyConfiguration,
 }));
 
 import { MutationOutcomeUnknownError } from "../mutation-safety.js";

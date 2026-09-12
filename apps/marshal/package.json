@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/marshal",
-  "version": "1.0.114",
+  "version": "1.0.122",
   "repository": "https://github.com/hexclave/hexclave",
   "private": true,
   "type": "module",
@@ -12,6 +12,7 @@
     "dev": "NODE_ENV=development tsx watch --clear-screen=false src/server.ts",
     "build": "tsdown --config tsdown.config.ts",
     "test": "vitest run",
+    "test:platform-domains:live": "tsx src/live-platform-domain-test-runner.ts",
     "test:watch": "vitest watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint --ext .ts .",

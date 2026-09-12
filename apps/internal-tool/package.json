@@ -1,7 +1,7 @@
 {
   "name": "@hexclave/internal-tool",
   "private": true,
-  "version": "1.0.114",
+  "version": "1.0.122",
   "type": "module",
   "scripts": {
     "dev": "node scripts/pre-dev.mjs && next dev --turbopack --port ${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}41",

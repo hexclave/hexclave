@@ -7,6 +7,11 @@
 - Trusted domains can now include a custom port, e.g. `*.example.com:4250`.
 - Fixed impersonation links and console snippets not navigating correctly.
 
+## 9/4/26
+
+- Microsoft sign-in no longer asks for admin consent on every login.
+- Fixed impersonation links and console snippets landing on the wrong page.
+
 ## 8/28/26
 
 - The CLI can now access and analyze session replays with AI.

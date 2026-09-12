@@ -144,7 +144,8 @@ export function declareBufferedPiledriverDatabase(wrapped: PiledriverDatabase): 
     await wait(underlyingSeq);
   };
 
-  return {
+  const wrappedSerializedFormAccess = wrapped.getSerializedFormAccess?.();
+  const result: PiledriverDatabase = {
     getDebugInfo() {
       return { backend: "piledriver-buffered", wrapped, pendingBufferSize: pending.size, inFlightBufferSize: inFlight.size };
     },
@@ -205,4 +206,27 @@ export function declareBufferedPiledriverDatabase(wrapped: PiledriverDatabase): 
     },
     initialSeq,
   };
+  if (wrappedSerializedFormAccess !== undefined) {
+    // Buffered sequences are synthetic arrays tracked by identity in a WeakMap, so a sequence
+    // that round-trips through the verification cursor's JSON would be rejected as unknown.
+    result.getSerializedFormAccess = () => ({
+      async getSerializedRootObject(key) {
+        await drainBeforeOperation();
+        return await wrappedSerializedFormAccess.getSerializedRootObject(key);
+      },
+      async deserializeSerializedObject(buffer, seq) {
+        await drainBeforeOperation();
+        return await wrappedSerializedFormAccess.deserializeSerializedObject(buffer, seq);
+      },
+      async getSerializedHeapObject(key) {
+        await drainBeforeOperation();
+        return await wrappedSerializedFormAccess.getSerializedHeapObject(key);
+      },
+      async listHeapEntries(options) {
+        await drainBeforeOperation();
+        return await wrappedSerializedFormAccess.listHeapEntries(options);
+      },
+    });
+  }
+  return result;
 }

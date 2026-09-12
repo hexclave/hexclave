@@ -26,6 +26,8 @@ function createClientApp() {
 }
 
 describe("StackClientApp Next.js server sessions", () => {
+  // Only the Next.js SDK keys server token stores by the request's cookies() identity.
+  // IF_PLATFORM next
   it("shares one token store and session across cookie helpers from the same request", () => {
     const clientApp = createClientApp();
     const getTokenStore = Reflect.get(clientApp, "_getOrCreateTokenStore");
@@ -38,6 +40,7 @@ describe("StackClientApp Next.js server sessions", () => {
     expect(secondStore).toBe(firstStore);
     expect(getSession.call(clientApp, secondStore)).toBe(getSession.call(clientApp, firstStore));
   });
+  // END_PLATFORM
 
   it("isolates token stores belonging to different requests", () => {
     const clientApp = createClientApp();

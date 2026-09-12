@@ -13,7 +13,7 @@
   
   "//": "NEXT_LINE_PLATFORM template",
   "private": true,
-  "version": "1.0.114",
+  "version": "1.0.122",
   "repository": "https://github.com/hexclave/hexclave",
   "sideEffects": false,
   "main": "./dist/index.js",

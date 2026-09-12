@@ -32,7 +32,7 @@ In production, plan for these components:
 - **Svix**: Required only if you use webhooks. You can use Svix Cloud or self-host Svix.
 - **S3-compatible storage**: Required for features that store files or assets.
 - **ClickHouse**: Required for the supported Docker deployment path. The migration script creates ClickHouse databases, tables, views, users, grants, and row policies after Postgres migrations.
-- **Freestyle and OpenRouter keys**: Freestyle is required for custom, manual, or programmatic email sending. OpenRouter is optional and used by AI-assisted dashboard features.
+- **Freestyle and OpenRouter keys**: Freestyle and a bootstrapped VM snapshot are required for custom, manual, or programmatic email sending. OpenRouter is optional and used by AI-assisted dashboard features.
 
 For local app development, use [Local Development](/guides/going-further/local-development) or a development environment. Do not use the production Docker guide as your day-to-day local development setup.
 
@@ -286,11 +286,20 @@ Some dashboard AI features require OpenRouter:
 STACK_OPENROUTER_API_KEY=...
 ```
 
-Custom, manual, and programmatic email sending requires Freestyle:
+Custom, manual, and programmatic email sending requires Freestyle. Before starting Hexclave for the first time, build the private Node 24 sandbox snapshot in the same Freestyle account as the API key:
+
+```bash
+HEXCLAVE_FREESTYLE_API_KEY=... HEXCLAVE_FREESTYLE_SNAPSHOT_ID=hexclave-js-node24-v4 pnpm --filter @hexclave/backend freestyle:bootstrap-snapshot
+```
+
+The bootstrap downloads a checksum-pinned Node 24 glibc-217 build, installs it directly into a resized Freestyle BusyBox VM, and snapshots that single VM after verifying Node and npm can install a package. The captured private `hexclave-js-node24-v4` snapshot contains BusyBox, Node, npm, and the runtime support needed by the sandbox. Then configure the server:
 
 ```env
-STACK_FREESTYLE_API_KEY=...
+HEXCLAVE_FREESTYLE_API_KEY=...
+HEXCLAVE_FREESTYLE_SNAPSHOT_ID=hexclave-js-node24-v4
 ```
+
+Choose a different `HEXCLAVE_FREESTYLE_SNAPSHOT_ID` in both commands if that slug is already in use. Existing `STACK_FREESTYLE_*` environment names remain accepted.
 
 ### Request Body Size
 

@@ -31,6 +31,10 @@ export class MicrosoftProvider extends OAuthBaseProvider {
       // it, but connected-account flows with extra provider_scope values have
       // returned AADSTS70011 unless we include the originally requested scopes.
       includeScopeInCallbackTokenExchange: true,
+      // Entra re-prompts for (admin) consent on every sign-in when prompt=consent
+      // is sent, even if the tenant already granted consent; incremental consent
+      // still happens automatically when new scopes are requested.
+      noConsentPrompt: true,
       ...rest,
     }));
   }
