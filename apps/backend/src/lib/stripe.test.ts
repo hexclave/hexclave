@@ -10,12 +10,14 @@ import {
 
 describe.sequential("Stripe invoice outcome ordering (real DB)", () => {
   const projectIds: string[] = [];
+  const tenancyIds: string[] = [];
 
   async function createInvoice() {
     const projectId = `stripe-outcome-${randomUUID()}`;
     const tenancyId = randomUUID();
     const stripeSubscriptionId = `sub_${randomUUID()}`;
     projectIds.push(projectId);
+    tenancyIds.push(tenancyId);
 
     await globalPrismaClient.project.create({
       data: {
@@ -113,8 +115,12 @@ describe.sequential("Stripe invoice outcome ordering (real DB)", () => {
   }
 
   afterEach(async () => {
+    const tenancyIdsToDelete = [...tenancyIds];
     const projectIdsToDelete = [...projectIds];
+    await globalPrismaClient.subscriptionInvoice.deleteMany({ where: { tenancyId: { in: tenancyIdsToDelete } } });
+    await globalPrismaClient.subscription.deleteMany({ where: { tenancyId: { in: tenancyIdsToDelete } } });
     await globalPrismaClient.project.deleteMany({ where: { id: { in: projectIdsToDelete } } });
+    tenancyIds.splice(0);
     projectIds.splice(0);
   });
 
@@ -315,5 +321,34 @@ describe.sequential("Stripe invoice outcome ordering (real DB)", () => {
       currency: "USD",
       markedUncollectibleAt: newerMarkedAt,
     });
+  });
+
+  it("stores exact outcome timestamps as UTC wall-clock values", async () => {
+    const processEnv = Reflect.get(process, "env");
+    const previousTimezone = Reflect.get(processEnv, "TZ");
+    Reflect.set(processEnv, "TZ", "America/New_York");
+    try {
+      const { invoice, tenancy } = await createInvoice();
+      const paidAt = new Date("2026-08-20T15:00:00.000Z");
+      await applyStripeInvoiceOutcome(globalPrismaClient, {
+        tenancyId: tenancy.id,
+        invoiceId: invoice.id,
+        currency: "usd",
+        amountPaid: 10_000,
+        outcome: exactPaidOutcome(paidAt, paidAt),
+      });
+      const rows = await globalPrismaClient.$queryRaw<Array<{ paidAt: string | null }>>`
+        SELECT "paidAt"::TEXT AS "paidAt"
+        FROM "SubscriptionInvoice"
+        WHERE "tenancyId" = ${tenancy.id}::UUID AND "id" = ${invoice.id}::UUID
+      `;
+      expect(rows[0]?.paidAt).toBe("2026-08-20 15:00:00");
+    } finally {
+      if (previousTimezone == null) {
+        Reflect.deleteProperty(processEnv, "TZ");
+      } else {
+        Reflect.set(processEnv, "TZ", previousTimezone);
+      }
+    }
   });
 });
