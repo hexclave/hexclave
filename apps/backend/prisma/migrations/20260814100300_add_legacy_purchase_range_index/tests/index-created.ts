@@ -36,12 +36,29 @@ export const postMigration = async (sql: Sql) => {
     const unquotedPredicate = predicateRows.find((row) => row.schema === "cr6_unquoted")?.predicate;
     const quotedPredicate = predicateRows.find((row) => row.schema === "cr6 quoted")?.predicate;
     if (unquotedPredicate == null || quotedPredicate == null) throw new Error("Predicate probe indexes were not created.");
-    const oldPattern = /"[^"]+"\."PurchaseCreationSource"/g;
-    const newPattern = /("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\."PurchaseCreationSource"/g;
-    const normalize = (predicate: string, pattern: RegExp) => predicate.replace(pattern, '"PurchaseCreationSource"').replace(/[()\s]/g, "");
+    const shippedPatterns = [...migrationSql.matchAll(/'([^']*\\\."PurchaseCreationSource"[^']*)'/g)].map((match) => match[1]);
+    if (shippedPatterns.length === 0) throw new Error("Could not find the PurchaseCreationSource normalization pattern in migration SQL.");
+    const shippedPattern = shippedPatterns[0];
+    if (!shippedPatterns.every((pattern) => pattern === shippedPattern)) {
+      throw new Error("PurchaseCreationSource normalization patterns differ within migration SQL.");
+    }
+    const normalize = async (predicate: string) => {
+      const rows = await sql<{ normalized: string }[]>`
+        SELECT regexp_replace(
+          regexp_replace(${predicate}, ${shippedPattern}, '"PurchaseCreationSource"', 'g'),
+          '[()\s]',
+          '',
+          'g'
+        ) AS normalized
+      `;
+      return rows[0].normalized;
+    };
+    const normalizedUnquoted = await normalize(unquotedPredicate);
+    const normalizedQuoted = await normalize(quotedPredicate);
+    const normalizedCanonical = await normalize(`"creationSource" = 'PURCHASE_PAGE'::"PurchaseCreationSource"`);
     expect(unquotedPredicate).toContain('cr6_unquoted."PurchaseCreationSource"');
-    expect(normalize(unquotedPredicate, oldPattern)).not.toBe(normalize(unquotedPredicate, newPattern));
-    expect(normalize(quotedPredicate, oldPattern)).toBe(normalize(quotedPredicate, newPattern));
+    expect(normalizedUnquoted).toBe(normalizedQuoted);
+    expect(normalizedUnquoted).toBe(normalizedCanonical);
   } finally {
     for (const probeSchema of probeSchemas) {
       const quotedSchema = probeSchema === "cr6_unquoted" ? probeSchema : `"${probeSchema}"`;

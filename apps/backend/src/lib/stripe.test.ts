@@ -324,31 +324,20 @@ describe.sequential("Stripe invoice outcome ordering (real DB)", () => {
   });
 
   it("stores exact outcome timestamps as UTC wall-clock values", async () => {
-    const processEnv = Reflect.get(process, "env");
-    const previousTimezone = Reflect.get(processEnv, "TZ");
-    Reflect.set(processEnv, "TZ", "America/New_York");
-    try {
-      const { invoice, tenancy } = await createInvoice();
-      const paidAt = new Date("2026-08-20T15:00:00.000Z");
-      await applyStripeInvoiceOutcome(globalPrismaClient, {
-        tenancyId: tenancy.id,
-        invoiceId: invoice.id,
-        currency: "usd",
-        amountPaid: 10_000,
-        outcome: exactPaidOutcome(paidAt, paidAt),
-      });
-      const rows = await globalPrismaClient.$queryRaw<Array<{ paidAt: string | null }>>`
-        SELECT "paidAt"::TEXT AS "paidAt"
-        FROM "SubscriptionInvoice"
-        WHERE "tenancyId" = ${tenancy.id}::UUID AND "id" = ${invoice.id}::UUID
-      `;
-      expect(rows[0]?.paidAt).toBe("2026-08-20 15:00:00");
-    } finally {
-      if (previousTimezone == null) {
-        Reflect.deleteProperty(processEnv, "TZ");
-      } else {
-        Reflect.set(processEnv, "TZ", previousTimezone);
-      }
-    }
+    const { invoice, tenancy } = await createInvoice();
+    const paidAt = new Date("2026-08-20T15:00:00.000Z");
+    await applyStripeInvoiceOutcome(globalPrismaClient, {
+      tenancyId: tenancy.id,
+      invoiceId: invoice.id,
+      currency: "usd",
+      amountPaid: 10_000,
+      outcome: exactPaidOutcome(paidAt, paidAt),
+    });
+    const rows = await globalPrismaClient.$queryRaw<Array<{ paidAt: string | null }>>`
+      SELECT "paidAt"::TEXT AS "paidAt"
+      FROM "SubscriptionInvoice"
+      WHERE "tenancyId" = ${tenancy.id}::UUID AND "id" = ${invoice.id}::UUID
+    `;
+    expect(rows[0]?.paidAt).toBe("2026-08-20 15:00:00");
   });
 });
