@@ -235,7 +235,51 @@ async function processStripeWebhookEvent(event: Stripe.Event): Promise<void> {
         quantity: qty,
       }
     });
-    await bulldozerWriteOneTimePurchase(upsertedPurchase);
+    const paidAt = new Date(event.created * 1000);
+    // PaymentIntent webhooks can be replayed or delivered out of order. Only a
+    // success event may stamp collection truth, and an older success must not
+    // replace a newer authoritative observation for the same logical purchase.
+    await prisma.$executeRaw`
+      UPDATE "OneTimePurchase"
+      SET
+        "amountReceived" = CASE
+          WHEN "paidAt" IS NULL OR ${paidAt} >= "paidAt" THEN ${paymentIntent.amount_received}
+          ELSE "amountReceived"
+        END,
+        "currency" = CASE
+          WHEN "paidAt" IS NULL OR ${paidAt} >= "paidAt" THEN UPPER(${paymentIntent.currency})
+          ELSE "currency"
+        END,
+        "paidAt" = GREATEST("paidAt", ${paidAt})
+      WHERE "tenancyId" = ${tenancy.id}::UUID
+        AND "id" = ${upsertedPurchase.id}::UUID
+    `;
+    const normalizedPurchase = (await prisma.$queryRaw<Array<typeof upsertedPurchase & {
+      amountReceived: number | null,
+      currency: string | null,
+      paidAt: Date | null,
+    }>>`
+      SELECT * FROM "OneTimePurchase"
+      WHERE "tenancyId" = ${tenancy.id}::UUID AND "id" = ${upsertedPurchase.id}::UUID
+    `).at(0);
+    if (normalizedPurchase == null) {
+      throw new HexclaveAssertionError("Normalized one-time purchase disappeared after update", { tenancyId: tenancy.id, purchaseId: upsertedPurchase.id });
+    }
+    await bulldozerWriteOneTimePurchase(normalizedPurchase);
+    const latestPurchase = (await prisma.$queryRaw<Array<typeof normalizedPurchase>>`
+      SELECT * FROM "OneTimePurchase"
+      WHERE "tenancyId" = ${tenancy.id}::UUID AND "id" = ${upsertedPurchase.id}::UUID
+    `).at(0);
+    if (latestPurchase == null) {
+      throw new HexclaveAssertionError("One-time purchase disappeared during Bulldozer convergence", { tenancyId: tenancy.id, purchaseId: upsertedPurchase.id });
+    }
+    if (
+      latestPurchase.paidAt?.getTime() !== normalizedPurchase.paidAt?.getTime()
+      || latestPurchase.amountReceived !== normalizedPurchase.amountReceived
+      || latestPurchase.currency !== normalizedPurchase.currency
+    ) {
+      await bulldozerWriteOneTimePurchase(latestPurchase);
+    }
 
     const recipients = await getPaymentRecipients({
       tenancy,
@@ -340,7 +384,7 @@ async function processStripeWebhookEvent(event: Stripe.Event): Promise<void> {
 
     if (event.type.startsWith("invoice.")) {
       const invoice = event.data.object as Stripe.Invoice;
-      await upsertStripeInvoice(stripe, accountId, invoice);
+      await upsertStripeInvoice(stripe, accountId, invoice, event);
     }
 
     if (event.type === "invoice.payment_succeeded") {

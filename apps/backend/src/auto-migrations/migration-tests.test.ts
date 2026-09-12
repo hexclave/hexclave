@@ -73,18 +73,19 @@ const { allMigrations, migrationsWithTests } = discoverTestFiles();
 describe.sequential('database migration tests', { timeout: 600_000 }, () => {
   let sql: postgres.Sql;
   let prismaClient: PrismaClient;
+  let connectionString: string;
   let testDbName: string;
   let appliedUpTo = 0;
 
   async function applyMigrationsUpTo(targetIndex: number) {
     if (appliedUpTo >= targetIndex) return;
     const batch = allMigrations.slice(0, targetIndex);
-    await applyMigrations({ prismaClient, migrationFiles: batch, schema: 'public' });
+    await applyMigrations({ prismaClient, migrationFiles: batch, outsideTransactionConnectionString: connectionString, schema: 'public' });
     appliedUpTo = targetIndex;
   }
 
   async function applySingleMigration(index: number) {
-    await applyMigrations({ prismaClient, migrationFiles: allMigrations.slice(0, index + 1), schema: 'public' });
+    await applyMigrations({ prismaClient, migrationFiles: allMigrations.slice(0, index + 1), outsideTransactionConnectionString: connectionString, schema: 'public' });
     appliedUpTo = index + 1;
   }
 
@@ -100,7 +101,7 @@ describe.sequential('database migration tests', { timeout: 600_000 }, () => {
       await adminSql.end();
     }
 
-    const connectionString = `${dbURL.full}?${dbURL.query}`;
+    connectionString = `${dbURL.full}?${dbURL.query}`;
     sql = postgres(connectionString);
 
     const adapter = new PrismaPg({ connectionString });

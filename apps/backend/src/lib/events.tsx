@@ -212,6 +212,28 @@ const UserRestrictedEventType = {
   inherits: [],
 } as const satisfies SystemEventTypeBase;
 
+export const TV_DISPLAY_SECURITY_ACTIONS = [
+  "pairing-approved",
+  "credential-issued",
+  "refresh-reuse-detected",
+  "display-renamed",
+  "profile-reassigned",
+  "display-revoked",
+] as const;
+export type TvDisplaySecurityAction = typeof TV_DISPLAY_SECURITY_ACTIONS[number];
+
+const TvDisplaySecurityEventType = {
+  id: "$tv-display-security",
+  dataSchema: yupObject({
+    projectId: yupString().defined(),
+    branchId: yupString().defined(),
+    action: yupString().oneOf(TV_DISPLAY_SECURITY_ACTIONS).defined(),
+    displayId: yupString().uuid().nullable().defined(),
+    actorUserId: yupString().uuid().nullable().defined(),
+  }).noUnknown().defined(),
+  inherits: [],
+} as const satisfies SystemEventTypeBase;
+
 export const SystemEventTypes = stripEventTypeSuffixFromKeys({
   ProjectEventType,
   ProjectActivityEventType,
@@ -224,6 +246,7 @@ export const SystemEventTypes = stripEventTypeSuffixFromKeys({
   SignInAttemptEventType,
   PermissionCheckEventType,
   UserRestrictedEventType,
+  TvDisplaySecurityEventType,
 } as const);
 const systemEventTypesById = new Map(Object.values(SystemEventTypes).map(eventType => [eventType.id, eventType]));
 

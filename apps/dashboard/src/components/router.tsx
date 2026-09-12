@@ -49,14 +49,20 @@ export function useRouterConfirm() {
 }
 
 export function RouterProvider(props: {  children: React.ReactNode }) {
-  const [needConfirm, setNeedConfirm] = React.useState(false);
+  const [needConfirm, setNeedConfirmState] = React.useState(false);
+  const needConfirmRef = React.useRef(needConfirm);
   const [showDialog, setShowDialog] = React.useState(false);
   const [pendingNavigation, setPendingNavigation] = React.useState<(() => void) | null>(null);
+
+  const setNeedConfirm = React.useCallback((value: boolean) => {
+    needConfirmRef.current = value;
+    setNeedConfirmState(value);
+  }, []);
 
   // Handle browser navigation events (back button, closing tab, etc.)
   React.useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (needConfirm) {
+      if (needConfirmRef.current) {
         e.preventDefault();
         // Modern browsers require returnValue to be set
         e.returnValue = confirmAlertMessage;
@@ -66,7 +72,7 @@ export function RouterProvider(props: {  children: React.ReactNode }) {
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [needConfirm]);
+  }, []);
 
   const showNavigationDialog = React.useCallback((onConfirm: () => void) => {
     setPendingNavigation(() => onConfirm);
@@ -80,7 +86,7 @@ export function RouterProvider(props: {  children: React.ReactNode }) {
       pendingNavigation();
       setPendingNavigation(null);
     }
-  }, [pendingNavigation]);
+  }, [pendingNavigation, setNeedConfirm]);
 
   const handleCancel = React.useCallback(() => {
     setShowDialog(false);

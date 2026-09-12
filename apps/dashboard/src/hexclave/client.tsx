@@ -1,4 +1,5 @@
 import { getPublicEnvVar } from "@/lib/env";
+import { isIndependentTvDisplayPath } from "@/lib/tv-mode/routes";
 import { StackClientApp } from "@hexclave/next";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import "../polyfills";
@@ -18,6 +19,10 @@ export const hexclaveClientApp = new StackClientApp({
   projectId: "internal",
   publishableClientKey: getPublicEnvVar("NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY"),
   tokenStore: isPreview || isRemoteDevelopmentEnvironment ? "memory" : "nextjs-cookie",
+  // The independent display is intentionally not a dashboard principal. Even
+  // when Next preloads this module, it must not start dashboard identity,
+  // analytics, replay, or development-overlay requests from the display.
+  automaticSideEffects: typeof window === "undefined" || !isIndependentTvDisplayPath(window.location.pathname),
   urls: {
     afterSignIn: "/projects",
     afterSignUp: "/new-project",

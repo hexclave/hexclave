@@ -226,6 +226,11 @@ async function fetchSubscriptionInvoiceBatch(
       si."isSubscriptionCreationInvoice",
       si."status",
       si."amountTotal",
+      si."paidAt",
+      si."markedUncollectibleAt",
+      si."voidedAt",
+      si."currency",
+      si."amountPaid",
       si."hostedInvoiceUrl",
       si."createdAt"
     FROM "SubscriptionInvoice" si

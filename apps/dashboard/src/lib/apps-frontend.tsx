@@ -316,10 +316,24 @@ export const ALL_APPS_FRONTEND = {
     icon: TelevisionSimpleIcon,
     href: "tv-mode",
     navigationItems: [
-      { displayName: "TV mode", href: "." },
+      {
+        displayName: "Profiles",
+        href: ".",
+        matchPath: (relativePart) => /^\/projects\/[^/]+\/tv-mode(?:\/profiles(?:\/.*)?)?\/?$/.test(new URL(relativePart, DUMMY_ORIGIN).pathname),
+      },
+      {
+        displayName: "Displays",
+        href: "displays",
+        matchPath: (relativePart) => /^\/projects\/[^/]+\/tv-mode\/displays\/?$/.test(new URL(relativePart, DUMMY_ORIGIN).pathname),
+      },
     ],
     screenshots: [],
-    storeDescription: <></>,
+    storeDescription: (
+      <>
+        <p>TV Mode turns your project activity into an ambient, full-screen company pulse.</p>
+        <p>Build named presentation profiles, rotate through office-safe metrics, and preview incident or celebration takeovers.</p>
+      </>
+    ),
   },
   "launch-checklist": {
     icon: RocketIcon,

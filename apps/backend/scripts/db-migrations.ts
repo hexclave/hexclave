@@ -2,7 +2,7 @@ import { applyMigrations } from "@/auto-migrations";
 import { MIGRATION_FILES_DIR, getMigrationFiles } from "@/auto-migrations/utils";
 import { Prisma } from "@/generated/prisma/client";
 import { getClickhouseAdminClient } from "@/lib/clickhouse";
-import { globalPrismaClient, globalPrismaSchema, sqlQuoteIdent } from "@/prisma-client";
+import { globalPrismaClient, globalPrismaConnectionString, globalPrismaSchema, sqlQuoteIdent } from "@/prisma-client";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
@@ -144,6 +144,7 @@ const migrate = async (selectedMigrationFiles?: { migrationName: string, sql: st
 
   const result = await applyMigrations({
     prismaClient: globalPrismaClient,
+    outsideTransactionConnectionString: globalPrismaConnectionString,
     migrationFiles,
     logging: true,
     schema: globalPrismaSchema,
