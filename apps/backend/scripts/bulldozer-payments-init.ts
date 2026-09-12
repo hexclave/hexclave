@@ -745,9 +745,28 @@ function formatBackfillFailures(failures: BackfillFailure[]): string {
 
 export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = {}) {
   const replica = globalPrismaClient.$replica();
-  const paymentOutcomeColumnPresence = await getPaymentOutcomeColumnPresence(replica);
-  const subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(paymentOutcomeColumnPresence);
-  const oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(paymentOutcomeColumnPresence);
+  let paymentOutcomeColumnPresence = await getPaymentOutcomeColumnPresence(replica);
+  let subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(paymentOutcomeColumnPresence);
+  let oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(paymentOutcomeColumnPresence);
+  const allPaymentOutcomeColumnsPresent = (presence: PaymentOutcomeColumnPresence) => Object.values(presence).every(Boolean);
+  let paymentOutcomeColumnPresenceChangedLogged = false;
+  const refreshPaymentOutcomeColumns = async () => {
+    if (allPaymentOutcomeColumnsPresent(paymentOutcomeColumnPresence)) return;
+    const nextPresence = await getPaymentOutcomeColumnPresence(replica);
+    const changed = Object.keys(paymentOutcomeColumnPresence).some((key) => (
+      paymentOutcomeColumnPresence[key as keyof PaymentOutcomeColumnPresence]
+      !== nextPresence[key as keyof PaymentOutcomeColumnPresence]
+    ));
+    if (changed) {
+      paymentOutcomeColumnPresence = nextPresence;
+      subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(nextPresence);
+      oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(nextPresence);
+      if (!paymentOutcomeColumnPresenceChangedLogged) {
+        log("Payment outcome columns changed during the run; subsequent pages will include the newly available columns.");
+        paymentOutcomeColumnPresenceChangedLogged = true;
+      }
+    }
+  };
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const tenancyFilter = options.tenancyFilter;
   assertResumeCursorMatchesTenancyFilter(options.resumeCursor, tenancyFilter);
@@ -770,12 +789,18 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
     ),
     makeTable(
       "SubscriptionInvoice",
-      (cursor) => fetchSubscriptionInvoiceBatch(replica, cursor, batchSize, tenancyFilter, subscriptionInvoicePaymentColumns),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchSubscriptionInvoiceBatch(replica, cursor, batchSize, tenancyFilter, subscriptionInvoicePaymentColumns);
+      },
       (invoices) => bulldozerWriteSubscriptionInvoices(invoices),
     ),
     makeTable(
       "OneTimePurchase",
-      (cursor) => fetchOneTimePurchaseBatch(replica, cursor, batchSize, tenancyFilter, oneTimePurchasePaymentColumns),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchOneTimePurchaseBatch(replica, cursor, batchSize, tenancyFilter, oneTimePurchasePaymentColumns);
+      },
       async (purchases) => {
         await bulldozerWriteOneTimePurchases(purchases);
         const refunds = purchases

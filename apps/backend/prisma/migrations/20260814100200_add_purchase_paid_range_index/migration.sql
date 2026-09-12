@@ -149,6 +149,8 @@ BEGIN
       AND i.indisready
       AND NOT i.indisunique
       AND i.indnatts = i.indnkeyatts
+      AND pg_index_column_has_property(idx.oid, 1, 'desc') IS FALSE
+      AND pg_index_column_has_property(idx.oid, 2, 'desc') IS FALSE
       AND access_method.amname = 'btree'
       AND pg_get_indexdef(idx.oid) LIKE '%("tenancyId", "paidAt") WHERE%'
       AND regexp_replace(regexp_replace(pg_get_expr(i.indpred, i.indrelid), '"[^\"]+"\."PurchaseCreationSource"', '"PurchaseCreationSource"', 'g'), '[()\s]', '', 'g') = regexp_replace('"creationSource" = ''PURCHASE_PAGE''::"PurchaseCreationSource" AND "paidAt" IS NOT NULL', '[()\s]', '', 'g')

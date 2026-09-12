@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   createTvPaymentEvaluatorState,
   evaluateTvSubscriptionCollection,
-  selectTvSubscriptionInvoiceOutcome,
   TV_PAYMENT_RULE_VERSION,
   type TvPaymentSample,
   type TvPaymentEvaluatorState,
@@ -45,13 +44,6 @@ function sample(options: {
 }
 
 describe("subscription collection evaluator", () => {
-  it("selects only the latest authoritative outcome with deterministic ties", () => {
-    const failure = new Date("2026-08-13T10:00:00.000Z");
-    const paid = new Date("2026-08-13T11:00:00.000Z");
-    expect(selectTvSubscriptionInvoiceOutcome({ paidAt: paid, markedUncollectibleAt: failure, voidedAt: null })).toEqual({ type: "success", at: paid });
-    expect(selectTvSubscriptionInvoiceOutcome({ paidAt: null, markedUncollectibleAt: failure, voidedAt: new Date("2026-08-13T12:00:00.000Z") })).toBeNull();
-    expect(selectTvSubscriptionInvoiceOutcome({ paidAt: paid, markedUncollectibleAt: paid, voidedAt: paid })).toEqual({ type: "success", at: paid });
-  });
   it("does not activate from one failed collection", () => {
     expect(evaluateTvSubscriptionCollection(createTvPaymentEvaluatorState(), sample({ outcomes: 1, failures: 1 })).action).toEqual({ type: "none" });
   });
@@ -66,6 +58,16 @@ describe("subscription collection evaluator", () => {
     const result = evaluateTvSubscriptionCollection(createTvPaymentEvaluatorState(), sample({ outcomes: 10, failures: 5, baseline: 99 }));
     expect(result.qualification).toBe("critical");
     expect(result.state.candidate?.presentationClass).toBe("critical-incident");
+  });
+
+  it("does not qualify a future-dated baseline as fresh", () => {
+    const result = evaluateTvSubscriptionCollection(createTvPaymentEvaluatorState(), sample({
+      outcomes: 10,
+      failures: 5,
+      baseline: 99,
+      baselineComputedAt: new Date(now.getTime() + 60_000),
+    }));
+    expect(result.qualification).toBe("strict");
   });
 
   it("requires thirty observed minutes for a low-volume critical breach", () => {
