@@ -74,7 +74,12 @@ BEGIN
     table_relation.relname AS table_name,
     index_metadata.indisvalid,
     index_metadata.indisready,
+    index_metadata.indnatts,
+    index_metadata.indnkeyatts,
     index_metadata.indisunique,
+    pg_index_column_has_property(index_relation.oid, 1, 'desc') AS first_key_is_desc,
+    pg_index_column_has_property(index_relation.oid, 2, 'desc') AS second_key_is_desc,
+    pg_index_column_has_property(index_relation.oid, 3, 'desc') AS third_key_is_desc,
     index_metadata.indpred IS NULL AS has_no_predicate,
     index_metadata.indexprs IS NULL AS has_no_expressions,
     pg_get_indexdef(index_relation.oid) AS index_definition,
@@ -100,10 +105,14 @@ BEGIN
 
   IF FOUND AND (
     existing.table_name IS DISTINCT FROM 'TvEventOccurrence'
+    OR existing.indnatts IS DISTINCT FROM existing.indnkeyatts
     OR existing.indisunique IS DISTINCT FROM FALSE
     OR existing.has_no_predicate IS DISTINCT FROM TRUE
     OR existing.has_no_expressions IS DISTINCT FROM TRUE
     OR existing.access_method IS DISTINCT FROM 'btree'
+    OR existing.first_key_is_desc IS DISTINCT FROM FALSE
+    OR existing.second_key_is_desc IS DISTINCT FROM TRUE
+    OR existing.third_key_is_desc IS DISTINCT FROM FALSE
     OR existing.key_columns IS DISTINCT FROM ARRAY['tenancyId', 'occurredAt', 'id']
   ) THEN
     RAISE EXCEPTION 'TV event occurred-at index % already exists but is invalid or has an unexpected definition; refusing to drop it', 'TvEventOccurrence_occurred_lookup_idx';
@@ -152,9 +161,6 @@ BEGIN
       AND access_method.amname = 'btree'
       AND i.indpred IS NULL
       AND i.indexprs IS NULL
-      AND pg_index_column_has_property(idx.oid, 1, 'desc') IS FALSE
-      AND pg_index_column_has_property(idx.oid, 2, 'desc') IS TRUE
-      AND pg_index_column_has_property(idx.oid, 3, 'desc') IS FALSE
       AND (
         SELECT array_agg(table_attribute.attname::text ORDER BY index_key.ordinality)
         FROM unnest(i.indkey::smallint[]) WITH ORDINALITY
