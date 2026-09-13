@@ -1,10 +1,12 @@
 "use client";
 
+import { useAdminApp } from "@/app/(main)/(protected)/projects/[projectId]/use-admin-app";
 import {
   DesignAlert,
   DesignBadge,
   type DesignBadgeColor,
   DesignButton,
+  DesignDialog,
 } from "@/components/design-components";
 import { ActionCell, ActionDialog, RadioGroup, RadioGroupItem, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui";
 import { Label } from "@/components/ui/label";
@@ -15,8 +17,10 @@ import {
   type DataGridColumnDef,
   type DataGridDataSource,
 } from "@hexclave/dashboard-ui-components";
+import type { AdminPromoCode } from "@hexclave/next";
+import { KnownErrors } from "@hexclave/shared";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
-import { wait } from "@hexclave/shared/dist/utils/promises";
+import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { MagnifyingGlassIcon, PlusIcon } from "@phosphor-icons/react";
 import { useCallback, useMemo, useState } from "react";
 import { PageLayout } from "../../page-layout";
@@ -24,6 +28,7 @@ import { PageLayout } from "../../page-layout";
 export type PromoCodeStatus = "active" | "scheduled" | "paused" | "expired" | "ended";
 export type DiscountKind = "percent" | "fixed";
 export type SubscriptionDiscountEndChoice = "keep" | "end_after_period";
+export type SubscriptionBehavior = "first_payment" | "fixed_duration" | "forever";
 
 export type PromoCodeRow = {
   id: string,
@@ -32,23 +37,23 @@ export type PromoCodeRow = {
   statusDetail: string | null,
   discountKind: DiscountKind,
   discountAmount: number,
+  discountLabel: string,
   productsLabel: string,
+  applicableProductIds: string[] | null,
   numRedemptions: number,
   maxRedemptions: number | null,
   availability: string,
-  /**
-   * Dummy stand-in for "this code still discounts live subscriptions."
-   * TODO: Once PromoCodeRedemption is wired, derive this from redemptions
-   * still applying a discount on renewals (`subscriptionBehavior` is
-   * `forever` or `fixed_duration`, and the discount has not already been
-   * removed). Do not show the radio group when that set is empty.
-   */
+  availabilityType: "always" | "between_dates",
+  startsAt: Date | null,
+  endsAt: Date | null,
+  pausedAt: Date | null,
+  endedAt: Date | null,
+  subscriptionBehavior: SubscriptionBehavior,
+  subscriptionDiscountDurationMonths: number | null,
   hasActiveSubscriptionRedemptions: boolean,
 };
 
 type StatusFilter = "all" | PromoCodeStatus;
-
-const PAGE_SIZE = 25;
 
 const STATUS_BADGE = new Map<PromoCodeStatus, { label: string, color: DesignBadgeColor }>([
   ["active", { label: "Active", color: "green" }],
@@ -58,91 +63,30 @@ const STATUS_BADGE = new Map<PromoCodeStatus, { label: string, color: DesignBadg
   ["ended", { label: "Ended", color: "red" }],
 ]);
 
-const SEED_PROMO_CODES: PromoCodeRow[] = [
-  {
-    id: "dummy-summer25",
-    codename: "SUMMER25",
-    status: "active",
-    statusDetail: null,
-    discountKind: "percent",
-    discountAmount: 25,
-    productsLabel: "Pro Plan, Seats",
-    numRedemptions: 236,
-    maxRedemptions: 400,
-    availability: "Jun 1 – Aug 31st Yearly",
-    hasActiveSubscriptionRedemptions: true,
-  },
-  {
-    id: "dummy-welcome10",
-    codename: "WELCOME10",
-    status: "scheduled",
-    statusDetail: "Starts Sep 1st",
-    discountKind: "fixed",
-    discountAmount: 10,
-    productsLabel: "Growth Plan",
-    numRedemptions: 12,
-    maxRedemptions: 100,
-    availability: "Always",
-    hasActiveSubscriptionRedemptions: false,
-  },
-  {
-    id: "dummy-team-pause",
-    codename: "TEAM50",
-    status: "paused",
-    statusDetail: "Since Aug 14th",
-    discountKind: "percent",
-    discountAmount: 50,
-    productsLabel: "Team Plan",
-    numRedemptions: 83,
-    maxRedemptions: null,
-    availability: "Always",
-    hasActiveSubscriptionRedemptions: true,
-  },
-  {
-    id: "dummy-expired",
-    codename: "NY2026",
-    status: "expired",
-    statusDetail: "Since Jan 10th",
-    discountKind: "percent",
-    discountAmount: 15,
-    productsLabel: "Pro Plan",
-    numRedemptions: 400,
-    maxRedemptions: 400,
-    availability: "Jan 1st – Jan 10th 2026",
-    hasActiveSubscriptionRedemptions: false,
-  },
-  {
-    id: "dummy-ended",
-    codename: "LAUNCH",
-    status: "ended",
-    statusDetail: "Since Feb 10th",
-    discountKind: "fixed",
-    discountAmount: 20,
-    productsLabel: "All products",
-    numRedemptions: 51,
-    maxRedemptions: null,
-    availability: "Always",
-    hasActiveSubscriptionRedemptions: false,
-  },
-];
-
-// TODO: Replace this dummy list with PromoCode rows from the API once the
-// PromoCode table (and list endpoint) is wired. Status must be derived from
-// PromoCode fields plus current time / redemptions — do not persist a
-// separate status column.
-export const DUMMY_PROMO_CODES: PromoCodeRow[] = [
-  ...SEED_PROMO_CODES,
-  ...Array.from({ length: 40 }, (_, index) => {
-    const source = SEED_PROMO_CODES[index % SEED_PROMO_CODES.length] ?? throwErr("Missing seed promo code");
-    const n = index + 2;
-    return {
-      ...source,
-      id: `${source.id}-dup-${index}`,
-      codename: `${source.codename}-${n}`,
-      numRedemptions: source.numRedemptions + index,
-    };
-  }),
-];
+export function adminPromoCodeToRow(promo: AdminPromoCode): PromoCodeRow {
+  return {
+    id: promo.id,
+    codename: promo.codeName,
+    status: promo.status,
+    statusDetail: promo.statusDetail,
+    discountKind: promo.discountType === "percent" ? "percent" : "fixed",
+    discountAmount: promo.discountAmount,
+    discountLabel: promo.discountLabel,
+    productsLabel: promo.productsLabel,
+    applicableProductIds: promo.applicableProductIds,
+    numRedemptions: promo.numRedemptions,
+    maxRedemptions: promo.maxRedemptions,
+    availability: promo.availability,
+    availabilityType: promo.availabilityType,
+    startsAt: promo.startsAt,
+    endsAt: promo.endsAt,
+    pausedAt: promo.pausedAt,
+    endedAt: promo.endedAt,
+    subscriptionBehavior: promo.subscriptionBehavior,
+    subscriptionDiscountDurationMonths: promo.subscriptionDiscountDurationMonths,
+    hasActiveSubscriptionRedemptions: promo.hasActiveSubscriptionRedemptions,
+  };
+}
 
 function parseStatusFilter(value: string): StatusFilter {
   if (value === "all" || value === "active" || value === "scheduled" || value === "paused" || value === "expired" || value === "ended") {
@@ -177,35 +121,37 @@ function canEnd(status: PromoCodeStatus): boolean {
   return status !== "ended";
 }
 
+function promoErrorMessage(error: unknown): string {
+  if (error instanceof KnownErrors.PromoCodeInvalid
+    || error instanceof KnownErrors.PromoCodeCannotPause
+    || error instanceof KnownErrors.PromoCodeCannotResume
+    || error instanceof KnownErrors.PromoCodeAlreadyEnded
+    || error instanceof KnownErrors.PromoCodeNotFound
+    || error instanceof KnownErrors.PromoCodeCodeNameAlreadyExists
+    || error instanceof KnownErrors.PromoCodeStripeCreateFailed
+  ) {
+    return error.message;
+  }
+  if (error instanceof Error) return error.message;
+  return "Something went wrong. Please try again.";
+}
+
+function subscriptionBehaviorLabel(row: PromoCodeRow): string {
+  if (row.subscriptionBehavior === "first_payment") return "First payment only";
+  if (row.subscriptionBehavior === "forever") return "On every renewal";
+  const months = row.subscriptionDiscountDurationMonths ?? throwErr("fixed_duration promo is missing months");
+  return `For ${months} month${months === 1 ? "" : "s"}`;
+}
+
 export function PromoCodesListView(props: {
-  promoCodes: PromoCodeRow[],
-  onPromoCodesChange: (next: PromoCodeRow[]) => void,
   onCreate: () => void,
+  refreshKey: number,
+  onChanged: () => void,
 }) {
+  const adminApp = useAdminApp();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [endingCode, setEndingCode] = useState<PromoCodeRow | null>(null);
-
-  const handlePauseOrResume = useCallback((row: PromoCodeRow) => {
-    props.onPromoCodesChange(props.promoCodes.map((current) => {
-      if (current.id !== row.id) return current;
-      if (current.status === "paused") {
-        return { ...current, status: "active", statusDetail: null };
-      }
-      return { ...current, status: "paused", statusDetail: "Since just now" };
-    }));
-  }, [props]);
-
-  const handleEnded = useCallback((rowId: string) => {
-    props.onPromoCodesChange(props.promoCodes.map((current) => {
-      if (current.id !== rowId) return current;
-      return {
-        ...current,
-        status: "ended",
-        statusDetail: "Since just now",
-        hasActiveSubscriptionRedemptions: false,
-      };
-    }));
-  }, [props]);
+  const [detailsCode, setDetailsCode] = useState<PromoCodeRow | null>(null);
 
   const columns = useMemo<DataGridColumnDef<PromoCodeRow>[]>(() => [
     {
@@ -214,6 +160,7 @@ export function PromoCodesListView(props: {
       accessor: "codename",
       type: "string",
       width: 140,
+      sortable: false,
       renderCell: ({ row }) => (
         <span className="truncate font-medium">{row.codename}</span>
       ),
@@ -223,14 +170,18 @@ export function PromoCodesListView(props: {
       header: "Status",
       accessor: "status",
       type: "string",
-      width: 200,
+      width: 220,
+      sortable: false,
+      cellOverflow: "wrap",
       renderCell: ({ row }) => {
         const badge = getStatusBadge(row.status);
         return (
-          <div className="flex min-w-0 items-center gap-2">
+          <div className={row.statusDetail != null ? "flex min-w-0 flex-col gap-1 py-0.5" : "flex min-w-0 flex-col gap-0.5"}>
             <DesignBadge label={badge.label} color={badge.color} size="sm" />
             {row.statusDetail != null && (
-              <span className="truncate text-xs text-muted-foreground">{row.statusDetail}</span>
+              <span className="whitespace-normal break-words text-xs leading-snug text-muted-foreground">
+                {row.statusDetail}
+              </span>
             )}
           </div>
         );
@@ -239,9 +190,10 @@ export function PromoCodesListView(props: {
     {
       id: "discount",
       header: "Discount",
-      accessor: (row) => formatDiscountLabel(row.discountKind, row.discountAmount),
+      accessor: (row) => row.discountLabel,
       type: "string",
       width: 110,
+      sortable: false,
     },
     {
       id: "products",
@@ -250,6 +202,7 @@ export function PromoCodesListView(props: {
       type: "string",
       width: 180,
       flex: 1,
+      sortable: false,
     },
     {
       id: "redemptions",
@@ -257,6 +210,7 @@ export function PromoCodesListView(props: {
       accessor: (row) => formatRedemptions(row.numRedemptions, row.maxRedemptions),
       type: "string",
       width: 120,
+      sortable: false,
     },
     {
       id: "availability",
@@ -265,6 +219,7 @@ export function PromoCodesListView(props: {
       type: "string",
       width: 200,
       flex: 1,
+      sortable: false,
     },
     {
       id: "actions",
@@ -287,13 +242,18 @@ export function PromoCodesListView(props: {
             items={[
               {
                 item: "View details",
-                onClick: () => {
-                  // Dummy until the details surface is built.
-                },
+                onClick: () => setDetailsCode(row),
               },
               ...(canPause(row.status) ? [{
                 item: row.status === "paused" ? "Resume" : "Pause",
-                onClick: () => handlePauseOrResume(row),
+                onClick: () => runAsynchronouslyWithAlert(async () => {
+                  if (row.status === "paused") {
+                    await adminApp.resumePromoCode(row.id);
+                  } else {
+                    await adminApp.pausePromoCode(row.id);
+                  }
+                  props.onChanged();
+                }),
               }] : []),
               "-",
               ...(canEnd(row.status) ? [{
@@ -306,29 +266,27 @@ export function PromoCodesListView(props: {
         </div>
       ),
     },
-  ], [handlePauseOrResume]);
+  ], [adminApp, props]);
 
   const [gridState, setGridState] = useDataGridUrlState(columns, { paramPrefix: "promocodes" });
 
   const dataSource = useMemo<DataGridDataSource<PromoCodeRow>>(
     () => async function* (params) {
-      const query = typeof params.quickSearch === "string" ? params.quickSearch.trim().toLowerCase() : "";
-      const offsetRaw = typeof params.cursor === "string" ? Number(params.cursor) : 0;
-      const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
-      const matched = props.promoCodes.filter((row) => {
-        if (statusFilter !== "all" && row.status !== statusFilter) return false;
-        if (query.length > 0 && !row.codename.toLowerCase().includes(query)) return false;
-        return true;
+      void props.refreshKey;
+      const query = typeof params.quickSearch === "string" ? params.quickSearch.trim() : "";
+      const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
+      const result = await adminApp.listPromoCodes({
+        cursor,
+        query: query.length > 0 ? query : undefined,
+        status: statusFilter,
       });
-      const rows = matched.slice(offset, offset + PAGE_SIZE);
-      const nextOffset = offset + rows.length;
       yield {
-        rows,
-        hasMore: nextOffset < matched.length,
-        nextCursor: nextOffset < matched.length ? String(nextOffset) : undefined,
+        rows: result.promoCodes.map(adminPromoCodeToRow),
+        hasMore: result.nextCursor != null,
+        nextCursor: result.nextCursor ?? undefined,
       };
     },
-    [props.promoCodes, statusFilter],
+    [adminApp, statusFilter, props.refreshKey],
   );
 
   const getRowId = useCallback((row: PromoCodeRow) => row.id, []);
@@ -353,64 +311,144 @@ export function PromoCodesListView(props: {
         </DesignButton>
       )}
     >
-      <DataGrid
-        columns={columns}
-        rows={gridData.rows}
-        getRowId={getRowId}
-        isLoading={gridData.isLoading}
-        isRefetching={gridData.isRefetching}
-        state={gridState}
-        onChange={setGridState}
-        paginationMode="infinite"
-        hasMore={gridData.hasMore}
-        isLoadingMore={gridData.isLoadingMore}
-        onLoadMore={gridData.loadMore}
-        fillHeight={false}
-        footer={false}
-        toolbarExtra={
-          <Select value={statusFilter} onValueChange={(value) => setStatusFilter(parseStatusFilter(value))}>
-            <SelectTrigger className="w-[160px] h-8 text-xs" aria-label="Filter by status">
-              <SelectValue placeholder="All statuses" />
-            </SelectTrigger>
-            <SelectContent align="start">
-              <SelectItem value="all">All statuses</SelectItem>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="scheduled">Scheduled</SelectItem>
-              <SelectItem value="paused">Paused</SelectItem>
-              <SelectItem value="expired">Expired</SelectItem>
-              <SelectItem value="ended">Ended</SelectItem>
-            </SelectContent>
-          </Select>
-        }
-        emptyState={
-          <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-8">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-              <MagnifyingGlassIcon className="h-6 w-6 text-muted-foreground" />
+      {gridData.error != null && gridData.rows.length === 0 ? (
+        <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-8">
+          <DesignAlert
+            variant="error"
+            title="Couldn't load promo codes"
+            description="Something went wrong while loading promo codes. Try again."
+          />
+          <DesignButton variant="outline" onClick={() => gridData.reload()}>
+            Retry
+          </DesignButton>
+        </div>
+      ) : (
+        <div className="flex min-h-0 flex-col gap-3">
+          {gridData.error != null && (
+            <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <DesignAlert
+                variant="error"
+                title="Couldn't load promo codes"
+                description="Something went wrong while loading more promo codes. Try again."
+              />
+              <DesignButton variant="outline" onClick={() => gridData.reload()}>
+                Retry
+              </DesignButton>
             </div>
-            <div className="text-base font-medium text-foreground">No promo codes found</div>
-            <p className="text-sm text-muted-foreground">
-              Try adjusting your search or filter.
-            </p>
-          </div>
-        }
-      />
+          )}
+          <DataGrid
+            columns={columns}
+            rows={gridData.rows}
+            getRowId={getRowId}
+            isLoading={gridData.isLoading}
+            isRefetching={gridData.isRefetching}
+            state={gridState}
+            onChange={setGridState}
+            paginationMode="infinite"
+            hasMore={gridData.hasMore}
+            isLoadingMore={gridData.isLoadingMore}
+            onLoadMore={gridData.loadMore}
+            fillHeight={false}
+            footer={false}
+            rowHeight="auto"
+            estimatedRowHeight={44}
+            toolbarExtra={
+              <Select value={statusFilter} onValueChange={(value) => setStatusFilter(parseStatusFilter(value))}>
+                <SelectTrigger className="w-[160px] h-8 text-xs" aria-label="Filter by status">
+                  <SelectValue placeholder="All statuses" />
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="all">All statuses</SelectItem>
+                  <SelectItem value="active">Active</SelectItem>
+                  <SelectItem value="scheduled">Scheduled</SelectItem>
+                  <SelectItem value="paused">Paused</SelectItem>
+                  <SelectItem value="expired">Expired</SelectItem>
+                  <SelectItem value="ended">Ended</SelectItem>
+                </SelectContent>
+              </Select>
+            }
+            emptyState={
+              <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-8">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+                  <MagnifyingGlassIcon className="h-6 w-6 text-muted-foreground" />
+                </div>
+                <div className="text-base font-medium text-foreground">No promo codes found</div>
+                <p className="text-sm text-muted-foreground">
+                  Try adjusting your search or filter.
+                </p>
+              </div>
+            }
+          />
+        </div>
+      )}
 
       <EndPromoCodeDialog
         promoCode={endingCode}
         onOpenChange={(open) => {
           if (!open) setEndingCode(null);
         }}
-        onEnded={handleEnded}
+        onEnded={() => {
+          setEndingCode(null);
+          props.onChanged();
+        }}
+      />
+      <PromoCodeDetailsDialog
+        promoCode={detailsCode}
+        onOpenChange={(open) => {
+          if (!open) setDetailsCode(null);
+        }}
       />
     </PageLayout>
+  );
+}
+
+function PromoCodeDetailsDialog(props: {
+  promoCode: PromoCodeRow | null,
+  onOpenChange: (open: boolean) => void,
+}) {
+  const promoCode = props.promoCode;
+  const badge = promoCode != null ? getStatusBadge(promoCode.status) : null;
+  return (
+    <DesignDialog
+      open={promoCode != null}
+      onOpenChange={props.onOpenChange}
+      size="md"
+      title={promoCode?.codename ?? "Promo code"}
+    >
+      {promoCode != null && badge != null && (
+        <div className="flex flex-col gap-3 text-sm">
+          <div className="flex items-center gap-2">
+            <DesignBadge label={badge.label} color={badge.color} size="sm" />
+            {promoCode.statusDetail != null && (
+              <span className="text-muted-foreground">{promoCode.statusDetail}</span>
+            )}
+          </div>
+          <DetailRow label="Discount" value={promoCode.discountLabel} />
+          <DetailRow label="Products" value={promoCode.productsLabel} />
+          <DetailRow label="Redemptions" value={formatRedemptions(promoCode.numRedemptions, promoCode.maxRedemptions)} />
+          <DetailRow label="Availability" value={promoCode.availability} />
+          <DetailRow label="Subscription discount" value={subscriptionBehaviorLabel(promoCode)} />
+        </div>
+      )}
+    </DesignDialog>
+  );
+}
+
+function DetailRow(props: { label: string, value: string }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{props.label}</span>
+      <span className="text-foreground">{props.value}</span>
+    </div>
   );
 }
 
 function EndPromoCodeDialog(props: {
   promoCode: PromoCodeRow | null,
   onOpenChange: (open: boolean) => void,
-  onEnded: (rowId: string) => void,
+  onEnded: () => void,
 }) {
+  const adminApp = useAdminApp();
   const promoCode = props.promoCode;
   const [subscriptionChoice, setSubscriptionChoice] = useState<SubscriptionDiscountEndChoice | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -434,12 +472,17 @@ function EndPromoCodeDialog(props: {
       return "prevent-close" as const;
     }
     setErrorMessage(null);
-    // Dummy commit until the end-promo API exists.
-    // TODO: Call the end-promo API here (including subscriptionChoice when
-    // live subscription redemptions exist). On failure, setErrorMessage and
-    // keep the modal open — do not toast.
-    await wait(400);
-    props.onEnded(promoCode.id);
+    try {
+      await adminApp.endPromoCode(promoCode.id, {
+        existingSubscriptionDiscounts: showSubscriptionChoice
+          ? (subscriptionChoice ?? throwErr("End requires a subscription discount choice"))
+          : undefined,
+      });
+    } catch (error) {
+      setErrorMessage(promoErrorMessage(error));
+      return "prevent-close" as const;
+    }
+    props.onEnded();
   };
 
   return (

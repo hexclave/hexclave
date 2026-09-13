@@ -1,50 +1,45 @@
 "use client";
 
 import {
+  DesignAlert,
   DesignBadge,
   DesignButton,
   DesignDialog,
   DesignDialogClose,
   DesignInput,
   DesignPillToggle,
-  DesignSelectorDropdown,
 } from "@/components/design-components";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { KnownErrors } from "@hexclave/shared";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import { typedEntries } from "@hexclave/shared/dist/utils/objects";
 import { MagnifyingGlassIcon, PlusIcon, TicketIcon } from "@phosphor-icons/react";
 import { CheckIcon } from "@radix-ui/react-icons";
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { PageLayout } from "../../page-layout";
+import { useAdminApp } from "../../use-admin-app";
 import {
-  DUMMY_PROMO_CODES,
   PromoCodesListView,
   type DiscountKind,
-  type PromoCodeRow,
 } from "./promo-codes-list";
 
 type ProductScope = "all" | "specific";
-type RedemptionLimitMode = "total" | "per_period";
-type SubscriptionApplicability = "first_payment" | "between_dates" | "every_renewal";
-type ValidDatesMode = "always" | "between_dates" | "recurring";
-
-const REDEMPTION_LIMIT_OPTIONS = [
-  { id: "total", label: "Total" },
-  { id: "per_period", label: "Per period" },
-] as const;
+type SubscriptionApplicability = "first_payment" | "forever" | "fixed_duration";
+type ValidDatesMode = "always" | "between_dates";
 
 const SUBSCRIPTION_APPLICABILITY_OPTIONS = [
   { id: "first_payment", label: "First payment only" },
-  { id: "between_dates", label: "Between these dates" },
-  { id: "every_renewal", label: "On every renewal" },
+  { id: "forever", label: "On every renewal" },
+  { id: "fixed_duration", label: "For N months" },
 ] as const;
 
 const VALID_DATES_OPTIONS = [
   { id: "always", label: "Always" },
   { id: "between_dates", label: "Between these dates" },
-  { id: "recurring", label: "Recurring schedule" },
 ] as const;
 
 const DISCOUNT_KIND_OPTIONS = [
@@ -57,24 +52,8 @@ const PRODUCT_SCOPE_OPTIONS = [
   { id: "specific", label: "Specific products" },
 ] as const;
 
-const PRODUCT_OPTIONS = [
-  { value: "pro-plan", label: "Pro Plan" },
-  { value: "seats", label: "Seats" },
-  { value: "team", label: "Team" },
-  { value: "credits", label: "Credits" },
-  { value: "starter", label: "Starter" },
-  { value: "enterprise", label: "Enterprise" },
-];
-
-const PERIOD_OPTIONS = [
-  { value: "month", label: "Per month" },
-  { value: "year", label: "Per year" },
-];
-
-const RECURRING_OPTIONS = [
-  { value: "yearly", label: "Yearly" },
-  { value: "monthly", label: "Monthly" },
-];
+// Must match backend MAX_PROMO_AMOUNT_DISCOUNT_USD ($999,999).
+const MAX_PROMO_AMOUNT_DISCOUNT_USD = 999_999;
 
 function parseDiscountKind(id: string): DiscountKind {
   if (id === "percent" || id === "fixed") return id;
@@ -86,31 +65,210 @@ function parseProductScope(id: string): ProductScope {
   throwErr(`Unknown product scope: ${id}`);
 }
 
-function parseRedemptionLimitMode(id: string): RedemptionLimitMode {
-  if (id === "total" || id === "per_period") return id;
-  throwErr(`Unknown redemption limit mode: ${id}`);
-}
-
 function parseSubscriptionApplicability(id: string): SubscriptionApplicability {
-  if (id === "first_payment" || id === "between_dates" || id === "every_renewal") return id;
+  if (id === "first_payment" || id === "forever" || id === "fixed_duration") return id;
   throwErr(`Unknown subscription applicability: ${id}`);
 }
 
 function parseValidDatesMode(id: string): ValidDatesMode {
-  if (id === "always" || id === "between_dates" || id === "recurring") return id;
+  if (id === "always" || id === "between_dates") return id;
   throwErr(`Unknown valid dates mode: ${id}`);
 }
 
-export default function PageClient() {
-  const [createOpen, setCreateOpen] = useState(false);
-  const [promoCodes, setPromoCodes] = useState<PromoCodeRow[]>(() => [...DUMMY_PROMO_CODES]);
+function parsePositiveIntegerField(raw: string, message: string): { ok: true, value: number } | { ok: false, message: string } {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || !/^[1-9][0-9]*$/.test(trimmed)) {
+    return { ok: false, message };
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    return { ok: false, message };
+  }
+  return { ok: true, value };
+}
 
-  const handleCreate = (row: PromoCodeRow) => {
-    setPromoCodes((current) => [row, ...current]);
+function dateWindowFromForm(validFrom: string, validUntil: string): { ok: true, startsAt: Date, endsAt: Date } | { ok: false, message: string } {
+  if (validFrom.length === 0 || validUntil.length === 0) {
+    return { ok: false, message: "A date-window promo code requires both a start and an end date." };
+  }
+  const startsAt = new Date(`${validFrom}T00:00:00`);
+  const endsAt = new Date(`${validUntil}T23:59:59`);
+  if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
+    return { ok: false, message: "Enter valid start and end dates." };
+  }
+  if (startsAt >= endsAt) {
+    return { ok: false, message: "Start date must be before the end date. Same calendar day is allowed (start 00:00:00, end 23:59:59 local)." };
+  }
+  return { ok: true, startsAt, endsAt };
+}
+
+type CreatePromoCodeFormState = {
+  codename: string,
+  discount: string,
+  discountKind: DiscountKind,
+  productScope: ProductScope,
+  selectedProductIds: ReadonlySet<string>,
+  isUnlimited: boolean,
+  maxRedemptions: string,
+  subscriptionApplicability: SubscriptionApplicability,
+  durationMonths: string,
+  validDatesMode: ValidDatesMode,
+  validFrom: string,
+  validUntil: string,
+};
+
+type PromoCodeDbPreview = {
+  codeName: string,
+  discountType: "percent" | "amount",
+  discountAmount: number | string,
+  currency: "USD",
+  applicableProductIds: string[] | null,
+  maxRedemptions: number | null,
+  numRedemptions: 0,
+  pendingRedemptions: 0,
+  subscriptionBehavior: SubscriptionApplicability,
+  subscriptionDiscountDurationMonths: number | null,
+  availabilityType: ValidDatesMode,
+  startsAt: string | null,
+  endsAt: string | null,
+  pausedAt: null,
+  endedAt: null,
+  stripeCouponId: string,
+  derivedStatusIfSavedNow: "active" | "scheduled" | "expired" | "invalid_form",
+};
+
+function promoCodeDbPreviewFromForm(form: CreatePromoCodeFormState): { errors: string[], preview: PromoCodeDbPreview } {
+  const errors: string[] = [];
+  const codeName = form.codename.trim().toUpperCase();
+  if (codeName.length === 0) {
+    errors.push("Codename is required.");
+  }
+
+  const parsedDiscount = Number(form.discount);
+  if (!Number.isFinite(parsedDiscount) || parsedDiscount <= 0) {
+    errors.push("Discount must be greater than 0.");
+  } else if (form.discountKind === "percent" && parsedDiscount > 100) {
+    errors.push("Percentage discounts cannot be greater than 100.");
+  } else if (form.discountKind === "fixed" && parsedDiscount > MAX_PROMO_AMOUNT_DISCOUNT_USD) {
+    errors.push("Amount discounts cannot be greater than $999,999.");
+  }
+
+  let applicableProductIds: string[] | null = null;
+  if (form.productScope === "specific") {
+    applicableProductIds = [...form.selectedProductIds];
+    if (applicableProductIds.length === 0) {
+      errors.push("Select at least one product, or apply to all products.");
+    }
+  }
+
+  let maxRedemptions: number | null = null;
+  if (!form.isUnlimited) {
+    const parsedMax = parsePositiveIntegerField(
+      form.maxRedemptions,
+      "Maximum redemptions must be an integer of at least 1, or unlimited.",
+    );
+    if (!parsedMax.ok) {
+      errors.push(parsedMax.message);
+    } else {
+      maxRedemptions = parsedMax.value;
+    }
+  }
+
+  let subscriptionDiscountDurationMonths: number | null = null;
+  if (form.subscriptionApplicability === "fixed_duration") {
+    const parsedMonths = parsePositiveIntegerField(
+      form.durationMonths,
+      "Fixed-duration subscription discounts require a number of months of at least 1.",
+    );
+    if (!parsedMonths.ok) {
+      errors.push(parsedMonths.message);
+    } else {
+      subscriptionDiscountDurationMonths = parsedMonths.value;
+    }
+  }
+
+  let startsAt: Date | null = null;
+  let endsAt: Date | null = null;
+  if (form.validDatesMode === "between_dates") {
+    const window = dateWindowFromForm(form.validFrom, form.validUntil);
+    if (!window.ok) {
+      errors.push(window.message);
+    } else {
+      startsAt = window.startsAt;
+      endsAt = window.endsAt;
+    }
+  }
+
+  const now = new Date();
+  let derivedStatusIfSavedNow: PromoCodeDbPreview["derivedStatusIfSavedNow"] = "active";
+  if (errors.length > 0) {
+    derivedStatusIfSavedNow = "invalid_form";
+  } else if (endsAt != null && endsAt < now) {
+    derivedStatusIfSavedNow = "expired";
+  } else if (startsAt != null && startsAt > now) {
+    derivedStatusIfSavedNow = "scheduled";
+  }
+
+  return {
+    errors,
+    preview: {
+      codeName,
+      discountType: form.discountKind === "percent" ? "percent" : "amount",
+      discountAmount: Number.isFinite(parsedDiscount) ? parsedDiscount : form.discount,
+      currency: "USD",
+      applicableProductIds,
+      maxRedemptions,
+      numRedemptions: 0,
+      pendingRedemptions: 0,
+      subscriptionBehavior: form.subscriptionApplicability,
+      subscriptionDiscountDurationMonths,
+      availabilityType: form.validDatesMode,
+      startsAt: startsAt?.toISOString() ?? null,
+      endsAt: endsAt?.toISOString() ?? null,
+      pausedAt: null,
+      endedAt: null,
+      stripeCouponId: "(assigned after Stripe coupon create)",
+      derivedStatusIfSavedNow,
+    },
+  };
+}
+
+function createPromoErrorMessage(error: unknown): string {
+  if (
+    error instanceof KnownErrors.PromoCodeCodeNameAlreadyExists
+    || error instanceof KnownErrors.PromoCodeStripeCreateFailed
+    || error instanceof KnownErrors.PromoCodeInvalid
+  ) {
+    return error.message;
+  }
+  if (error instanceof Error) return error.message;
+  return "Could not create this promo code. Please try again.";
+}
+
+export default function PageClient() {
+  const adminApp = useAdminApp();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [hasAny, setHasAny] = useState<boolean | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    runAsynchronouslyWithAlert(async () => {
+      const result = await adminApp.listPromoCodes({});
+      if (!cancelled) setHasAny(result.promoCodes.length > 0);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminApp, refreshKey]);
+
+  const handleCreated = () => {
     setCreateOpen(false);
+    setHasAny(true);
+    setRefreshKey((current) => current + 1);
   };
 
-  if (promoCodes.length === 0) {
+  if (hasAny === false) {
     return (
       <PageLayout containedHeight>
         <div className="flex flex-1 min-h-0 flex-col items-center justify-center">
@@ -135,7 +293,7 @@ export default function PageClient() {
         <CreatePromoCodeDialog
           open={createOpen}
           onOpenChange={setCreateOpen}
-          onConfirm={handleCreate}
+          onCreated={handleCreated}
         />
       </PageLayout>
     );
@@ -144,14 +302,14 @@ export default function PageClient() {
   return (
     <>
       <PromoCodesListView
-        promoCodes={promoCodes}
-        onPromoCodesChange={setPromoCodes}
         onCreate={() => setCreateOpen(true)}
+        refreshKey={refreshKey}
+        onChanged={() => setRefreshKey((current) => current + 1)}
       />
       <CreatePromoCodeDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        onConfirm={handleCreate}
+        onCreated={handleCreated}
       />
     </>
   );
@@ -160,16 +318,21 @@ export default function PageClient() {
 function CreatePromoCodeDialog(props: {
   open: boolean,
   onOpenChange: (open: boolean) => void,
-  onConfirm: (row: PromoCodeRow) => void,
+  onCreated: () => void,
 }) {
+  const adminApp = useAdminApp();
+  const products = adminApp.useProject().useConfig().payments.products;
+  const productOptions = typedEntries(products).map(([id, product]) => ({
+    value: id,
+    label: product.displayName || id,
+  }));
   const ids = {
     codename: useId(),
     discount: useId(),
     redemptions: useId(),
     validFrom: useId(),
     validUntil: useId(),
-    subFrom: useId(),
-    subUntil: useId(),
+    durationMonths: useId(),
   };
 
   const [codename, setCodename] = useState("");
@@ -179,15 +342,12 @@ function CreatePromoCodeDialog(props: {
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(() => new Set());
   const [maxRedemptions, setMaxRedemptions] = useState("");
   const [isUnlimited, setIsUnlimited] = useState(false);
-  const [redemptionLimitMode, setRedemptionLimitMode] = useState<RedemptionLimitMode>("total");
-  const [period, setPeriod] = useState("month");
   const [subscriptionApplicability, setSubscriptionApplicability] = useState<SubscriptionApplicability>("first_payment");
+  const [durationMonths, setDurationMonths] = useState("");
   const [validDatesMode, setValidDatesMode] = useState<ValidDatesMode>("always");
-  const [recurringSchedule, setRecurringSchedule] = useState("yearly");
   const [validFrom, setValidFrom] = useState("");
   const [validUntil, setValidUntil] = useState("");
-  const [subscriptionFrom, setSubscriptionFrom] = useState("");
-  const [subscriptionUntil, setSubscriptionUntil] = useState("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   return (
     <DesignDialog
@@ -207,34 +367,49 @@ function CreatePromoCodeDialog(props: {
           </DesignDialogClose>
           <DesignButton
             size="sm"
-            onClick={() => {
-              const productLabels = productScope === "all"
-                ? "All products"
-                : PRODUCT_OPTIONS
-                  .filter((option) => selectedProductIds.has(option.value))
-                  .map((option) => option.label)
-                  .join(", ");
-              const parsedDiscount = Number(discount);
-              const parsedMax = Number(maxRedemptions);
-              props.onConfirm({
-                id: `dummy-${crypto.randomUUID()}`,
-                codename: codename.trim().length > 0 ? codename.trim().toUpperCase() : "NEWCODE",
-                status: "active",
-                statusDetail: null,
+            onClick={async () => {
+              setErrorMessage(null);
+              const validated = promoCodeDbPreviewFromForm({
+                codename,
+                discount,
                 discountKind,
-                discountAmount: Number.isFinite(parsedDiscount) ? parsedDiscount : 0,
-                productsLabel: productLabels.length > 0 ? productLabels : "All products",
-                numRedemptions: 0,
-                maxRedemptions: isUnlimited || !Number.isFinite(parsedMax) || parsedMax <= 0 ? null : parsedMax,
-                availability: validDatesMode === "always"
-                  ? "Always"
-                  : validDatesMode === "recurring"
-                    ? `${recurringSchedule === "yearly" ? "Yearly" : "Monthly"}`
-                    : "Between dates",
-                // Dummy: treat "on every renewal" as if live subscription
-                // redemptions exist so both End-modal variants can be exercised.
-                hasActiveSubscriptionRedemptions: subscriptionApplicability === "every_renewal",
+                productScope,
+                selectedProductIds,
+                isUnlimited,
+                maxRedemptions,
+                subscriptionApplicability,
+                durationMonths,
+                validDatesMode,
+                validFrom,
+                validUntil,
               });
+              if (validated.errors.length > 0) {
+                setErrorMessage(validated.errors[0] ?? throwErr("Create form validation produced an empty error list"));
+                return;
+              }
+              const preview = validated.preview;
+              if (typeof preview.discountAmount !== "number") {
+                setErrorMessage("Discount must be greater than 0.");
+                return;
+              }
+              try {
+                await adminApp.createPromoCode({
+                  codeName: preview.codeName,
+                  discountType: preview.discountType,
+                  discountAmount: preview.discountAmount,
+                  applicableProductIds: preview.applicableProductIds,
+                  maxRedemptions: preview.maxRedemptions,
+                  subscriptionBehavior: preview.subscriptionBehavior,
+                  subscriptionDiscountDurationMonths: preview.subscriptionDiscountDurationMonths,
+                  availabilityType: preview.availabilityType,
+                  startsAt: preview.startsAt == null ? null : new Date(preview.startsAt),
+                  endsAt: preview.endsAt == null ? null : new Date(preview.endsAt),
+                });
+              } catch (error) {
+                setErrorMessage(createPromoErrorMessage(error));
+                return;
+              }
+              props.onCreated();
             }}
           >
             Confirm
@@ -243,6 +418,9 @@ function CreatePromoCodeDialog(props: {
       )}
     >
       <div className="flex flex-col gap-5">
+        {errorMessage != null && (
+          <DesignAlert variant="error" description={errorMessage} />
+        )}
         <FormField label="Codename" htmlFor={ids.codename}>
           <DesignInput
             id={ids.codename}
@@ -259,7 +437,7 @@ function CreatePromoCodeDialog(props: {
                 id={ids.discount}
                 type="number"
                 min={0}
-                max={discountKind === "percent" ? 100 : undefined}
+                max={discountKind === "percent" ? 100 : MAX_PROMO_AMOUNT_DISCOUNT_USD}
                 inputMode="decimal"
                 value={discount}
                 onChange={(event) => setDiscount(event.target.value)}
@@ -286,7 +464,7 @@ function CreatePromoCodeDialog(props: {
             />
             {productScope === "specific" && (
               <ProductSearchMultiSelect
-                options={PRODUCT_OPTIONS}
+                options={productOptions}
                 selectedIds={selectedProductIds}
                 onSelectedIdsChange={setSelectedProductIds}
               />
@@ -300,25 +478,18 @@ function CreatePromoCodeDialog(props: {
               {isUnlimited ? (
                 <DesignBadge label="Unlimited" color="blue" size="md" />
               ) : (
-                <>
-                  <div className="sm:w-40">
-                    <DesignInput
-                      id={ids.redemptions}
-                      type="number"
-                      min={1}
-                      inputMode="numeric"
-                      value={maxRedemptions}
-                      onChange={(event) => setMaxRedemptions(event.target.value)}
-                      placeholder="400"
-                    />
-                  </div>
-                  <DesignPillToggle
-                    size="sm"
-                    options={[...REDEMPTION_LIMIT_OPTIONS]}
-                    selected={redemptionLimitMode}
-                    onSelect={(id) => setRedemptionLimitMode(parseRedemptionLimitMode(id))}
+                <div className="sm:w-40">
+                  <DesignInput
+                    id={ids.redemptions}
+                    type="number"
+                    min={1}
+                    step={1}
+                    inputMode="numeric"
+                    value={maxRedemptions}
+                    onChange={(event) => setMaxRedemptions(event.target.value)}
+                    placeholder="400"
                   />
-                </>
+                </div>
               )}
               <DesignButton
                 variant="outline"
@@ -329,15 +500,6 @@ function CreatePromoCodeDialog(props: {
                 {isUnlimited ? "Set a limit" : "Make Unlimited"}
               </DesignButton>
             </div>
-            {redemptionLimitMode === "per_period" && !isUnlimited && (
-              <DesignSelectorDropdown
-                value={period}
-                onValueChange={setPeriod}
-                options={PERIOD_OPTIONS}
-                size="md"
-                className="sm:max-w-[12rem]"
-              />
-            )}
           </div>
         </FormField>
 
@@ -349,15 +511,18 @@ function CreatePromoCodeDialog(props: {
             onSelect={(id) => setSubscriptionApplicability(parseSubscriptionApplicability(id))}
             className="flex-wrap"
           />
-          {subscriptionApplicability === "between_dates" && (
-            <DateRangeFields
-              fromId={ids.subFrom}
-              untilId={ids.subUntil}
-              from={subscriptionFrom}
-              until={subscriptionUntil}
-              onFromChange={setSubscriptionFrom}
-              onUntilChange={setSubscriptionUntil}
-            />
+          {subscriptionApplicability === "fixed_duration" && (
+            <div className="sm:w-40">
+              <DesignInput
+                id={ids.durationMonths}
+                type="number"
+                min={1}
+                inputMode="numeric"
+                value={durationMonths}
+                onChange={(event) => setDurationMonths(event.target.value)}
+                placeholder="3"
+              />
+            </div>
           )}
         </FormField>
 
@@ -377,15 +542,6 @@ function CreatePromoCodeDialog(props: {
               until={validUntil}
               onFromChange={setValidFrom}
               onUntilChange={setValidUntil}
-            />
-          )}
-          {validDatesMode === "recurring" && (
-            <DesignSelectorDropdown
-              value={recurringSchedule}
-              onValueChange={setRecurringSchedule}
-              options={RECURRING_OPTIONS}
-              size="md"
-              className="sm:max-w-[12rem]"
             />
           )}
         </FormField>
