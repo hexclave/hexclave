@@ -10,6 +10,8 @@ export type ProjectConfig = {
   readonly oauthProviders: OAuthProviderConfig[],
   readonly allowUserApiKeys: boolean,
   readonly allowTeamApiKeys: boolean,
+  readonly allowPromoCodes: boolean,
+  readonly allowStackingPromoCodes: boolean,
 };
 
 export type OAuthProviderConfig = {
@@ -38,6 +40,8 @@ export type AdminProjectConfig = {
   readonly oauthAccountMergeStrategy: 'link_method' | 'raise_error' | 'allow_duplicates',
   readonly allowUserApiKeys: boolean,
   readonly allowTeamApiKeys: boolean,
+  readonly allowPromoCodes: boolean,
+  readonly allowStackingPromoCodes: boolean,
 };
 
 export type AdminEmailConfig = (

@@ -171,9 +171,9 @@ netAmount is the first charge (including first-payment-only codes). recurringAmo
 POST /api/v1/payments/products/{type}/{id}/validate-promo-codes { product_id, price_id, quantity, promo_codes } [authenticated]
 Route: apps/backend/src/app/api/latest/payments/products/[customer_type]/[customer_id]/validate-promo-codes/route.ts
 
-Validates typed promo names against a product without redeeming them. Stacking is controlled by project configuration.
+Validates typed promo names against a product without redeeming them. Stacking is controlled by project configuration. Client and server Customer objects both use this customer-scoped route (server sends a server key) so the preview matches the quantity and product-type checks the switch will use.
 
-HexclaveServerApp also has a server-only validatePromoCodes that POSTs /api/v1/payments/promo-codes/validate with a server key.
+HexclaveServerApp also has a server-only validatePromoCodes that POSTs /api/v1/payments/promo-codes/validate with a server key. That app-level helper has no customer context and is not what Customer.validatePromoCodes calls.
 
 Errors: PROMO_CODES_DISABLED, PROMO_CODE_STACKING_DISABLED, and other promo KnownErrors.
 
