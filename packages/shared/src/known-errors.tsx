@@ -2022,12 +2022,12 @@ const PromoCodeNothingToDiscount = createKnownErrorConstructor(
   () => [] as const,
 );
 
-const PromoCodeDiscountBelowStripeMinimum = createKnownErrorConstructor(
+const PromoCodeDiscountBelowMinimum = createKnownErrorConstructor(
   KnownError,
-  "PROMO_CODE_DISCOUNT_BELOW_STRIPE_MINIMUM",
+  "PROMO_CODE_DISCOUNT_BELOW_MINIMUM",
   () => [
     400,
-    "This discount would bring the one-time charge below Stripe's minimum.",
+    "This discount would bring the one-time charge below $0.50. Increase the remaining amount, or discount the purchase to $0.",
   ] as const,
   () => [] as const,
 );
@@ -2037,7 +2037,7 @@ const PromoCodeCannotPause = createKnownErrorConstructor(
   "PROMO_CODE_CANNOT_PAUSE",
   () => [
     400,
-    "This promo code cannot be paused because it has ended or permanently expired.",
+    "This promo code cannot be paused.",
   ] as const,
   () => [] as const,
 );
@@ -2047,7 +2047,7 @@ const PromoCodeCannotResume = createKnownErrorConstructor(
   "PROMO_CODE_CANNOT_RESUME",
   () => [
     400,
-    "This promo code cannot be resumed because it has ended or permanently expired.",
+    "This promo code cannot be resumed.",
   ] as const,
   () => [] as const,
 );
@@ -2247,7 +2247,7 @@ export const KnownErrors = {
   PromoCodeRedemptionLimitReached,
   PromoCodeStackingNotAllowed,
   PromoCodeNothingToDiscount,
-  PromoCodeDiscountBelowStripeMinimum,
+  PromoCodeDiscountBelowMinimum,
   PromoCodeCannotPause,
   PromoCodeCannotResume,
   PromoCodeAlreadyEnded,

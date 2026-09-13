@@ -1,4 +1,6 @@
 import { sendEmailToMany, type EmailOutboxRecipient } from "@/lib/emails";
+import { attachSetupIntentPaymentMethodToSubscription } from "@/lib/payments";
+import { attachPromoCouponsAfterTrial, isTrialCreationInvoice, listLiveHexclaveRedemptions, markHexclaveDiscountsRemoved, markPromoInitialInvoicePaid, promoCouponActionForInvoice, releasePendingRedemptions, restoreLingeringSubscriptionCoupons, succeedPendingRedemptions } from "@/lib/payments/promo-code-checkout";
 import { bulldozerWriteOneTimePurchase } from "@/lib/payments/bulldozer-dual-write";
 import { claimStripeEvent, markStripeEventFailed, markStripeEventProcessed } from "@/lib/stripe-webhook-events";
 import { runAsynchronouslyAndWaitUntil } from "@/utils/background-tasks";
@@ -52,11 +54,27 @@ const ignoredEvents = [
   "customer.updated",
   "customer.created",
   "invoice_payment.paid",
+  "setup_intent.created",
+  "setup_intent.canceled",
+  "setup_intent.requires_action",
+  "setup_intent.setup_failed",
   "payout.created",
   "payout.paid",
   "payout.reconciliation_completed",
   "refund.updated",
 ] as const satisfies Stripe.Event.Type[];
+
+function stripeSubscriptionIdFromInvoice(invoice: Stripe.Invoice): string | null {
+  const fromParent = invoice.parent?.subscription_details?.subscription;
+  if (typeof fromParent === "string") return fromParent;
+  if (fromParent != null && typeof fromParent.id === "string") return fromParent.id;
+  const lines = invoice.lines.data;
+  for (const line of lines) {
+    const fromLine = line.parent?.subscription_item_details?.subscription;
+    if (typeof fromLine === "string" && fromLine.length > 0) return fromLine;
+  }
+  return null;
+}
 
 const isSubscriptionChangedEvent = (event: Stripe.Event): event is Stripe.Event & { type: (typeof subscriptionChangedEvents)[number] } => {
   return subscriptionChangedEvents.includes(event.type as any);
@@ -280,6 +298,12 @@ async function processStripeWebhookEvent(event: Stripe.Event): Promise<void> {
     ) {
       await bulldozerWriteOneTimePurchase(latestPurchase);
     }
+    await succeedPendingRedemptions({
+      prisma,
+      tenancyId: tenancy.id,
+      stripePaymentIntentId,
+      oneTimePurchaseId: upsertedPurchase.id,
+    });
 
     const recipients = await getPaymentRecipients({
       tenancy,
@@ -348,6 +372,31 @@ async function processStripeWebhookEvent(event: Stripe.Event): Promise<void> {
       extraVariables,
     });
   }
+  else if (event.type === "payment_intent.canceled" && event.data.object.metadata.purchaseKind === "ONE_TIME") {
+    const paymentIntent = event.data.object as Stripe.PaymentIntent;
+    const accountId = event.account;
+    if (!accountId) {
+      throw new HexclaveAssertionError("Stripe webhook account id missing", { event });
+    }
+    const tenancy = await getTenancyForStripeAccountId(accountId, mockData);
+    const prisma = await getPrismaClientForTenancy(tenancy);
+    await releasePendingRedemptions({
+      prisma,
+      tenancyId: tenancy.id,
+      stripePaymentIntentId: paymentIntent.id,
+    });
+  }
+  else if (event.type === "setup_intent.succeeded") {
+    const accountId = event.account;
+    if (!accountId) {
+      throw new HexclaveAssertionError("Stripe webhook account id missing", { event });
+    }
+    const stripe = await getStripeForAccount({ accountId }, mockData);
+    await attachSetupIntentPaymentMethodToSubscription({
+      stripe,
+      setupIntent: event.data.object as Stripe.SetupIntent,
+    });
+  }
   else if (event.type === "charge.dispute.created") {
     const telegramConfig = getTelegramConfig("chargebacks");
     if (!telegramConfig) {
@@ -381,6 +430,101 @@ async function processStripeWebhookEvent(event: Stripe.Event): Promise<void> {
     }
     const stripe = await getStripeForAccount({ accountId }, mockData);
     await syncStripeSubscriptions(stripe, accountId, customerId);
+    const tenancyForPromo = await getTenancyForStripeAccountId(accountId, mockData);
+    const prismaForPromo = await getPrismaClientForTenancy(tenancyForPromo);
+    if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated" || event.type === "invoice.paid") {
+      const stripeSubscriptionId = event.type.startsWith("invoice.")
+        ? stripeSubscriptionIdFromInvoice(event.data.object as Stripe.Invoice)
+        : (event.data.object as Stripe.Subscription).id;
+      if (stripeSubscriptionId != null) {
+        const dbSub = await prismaForPromo.subscription.findUnique({
+          where: {
+            tenancyId_stripeSubscriptionId: {
+              tenancyId: tenancyForPromo.id,
+              stripeSubscriptionId,
+            },
+          },
+          select: { id: true, status: true },
+        });
+        if (dbSub != null && (dbSub.status === "active" || dbSub.status === "trialing")) {
+          await succeedPendingRedemptions({
+            prisma: prismaForPromo,
+            tenancyId: tenancyForPromo.id,
+            stripeSubscriptionId,
+            subscriptionId: dbSub.id,
+          });
+        }
+      }
+    }
+    if (event.type === "customer.subscription.deleted" || event.type === "customer.subscription.updated") {
+      const subscription = event.data.object as Stripe.Subscription;
+      if (subscription.status === "incomplete_expired" || subscription.status === "canceled" || event.type === "customer.subscription.deleted") {
+        await releasePendingRedemptions({
+          prisma: prismaForPromo,
+          tenancyId: tenancyForPromo.id,
+          stripeSubscriptionId: subscription.id,
+        });
+        const live = await listLiveHexclaveRedemptions({
+          prisma: prismaForPromo,
+          tenancyId: tenancyForPromo.id,
+          stripeSubscriptionId: subscription.id,
+        });
+        await markHexclaveDiscountsRemoved({
+          prisma: prismaForPromo,
+          tenancyId: tenancyForPromo.id,
+          redemptionIds: live.map((row) => row.id),
+        });
+      }
+    }
+    if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
+      const subscription = event.data.object as Stripe.Subscription;
+      if (subscription.status === "trialing") {
+        await attachPromoCouponsAfterTrial({
+          prisma: prismaForPromo,
+          stripe,
+          tenancyId: tenancyForPromo.id,
+          subscription,
+        });
+      }
+    }
+    // Do not attach on trial_will_end. That event is days before the first
+    // paid invoice; attaching then is unnecessary once coupons are on the
+    // subscription after the $0 trial invoice is paid.
+    if (event.type === "invoice.created") {
+      let invoice = event.data.object as Stripe.Invoice;
+      let stripeSubscriptionId = stripeSubscriptionIdFromInvoice(invoice);
+      if (stripeSubscriptionId == null && invoice.id != null) {
+        invoice = await stripe.invoices.retrieve(invoice.id);
+        stripeSubscriptionId = stripeSubscriptionIdFromInvoice(invoice);
+      }
+      if (stripeSubscriptionId != null) {
+        const subscription = await stripe.subscriptions.retrieve(stripeSubscriptionId, { expand: ["discounts"] });
+        const promoCodeIdsRaw = Object.hasOwn(subscription.metadata, "promoCodeIds")
+          ? subscription.metadata.promoCodeIds
+          : undefined;
+        const action = promoCouponActionForInvoice({
+          billingReason: invoice.billing_reason ?? null,
+          promoInitialInvoicePaid: subscription.metadata.promoInitialInvoicePaid === "true",
+          hasPromoCodeIds: promoCodeIdsRaw != null && promoCodeIdsRaw.length > 0,
+        });
+        if (action === "attach_all") {
+          await attachPromoCouponsAfterTrial({
+            prisma: prismaForPromo,
+            stripe,
+            tenancyId: tenancyForPromo.id,
+            subscription,
+            draftInvoiceId: invoice.status === "draft" ? invoice.id : undefined,
+          });
+        } else if (action === "restore_lingering") {
+          await restoreLingeringSubscriptionCoupons({
+            prisma: prismaForPromo,
+            stripe,
+            tenancyId: tenancyForPromo.id,
+            subscription,
+          });
+        }
+      }
+    }
 
     if (event.type.startsWith("invoice.")) {
       const invoice = event.data.object as Stripe.Invoice;
@@ -389,6 +533,28 @@ async function processStripeWebhookEvent(event: Stripe.Event): Promise<void> {
 
     if (event.type === "invoice.payment_succeeded") {
       const invoice = event.data.object as Stripe.Invoice;
+      const stripeSubscriptionId = stripeSubscriptionIdFromInvoice(invoice)
+        ?? (invoice.id == null ? null : stripeSubscriptionIdFromInvoice(await stripe.invoices.retrieve(invoice.id)));
+      if (stripeSubscriptionId != null) {
+        const subscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+        if (isTrialCreationInvoice({
+          billing_reason: invoice.billing_reason ?? null,
+          subtotal: invoice.subtotal,
+          total: invoice.total,
+        })) {
+          await attachPromoCouponsAfterTrial({
+            prisma: prismaForPromo,
+            stripe,
+            tenancyId: tenancyForPromo.id,
+            subscription,
+          });
+        } else {
+          await markPromoInitialInvoicePaid({
+            stripe,
+            subscription,
+          });
+        }
+      }
 
       // Skip $0 invoices (e.g. free-trial creation invoices) so customers don't
       // get a "payment receipt" that looks like they were charged at checkout.
