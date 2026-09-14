@@ -580,45 +580,55 @@ export async function applyStripeInvoiceOutcome(
     voidedAtIsExact,
     paymentOutcomeEventAt,
   } = options.outcome;
-  // Stripe does not guarantee webhook ordering. The watermark records only the
-  // newest exact outcome event applied; inferred fields must remain repairable
-  // by an exact event even when that exact event was created earlier.
+  // Stripe does not guarantee webhook ordering, so outcome writes are ordered by
+  // Stripe's event creation time rather than delivery order: an event only applies
+  // when it is at least as new as the last one applied. A field still unset is
+  // always filled, so an out-of-order event never leaves a gap.
+  //
+  // Known limitation: the watermark is a single timestamp and does not record which
+  // fields were exact versus inferred from surrounding data. An exact event created
+  // *before* the watermark therefore cannot overwrite an inferred timestamp that is
+  // already stored — the value stays inferred. Correcting that needs per-field
+  // exactness persisted alongside the timestamps; it affects precision only, not
+  // which outcome an invoice is classified as.
+  // PostgreSQL TIMESTAMP has no timezone; normalize bound instants through
+  // TIMESTAMPTZ so the stored UTC wall-clock value is independent of Node's TZ.
   const shouldApply = Prisma.sql`
-    ${paymentOutcomeEventAt}::TIMESTAMP IS NOT NULL
+    (${paymentOutcomeEventAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NOT NULL
     AND (
       "paymentOutcomeEventAt" IS NULL
-      OR ${paymentOutcomeEventAt}::TIMESTAMP >= "paymentOutcomeEventAt"
+      OR (${paymentOutcomeEventAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') >= "paymentOutcomeEventAt"
     )
   `;
   await prisma.$executeRaw`
     UPDATE "SubscriptionInvoice"
     SET
       "paymentOutcomeEventAt" = CASE
-        WHEN ${shouldApply} THEN ${paymentOutcomeEventAt}::TIMESTAMP
+        WHEN ${shouldApply} THEN (${paymentOutcomeEventAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
         ELSE "paymentOutcomeEventAt"
       END,
       "paidAt" = CASE
-        WHEN ${paidAt}::TIMESTAMP IS NULL THEN "paidAt"
+        WHEN (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NULL THEN "paidAt"
         WHEN ${paidAtIsExact} AND (${shouldApply} OR "paidAt" IS NULL)
-          THEN ${paidAt}::TIMESTAMP
-        WHEN NOT ${paidAtIsExact} THEN COALESCE("paidAt", ${paidAt}::TIMESTAMP)
+          THEN (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
+        WHEN NOT ${paidAtIsExact} THEN COALESCE("paidAt", (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC'))
         ELSE "paidAt"
       END,
       "markedUncollectibleAt" = CASE
-        WHEN ${markedUncollectibleAt}::TIMESTAMP IS NULL THEN "markedUncollectibleAt"
+        WHEN (${markedUncollectibleAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NULL THEN "markedUncollectibleAt"
         WHEN ${markedUncollectibleAtIsExact}
           AND (${shouldApply} OR "markedUncollectibleAt" IS NULL)
-          THEN ${markedUncollectibleAt}::TIMESTAMP
+          THEN (${markedUncollectibleAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
         WHEN NOT ${markedUncollectibleAtIsExact}
-          THEN COALESCE("markedUncollectibleAt", ${markedUncollectibleAt}::TIMESTAMP)
+          THEN COALESCE("markedUncollectibleAt", (${markedUncollectibleAt}::TIMESTAMPTZ AT TIME ZONE 'UTC'))
         ELSE "markedUncollectibleAt"
       END,
       "voidedAt" = CASE
-        WHEN ${voidedAt}::TIMESTAMP IS NULL THEN "voidedAt"
+        WHEN (${voidedAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NULL THEN "voidedAt"
         WHEN ${voidedAtIsExact}
           AND (${shouldApply} OR "voidedAt" IS NULL)
-          THEN ${voidedAt}::TIMESTAMP
-        WHEN NOT ${voidedAtIsExact} THEN COALESCE("voidedAt", ${voidedAt}::TIMESTAMP)
+          THEN (${voidedAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
+        WHEN NOT ${voidedAtIsExact} THEN COALESCE("voidedAt", (${voidedAt}::TIMESTAMPTZ AT TIME ZONE 'UTC'))
         ELSE "voidedAt"
       END,
       "currency" = CASE
@@ -627,7 +637,7 @@ export async function applyStripeInvoiceOutcome(
         ELSE "currency"
       END,
       "amountPaid" = CASE
-        WHEN ${paidAt}::TIMESTAMP IS NOT NULL
+        WHEN (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NOT NULL
           AND (
             (${paidAtIsExact} AND (${shouldApply} OR "paidAt" IS NULL))
             OR (NOT ${paidAtIsExact} AND "paidAt" IS NULL)
@@ -724,6 +734,10 @@ export async function upsertStripeInvoice(
     || latestInvoice.voidedAt?.getTime() !== normalizedInvoice.voidedAt?.getTime()
     || latestInvoice.amountPaid !== normalizedInvoice.amountPaid
     || latestInvoice.currency !== normalizedInvoice.currency
+    || latestInvoice.stripeSubscriptionId !== normalizedInvoice.stripeSubscriptionId
+    || latestInvoice.isSubscriptionCreationInvoice !== normalizedInvoice.isSubscriptionCreationInvoice
+    || latestInvoice.amountTotal !== normalizedInvoice.amountTotal
+    || latestInvoice.hostedInvoiceUrl !== normalizedInvoice.hostedInvoiceUrl
   ) {
     await bulldozerWriteSubscriptionInvoice(latestInvoice);
   }

@@ -294,6 +294,7 @@ describe("TV source health facts", () => {
     ["unavailable", "analytics-app-disabled", "Engagement metrics not enabled"],
     ["error", "source-query-failed", "Engagement metrics temporarily unavailable"],
     ["insufficient-data", "insufficient-analytics-data", "Not enough engagement data"],
+    ["empty", "empty", "No engagement activity"],
   ] satisfies ReadonlyArray<readonly [TvAudienceAnalytics["sourceStatus"], string, string]>)("describes %s Analytics enrichment as limited Audience data", (sourceStatus, diagnosticCode, detail) => {
     const audience = applyTvAudienceAnalytics(readyAudience, {
       sourceStatus,
@@ -553,6 +554,7 @@ describe("Live Pulse activity source states", () => {
 describe("TV deterministic insight eligibility", () => {
   it("requires returning activity to lead new activity by at least ten percent", () => {
     expect(isTvReturningInsightEligible(100, 109)).toBe(false);
+    expect(isTvReturningInsightEligible(100, 109.96)).toBe(false);
     expect(isTvReturningInsightEligible(100, 110)).toBe(true);
     expect(isTvReturningInsightEligible(0, 10)).toBe(false);
   });
@@ -616,5 +618,7 @@ describe("TV Audience lifecycle query", () => {
     expect(TV_AUDIENCE_ANALYTICS_QUERY).toContain("branch_id = {branchId:String}");
     expect(TV_AUDIENCE_ANALYTICS_QUERY).toContain("count() FROM sessions");
     expect(TV_AUDIENCE_ANALYTICS_QUERY).toContain("avgOrNull(duration_s)");
+    expect(TV_AUDIENCE_ANALYTICS_QUERY).toContain("token_refresh_users");
+    expect(TV_AUDIENCE_ANALYTICS_QUERY).toContain("latest_is_anonymous");
   });
 });

@@ -432,6 +432,33 @@ function oneTimePurchasePaymentColumnsSql(presence: PaymentOutcomeColumnPresence
   `;
 }
 
+function missingPaymentOutcomeColumns(presence: PaymentOutcomeColumnPresence): string[] {
+  const missing: string[] = [];
+  if (!presence.subscriptionInvoicePaidAt) missing.push("SubscriptionInvoice.paidAt");
+  if (!presence.subscriptionInvoiceMarkedUncollectibleAt) missing.push("SubscriptionInvoice.markedUncollectibleAt");
+  if (!presence.subscriptionInvoiceVoidedAt) missing.push("SubscriptionInvoice.voidedAt");
+  if (!presence.subscriptionInvoiceCurrency) missing.push("SubscriptionInvoice.currency");
+  if (!presence.subscriptionInvoiceAmountPaid) missing.push("SubscriptionInvoice.amountPaid");
+  if (!presence.oneTimePurchaseAmountReceived) missing.push("OneTimePurchase.amountReceived");
+  if (!presence.oneTimePurchaseCurrency) missing.push("OneTimePurchase.currency");
+  if (!presence.oneTimePurchasePaidAt) missing.push("OneTimePurchase.paidAt");
+  return missing;
+}
+
+function paymentOutcomeColumnPresenceChanged(
+  previous: PaymentOutcomeColumnPresence,
+  next: PaymentOutcomeColumnPresence,
+): boolean {
+  return previous.subscriptionInvoicePaidAt !== next.subscriptionInvoicePaidAt
+    || previous.subscriptionInvoiceMarkedUncollectibleAt !== next.subscriptionInvoiceMarkedUncollectibleAt
+    || previous.subscriptionInvoiceVoidedAt !== next.subscriptionInvoiceVoidedAt
+    || previous.subscriptionInvoiceCurrency !== next.subscriptionInvoiceCurrency
+    || previous.subscriptionInvoiceAmountPaid !== next.subscriptionInvoiceAmountPaid
+    || previous.oneTimePurchaseAmountReceived !== next.oneTimePurchaseAmountReceived
+    || previous.oneTimePurchaseCurrency !== next.oneTimePurchaseCurrency
+    || previous.oneTimePurchasePaidAt !== next.oneTimePurchasePaidAt;
+}
+
 async function fetchSubscriptionBatch(
   replica: PrismaReplica,
   cursor: Cursor | null,
@@ -745,9 +772,29 @@ function formatBackfillFailures(failures: BackfillFailure[]): string {
 
 export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = {}) {
   const replica = globalPrismaClient.$replica();
-  const paymentOutcomeColumnPresence = await getPaymentOutcomeColumnPresence(replica);
-  const subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(paymentOutcomeColumnPresence);
-  const oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(paymentOutcomeColumnPresence);
+  let paymentOutcomeColumnPresence = await getPaymentOutcomeColumnPresence(replica);
+  let subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(paymentOutcomeColumnPresence);
+  let oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(paymentOutcomeColumnPresence);
+  const allPaymentOutcomeColumnsPresent = (presence: PaymentOutcomeColumnPresence) => Object.values(presence).every(Boolean);
+  const missingColumns = missingPaymentOutcomeColumns(paymentOutcomeColumnPresence);
+  if (missingColumns.length > 0) {
+    log(`WARNING: Payment outcome columns are missing: ${missingColumns.join(", ")}. This run mirrors NULL outcome values for those columns. Repeat this run after the payment outcome migrations are applied. Writes are idempotent.`);
+  }
+  let paymentOutcomeColumnPresenceChangedLogged = false;
+  const refreshPaymentOutcomeColumns = async () => {
+    if (allPaymentOutcomeColumnsPresent(paymentOutcomeColumnPresence)) return;
+    const nextPresence = await getPaymentOutcomeColumnPresence(replica);
+    const changed = paymentOutcomeColumnPresenceChanged(paymentOutcomeColumnPresence, nextPresence);
+    if (changed) {
+      paymentOutcomeColumnPresence = nextPresence;
+      subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(nextPresence);
+      oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(nextPresence);
+      if (!paymentOutcomeColumnPresenceChangedLogged) {
+        log("Payment outcome columns changed during the run; subsequent pages will include the newly available columns.");
+        paymentOutcomeColumnPresenceChangedLogged = true;
+      }
+    }
+  };
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const tenancyFilter = options.tenancyFilter;
   assertResumeCursorMatchesTenancyFilter(options.resumeCursor, tenancyFilter);
@@ -770,12 +817,18 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
     ),
     makeTable(
       "SubscriptionInvoice",
-      (cursor) => fetchSubscriptionInvoiceBatch(replica, cursor, batchSize, tenancyFilter, subscriptionInvoicePaymentColumns),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchSubscriptionInvoiceBatch(replica, cursor, batchSize, tenancyFilter, subscriptionInvoicePaymentColumns);
+      },
       (invoices) => bulldozerWriteSubscriptionInvoices(invoices),
     ),
     makeTable(
       "OneTimePurchase",
-      (cursor) => fetchOneTimePurchaseBatch(replica, cursor, batchSize, tenancyFilter, oneTimePurchasePaymentColumns),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchOneTimePurchaseBatch(replica, cursor, batchSize, tenancyFilter, oneTimePurchasePaymentColumns);
+      },
       async (purchases) => {
         await bulldozerWriteOneTimePurchases(purchases);
         const refunds = purchases

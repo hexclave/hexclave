@@ -774,7 +774,7 @@ export default function PageClient() {
                 {settingRow({
                   title: "Successful Launches",
                   description: "Unavailable · deployment integration required.",
-                  control: <Switch checked={false} disabled />,
+                  control: <Switch checked={false} disabled aria-label="Successful launch celebrations are unavailable" />,
                 })}
               </div>
             </DesignCard>

@@ -61,33 +61,16 @@ async function refreshDevEnvironmentHealth() {
     }
   };
 
+  let response: Response;
+  let body: unknown;
   try {
-    const response = await fetchWithRemoteDevelopmentEnvironmentBrowserSecret("/api/development-environment/health", {
+    response = await fetchWithRemoteDevelopmentEnvironmentBrowserSecret("/api/development-environment/health", {
       cache: "no-store",
       headers: {
         Accept: "application/json",
       },
     });
-    const body: unknown = await response.json();
-
-    // If the health endpoint returns a 403, the user is likely accessing via
-    // an unsupported address (e.g. localhost instead of 127.0.0.1). Extract
-    // the suggested URL from the error and show a dedicated screen.
-    if (response.status === 403 && body != null && typeof body === "object" && "error" in body && typeof body.error === "string") {
-      const match = body.error.match(/http:\/\/127\.0\.0\.1(?::\d+)?/);
-      if (match != null) {
-        setSnapshotIfCurrent({ status: "wrong_address", suggestedUrl: match[0] });
-        return;
-      }
-    }
-
-    if (!isDevEnvironmentHealthResponse(body)) {
-      throw new Error("Development environment health endpoint returned an invalid response.");
-    }
-
-    setSnapshotIfCurrent(body.ok && response.ok
-      ? HEALTHY_DEV_ENVIRONMENT_HEALTH_SNAPSHOT
-      : { status: "unhealthy", restartCommand: body.restart_command });
+    body = await response.json();
   } catch (error) {
     if (error instanceof RemoteDevelopmentEnvironmentBrowserSecretRedirectingError) {
       return;
@@ -96,7 +79,31 @@ async function refreshDevEnvironmentHealth() {
       status: "unhealthy",
       restartCommand: "hexclave dev --config-file <path-to-hexclave.config.ts> -- <your app command>",
     });
+    return;
   }
+
+  // If the health endpoint returns a 403, the user is likely accessing via
+  // an unsupported address (e.g. localhost instead of 127.0.0.1). Extract
+  // the suggested URL from the error and show a dedicated screen.
+  if (response.status === 403 && body != null && typeof body === "object" && "error" in body && typeof body.error === "string") {
+    const match = body.error.match(/http:\/\/127\.0\.0\.1(?::\d+)?/);
+    if (match != null) {
+      setSnapshotIfCurrent({ status: "wrong_address", suggestedUrl: match[0] });
+      return;
+    }
+  }
+
+  if (!isDevEnvironmentHealthResponse(body)) {
+    setSnapshotIfCurrent({
+      status: "unhealthy",
+      restartCommand: "hexclave dev --config-file <path-to-hexclave.config.ts> -- <your app command>",
+    });
+    return;
+  }
+
+  setSnapshotIfCurrent(body.ok && response.ok
+    ? HEALTHY_DEV_ENVIRONMENT_HEALTH_SNAPSHOT
+    : { status: "unhealthy", restartCommand: body.restart_command });
 }
 
 function subscribeDevEnvironmentHealth(callback: () => void) {

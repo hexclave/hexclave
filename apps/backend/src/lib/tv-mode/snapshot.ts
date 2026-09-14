@@ -4,6 +4,7 @@ import { type Tenancy } from "@/lib/tenancies";
 import {
   evaluateTvEventsIfDue,
   resolveTvEventPresentation,
+  tvSubscriptionOutcomeQualificationSql,
   tvEventTablesAreReady,
   type TvEventPresentation,
 } from "@/lib/tv-mode/events";
@@ -92,32 +93,48 @@ export const TV_AUDIENCE_LIFECYCLE_QUERY = `
 `;
 
 export const TV_AUDIENCE_ANALYTICS_QUERY = `
-  WITH sessions AS (
+  WITH token_refresh_users AS (
     SELECT
-      session_replay_segment_id AS sid,
-      dateDiff('second', min(event_at), max(event_at)) AS duration_s
+      sipHash64(user_id) AS user_hash,
+      argMax(coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0), event_at) AS latest_is_anonymous
     FROM analytics_internal.events
-    WHERE project_id = {projectId:String}
+    WHERE event_type = '$token-refresh'
+      AND project_id = {projectId:String}
       AND branch_id = {branchId:String}
+      AND user_id IS NOT NULL
       AND event_at >= {since:DateTime}
       AND event_at < {until:DateTime}
-      AND event_type IN ('$page-view', '$click')
-      AND user_id IS NOT NULL
-      AND session_replay_segment_id IS NOT NULL
-      AND coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0
+    GROUP BY user_hash
+  ), sessions AS (
+    SELECT
+      e.session_replay_segment_id AS sid,
+      dateDiff('second', min(e.event_at), max(e.event_at)) AS duration_s
+    FROM analytics_internal.events e
+    LEFT JOIN token_refresh_users
+      ON sipHash64(e.user_id) = token_refresh_users.user_hash
+    WHERE e.project_id = {projectId:String}
+      AND e.branch_id = {branchId:String}
+      AND e.event_at >= {since:DateTime}
+      AND e.event_at < {until:DateTime}
+      AND e.event_type IN ('$page-view', '$click')
+      AND e.user_id IS NOT NULL
+      AND e.session_replay_segment_id IS NOT NULL
+      AND coalesce(CAST(e.data.is_anonymous, 'Nullable(UInt8)'), token_refresh_users.latest_is_anonymous, 0) = 0
     GROUP BY sid
   )
   SELECT
     (
-      SELECT uniqExact(assumeNotNull(user_id))
-      FROM analytics_internal.events
-      WHERE project_id = {projectId:String}
-        AND branch_id = {branchId:String}
-        AND event_at >= {since:DateTime}
-        AND event_at < {until:DateTime}
-        AND event_type = '$page-view'
-        AND user_id IS NOT NULL
-        AND coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0
+      SELECT uniqExact(assumeNotNull(e.user_id))
+      FROM analytics_internal.events e
+      LEFT JOIN token_refresh_users
+        ON sipHash64(e.user_id) = token_refresh_users.user_hash
+      WHERE e.project_id = {projectId:String}
+        AND e.branch_id = {branchId:String}
+        AND e.event_at >= {since:DateTime}
+        AND e.event_at < {until:DateTime}
+        AND e.event_type = '$page-view'
+        AND e.user_id IS NOT NULL
+        AND coalesce(CAST(e.data.is_anonymous, 'Nullable(UInt8)'), token_refresh_users.latest_is_anonymous, 0) = 0
     ) AS visitors,
     (SELECT count() FROM sessions) AS qualifying_sessions,
     (SELECT avgOrNull(duration_s) FROM sessions) AS average_session_seconds
@@ -154,7 +171,7 @@ function percentChange(current: number, comparison: number): number {
 
 export function isTvReturningInsightEligible(newActivity: number, returningActivity: number): boolean {
   if (newActivity <= 0 || returningActivity <= newActivity) return false;
-  return roundPercent(((returningActivity - newActivity) / newActivity) * 100) >= 10;
+  return ((returningActivity - newActivity) / newActivity) * 100 >= 10;
 }
 
 export function applyTvAudienceAnalytics(
@@ -867,17 +884,7 @@ async function loadRevenueScreen(
           FROM selected_health
           WHERE outcome_at >= ${bounds.currentStartsAt}
             AND outcome_at < ${bounds.currentEndsAt}
-            AND (
-              -- Paid outcomes represent collected value; uncollectible
-              -- outcomes represent attempted value that failed collection.
-              ("paidAt" = outcome_at AND COALESCE("amountPaid", 0) > 0)
-              OR (
-                "paidAt" IS DISTINCT FROM outcome_at
-                AND "voidedAt" IS DISTINCT FROM outcome_at
-                AND "markedUncollectibleAt" = outcome_at
-                AND COALESCE("amountTotal", 0) > 0
-              )
-            )
+            ${Prisma.raw(tvSubscriptionOutcomeQualificationSql("outcome_at"))}
           UNION ALL
           SELECT ("status" IN (${successfulStatuses[0]}, ${successfulStatuses[1]})) AS success
           FROM ${sqlQuoteIdent(schema)}."SubscriptionInvoice"
@@ -1284,6 +1291,9 @@ export function sourceHealthFact(
     }
     if (analyticsStatus === "insufficient-data") {
       return { label, status: "limited", value: "Limited", detail: "Not enough engagement data" };
+    }
+    if (analyticsStatus === "empty") {
+      return { label, status: "limited", value: "Limited", detail: "No engagement activity" };
     }
     return { label, status: "ready", value: "Fresh", detail: "All metrics available" };
   }

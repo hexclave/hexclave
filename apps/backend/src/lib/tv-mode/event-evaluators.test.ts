@@ -249,6 +249,19 @@ describe("email delivery TV event evaluator V2", () => {
     }
   });
 
+  it("does not qualify a future-dated baseline", () => {
+    const futureBaseline = {
+      ...baseline,
+      computedAt: "2026-07-29T13:00:00.000Z",
+    };
+    expect(evaluateSequence([
+      sampleAt(0, {
+        baseline: futureBaseline,
+        current: windowAt({ assessable: 100, failures: 20 }),
+      }),
+    ]).qualification).toBe("strict-standard");
+  });
+
   it("caps elapsed persistence so a polling gap does not qualify", () => {
     const degraded = windowAt({ assessable: 100, failures: 10 });
     const state = evaluateTvEmailDelivery(createTvEmailEvaluatorState(), sampleAt(0, { current: degraded })).state;
@@ -323,9 +336,9 @@ describe("payment collection TV event evaluator", () => {
   };
   const nonCriticalBreach = {
     outcomes: 100,
-    successes: 90,
-    failures: 10,
-    successRatePercent: 90,
+    successes: 75,
+    failures: 25,
+    successRatePercent: 75,
   };
   const notHealthy = {
     outcomes: 100,
@@ -340,7 +353,9 @@ describe("payment collection TV event evaluator", () => {
       paymentSampleAt(1, { current: critical }),
       paymentSampleAt(2, { current: nonCriticalBreach }),
     ], activeIncident);
+    expect(afterGap.qualification).toBe("standard");
     expect(afterGap.state.candidate).toBeNull();
+    expect(afterGap.state.recovery).toBeNull();
 
     const beforeEscalation = evaluatePaymentSequence([
       paymentSampleAt(3, { current: critical }),

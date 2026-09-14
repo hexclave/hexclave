@@ -121,6 +121,20 @@ it("persists project-scoped TV profiles with duplication and optimistic concurre
   const updated = await TvSavedProfileResourceSchema.validate(updateResponse.body.profile, { strict: true });
   expect(updated.version).toBe(created.version + 1);
 
+  const exactSnapshotResponse = await niceBackendFetch(
+    `/api/v1/internal/tv-mode/profiles/${created.id}/snapshot`,
+    { accessType: "admin" },
+  );
+  expect(exactSnapshotResponse.status).toBe(200);
+  const exactSnapshot = await TvSnapshotSchema.validate(exactSnapshotResponse.body, { strict: true });
+  const exactRevenueScreen = exactSnapshot.screens.find((screen) => screen.id === "revenue-payments");
+  if (exactRevenueScreen?.id !== "revenue-payments" || exactRevenueScreen.data == null) {
+    throw new Error(
+      `The live payment fixture must produce Revenue & Payments data for exact-financials coverage (status: ${exactRevenueScreen?.sourceStatus ?? "missing"}, diagnostic: ${exactRevenueScreen?.diagnosticCode ?? "missing"}).`,
+    );
+  }
+  expect(exactRevenueScreen.data.financials.visibility).toBe("exact");
+
   const redactResponse = await niceBackendFetch(`/api/v1/internal/tv-mode/profiles/${created.id}`, {
     method: "PATCH",
     accessType: "admin",

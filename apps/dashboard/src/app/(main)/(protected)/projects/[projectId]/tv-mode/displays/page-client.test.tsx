@@ -20,11 +20,16 @@ const nativeClipboardDescriptor: PropertyDescriptor = {
 };
 
 beforeAll(() => {
+  originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   Object.defineProperty(navigator, "clipboard", nativeClipboardDescriptor);
 });
 
 afterAll(() => {
-  Reflect.deleteProperty(navigator, "clipboard");
+  if (originalClipboardDescriptor == null) {
+    Reflect.deleteProperty(navigator, "clipboard");
+  } else {
+    Object.defineProperty(navigator, "clipboard", originalClipboardDescriptor);
+  }
 });
 
 vi.mock("../../use-admin-app", () => ({

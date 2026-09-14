@@ -109,20 +109,6 @@ export type TvPaymentWindow = {
   successRatePercent: number | null,
 };
 
-export function selectTvSubscriptionInvoiceOutcome(invoice: {
-  paidAt: Date | null,
-  markedUncollectibleAt: Date | null,
-  voidedAt: Date | null,
-}): { type: "success" | "failure", at: Date } | null {
-  const transitions = [
-    invoice.markedUncollectibleAt == null ? null : { type: "failure" as const, at: invoice.markedUncollectibleAt, rank: 1 },
-    invoice.voidedAt == null ? null : { type: "neutral" as const, at: invoice.voidedAt, rank: 2 },
-    invoice.paidAt == null ? null : { type: "success" as const, at: invoice.paidAt, rank: 3 },
-  ].filter((transition) => transition != null).sort((left, right) => right.at.getTime() - left.at.getTime() || right.rank - left.rank);
-  const latest = transitions.at(0);
-  return latest == null || latest.type === "neutral" ? null : { type: latest.type, at: latest.at };
-}
-
 export type TvPaymentBaseline = {
   computedAt: string,
   qualifiedWeeks: number,
@@ -175,6 +161,7 @@ function paymentBaselineRate(sample: TvPaymentSample): number | null {
   return baseline != null
     && baseline.qualifiedWeeks >= 4
     && baseline.assessableOutcomes >= 40
+    && new Date(sample.evaluatedAt).getTime() - new Date(baseline.computedAt).getTime() >= 0
     && new Date(sample.evaluatedAt).getTime() - new Date(baseline.computedAt).getTime() <= TV_PAYMENT_BASELINE_STALE_MS
     ? baseline.medianSuccessRatePercent
     : null;
@@ -307,6 +294,7 @@ function baselineIsQualified(baseline: TvEmailBaseline | null, evaluatedAt: Date
   return baseline?.medianDeliveryRatePercent != null
     && baseline.assessableSends >= 100
     && baseline.qualifiedDays >= 7
+    && evaluatedAt.getTime() - new Date(baseline.computedAt).getTime() >= 0
     && evaluatedAt.getTime() - new Date(baseline.computedAt).getTime() <= TV_EMAIL_BASELINE_STALE_MS;
 }
 
@@ -487,7 +475,6 @@ export function evaluateTvEmailDelivery(
     }
     const recovery = recoveryWindow(normalizedSample);
     if (recovery == null) {
-      const borderlineEvaluations = (previous.candidate?.borderlineEvaluations ?? 0) + 1;
       return {
         state: {
           ...stateWithBaseline,

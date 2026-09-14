@@ -55,6 +55,23 @@ import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 const MINUTE_MS = 60_000;
 const MAX_EVENT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
+export function tvSubscriptionOutcomeQualificationSql(outcomeAtAlias: string): string {
+  return `
+      AND (
+        -- A zero-value invoice has no collection attempt to assess. Preserve
+        -- its authoritative terminal state, but keep it out of health rates.
+        -- Paid outcomes represent collected value; uncollectible
+        -- outcomes represent attempted value that failed collection.
+        ("paidAt" = ${outcomeAtAlias} AND COALESCE("amountPaid", 0) > 0)
+        OR (
+          "paidAt" IS DISTINCT FROM ${outcomeAtAlias}
+          AND "voidedAt" IS DISTINCT FROM ${outcomeAtAlias}
+          AND "markedUncollectibleAt" = ${outcomeAtAlias}
+          AND COALESCE("amountTotal", 0) > 0
+        )
+      )`;
+}
+
 export type EvaluatorClaimRow = {
   claimExpiresAt: Date,
   breachCount: number,
@@ -754,12 +771,20 @@ export function readTvPaymentState(value: unknown, activeClass: TvPaymentEvaluat
   const medianRate = baselineValue == null || !("medianSuccessRatePercent" in baselineValue) || baselineValue.medianSuccessRatePercent == null
     ? null
     : readNumber(baselineValue, "medianSuccessRatePercent");
-  const baseline: TvPaymentBaseline | null = baselineValue == null ? null : {
-    computedAt: readString(baselineValue, "computedAt") ?? "",
-    qualifiedWeeks: readNumber(baselineValue, "qualifiedWeeks") ?? 0,
-    assessableOutcomes: readNumber(baselineValue, "assessableOutcomes") ?? 0,
-    medianSuccessRatePercent: medianRate,
-  };
+  const computedAt = baselineValue == null ? null : readString(baselineValue, "computedAt");
+  const qualifiedWeeks = baselineValue == null ? null : readNumber(baselineValue, "qualifiedWeeks");
+  const assessableOutcomes = baselineValue == null ? null : readNumber(baselineValue, "assessableOutcomes");
+  const baseline: TvPaymentBaseline | null = baselineValue == null
+    || computedAt == null
+    || qualifiedWeeks == null
+    || assessableOutcomes == null
+    ? null
+    : {
+      computedAt,
+      qualifiedWeeks,
+      assessableOutcomes,
+      medianSuccessRatePercent: medianRate,
+    };
   const freshAt = !("lastFreshEvaluatedAt" in value) || value.lastFreshEvaluatedAt == null ? null : readString(value, "lastFreshEvaluatedAt");
   let candidate: TvPaymentEvaluatorState["candidate"] = null;
   if ("candidate" in value && isObject(value.candidate)) {
@@ -846,17 +871,7 @@ export async function loadTvSubscriptionCollectionOutcomes(
     SELECT "outcomeAt", COALESCE("paidAt" = "outcomeAt", FALSE) AS success
     FROM selected
     WHERE "outcomeAt" >= ${startsAt} AND "outcomeAt" < ${endsAt}
-      AND (
-        -- A zero-value invoice has no collection attempt to assess. Preserve
-        -- its authoritative terminal state, but keep it out of health rates.
-        ("paidAt" = "outcomeAt" AND COALESCE("amountPaid", 0) > 0)
-        OR (
-          "paidAt" IS DISTINCT FROM "outcomeAt"
-          AND "voidedAt" IS DISTINCT FROM "outcomeAt"
-          AND "markedUncollectibleAt" = "outcomeAt"
-          AND COALESCE("amountTotal", 0) > 0
-        )
-      )
+      ${Prisma.raw(tvSubscriptionOutcomeQualificationSql('"outcomeAt"'))}
   `;
 }
 
@@ -888,7 +903,7 @@ async function loadPaymentBaseline(tenancy: Tenancy, now: Date): Promise<TvPayme
   };
 }
 
-async function persistPaymentEvaluation(options: { tenancy: Tenancy, claim: EvaluatorClaimRow, state: TvPaymentEvaluatorState, sample: TvPaymentSample, now: Date }) {
+export async function persistPaymentEvaluation(options: { tenancy: Tenancy, claim: EvaluatorClaimRow, state: TvPaymentEvaluatorState, sample: TvPaymentSample, now: Date }) {
   const result = evaluateTvSubscriptionCollection(options.state, options.sample);
   const schema = await getPrismaSchemaForTenancy(options.tenancy);
   const prisma = await getPrismaClientForTenancy(options.tenancy);
@@ -917,9 +932,21 @@ async function persistPaymentEvaluation(options: { tenancy: Tenancy, claim: Eval
           ${options.now}, ${options.now}, ${options.now}, ${options.now}
         )
       `;
-    } else if (activeOccurrenceId != null && result.action.type === "escalate") {
+    } else if (result.action.type === "escalate") {
+      if (activeOccurrenceId == null) {
+        throw new HexclaveAssertionError("The TV payment evaluator cannot escalate without an active occurrence.", {
+          tenancyId: options.tenancy.id,
+          activeOccurrenceId,
+        });
+      }
       await transaction.$executeRaw`UPDATE ${sqlQuoteIdent(schema)}."TvEventOccurrence" SET "presentationClass" = 'CRITICAL_INCIDENT'::${sqlQuoteIdent(schema)}."TvEventPresentationClass", "escalatedAt" = ${options.now}, "metricValue" = ${metricValue}, "aggregateEvidence" = ${JSON.stringify({ ...previousEvidence, escalation: evidence, latestActiveObservation: evidence })}::JSONB, "updatedAt" = ${options.now} WHERE "tenancyId" = ${options.tenancy.id}::UUID AND "id" = ${activeOccurrenceId}::UUID AND "lifecycle" = 'ACTIVE'::${sqlQuoteIdent(schema)}."TvEventOccurrenceLifecycle"`;
-    } else if (activeOccurrenceId != null && result.action.type === "resolve") {
+    } else if (result.action.type === "resolve") {
+      if (activeOccurrenceId == null) {
+        throw new HexclaveAssertionError("The TV payment evaluator cannot resolve without an active occurrence.", {
+          tenancyId: options.tenancy.id,
+          activeOccurrenceId,
+        });
+      }
       await transaction.$executeRaw`UPDATE ${sqlQuoteIdent(schema)}."TvEventOccurrence" SET "lifecycle" = 'RESOLVED'::${sqlQuoteIdent(schema)}."TvEventOccurrenceLifecycle", "resolvedAt" = ${options.now}, "title" = ${TV_PAYMENT_RECOVERY_TITLE}, "summary" = 'Subscription collection is back within the expected range.', "metricValue" = ${metricValue}, "aggregateEvidence" = ${JSON.stringify({ ...previousEvidence, resolution: evidence })}::JSONB, "updatedAt" = ${options.now} WHERE "tenancyId" = ${options.tenancy.id}::UUID AND "id" = ${activeOccurrenceId}::UUID AND "lifecycle" = 'ACTIVE'::${sqlQuoteIdent(schema)}."TvEventOccurrenceLifecycle"`;
       activeOccurrenceId = null;
     } else if (activeOccurrenceId != null) {
