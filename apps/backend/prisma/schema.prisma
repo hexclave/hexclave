@@ -681,6 +681,11 @@ model ProjectUserRefreshToken {
   refreshToken    String    @unique
   expiresAt       DateTime?
   isImpersonation Boolean   @default(false)
+  // Set when this session was minted for an AI agent through the agent-auth
+  // claim flow. Agents are ordinary sessions on the user's account (so RBAC,
+  // teams, and session revocation all apply unchanged); this is what lets us
+  // tell them apart from browser sessions in listings and audit trails.
+  agentName       String?
 
   sequenceId             BigInt?  @unique
   shouldUpdateSequenceId Boolean  @default(true)
@@ -1155,6 +1160,41 @@ model CliAuthAttempt {
 
   @@id([tenancyId, id])
   @@index([tenancyId, createdAt(sort: Desc), id(sort: Desc)], name: "CliAuthAttempt_tenancyId_createdAt_id_idx")
+}
+
+// One agent's attempt to register with a project. Mirrors CliAuthAttempt (same
+// device-flow shape, same tenancy-DB placement) but is intentionally a separate
+// table: agent registrations carry identity metadata, are approved through a
+// dedicated confirm page, and end with a *new* session on the approving user
+// rather than sharing the browser's refresh token like the CLI flow does.
+model AgentAuthAttempt {
+  tenancyId String @db.Uuid
+
+  id               String    @default(uuid()) @db.Uuid
+  agentName        String
+  agentDescription String?
+  agentUrl         String?
+  userHint         String?
+  // Short human-typeable code shown on the confirm page. Unique per tenancy
+  // only, because the confirm page always knows which project it belongs to.
+  claimCode        String
+  pollToken        String    @unique
+  anonProjectUserId String?  @db.Uuid
+  approvedByUserId String?   @db.Uuid
+  approvedAt       DateTime?
+  deniedAt         DateTime?
+  // The agent's session refresh token, set on approval and handed out exactly
+  // once through poll (usedAt is set atomically when it is consumed).
+  refreshToken     String?
+  usedAt           DateTime?
+  expiresAt        DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, claimCode])
+  @@index([tenancyId, createdAt(sort: Desc), id(sort: Desc)], name: "AgentAuthAttempt_tenancyId_createdAt_id_idx")
 }
 
 model UserNotificationPreference {

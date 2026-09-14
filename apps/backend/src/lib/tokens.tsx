@@ -413,6 +413,8 @@ type CreateRefreshTokenOptions = {
   projectUserId: string,
   expiresAt?: Date,
   isImpersonation?: boolean,
+  // Marks the session as belonging to an AI agent (see ProjectUserRefreshToken.agentName).
+  agentName?: string,
 }
 
 type CreateAuthTokensOptions = CreateRefreshTokenOptions & {
@@ -434,6 +436,7 @@ export async function createRefreshTokenObj(options: CreateRefreshTokenOptions) 
       refreshToken: refreshToken,
       expiresAt: options.expiresAt,
       isImpersonation: options.isImpersonation,
+      agentName: options.agentName,
     },
   });
 

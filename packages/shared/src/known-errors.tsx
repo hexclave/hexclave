@@ -1848,6 +1848,36 @@ const AnalyticsNotEnabled = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const AgentAuthNotEnabled = createKnownErrorConstructor(
+  KnownError,
+  "AGENT_AUTH_NOT_ENABLED",
+  () => [
+    400,
+    "Agent authentication is not enabled for this project. Install the Agent Auth app in the Hexclave dashboard to enable it.",
+  ] as const,
+  () => [] as const,
+);
+
+const AgentAuthInvalidPollToken = createKnownErrorConstructor(
+  KnownError,
+  "AGENT_AUTH_INVALID_POLL_TOKEN",
+  () => [
+    400,
+    "The poll token is invalid or does not exist.",
+  ] as const,
+  () => [] as const,
+);
+
+const AgentAuthInvalidClaimCode = createKnownErrorConstructor(
+  KnownError,
+  "AGENT_AUTH_INVALID_CLAIM_CODE",
+  () => [
+    400,
+    "The claim code is invalid, has expired, or has already been used.",
+  ] as const,
+  () => [] as const,
+);
+
 const DefaultPaymentMethodRequired = createKnownErrorConstructor(
   KnownError,
   "DEFAULT_PAYMENT_METHOD_REQUIRED",
@@ -2048,6 +2078,9 @@ export const KnownErrors = {
   AnalyticsQueryTimeout,
   AnalyticsQueryError,
   AnalyticsNotEnabled,
+  AgentAuthNotEnabled,
+  AgentAuthInvalidPollToken,
+  AgentAuthInvalidClaimCode,
   TooManyImageAttachments,
   ImageAttachmentTooLarge,
 } satisfies Record<string, KnownErrorConstructor<any, any>>;
