@@ -24,9 +24,25 @@ import {
 } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { BroadcastIcon, LinkBreakIcon, MonitorIcon, PlusIcon } from "@phosphor-icons/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const DISPLAY_REFRESH_INTERVAL_MS = 5_000;
+
+export function formatTvDisplayPairingCode(value: string): string {
+  const normalized = value.toUpperCase().replaceAll(/[^0-9A-Z]/g, "").slice(0, 8);
+  return normalized.length <= 4
+    ? normalized
+    : `${normalized.slice(0, 4)}-${normalized.slice(4)}`;
+}
+
+function getPairingCodeCaretPosition(value: string, characterCount: number): number {
+  let seen = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (seen === characterCount) return value[index] === "-" ? index + 1 : index;
+    if (/[0-9A-Z]/.test(value[index] ?? "")) seen += 1;
+  }
+  return value.length;
+}
 
 type ActionNotice = {
   variant: "success" | "error" | "info",
@@ -115,7 +131,7 @@ export function TvDisplayManagement({
   const [displays, setDisplays] = useState<TvDisplayResource[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [pairingCode, setPairingCode] = useState("");
-  const [displayName, setDisplayName] = useState("Office Display");
+  const [displayName, setDisplayName] = useState("");
   const [profileId, setProfileId] = useState(
     profiles.some((profile) => profile.id === defaultProfileId)
       ? defaultProfileId
@@ -126,6 +142,13 @@ export function TvDisplayManagement({
   const [pairingError, setPairingError] = useState<ActionNotice | null>(null);
   const pairingInFlight = useRef(false);
   const refreshInFlight = useRef(false);
+  const pairingCodeInput = useRef<HTMLInputElement>(null);
+  // Capture selection on native beforeinput because React's onBeforeInput does not fire for deletions and select does not fire for collapsed carets; without a captured collapsed selection, skip the workaround so a selected separator is never widened into the preceding character.
+  const pairingSelectionBeforeEdit = useRef<{ start: number, end: number } | null>(null);
+  // Kept in state as a fresh object per edit (not a ref) so the caret layout effect also runs
+  // when formatting yields the same code as before, e.g. forward-deleting the separator: React
+  // then restores the controlled value, which moves the caret to the end unless we reposition it.
+  const [pendingPairingCaret, setPendingPairingCaret] = useState<{ characterCount: number } | null>(null);
   const hiddenDisplayIds = useRef(new Set<string>());
   const pendingPairing = useRef<{
     displayName: string,
@@ -133,6 +156,19 @@ export function TvDisplayManagement({
     approvedAt: string,
     expiresAt: string,
   } | null>(null);
+
+  useEffect(() => {
+    const input = pairingCodeInput.current;
+    if (input == null) return;
+    const record = () => {
+      pairingSelectionBeforeEdit.current = {
+        start: input.selectionStart ?? 0,
+        end: input.selectionEnd ?? 0,
+      };
+    };
+    input.addEventListener("beforeinput", record);
+    return () => input.removeEventListener("beforeinput", record);
+  }, []);
 
   const refresh = useCallback(async () => {
     const next = await fetchTvDisplaysOrThrow(adminApp);
@@ -178,6 +214,12 @@ export function TvDisplayManagement({
     return () => window.clearInterval(interval);
   }, [refreshSafely]);
 
+  useLayoutEffect(() => {
+    if (pendingPairingCaret == null || pairingCodeInput.current == null) return;
+    const caret = getPairingCodeCaretPosition(pairingCode, pendingPairingCaret.characterCount);
+    pairingCodeInput.current.setSelectionRange(caret, caret);
+  }, [pairingCode, pendingPairingCaret]);
+
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
   const normalizedPairingCode = pairingCode.replaceAll("-", "");
   const pair = async () => {
@@ -200,6 +242,8 @@ export function TvDisplayManagement({
         expiresAt: approval.expiresAt,
       };
       setPairingCode("");
+      setPendingPairingCaret(null);
+      setDisplayName("");
       setAcknowledgeExact(false);
       toast({
         variant: "success",
@@ -245,7 +289,29 @@ export function TvDisplayManagement({
           <div className="grid gap-4 md:grid-cols-3">
             <div className="space-y-2">
               <label htmlFor="new-tv-display-code" className="text-xs font-medium text-foreground">Pairing Code</label>
-              <DesignInput id="new-tv-display-code" aria-label="Pairing code" value={pairingCode} onChange={(event) => setPairingCode(event.target.value.toUpperCase())} placeholder="ABCD-EFGH" size="lg" className="font-mono uppercase tracking-widest" />
+              <DesignInput
+                ref={pairingCodeInput}
+                id="new-tv-display-code"
+                aria-label="Pairing code"
+                value={pairingCode}
+                onChange={(event) => {
+                  const selectionBeforeEdit = pairingSelectionBeforeEdit.current;
+                  pairingSelectionBeforeEdit.current = null;
+                  let nextValue = event.target.value;
+                  let caret = event.target.selectionStart ?? nextValue.length;
+                  if (event.nativeEvent instanceof InputEvent && event.nativeEvent.inputType === "deleteContentBackward" && selectionBeforeEdit != null && selectionBeforeEdit.start === selectionBeforeEdit.end && caret > 0 && pairingCode[caret] === "-" && nextValue === pairingCode.slice(0, caret) + pairingCode.slice(caret + 1)) {
+                    nextValue = nextValue.slice(0, caret - 1) + nextValue.slice(caret);
+                    caret -= 1;
+                  }
+                  setPendingPairingCaret({
+                    characterCount: nextValue.slice(0, caret).replaceAll(/[^0-9A-Z]/gi, "").length,
+                  });
+                  setPairingCode(formatTvDisplayPairingCode(nextValue));
+                }}
+                placeholder="ABCD-EFGH"
+                size="lg"
+                className="font-mono uppercase tracking-widest"
+              />
             </div>
             <div className="space-y-2">
               <label htmlFor="new-tv-display-name" className="text-xs font-medium text-foreground">Display Name</label>

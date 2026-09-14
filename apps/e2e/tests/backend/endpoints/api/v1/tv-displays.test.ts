@@ -3,11 +3,14 @@ import {
   TvDisplayPairingStatusSchema,
   TvSnapshotSchema,
 } from "@hexclave/shared/dist/interface/admin-tv-mode";
-import { it, niceFetch, STACK_BACKEND_BASE_URL, updateCookiesFromResponse } from "../../../../helpers";
+import { it, niceFetch, type NiceResponse, STACK_BACKEND_BASE_URL, updateCookiesFromResponse } from "../../../../helpers";
 import { Project } from "../../../backend-helpers";
 
-function apiUrl(path: string): URL {
-  return new URL(`/api/latest${path}`, STACK_BACKEND_BASE_URL);
+const LATEST_REFRESH_COOKIE = "hexclave-tv-display-refresh";
+const V1_REFRESH_COOKIE = "hexclave-tv-display-refresh-v1";
+
+function apiUrl(path: string, version: "latest" | "v1" = "latest"): URL {
+  return new URL(`/api/${version}${path}`, STACK_BACKEND_BASE_URL);
 }
 
 async function publicJsonRequest(path: string, options: {
@@ -15,8 +18,9 @@ async function publicJsonRequest(path: string, options: {
   body?: unknown,
   authorization?: string,
   cookie?: string,
+  version?: "latest" | "v1",
 }) {
-  return await niceFetch(apiUrl(path), {
+  return await niceFetch(apiUrl(path, options.version), {
     method: options.method ?? "GET",
     headers: {
       ...options.body === undefined ? {} : { "content-type": "application/json" },
@@ -25,6 +29,17 @@ async function publicJsonRequest(path: string, options: {
     },
     ...options.body === undefined ? {} : { body: JSON.stringify(options.body) },
   });
+}
+
+function activeRefreshCookie(response: NiceResponse, cookieName: string): string {
+  // The generic E2E cookie helper ignores paths. Select the live cookie by
+  // name so these requests model a browser sending only its matching alias.
+  const matchingCookies = response.headers.getSetCookie().filter((cookie) =>
+    cookie.startsWith(`${cookieName}=`) && !cookie.includes("Max-Age=0"));
+  if (matchingCookies.length !== 1) throw new Error(`Expected one live ${cookieName} cookie.`);
+  const cookiePair = matchingCookies.at(0)?.split(";").at(0);
+  if (cookiePair == null) throw new Error("Expected the live Set-Cookie header to contain a cookie pair.");
+  return cookiePair;
 }
 
 async function adminJsonRequest(options: {
@@ -48,6 +63,8 @@ async function adminJsonRequest(options: {
 }
 
 async function createPairedDisplay(displayName: string) {
+  // Keep this file at or below five pairings: the endpoint's per-minute IP
+  // limit is shared by every E2E request.
   const project = await Project.createAndSwitch();
   const challengeResponse = await publicJsonRequest("/tv-displays/pairing-challenges", { method: "POST" });
   if (challengeResponse.status !== 200) throw new Error(`Expected pairing challenge, received ${challengeResponse.status}.`);
@@ -90,13 +107,18 @@ it("pairs a narrow display principal, preserves tenancy assignment, and detects 
     statusResponse,
   } = await createPairedDisplay("E2E Lobby Display");
   const refreshSetCookies = statusResponse.headers.getSetCookie()
-    .filter((cookie) => cookie.startsWith("hexclave-tv-display-refresh="));
-  expect(refreshSetCookies).toHaveLength(3);
-  expect(refreshSetCookies).toEqual(expect.arrayContaining([
-    expect.stringContaining("Path=/api; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0"),
-    expect.stringContaining("Path=/api/latest/tv-displays"),
-    expect.stringContaining("Path=/api/v1/tv-displays"),
-  ]));
+    .filter((cookie) => cookie.startsWith(`${LATEST_REFRESH_COOKIE}=`) || cookie.startsWith(`${V1_REFRESH_COOKIE}=`));
+  expect(refreshSetCookies).toHaveLength(4);
+  // Legacy deletions must precede both replacements: affected WebKit cookie
+  // stores delete by name/domain without respecting the cookie path.
+  expect(refreshSetCookies.slice(0, 2)).toEqual([
+    expect.stringContaining(`${LATEST_REFRESH_COOKIE}=; Path=/api; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0`),
+    expect.stringContaining(`${LATEST_REFRESH_COOKIE}=; Path=/api/v1/tv-displays; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0`),
+  ]);
+  expect(refreshSetCookies[2]).toContain("Path=/api/latest/tv-displays");
+  expect(refreshSetCookies[2]?.startsWith(`${LATEST_REFRESH_COOKIE}=`)).toBe(true);
+  expect(refreshSetCookies[3]).toContain("Path=/api/v1/tv-displays");
+  expect(refreshSetCookies[3]?.startsWith(`${V1_REFRESH_COOKIE}=`)).toBe(true);
   for (const refreshSetCookie of refreshSetCookies) {
     expect(refreshSetCookie).toContain("HttpOnly");
     expect(refreshSetCookie).toContain("SameSite=Strict");
@@ -168,6 +190,95 @@ it("pairs a narrow display principal, preserves tenancy assignment, and detects 
   expect(compromisedFamilySnapshot.status).toBe(401);
 });
 
+it("keeps latest and v1 refresh aliases synchronized across repeated rotations and detects cross-alias replay", async ({ expect }) => {
+  const { statusResponse } = await createPairedDisplay("Alternating API Alias Display");
+  let latestCookie = activeRefreshCookie(statusResponse, LATEST_REFRESH_COOKIE);
+  let v1Cookie = activeRefreshCookie(statusResponse, V1_REFRESH_COOKIE);
+  const originalV1Cookie = v1Cookie;
+  let finalResponse = statusResponse;
+
+  for (let rotation = 0; rotation < 4; rotation++) {
+    const version = rotation % 2 === 0 ? "latest" : "v1";
+    const response = await publicJsonRequest("/tv-displays/auth/refresh", {
+      version,
+      method: "POST",
+      cookie: version === "latest" ? latestCookie : v1Cookie,
+    });
+    expect(response.status).toBe(200);
+    const nextLatestCookie = activeRefreshCookie(response, LATEST_REFRESH_COOKIE);
+    const nextV1Cookie = activeRefreshCookie(response, V1_REFRESH_COOKIE);
+    // Compare booleans to keep bearer values out of failed assertion output.
+    expect(nextLatestCookie !== latestCookie).toBe(true);
+    expect(nextV1Cookie !== v1Cookie).toBe(true);
+    expect(nextLatestCookie.slice(LATEST_REFRESH_COOKIE.length) === nextV1Cookie.slice(V1_REFRESH_COOKIE.length)).toBe(true);
+    latestCookie = nextLatestCookie;
+    v1Cookie = nextV1Cookie;
+    finalResponse = response;
+  }
+
+  const snapshot = await publicJsonRequest("/tv-displays/snapshot", {
+    authorization: finalResponse.body.accessToken,
+  });
+  expect(snapshot.status).toBe(200);
+
+  const replayResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    version: "v1",
+    method: "POST",
+    cookie: originalV1Cookie,
+  });
+  expect(replayResponse.status).toBe(401);
+  const compromisedSnapshot = await publicJsonRequest("/tv-displays/snapshot", {
+    authorization: finalResponse.body.accessToken,
+  });
+  expect(compromisedSnapshot.status).toBe(401);
+});
+
+it("scopes refresh cookies per route and migrates original-name v1 cookies without re-pairing", async ({ expect }) => {
+  const { statusResponse } = await createPairedDisplay("Refresh Cookie Alias Display");
+  const wrongAliasResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    method: "POST",
+    cookie: activeRefreshCookie(statusResponse, V1_REFRESH_COOKIE),
+  });
+  expect(wrongAliasResponse.status).toBe(401);
+
+  const legacyCookie = activeRefreshCookie(statusResponse, LATEST_REFRESH_COOKIE);
+  const invalidResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    version: "v1",
+    method: "POST",
+    cookie: `${V1_REFRESH_COOKIE}=invalid; ${legacyCookie}`,
+  });
+  expect(invalidResponse.status).toBe(401);
+  const clearedCookies = invalidResponse.headers.getSetCookie();
+  expect(clearedCookies).toHaveLength(4);
+  for (const cookie of clearedCookies) expect(cookie).toContain("Max-Age=0");
+  expect(clearedCookies.some((cookie) => cookie.startsWith(`${V1_REFRESH_COOKIE}=`))).toBe(true);
+
+  // The rejected alias must not consume the valid legacy credential or
+  // cause a second refresh attempt that silently authorizes the request.
+  const validResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    method: "POST",
+    cookie: legacyCookie,
+  });
+  expect(validResponse.status).toBe(200);
+
+  const migratedResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    version: "v1",
+    method: "POST",
+    cookie: activeRefreshCookie(validResponse, LATEST_REFRESH_COOKIE),
+  });
+  expect(migratedResponse.status).toBe(200);
+  const nextResponse = await publicJsonRequest("/tv-displays/auth/refresh", {
+    version: "v1",
+    method: "POST",
+    cookie: activeRefreshCookie(migratedResponse, V1_REFRESH_COOKIE),
+  });
+  expect(nextResponse.status).toBe(200);
+  const snapshot = await publicJsonRequest("/tv-displays/snapshot", {
+    authorization: nextResponse.body.accessToken,
+  });
+  expect(snapshot.status).toBe(200);
+});
+
 it("hard-deletes a display after an administrator unpairs it and rejects its remote credentials", async ({ expect }) => {
   const { pairing, refreshCookie, project } = await createPairedDisplay("E2E Active Display");
 
@@ -207,6 +318,13 @@ it("hard-deletes a display after an administrator unpairs it and rejects its rem
   });
   expect(staleRefresh.status).toBe(401);
 
+  const staleV1Refresh = await publicJsonRequest("/tv-displays/auth/refresh", {
+    version: "v1",
+    method: "POST",
+    cookie: refreshCookie,
+  });
+  expect(staleV1Refresh.status).toBe(401);
+
   const repeatedUnpair = await publicJsonRequest("/tv-displays/unpair", {
     method: "POST",
     authorization: pairing.accessToken,
@@ -226,12 +344,13 @@ it("clears every refresh-cookie path when a display unpairs itself", async ({ ex
   expect(unpairResponse.status).toBe(200);
   expect(unpairResponse.body).toEqual({ success: true });
   const clearedCookies = unpairResponse.headers.getSetCookie()
-    .filter((cookie) => cookie.startsWith("hexclave-tv-display-refresh="));
-  expect(clearedCookies).toHaveLength(3);
+    .filter((cookie) => cookie.startsWith(`${LATEST_REFRESH_COOKIE}=`) || cookie.startsWith(`${V1_REFRESH_COOKIE}=`));
+  expect(clearedCookies).toHaveLength(4);
   expect(clearedCookies).toEqual(expect.arrayContaining([
-    expect.stringContaining("Path=/api/latest/tv-displays"),
-    expect.stringContaining("Path=/api/v1/tv-displays"),
-    expect.stringContaining("Path=/api;"),
+    expect.stringContaining(`${LATEST_REFRESH_COOKIE}=; Path=/api/latest/tv-displays;`),
+    expect.stringContaining(`${LATEST_REFRESH_COOKIE}=; Path=/api/v1/tv-displays;`),
+    expect.stringContaining(`${LATEST_REFRESH_COOKIE}=; Path=/api;`),
+    expect.stringContaining(`${V1_REFRESH_COOKIE}=; Path=/api/v1/tv-displays;`),
   ]));
   for (const clearedCookie of clearedCookies) expect(clearedCookie).toContain("Max-Age=0");
 

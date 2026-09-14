@@ -13,15 +13,47 @@ import {
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { BroadcastIcon, LinkBreakIcon, MonitorPlayIcon } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { withTvRequestDeadline } from "../../../public/tv-box/request.mjs";
 
 const PAIRING_RETRY_INTERVAL_MS = 5_000;
-const PAIRING_STATUS_TIMEOUT_MS = 12_000;
 const PAIRING_REQUEST_TIMEOUT_MS = 12_000;
 
+export function resolveTvDisplayApiBase({
+  browserOrigin,
+  configuredApiUrl,
+  configuredBrowserApiUrl,
+  nodeEnvironment,
+  quickTunnelEnabled,
+}: {
+  browserOrigin: string | null,
+  configuredApiUrl: string | undefined,
+  configuredBrowserApiUrl: string | undefined,
+  nodeEnvironment: string | undefined,
+  quickTunnelEnabled: boolean,
+}): string {
+  if (quickTunnelEnabled) {
+    if (nodeEnvironment !== "development") {
+      throw new Error("The TV Quick Tunnel transport cannot be used outside development.");
+    }
+    if (browserOrigin == null) {
+      throw new Error("The TV Quick Tunnel transport requires a browser origin.");
+    }
+    return browserOrigin;
+  }
+
+  const configuredBase = configuredBrowserApiUrl ?? configuredApiUrl;
+  if (configuredBase == null) throw new Error("TV display API URL is not configured.");
+  return configuredBase;
+}
+
 function apiUrl(path: string): string {
-  const base = getPublicEnvVar("NEXT_PUBLIC_BROWSER_STACK_API_URL")
-    ?? getPublicEnvVar("NEXT_PUBLIC_STACK_API_URL");
-  if (base == null) throw new Error("TV display API URL is not configured.");
+  const base = resolveTvDisplayApiBase({
+    browserOrigin: typeof window === "undefined" ? null : window.location.origin,
+    configuredApiUrl: getPublicEnvVar("NEXT_PUBLIC_STACK_API_URL"),
+    configuredBrowserApiUrl: getPublicEnvVar("NEXT_PUBLIC_BROWSER_STACK_API_URL"),
+    nodeEnvironment: process.env.NODE_ENV,
+    quickTunnelEnabled: getPublicEnvVar("NEXT_PUBLIC_HEXCLAVE_TV_QUICK_TUNNEL_ENABLED") === "true",
+  });
   return new URL(`/api/latest${path}`, base).toString();
 }
 
@@ -42,14 +74,12 @@ async function jsonRequest(path: string, options: RequestInit): Promise<Response
   });
 }
 
-async function jsonRequestWithTimeout(path: string, options: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), PAIRING_REQUEST_TIMEOUT_MS);
-  try {
-    return await jsonRequest(path, { ...options, signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-  }
+async function jsonRequestWithTimeout(path: string, options: RequestInit): Promise<{ response: Response, body: unknown }> {
+  return await withTvRequestDeadline(async (signal) => {
+    const response = await jsonRequest(path, { ...options, signal });
+    const body: unknown = response.ok ? await response.json() : null;
+    return { response, body };
+  }, PAIRING_REQUEST_TIMEOUT_MS, options.signal);
 }
 
 function PairingScreen({ challenge, error }: { challenge: TvDisplayPairingChallenge | null, error: boolean }) {
@@ -93,14 +123,15 @@ export default function IndependentTvPageClient() {
   const [pairingRetryAttempt, setPairingRetryAttempt] = useState(0);
   const pairingPollInFlight = useRef(false);
   const pairingRestoreInFlight = useRef<Promise<void> | null>(null);
+  const pairingCreationInFlight = useRef<Promise<TvDisplayPairingChallenge | null> | null>(null);
+  const pairingGeneration = useRef(0);
   const accessTokenRef = useRef(accessToken);
   accessTokenRef.current = accessToken;
 
-  const refreshAccess = useCallback(async (): Promise<string | null> => {
-    const response = await jsonRequestWithTimeout("/tv-displays/auth/refresh", { method: "POST" });
+  const refreshAccess = useCallback(async (signal?: AbortSignal): Promise<string | null> => {
+    const { response, body } = await jsonRequestWithTimeout("/tv-displays/auth/refresh", { method: "POST", signal });
     if (response.status === 401) return null;
     if (!response.ok) throw new Error("TV display credential could not be refreshed.");
-    const body = await response.json();
     if (typeof body !== "object" || body == null || !("accessToken" in body) || typeof body.accessToken !== "string") {
       throw new Error("TV display refresh response is invalid.");
     }
@@ -109,12 +140,23 @@ export default function IndependentTvPageClient() {
   }, []);
 
   const createChallenge = useCallback(async () => {
-    setPairingError(false);
-    const response = await jsonRequestWithTimeout("/tv-displays/pairing-challenges", { method: "POST" });
-    if (!response.ok) throw new Error("TV display pairing challenge could not be created.");
-    const next = await TvDisplayPairingChallengeSchema.validate(await response.json(), { strict: true });
-    setChallenge(next);
-    return next;
+    if (pairingCreationInFlight.current != null) return await pairingCreationInFlight.current;
+    const generation = pairingGeneration.current;
+    const creation = (async () => {
+      setPairingError(false);
+      const { response, body } = await jsonRequestWithTimeout("/tv-displays/pairing-challenges", { method: "POST" });
+      if (!response.ok) throw new Error("TV display pairing challenge could not be created.");
+      const next = await TvDisplayPairingChallengeSchema.validate(body, { strict: true });
+      if (generation !== pairingGeneration.current) return null;
+      setChallenge(next);
+      return next;
+    })();
+    pairingCreationInFlight.current = creation;
+    try {
+      return await creation;
+    } finally {
+      if (pairingCreationInFlight.current === creation) pairingCreationInFlight.current = null;
+    }
   }, []);
 
   const restoreOrCreatePairing = useCallback(async () => {
@@ -167,24 +209,25 @@ export default function IndependentTvPageClient() {
   useEffect(() => {
     if (challenge == null || accessToken != null) return;
     let active = true;
+    const generation = pairingGeneration.current;
     let activePollController: AbortController | null = null;
     const poll = async () => {
       if (pairingPollInFlight.current) return;
       pairingPollInFlight.current = true;
       const controller = new AbortController();
       activePollController = controller;
-      const timeout = window.setTimeout(() => controller.abort(), PAIRING_STATUS_TIMEOUT_MS);
       try {
-        const response = await jsonRequest(`/tv-displays/pairing-challenges/${encodeURIComponent(challenge.challengeId)}/status`, {
+        const { response, body } = await jsonRequestWithTimeout(`/tv-displays/pairing-challenges/${encodeURIComponent(challenge.challengeId)}/status`, {
           method: "POST",
           body: JSON.stringify({ deviceSecret: challenge.deviceSecret }),
           signal: controller.signal,
         });
         if (!response.ok) throw new Error("TV display pairing status could not be loaded.");
-        const result = await TvDisplayPairingStatusSchema.validate(await response.json(), { strict: true });
-        if (!active) return;
+        const result = await TvDisplayPairingStatusSchema.validate(body, { strict: true });
+        if (!active || generation !== pairingGeneration.current) return;
         setPairingError(false);
         if (result.status === "paired") {
+          pairingGeneration.current += 1;
           setAccessToken(result.accessToken);
           setChallenge(null);
         } else if (result.status !== "waiting") {
@@ -200,7 +243,6 @@ export default function IndependentTvPageClient() {
       } catch {
         if (active) setPairingError(true);
       } finally {
-        window.clearTimeout(timeout);
         if (activePollController === controller) activePollController = null;
         if (active) pairingPollInFlight.current = false;
       }
@@ -225,7 +267,7 @@ export default function IndependentTvPageClient() {
       signal,
     });
     if (response.status === 401) {
-      const refreshed = await refreshAccess();
+      const refreshed = await refreshAccess(signal);
       if (refreshed == null) {
         setAccessToken(null);
         // Clearing the credential disables polling and aborts this snapshot

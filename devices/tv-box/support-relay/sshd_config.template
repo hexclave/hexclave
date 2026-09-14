@@ -1,0 +1,48 @@
+# Reviewed starting point for a DEDICATED relay sshd, not a blind drop-in for
+# an existing office host. Replace all UPPERCASE enrollment placeholders and
+# validate with sshd -t plus sshd -T -C user=...,host=...,addr=... before use.
+# No endpoint, registered account, credential, or trust key is shipped here.
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile /etc/hexclave-relay/authorized_keys/%u
+UsePAM no
+PermitEmptyPasswords no
+AllowGroups hexclave-relay-devices hexclave-relay-operators
+PermitTTY no
+PermitUserRC no
+PermitUserEnvironment no
+X11Forwarding no
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+PermitTunnel no
+GatewayPorts no
+AllowTcpForwarding no
+PermitOpen none
+PermitListen none
+# Zero permits forwarding but forbids shell, exec and subsystem channels.
+MaxSessions 0
+ForceCommand /usr/sbin/nologin
+LoginGraceTime 30
+MaxAuthTries 3
+ClientAliveInterval 30
+ClientAliveCountMax 3
+LogLevel VERBOSE
+
+Match Group hexclave-relay-devices
+    AllowTcpForwarding remote
+
+Match Group hexclave-relay-operators
+    AllowTcpForwarding local
+
+# Repeat exact user blocks per device/operator. Never widen these to '*',
+# 'any', a subnet, or a port range. Maintain registrations outside Git.
+Match User TVBOX_DEVICE_ACCOUNT
+    PermitListen 127.0.0.1:ASSIGNED_RELAY_PORT
+
+Match User OPERATOR_ACCOUNT
+    PermitOpen 127.0.0.1:ASSIGNED_RELAY_PORT

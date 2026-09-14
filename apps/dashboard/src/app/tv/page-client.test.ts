@@ -3,7 +3,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import IndependentTvPageClient, { getTvDisplayRequestHeaders } from "./page-client";
+import IndependentTvPageClient, { getTvDisplayRequestHeaders, resolveTvDisplayApiBase } from "./page-client";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
@@ -27,6 +27,36 @@ afterEach(() => {
 });
 
 describe("independent TV display requests", () => {
+  it("keeps the configured API origin when the Quick Tunnel opt-in is disabled", () => {
+    expect(resolveTvDisplayApiBase({
+      browserOrigin: "https://phase-one-box.trycloudflare.com",
+      configuredApiUrl: "http://localhost:8102",
+      configuredBrowserApiUrl: undefined,
+      nodeEnvironment: "development",
+      quickTunnelEnabled: false,
+    })).toBe("http://localhost:8102");
+  });
+
+  it("uses the current browser origin only for an explicitly enabled development tunnel", () => {
+    expect(resolveTvDisplayApiBase({
+      browserOrigin: "https://phase-one-box.trycloudflare.com",
+      configuredApiUrl: "http://localhost:8102",
+      configuredBrowserApiUrl: undefined,
+      nodeEnvironment: "development",
+      quickTunnelEnabled: true,
+    })).toBe("https://phase-one-box.trycloudflare.com");
+  });
+
+  it("refuses to use the Quick Tunnel client transport in production", () => {
+    expect(() => resolveTvDisplayApiBase({
+      browserOrigin: "https://phase-one-box.trycloudflare.com",
+      configuredApiUrl: "https://api.hexclave.com",
+      configuredBrowserApiUrl: undefined,
+      nodeEnvironment: "production",
+      quickTunnelEnabled: true,
+    })).toThrowError(/cannot be used outside development/);
+  });
+
   it("does not advertise JSON for a bodyless pairing or refresh request", () => {
     const headers = getTvDisplayRequestHeaders({ method: "POST" });
     expect(headers.has("content-type")).toBe(false);
@@ -239,6 +269,65 @@ describe("independent TV display requests", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(4);
 
+    await act(async () => root.unmount());
+  });
+
+  it.each(["refresh", "challenge"])("bounds a stalled %s response body and retries restoration", async (operation) => {
+    const body = Promise.withResolvers<unknown>();
+    const stalled = new Response(null, { status: 200 });
+    vi.spyOn(stalled, "json").mockReturnValue(body.promise);
+    if (operation === "challenge") fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+    fetchMock.mockResolvedValueOnce(stalled).mockRejectedValue(new Error("backend unavailable"));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(IndependentTvPageClient)));
+    const initialRequests = operation === "challenge" ? 2 : 1;
+    expect(fetchMock).toHaveBeenCalledTimes(initialRequests);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12_000);
+    });
+    expect(container.textContent).toContain("Retrying automatically");
+    expect(fetchMock.mock.calls[initialRequests - 1]?.[1].signal.aborted).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(initialRequests + 1);
+    await act(async () => root.unmount());
+  });
+
+  it("does not overlap pairing polls while a response body stalls, then resumes after its deadline", async () => {
+    const challenge = {
+      challengeId: "927dfeac-2e80-4311-8180-4879b687bfc0",
+      pairingCode: "A2BC3DEF",
+      deviceSecret: "display-secret-with-at-least-32-characters",
+      expiresAt: "2099-08-19T01:00:00.000Z",
+      pollingIntervalSeconds: 5,
+    };
+    const body = Promise.withResolvers<unknown>();
+    const stalled = new Response(null, { status: 200 });
+    vi.spyOn(stalled, "json").mockReturnValue(body.promise);
+    fetchMock
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(Response.json(challenge))
+      .mockResolvedValueOnce(stalled)
+      .mockImplementation(async () => Response.json({ status: "waiting", retryAfterSeconds: 5 }));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(IndependentTvPageClient)));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls[2]?.[1].signal.aborted).toBe(true);
+    await act(async () => {
+      body.resolve({ status: "used" });
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(container.textContent).toContain("A2BC-3DEF");
     await act(async () => root.unmount());
   });
 });
