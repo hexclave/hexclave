@@ -1,7 +1,4 @@
 import { assertAgentAuthEnabled, pollAgentAuthAttempt } from "@/lib/agent-auth";
-import { getApiUrlForRequest } from "@/lib/request-api-url";
-import { generateAccessTokenFromRefreshTokenIfValid } from "@/lib/tokens";
-import { globalPrismaClient } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, clientOrHigherAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 
@@ -44,32 +41,12 @@ export const POST = createSmartRouteHandler({
   handler: async ({ auth, body }, fullReq): Promise<{ statusCode: 200 | 201, bodyType: "json", body: AgentAuthPollResponseBody }> => {
     assertAgentAuthEnabled(auth.tenancy);
 
-    const result = await pollAgentAuthAttempt(auth.tenancy, body.poll_token);
+    const result = await pollAgentAuthAttempt({ tenancy: auth.tenancy, pollToken: body.poll_token, fullReq });
     if (result.status !== "approved") {
       return {
         statusCode: 200,
         bodyType: "json",
         body: { status: result.status },
-      };
-    }
-
-    const refreshTokenObj = await globalPrismaClient.projectUserRefreshToken.findUnique({
-      where: { refreshToken: result.refreshToken },
-      select: { id: true, projectUserId: true, expiresAt: true },
-    });
-    const accessToken = await generateAccessTokenFromRefreshTokenIfValid({
-      tenancy: auth.tenancy,
-      refreshTokenObj,
-      apiUrl: getApiUrlForRequest(fullReq),
-    });
-    if (accessToken == null) {
-      // The approving user revoked the agent session (or was deleted) between
-      // approval and the agent's first poll. The attempt is already consumed,
-      // so the agent has to register again — same as an expired attempt.
-      return {
-        statusCode: 200,
-        bodyType: "json",
-        body: { status: "expired" },
       };
     }
 
@@ -80,7 +57,7 @@ export const POST = createSmartRouteHandler({
         status: "approved",
         session: {
           user_id: result.userId,
-          access_token: accessToken,
+          access_token: result.accessToken,
           refresh_token: result.refreshToken,
         },
       },

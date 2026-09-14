@@ -6,7 +6,7 @@ import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/er
 import { getHostedHandlerTrustedDomain } from "./redirect-urls";
 import { getApiUrlForRequest } from "./request-api-url";
 import { Tenancy } from "./tenancies";
-import { createAuthTokens } from "./tokens";
+import { createAuthTokens, generateAccessTokenFromRefreshTokenIfValid } from "./tokens";
 
 /**
  * Agent auth lets an AI agent obtain its own session on a Hexclave project.
@@ -119,12 +119,6 @@ export async function createAgentAuthAttempt(options: {
     data: { is_anonymous: true },
     allowedErrorTypes: [],
   });
-  const anonymousTokens = await createAuthTokens({
-    tenancy,
-    projectUserId: anonymousUser.id,
-    apiUrl: getApiUrlForRequest(options.fullReq),
-    agentName: options.agent.name,
-  });
 
   const pollToken = generateSecureRandomString();
   const expiresAt = new Date(Date.now() + options.expiresInMillis);
@@ -155,6 +149,16 @@ export async function createAgentAuthAttempt(options: {
         anonProjectUserId: anonymousUser.id,
         expiresAt,
       },
+    });
+    // The anonymous session is minted last: if the attempt row fails to write,
+    // no refresh token exists that nobody can revoke through the flow. If
+    // token minting itself fails, the attempt is a pending row with a claim
+    // code nobody knows, which simply expires.
+    const anonymousTokens = await createAuthTokens({
+      tenancy,
+      projectUserId: anonymousUser.id,
+      apiUrl: getApiUrlForRequest(options.fullReq),
+      agentName: options.agent.name,
     });
     return {
       attempt,
@@ -203,27 +207,40 @@ export async function approveAgentAuthAttempt(options: {
     agentName: options.agentName,
   });
 
-  const updated = await prisma.agentAuthAttempt.updateMany({
-    where: {
-      tenancyId: tenancy.id,
-      id: options.attemptId,
-      approvedAt: null,
-      deniedAt: null,
-      usedAt: null,
-      expiresAt: { gt: new Date() },
-    },
-    data: {
-      approvedAt: new Date(),
-      approvedByUserId: options.approvingUserId,
-      refreshToken: tokens.refreshToken,
-    },
-  });
-
-  if (updated.count === 0) {
-    // We lost the race; the session we just minted must not outlive it.
+  const revokeMintedSession = async () => {
     await globalPrismaClient.projectUserRefreshToken.deleteMany({
       where: { tenancyId: tenancy.id, refreshToken: tokens.refreshToken },
     });
+  };
+
+  let updated;
+  try {
+    updated = await prisma.agentAuthAttempt.updateMany({
+      where: {
+        tenancyId: tenancy.id,
+        id: options.attemptId,
+        approvedAt: null,
+        deniedAt: null,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      data: {
+        approvedAt: new Date(),
+        approvedByUserId: options.approvingUserId,
+        refreshToken: tokens.refreshToken,
+      },
+    });
+  } catch (error) {
+    // The session was minted before the attempt could reference it; without
+    // that reference nobody would ever hand it to the agent, so it must not
+    // linger as a live session on the user's account.
+    await revokeMintedSession();
+    throw error;
+  }
+
+  if (updated.count === 0) {
+    // We lost the race; the session we just minted must not outlive it.
+    await revokeMintedSession();
     throw new KnownErrors.AgentAuthInvalidClaimCode();
   }
 }
@@ -263,16 +280,25 @@ export type AgentAuthPollResult =
   | { status: "denied" }
   | { status: "expired" }
   | { status: "used" }
-  | { status: "approved", refreshToken: string, userId: string };
+  | { status: "approved", refreshToken: string, accessToken: string, userId: string };
 
 /**
  * Hands the agent's session to the poller exactly once. The refresh token is
  * cleared in the same conditional UPDATE that sets usedAt, so a second poller
  * (or a replay) can never retrieve it.
+ *
+ * Everything that can fail (looking up the session, signing the access token)
+ * happens *before* that UPDATE. Consuming first would turn a transient error
+ * into a permanent one: the agent would retry and only ever see `used`.
  */
-export async function pollAgentAuthAttempt(tenancy: Tenancy, pollToken: string): Promise<AgentAuthPollResult> {
+export async function pollAgentAuthAttempt(options: {
+  tenancy: Tenancy,
+  pollToken: string,
+  fullReq: { headers: Record<string, string[] | undefined> },
+}): Promise<AgentAuthPollResult> {
+  const { tenancy } = options;
   const prisma = await getPrismaClientForTenancy(tenancy);
-  const attempt = await prisma.agentAuthAttempt.findUnique({ where: { pollToken } });
+  const attempt = await prisma.agentAuthAttempt.findUnique({ where: { pollToken: options.pollToken } });
   if (attempt == null || attempt.tenancyId !== tenancy.id) {
     throw new KnownErrors.AgentAuthInvalidPollToken();
   }
@@ -280,6 +306,30 @@ export async function pollAgentAuthAttempt(tenancy: Tenancy, pollToken: string):
   const status = getAgentAuthAttemptStatus(attempt);
   if (status !== "approved") {
     return { status };
+  }
+
+  const refreshToken = attempt.refreshToken ?? throwErr("Approved agent auth attempt has no refresh token; approveAgentAuthAttempt always sets both together", { attemptId: attempt.id });
+  const userId = attempt.approvedByUserId ?? throwErr("Approved agent auth attempt has no approving user; approveAgentAuthAttempt always sets both together", { attemptId: attempt.id });
+
+  const refreshTokenObj = await globalPrismaClient.projectUserRefreshToken.findUnique({
+    where: { refreshToken },
+    select: { id: true, projectUserId: true, expiresAt: true },
+  });
+  const accessToken = await generateAccessTokenFromRefreshTokenIfValid({
+    tenancy,
+    refreshTokenObj,
+    apiUrl: getApiUrlForRequest(options.fullReq),
+  });
+  if (accessToken == null) {
+    // The approving user revoked the agent session (or was deleted) between
+    // approval and the agent's first poll. Nothing is left to hand over, so
+    // consume the attempt and report it like an expired one; the agent has
+    // to register again.
+    await prisma.agentAuthAttempt.updateMany({
+      where: { tenancyId: tenancy.id, id: attempt.id, usedAt: null },
+      data: { usedAt: new Date(), refreshToken: null },
+    });
+    return { status: "expired" };
   }
 
   const claimed = await prisma.agentAuthAttempt.updateMany({
@@ -290,9 +340,5 @@ export async function pollAgentAuthAttempt(tenancy: Tenancy, pollToken: string):
     return { status: "used" };
   }
 
-  return {
-    status: "approved",
-    refreshToken: attempt.refreshToken ?? throwErr("Approved agent auth attempt has no refresh token; approveAgentAuthAttempt always sets both together", { attemptId: attempt.id }),
-    userId: attempt.approvedByUserId ?? throwErr("Approved agent auth attempt has no approving user; approveAgentAuthAttempt always sets both together", { attemptId: attempt.id }),
-  };
+  return { status: "approved", refreshToken, accessToken, userId };
 }

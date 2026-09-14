@@ -114,9 +114,9 @@ export const GET = createSmartRouteHandler({
       LIMIT ${recentAttemptLimit}
     `);
 
-    const counts = { pending: 0, approved: 0, denied: 0, expired: 0, used: 0 };
+    const counts = new Map<AgentAuthAttemptRow["status"], number>();
     for (const attempt of recentAttempts) {
-      counts[attempt.status]++;
+      counts.set(attempt.status, (counts.get(attempt.status) ?? 0) + 1);
     }
 
     // Agent sessions live in the global refresh-token table; the tenancy prefix
@@ -178,10 +178,10 @@ export const GET = createSmartRouteHandler({
       body: {
         summary: {
           attempts_in_window: recentAttempts.length,
-          pending_attempts_in_window: counts.pending,
-          used_attempts_in_window: counts.used,
-          denied_attempts_in_window: counts.denied,
-          expired_attempts_in_window: counts.expired,
+          pending_attempts_in_window: counts.get("pending") ?? 0,
+          used_attempts_in_window: counts.get("used") ?? 0,
+          denied_attempts_in_window: counts.get("denied") ?? 0,
+          expired_attempts_in_window: counts.get("expired") ?? 0,
           active_agent_sessions_in_window: formattedSessions.filter((session) => !session.is_expired).length,
           attempt_window_limit: recentAttemptLimit,
           agent_session_window_limit: agentSessionLimit,

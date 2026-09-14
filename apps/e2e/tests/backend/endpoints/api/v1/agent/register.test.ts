@@ -229,6 +229,32 @@ it("revoking the agent session signs out the agent but not the human", async ({ 
   expect(humanMe.status).toBe(200);
 });
 
+it("revoking the agent session before the first poll reports expired and never hands out the dead session", async ({ expect }) => {
+  await createProjectWithAgentAuth();
+  const { body: registration } = await registerAgent();
+  const user = await Auth.fastSignUp();
+  await confirmAgent(registration.claim_code, "approve");
+
+  const sessions = await niceBackendFetch(`/api/v1/auth/sessions?user_id=${user.userId}`, { accessType: "server" });
+  const agentSession = sessions.body.items.find((s: { agent_name: string | null }) => s.agent_name === "Claude Code");
+  expect(agentSession).toBeDefined();
+  const revoke = await niceBackendFetch(`/api/v1/auth/sessions/${agentSession.id}?user_id=${user.userId}`, { method: "DELETE", accessType: "server" });
+  expect(revoke.status).toBe(200);
+
+  const poll = await pollAgent(registration.poll_token);
+  expect(poll).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": { "status": "expired" },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+
+  // The attempt is consumed; it does not flip back to approved on later polls.
+  const secondPoll = await pollAgent(registration.poll_token);
+  expect(secondPoll.body.status).toBe("used");
+});
+
 it("denying tells the poller, spends the claim code and revokes the anonymous session", async ({ expect }) => {
   await createProjectWithAgentAuth();
   const { body: registration } = await registerAgent();

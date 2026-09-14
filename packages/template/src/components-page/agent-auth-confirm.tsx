@@ -95,12 +95,19 @@ export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
   const [status, setStatus] = useState<Exclude<AgentAuthConfirmationStatus, "invalid">>("loading");
   const [details, setDetails] = useState<ConfirmResponse | null>(null);
   const [error, setError] = useState<Error | null>(null);
-  const inspectStartedRef = useRef(false);
+  // Bumping this re-runs the inspection effect; the effect's other deps
+  // (app, claimCode, user) do not change on a retry.
+  const [inspectRun, setInspectRun] = useState(0);
   const actionInProgressRef = useRef(false);
+  const statusRef = useRef(status);
+  statusRef.current = status;
 
   useEffect(() => {
-    if (claimCode == null || inspectStartedRef.current) return;
-    inspectStartedRef.current = true;
+    // `user` is re-fetched after approve/deny (a new session was minted on the
+    // account), which re-runs this effect; only inspect while we are actually
+    // waiting for the initial inspection, never overwrite a later state.
+    if (claimCode == null || statusRef.current !== "loading") return;
+    let cancelled = false;
     runAsynchronouslyWithAlert(async () => {
       try {
         if (user == null) {
@@ -114,14 +121,19 @@ export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
           return;
         }
         const response = await postAgentConfirm(app, claimCode, "inspect");
+        if (cancelled) return;
         setDetails(response);
         setStatus("ready");
       } catch (err) {
+        if (cancelled) return;
         setError(getError(err));
         setStatus("error");
       }
     });
-  }, [app, claimCode, user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [app, claimCode, user, inspectRun]);
 
   const runAction = useCallback(async (action: "approve" | "deny") => {
     if (claimCode == null || actionInProgressRef.current) return;
@@ -144,8 +156,8 @@ export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
   const deny = useCallback(async () => await runAction("deny"), [runAction]);
   const retry = useCallback(() => {
     setError(null);
-    inspectStartedRef.current = false;
     setStatus("loading");
+    setInspectRun((run) => run + 1);
   }, []);
 
   const visibleStatus = claimCode == null ? "invalid" : status;
