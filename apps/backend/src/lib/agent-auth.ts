@@ -3,6 +3,7 @@ import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { KnownErrors } from "@hexclave/shared";
 import { generateSecureRandomString } from "@hexclave/shared/dist/utils/crypto";
 import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { recordExternalDbSyncDeletion, recordExternalDbSyncRefreshTokenDeletionsForUser } from "./external-db-sync";
 import { getHostedHandlerTrustedDomain } from "./redirect-urls";
 import { getApiUrlForRequest } from "./request-api-url";
 import { Tenancy } from "./tenancies";
@@ -208,8 +209,21 @@ export async function approveAgentAuthAttempt(options: {
   });
 
   const revokeMintedSession = async () => {
+    // Refresh tokens are mirrored to external DBs / ClickHouse, and deletions
+    // are only picked up if they are recorded in DeletedRow first (there is
+    // no DB trigger), so never delete a session row without recording it.
+    const minted = await globalPrismaClient.projectUserRefreshToken.findUnique({
+      where: { refreshToken: tokens.refreshToken },
+      select: { id: true, tenancyId: true },
+    });
+    if (minted == null || minted.tenancyId !== tenancy.id) return;
+    await recordExternalDbSyncDeletion(globalPrismaClient, {
+      tableName: "ProjectUserRefreshToken",
+      tenancyId: tenancy.id,
+      refreshTokenId: minted.id,
+    });
     await globalPrismaClient.projectUserRefreshToken.deleteMany({
-      where: { tenancyId: tenancy.id, refreshToken: tokens.refreshToken },
+      where: { tenancyId: tenancy.id, id: minted.id },
     });
   };
 
@@ -269,6 +283,10 @@ export async function denyAgentAuthAttempt(options: { tenancy: Tenancy, attemptI
     select: { anonProjectUserId: true },
   });
   if (attempt?.anonProjectUserId != null) {
+    await recordExternalDbSyncRefreshTokenDeletionsForUser(globalPrismaClient, {
+      tenancyId: options.tenancy.id,
+      projectUserId: attempt.anonProjectUserId,
+    });
     await globalPrismaClient.projectUserRefreshToken.deleteMany({
       where: { tenancyId: options.tenancy.id, projectUserId: attempt.anonProjectUserId },
     });
