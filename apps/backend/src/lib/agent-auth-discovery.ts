@@ -1,5 +1,58 @@
+import { KnownErrors } from "@hexclave/shared";
+import { adaptSchema, clientOrHigherAuthTypeSchema, yupObject, yupString, yupTuple } from "@hexclave/shared/dist/schema-fields";
+import { StatusError } from "@hexclave/shared/dist/utils/errors";
 import { agentAuthDefaults, isAgentAuthEnabled } from "./agent-auth";
-import { Tenancy } from "./tenancies";
+import { getApiUrlForRequest } from "./request-api-url";
+import { DEFAULT_BRANCH_ID, Tenancy, getSoleTenancyFromProjectBranch } from "./tenancies";
+
+/**
+ * Request shape shared by `/agent/auth.md` and `/agent/discovery`.
+ *
+ * Discovery is the one place an agent lands *before* it knows how to talk to
+ * this project, so it must not require the very headers it is documenting.
+ * `auth` is therefore nullable: an agent that only knows the project ID (the
+ * dashboard prompt gives it exactly that) sends `x-hexclave-project-id` and
+ * nothing else, and we resolve the tenancy from that header ourselves. Agents
+ * that already have client headers can send them too, which lets us echo the
+ * publishable key back into the pre-filled commands.
+ */
+export const agentAuthDiscoveryRequestSchema = yupObject({
+  auth: yupObject({
+    type: clientOrHigherAuthTypeSchema,
+    tenancy: adaptSchema.defined(),
+  }).nullable(),
+  headers: yupObject({
+    "x-stack-project-id": yupTuple([yupString().optional()]).optional(),
+    "x-stack-branch-id": yupTuple([yupString().optional()]).optional(),
+    "x-stack-publishable-client-key": yupTuple([yupString().optional()]).optional(),
+  }).defined(),
+});
+
+export async function getAgentAuthDiscoveryForRequest(
+  req: { auth: { tenancy: Tenancy } | null, headers: Record<string, string[] | undefined> },
+  fullReq: { headers: Record<string, string[] | undefined> },
+): Promise<AgentAuthDiscovery> {
+  let tenancy: Tenancy;
+  if (req.auth != null) {
+    tenancy = req.auth.tenancy;
+  } else {
+    const projectId = req.headers["x-stack-project-id"]?.[0];
+    if (projectId == null) {
+      throw new StatusError(400, "Send the project ID in the x-hexclave-project-id header to read this project's agent auth guide.");
+    }
+    const branchId = req.headers["x-stack-branch-id"]?.[0] ?? DEFAULT_BRANCH_ID;
+    tenancy = await getSoleTenancyFromProjectBranch(projectId, branchId, true) ?? throwProjectNotFound(projectId);
+  }
+  return getAgentAuthDiscovery({
+    tenancy,
+    apiUrl: getApiUrlForRequest(fullReq),
+    publishableClientKey: req.headers["x-stack-publishable-client-key"]?.[0] ?? null,
+  });
+}
+
+function throwProjectNotFound(projectId: string): never {
+  throw new KnownErrors.CurrentProjectNotFound(projectId);
+}
 
 /**
  * Machine-readable description of a project's agent-auth setup. This is what
@@ -22,6 +75,7 @@ export type AgentAuthDiscovery = {
     project_id: string,
     project_display_name: string,
     publishable_client_key: string | null,
+    publishable_client_key_required: boolean,
     poll_endpoint: string,
     confirm_endpoint: string,
     sessions_endpoint: string,
@@ -40,6 +94,10 @@ export function getAgentAuthDiscovery(options: {
 }): AgentAuthDiscovery {
   const { tenancy, apiUrl } = options;
   const api = apiUrl.replace(/\/$/, "");
+  // Projects that don't enforce a publishable client key (the default for new projects) must not make agents hunt for
+  // one; the header is only listed when the project actually checks it. If it is checked and the agent didn't send it
+  // to us, the placeholder tells the agent to ask the user for it.
+  const publishableClientKeyRequired = tenancy.config.project.requirePublishableClientKey;
   return {
     issuer: api,
     registration_endpoint: `${api}/api/v1/agent/register`,
@@ -51,6 +109,7 @@ export function getAgentAuthDiscovery(options: {
       project_id: tenancy.project.id,
       project_display_name: tenancy.project.display_name,
       publishable_client_key: options.publishableClientKey,
+      publishable_client_key_required: publishableClientKeyRequired,
       poll_endpoint: `${api}/api/v1/agent/register/poll`,
       confirm_endpoint: `${api}/api/v1/agent/register/confirm`,
       sessions_endpoint: `${api}/api/v1/auth/sessions`,
@@ -61,7 +120,9 @@ export function getAgentAuthDiscovery(options: {
       required_headers: {
         "x-hexclave-access-type": "client",
         "x-hexclave-project-id": tenancy.project.id,
-        "x-hexclave-publishable-client-key": options.publishableClientKey ?? "<publishable client key>",
+        ...(options.publishableClientKey != null || publishableClientKeyRequired ? {
+          "x-hexclave-publishable-client-key": options.publishableClientKey ?? "<publishable client key; ask the user, it is in the app's Hexclave config>",
+        } : {}),
       },
     },
   };

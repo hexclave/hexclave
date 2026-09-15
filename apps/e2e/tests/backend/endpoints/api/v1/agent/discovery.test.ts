@@ -1,5 +1,5 @@
 import { it } from "../../../../../helpers";
-import { niceBackendFetch, Project } from "../../../../backend-helpers";
+import { backendContext, niceBackendFetch, Project } from "../../../../backend-helpers";
 
 it("serves a machine-readable discovery document that reflects whether agent auth is enabled", async ({ expect }) => {
   await Project.createAndSwitch();
@@ -33,6 +33,66 @@ it("serves auth.md as project-specific Markdown with the publishable key and end
   expect(markdown).toContain("x-hexclave-publishable-client-key");
   expect(markdown).toContain("x-hexclave-allow-anonymous-user");
   expect(markdown).not.toContain("<publishable client key>");
+});
+
+it("serves discovery and auth.md with only the project ID header, so an agent can bootstrap from the dashboard prompt", async ({ expect }) => {
+  await Project.createAndSwitch({ display_name: "Bootstrap Project" });
+  await Project.updateConfig({ "apps.installed.agent-auth.enabled": true });
+  const projectKeys = backendContext.value.projectKeys;
+  if (projectKeys === "no-project") throw new Error("expected a project");
+
+  const discovery = await niceBackendFetch("/api/v1/agent/discovery", {
+    accessType: null,
+    headers: { "x-hexclave-project-id": projectKeys.projectId },
+  });
+  expect(discovery.status).toBe(200);
+  expect(discovery.body.hexclave_agent_auth.project_id).toBe(projectKeys.projectId);
+  expect(discovery.body.hexclave_agent_auth.publishable_client_key).toBe(null);
+  // New projects don't enforce the publishable key, so agents shouldn't be told to send one they can't know
+  expect(discovery.body.hexclave_agent_auth.publishable_client_key_required).toBe(false);
+  expect(discovery.body.hexclave_agent_auth.required_headers).toEqual({
+    "x-hexclave-access-type": "client",
+    "x-hexclave-project-id": projectKeys.projectId,
+  });
+
+  const markdown = await niceBackendFetch("/api/v1/agent/auth.md", {
+    accessType: null,
+    headers: { "x-hexclave-project-id": projectKeys.projectId },
+  });
+  expect(markdown.status).toBe(200);
+  expect(markdown.body).toContain("# Agent authentication for Bootstrap Project");
+  expect(markdown.body).not.toContain("publishable client key");
+});
+
+it("lists the publishable key header (with a placeholder) only when the project enforces it", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Project.updateProjectConfig({ "project.requirePublishableClientKey": true });
+  const projectKeys = backendContext.value.projectKeys;
+  if (projectKeys === "no-project") throw new Error("expected a project");
+
+  const discovery = await niceBackendFetch("/api/v1/agent/discovery", {
+    accessType: null,
+    headers: { "x-hexclave-project-id": projectKeys.projectId },
+  });
+  expect(discovery.status).toBe(200);
+  expect(discovery.body.hexclave_agent_auth.publishable_client_key_required).toBe(true);
+  expect(discovery.body.hexclave_agent_auth.required_headers["x-hexclave-publishable-client-key"]).toContain("<publishable client key");
+
+  const withKey = await niceBackendFetch("/api/v1/agent/discovery", { accessType: "client" });
+  expect(withKey.body.hexclave_agent_auth.required_headers["x-hexclave-publishable-client-key"]).toBe(projectKeys.publishableClientKey);
+});
+
+it("rejects discovery without a project ID or with an unknown project", async ({ expect }) => {
+  const missing = await niceBackendFetch("/api/v1/agent/discovery", { accessType: null });
+  expect(missing.status).toBe(400);
+  expect(missing.body).toContain("x-hexclave-project-id");
+
+  const unknown = await niceBackendFetch("/api/v1/agent/discovery", {
+    accessType: null,
+    headers: { "x-hexclave-project-id": "does-not-exist" },
+  });
+  expect(unknown.status).toBe(400);
+  expect(unknown.body.code).toBe("CURRENT_PROJECT_NOT_FOUND");
 });
 
 it("auth.md tells agents when the project has not enabled agent auth", async ({ expect }) => {

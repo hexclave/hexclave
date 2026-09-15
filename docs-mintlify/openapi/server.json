@@ -192,8 +192,24 @@
     "/agent/auth.md": {
       "get": {
         "summary": "Agent auth guide (auth.md)",
-        "description": "A Markdown guide, written for AI agents, that explains how to register with this project and obtain a session. All commands are pre-filled with the project's values.",
+        "description": "A Markdown guide, written for AI agents, that explains how to register with this project and obtain a session. All commands are pre-filled with the project's values. Only the project ID header is required to read it.",
         "parameters": [
+          {
+            "name": "x-stack-project-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "x-stack-branch-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
           {
             "name": "x-stack-publishable-client-key",
             "in": "header",
@@ -224,8 +240,24 @@
     "/agent/discovery": {
       "get": {
         "summary": "Agent auth discovery document",
-        "description": "Machine-readable description of this project's agent-auth endpoints. Companion to /agent/auth.md.",
+        "description": "Machine-readable description of this project's agent-auth endpoints. Companion to /agent/auth.md. Only the project ID header is required to read it.",
         "parameters": [
+          {
+            "name": "x-stack-project-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "x-stack-branch-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
           {
             "name": "x-stack-publishable-client-key",
             "in": "header",
@@ -283,6 +315,9 @@
                             null
                           ]
                         },
+                        "publishable_client_key_required": {
+                          "type": "boolean"
+                        },
                         "poll_endpoint": {
                           "type": "string"
                         },
@@ -312,6 +347,7 @@
                         "enabled",
                         "project_id",
                         "project_display_name",
+                        "publishable_client_key_required",
                         "poll_endpoint",
                         "confirm_endpoint",
                         "sessions_endpoint",

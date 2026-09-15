@@ -245,6 +245,13 @@ export function AgentAuthConfirmation({ fullPage = true }: { fullPage?: boolean 
           {t("The agent expects to be approved by {userHint}.", { userHint: agentAuth.userHint })}
         </Typography>
       )}
+      {agentAuth.claimCode != null && (
+        <Typography variant="secondary">
+          {t("Claim code")} <span className="font-mono">{agentAuth.claimCode}</span>
+          {" — "}
+          {t("make sure it matches the code the agent showed you.")}
+        </Typography>
+      )}
       <Typography variant="destructive">
         {t("Approving gives the agent its own session with the same permissions as you. It will appear under your active sessions as \"{agentName}\" and you can revoke it there at any time. If you did not expect this request, deny it.", { agentName })}
       </Typography>
