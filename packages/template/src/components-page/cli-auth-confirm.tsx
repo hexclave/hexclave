@@ -102,9 +102,9 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
     // Nobody is signed in. If the CLI already has an anonymous session, adopt
     // it in this browser so sign-up upgrades that user instead of creating a new one.
     flow.setStatus("authorizing");
-    const checkData = await postCliAuthComplete(app, { login_code: loginCode, mode: "check" });
+    const checkData = await (await postCliAuthComplete(app, { login_code: loginCode, mode: "check" })).json();
     if (getStringField(checkData, "cli_session_state") === "anonymous") {
-      const tokens = await postCliAuthComplete(app, { login_code: loginCode, mode: "claim-anon-session" });
+      const tokens = await (await postCliAuthComplete(app, { login_code: loginCode, mode: "claim-anon-session" })).json();
       const accessToken = getStringField(tokens, "access_token");
       const refreshToken = getStringField(tokens, "refresh_token");
       if (accessToken == null || refreshToken == null) {

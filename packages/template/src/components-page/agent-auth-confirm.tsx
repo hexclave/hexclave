@@ -64,10 +64,10 @@ function isConfirmResponse(data: unknown): data is ConfirmResponse {
 }
 
 async function postAgentConfirm(app: StackClientApp, claimCode: string, action: "inspect" | "approve" | "deny"): Promise<ConfirmResponse> {
-  const data = await postConfirmationRequest(app, {
+  const data = await (await postConfirmationRequest(app, {
     endpoint: "/agent/register/confirm",
     body: { claim_code: claimCode, action },
-  });
+  })).json();
   if (!isConfirmResponse(data)) {
     throw new Error("Unexpected response from the agent authorization endpoint");
   }

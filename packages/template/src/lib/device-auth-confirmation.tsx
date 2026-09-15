@@ -84,16 +84,16 @@ export async function redirectRestrictedUserToCompleteSignIn(app: StackClientApp
  * POSTs JSON to a backend endpoint with the current session. `sendRequest`
  * already throws on any non-2xx (known errors as `KnownError`, whose messages
  * are written for end users and safe to render; everything else as an
- * assertion error), so callers only need to handle the parsed success body.
+ * assertion error), so a resolved promise means success. The body is parsed
+ * lazily via `.json()` because not every step cares about it.
  */
 export async function postConfirmationRequest(app: StackClientApp, options: {
   endpoint: string,
   body: Record<string, unknown>,
-}): Promise<unknown> {
-  const response = await app[hexclaveAppInternalsSymbol].sendRequest(options.endpoint, {
+}): Promise<{ json: () => Promise<unknown> }> {
+  return await app[hexclaveAppInternalsSymbol].sendRequest(options.endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options.body),
   });
-  return await response.json();
 }
