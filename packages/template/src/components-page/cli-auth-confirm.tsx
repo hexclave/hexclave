@@ -4,7 +4,7 @@ import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises
 import { Typography } from "@hexclave/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageCard } from "../components/message-cards/message-card";
-import { postConfirmationRequest, redirectRestrictedUserToCompleteSignIn, toError, useUrlQueryParam } from "../lib/device-auth-confirmation";
+import { getStringField, postConfirmationRequest, redirectRestrictedUserToCompleteSignIn, useConfirmationFlow, useUrlQueryParam } from "../lib/device-auth-confirmation";
 import { hexclaveAppInternalsSymbol } from "../lib/hexclave-app/common";
 import type { StackClientApp } from "../lib/hexclave-app/apps/interfaces/client-app";
 import { useStackApp } from "../lib/hooks";
@@ -29,17 +29,6 @@ function clearConfirmed() {
   sessionStorage.removeItem(CLI_AUTH_CONFIRMED_KEY);
 }
 
-function getObjectField(data: unknown, fieldName: string): unknown {
-  return typeof data === "object" && data !== null && fieldName in data
-    ? data[fieldName as keyof typeof data]
-    : undefined;
-}
-
-function getStringField(data: unknown, fieldName: string): string | undefined {
-  const value = getObjectField(data, fieldName);
-  return typeof value === "string" ? value : undefined;
-}
-
 export type CliAuthConfirmationStatus =
   | "idle"
   | "invalid"
@@ -60,10 +49,8 @@ export type CliAuthConfirmationState = {
 export function useCliAuthConfirmation(): CliAuthConfirmationState {
   const app = useStackApp();
   const user = app.useUser({ includeRestricted: true });
-  const [status, setStatus] = useState<Exclude<CliAuthConfirmationStatus, "invalid">>("idle");
-  const [error, setError] = useState<Error | null>(null);
+  const flow = useConfirmationFlow<Exclude<CliAuthConfirmationStatus, "invalid" | "error">>("idle");
   const autoCompleteRef = useRef(false);
-  const authorizeInProgressRef = useRef(false);
   const loginCode = useUrlQueryParam("login_code");
   const [confirmed] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -71,109 +58,80 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
   });
 
   const completeWithCurrentUser = useCallback(async () => {
-    if (!loginCode) {
+    if (loginCode == null) {
       throw new Error("Missing login code in URL parameters");
     }
-    if (!user) {
+    if (user == null) {
       throw new Error("Cannot complete CLI authorization without a signed-in user");
     }
     const refreshToken = (await user.currentSession.getTokens()).refreshToken;
-    if (!refreshToken) {
+    if (refreshToken == null) {
       throw new Error("Could not retrieve session token");
     }
+    flow.setStatus("authorizing");
     await postCliAuthComplete(app, { login_code: loginCode, refresh_token: refreshToken });
-  }, [app, loginCode, user]);
+    clearConfirmed();
+    flow.setStatus("success");
+  }, [app, flow, loginCode, user]);
 
+  // Coming back from sign-in/sign-up: the user clicked Authorize before, so
+  // finish without asking again.
   useEffect(() => {
-    if (!confirmed || !user || user.isRestricted || autoCompleteRef.current) {
+    if (!confirmed || user == null || user.isRestricted || autoCompleteRef.current) {
       return;
     }
     autoCompleteRef.current = true;
-    runAsynchronouslyWithAlert(async () => {
-      setStatus("authorizing");
-      try {
-        await completeWithCurrentUser();
-        clearConfirmed();
-        setStatus("success");
-      } catch (err) {
-        setError(toError(err));
-        setStatus("error");
-      }
-    });
-  }, [confirmed, user, completeWithCurrentUser]);
+    runAsynchronouslyWithAlert(flow.run(completeWithCurrentUser));
+  }, [confirmed, user, completeWithCurrentUser, flow]);
 
-  const authorize = useCallback(async () => {
-    if (authorizeInProgressRef.current) {
+  const authorize = useCallback(async () => await flow.run(async () => {
+    if (loginCode == null) {
+      throw new Error("Missing login code in URL parameters");
+    }
+    if (user != null) {
+      if (user.isRestricted) {
+        markConfirmed(loginCode);
+        flow.setStatus("redirecting");
+        await redirectRestrictedUserToCompleteSignIn(app, user);
+        return;
+      }
+      await completeWithCurrentUser();
       return;
     }
-    authorizeInProgressRef.current = true;
 
-    try {
-      if (!loginCode) {
-        setError(new Error("Missing login code in URL parameters"));
-        setStatus("error");
-        return;
+    // Nobody is signed in. If the CLI already has an anonymous session, adopt
+    // it in this browser so sign-up upgrades that user instead of creating a new one.
+    flow.setStatus("authorizing");
+    const checkData = await postCliAuthComplete(app, { login_code: loginCode, mode: "check" });
+    if (getStringField(checkData, "cli_session_state") === "anonymous") {
+      const tokens = await postCliAuthComplete(app, { login_code: loginCode, mode: "claim-anon-session" });
+      const accessToken = getStringField(tokens, "access_token");
+      const refreshToken = getStringField(tokens, "refresh_token");
+      if (accessToken == null || refreshToken == null) {
+        throw new Error("Anonymous CLI session claim did not return tokens");
       }
-
-      setError(null);
-      setStatus("authorizing");
-      if (user) {
-        if (user.isRestricted) {
-          markConfirmed(loginCode);
-          setStatus("redirecting");
-          await redirectRestrictedUserToCompleteSignIn(app, user);
-          return;
-        }
-        await completeWithCurrentUser();
-        clearConfirmed();
-        setStatus("success");
-        return;
-      }
-
-      const checkResult = await postCliAuthComplete(app, { login_code: loginCode, mode: "check" });
-      const checkData: unknown = await checkResult.json();
-      const cliSessionState = getStringField(checkData, "cli_session_state") ?? null;
-
-      if (cliSessionState === "anonymous") {
-        const claimResult = await postCliAuthComplete(app, { login_code: loginCode, mode: "claim-anon-session" });
-        const tokens: unknown = await claimResult.json();
-        const accessToken = getStringField(tokens, "access_token");
-        const refreshToken = getStringField(tokens, "refresh_token");
-        if (!accessToken || !refreshToken) {
-          throw new Error("Anonymous CLI session claim did not return tokens");
-        }
-        await app[hexclaveAppInternalsSymbol].signInWithTokens({
-          accessToken,
-          refreshToken,
-        });
-        markConfirmed(loginCode);
-        setStatus("redirecting");
-        await app.redirectToSignUp({ replace: true });
-        return;
-      }
-
+      await app[hexclaveAppInternalsSymbol].signInWithTokens({ accessToken, refreshToken });
       markConfirmed(loginCode);
-      setStatus("redirecting");
-      await app.redirectToSignIn({ replace: true });
-    } catch (err) {
-      setError(toError(err));
-      setStatus("error");
-    } finally {
-      authorizeInProgressRef.current = false;
+      flow.setStatus("redirecting");
+      await app.redirectToSignUp({ replace: true });
+      return;
     }
-  }, [app, completeWithCurrentUser, loginCode, user]);
+
+    markConfirmed(loginCode);
+    flow.setStatus("redirecting");
+    await app.redirectToSignIn({ replace: true });
+  }), [app, completeWithCurrentUser, flow, loginCode, user]);
 
   const retry = useCallback(() => {
-    setError(null);
     autoCompleteRef.current = false;
-    setStatus("idle");
-  }, []);
+    flow.reset("idle");
+  }, [flow]);
 
-  const visibleStatus = loginCode == null ? "invalid" : status;
+  const visibleStatus = loginCode == null ? "invalid" : flow.status;
   return {
     status: visibleStatus,
     loginCode,
-    error,
+    error: flow.error,
     isLoading: visibleStatus === "authorizing" || visibleStatus === "redirecting",
     authorize,
     retry,

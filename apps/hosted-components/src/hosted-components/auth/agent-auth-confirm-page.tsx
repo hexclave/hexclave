@@ -11,7 +11,7 @@ export function HostedAgentAuthConfirm(props: {
   const agentAuth = useAgentAuthConfirmation();
   const agentName = agentAuth.agent?.name ?? "The agent";
 
-  if (agentAuth.status === "approved") {
+  if (agentAuth.status === "success") {
     return (
       <HostedAuthMessage title="Agent connected" fullPage={props.fullPage}>
         {agentName} can now act on your behalf. You can review or revoke its access at any time from your account settings, under active sessions. You can close this window.

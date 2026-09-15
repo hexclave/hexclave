@@ -588,8 +588,8 @@
                     "status": {
                       "type": "string",
                       "enum": [
-                        "pending",
-                        "approved",
+                        "waiting",
+                        "success",
                         "denied"
                       ]
                     }
@@ -609,7 +609,7 @@
     "/agent/register/poll": {
       "post": {
         "summary": "Poll for agent approval",
-        "description": "Checks whether the human has approved the agent registration. Once approved, the agent's session tokens are returned exactly once; subsequent polls report `used`. Poll roughly every few seconds until the status is no longer `pending`.",
+        "description": "Checks whether the human has approved the agent registration. Once approved (`success`), the agent's session tokens are returned exactly once; subsequent polls report `used`. Poll roughly every few seconds while the status is `waiting`.",
         "parameters": [],
         "requestBody": {
           "required": true,
@@ -645,8 +645,8 @@
                     "status": {
                       "type": "string",
                       "enum": [
-                        "pending",
-                        "approved",
+                        "waiting",
+                        "success",
                         "denied",
                         "expired",
                         "used"
@@ -670,7 +670,7 @@
                         "access_token",
                         "refresh_token"
                       ],
-                      "description": "Only present when status is `approved`."
+                      "description": "Only present when status is `success`."
                     }
                   },
                   "required": [
@@ -690,8 +690,8 @@
                     "status": {
                       "type": "string",
                       "enum": [
-                        "pending",
-                        "approved",
+                        "waiting",
+                        "success",
                         "denied",
                         "expired",
                         "used"
@@ -715,7 +715,7 @@
                         "access_token",
                         "refresh_token"
                       ],
-                      "description": "Only present when status is `approved`."
+                      "description": "Only present when status is `success`."
                     }
                   },
                   "required": [

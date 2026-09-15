@@ -1,4 +1,4 @@
-import { agentAuthDefaults, assertAgentAuthEnabled, createAgentAuthAttempt, getAgentConfirmHandlerUrl, getAgentConfirmUrl } from "@/lib/agent-auth";
+import { agentAuthDefaults, assertAgentAuthEnabled, getAgentConfirmHandlerUrl, getAgentConfirmUrl, registerAgent } from "@/lib/agent-auth";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, clientOrHigherAuthTypeSchema, urlSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 
@@ -44,14 +44,14 @@ export const POST = createSmartRouteHandler({
     // Validated before anything is written so a bad app_url has no side effects.
     const confirmHandlerUrl = getAgentConfirmHandlerUrl(auth.tenancy, body.app_url ?? null);
 
-    const { attempt, anonymousSession } = await createAgentAuthAttempt({
+    const { attempt, anonymousSession } = await registerAgent({
       tenancy: auth.tenancy,
       agent: {
         name: body.agent.name,
         description: body.agent.description ?? null,
         url: body.agent.url ?? null,
+        userHint: body.user_hint ?? null,
       },
-      userHint: body.user_hint ?? null,
       expiresInMillis: body.expires_in_millis,
       fullReq,
     });
@@ -60,9 +60,9 @@ export const POST = createSmartRouteHandler({
       statusCode: 200,
       bodyType: "json",
       body: {
-        claim_code: attempt.claimCode,
-        confirm_url: getAgentConfirmUrl(confirmHandlerUrl, attempt.claimCode),
-        poll_token: attempt.pollToken,
+        claim_code: attempt.loginCode,
+        confirm_url: getAgentConfirmUrl(confirmHandlerUrl, attempt.loginCode),
+        poll_token: attempt.pollingCode,
         expires_at_millis: attempt.expiresAt.getTime(),
         anonymous_session: {
           user_id: anonymousSession.userId,

@@ -4,7 +4,7 @@ import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises
 import { Typography } from "@hexclave/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageCard } from "../components/message-cards/message-card";
-import { postConfirmationRequest, redirectRestrictedUserToCompleteSignIn, toError, useUrlQueryParam } from "../lib/device-auth-confirmation";
+import { postConfirmationRequest, redirectRestrictedUserToCompleteSignIn, useConfirmationFlow, useUrlQueryParam } from "../lib/device-auth-confirmation";
 import type { StackClientApp } from "../lib/hexclave-app/apps/interfaces/client-app";
 import { useStackApp } from "../lib/hooks";
 import { useTranslation } from "../lib/translations";
@@ -32,7 +32,7 @@ export type AgentAuthConfirmationStatus =
   | "ready"
   | "approving"
   | "denying"
-  | "approved"
+  | "success"
   | "denied"
   | "error";
 
@@ -53,7 +53,7 @@ type ConfirmResponse = {
   agent: AgentAuthConfirmationAgent,
   user_hint: string | null,
   expires_at_millis: number,
-  status: "pending" | "approved" | "denied",
+  status: "waiting" | "success" | "denied",
 };
 
 function isConfirmResponse(data: unknown): data is ConfirmResponse {
@@ -64,11 +64,10 @@ function isConfirmResponse(data: unknown): data is ConfirmResponse {
 }
 
 async function postAgentConfirm(app: StackClientApp, claimCode: string, action: "inspect" | "approve" | "deny"): Promise<ConfirmResponse> {
-  const result = await postConfirmationRequest(app, {
+  const data = await postConfirmationRequest(app, {
     endpoint: "/agent/register/confirm",
     body: { claim_code: claimCode, action },
   });
-  const data: unknown = await result.json();
   if (!isConfirmResponse(data)) {
     throw new Error("Unexpected response from the agent authorization endpoint");
   }
@@ -79,82 +78,66 @@ export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
   const app = useStackApp();
   const user = app.useUser({ includeRestricted: true });
   const claimCode = useUrlQueryParam("code");
-  const [status, setStatus] = useState<Exclude<AgentAuthConfirmationStatus, "invalid">>("loading");
+  const flow = useConfirmationFlow<Exclude<AgentAuthConfirmationStatus, "invalid" | "error">>("loading");
   const [details, setDetails] = useState<ConfirmResponse | null>(null);
-  const [error, setError] = useState<Error | null>(null);
   // Bumping this re-runs the inspection effect; the effect's other deps
   // (app, claimCode, user) do not change on a retry.
   const [inspectRun, setInspectRun] = useState(0);
-  const actionInProgressRef = useRef(false);
-  const statusRef = useRef(status);
-  statusRef.current = status;
+  const statusRef = useRef(flow.status);
+  statusRef.current = flow.status;
+  const userRef = useRef(user);
+  userRef.current = user;
+  const { run, setStatus } = flow;
+  const userId = user?.id ?? null;
+  const userIsRestricted = user?.isRestricted ?? false;
 
   useEffect(() => {
-    // `user` is re-fetched after approve/deny (a new session was minted on the
-    // account), which re-runs this effect; only inspect while we are actually
-    // waiting for the initial inspection, never overwrite a later state.
+    // Only inspect while we are waiting for the initial inspection, never
+    // overwrite a later state. Deps are primitives on purpose: the `user`
+    // object is re-created on every re-fetch (e.g. right after sign-in or
+    // after approve/deny minted a session), and a re-run while the inspect
+    // request is in flight must not discard its result — `run` already
+    // guarantees at most one request at a time.
     if (claimCode == null || statusRef.current !== "loading") return;
-    let cancelled = false;
-    runAsynchronouslyWithAlert(async () => {
-      try {
-        if (user == null) {
-          setStatus("redirecting");
-          await app.redirectToSignIn({ replace: true });
-          return;
-        }
-        if (user.isRestricted) {
-          setStatus("redirecting");
-          await redirectRestrictedUserToCompleteSignIn(app, user);
-          return;
-        }
-        const response = await postAgentConfirm(app, claimCode, "inspect");
-        if (cancelled) return;
-        setDetails(response);
-        setStatus("ready");
-      } catch (err) {
-        if (cancelled) return;
-        setError(toError(err));
-        setStatus("error");
+    runAsynchronouslyWithAlert(run(async () => {
+      const currentUser = userRef.current;
+      if (currentUser == null) {
+        setStatus("redirecting");
+        await app.redirectToSignIn({ replace: true });
+        return;
       }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [app, claimCode, user, inspectRun]);
+      if (currentUser.isRestricted) {
+        setStatus("redirecting");
+        await redirectRestrictedUserToCompleteSignIn(app, currentUser);
+        return;
+      }
+      setDetails(await postAgentConfirm(app, claimCode, "inspect"));
+      setStatus("ready");
+    }));
+  }, [app, claimCode, userId, userIsRestricted, inspectRun, run, setStatus]);
 
-  const runAction = useCallback(async (action: "approve" | "deny") => {
-    if (claimCode == null || actionInProgressRef.current) return;
-    actionInProgressRef.current = true;
-    try {
-      setError(null);
-      setStatus(action === "approve" ? "approving" : "denying");
-      const response = await postAgentConfirm(app, claimCode, action);
-      setDetails(response);
-      setStatus(action === "approve" ? "approved" : "denied");
-    } catch (err) {
-      setError(toError(err));
-      setStatus("error");
-    } finally {
-      actionInProgressRef.current = false;
-    }
-  }, [app, claimCode]);
+  const runAction = useCallback(async (action: "approve" | "deny") => await flow.run(async () => {
+    if (claimCode == null) return;
+    flow.setStatus(action === "approve" ? "approving" : "denying");
+    setDetails(await postAgentConfirm(app, claimCode, action));
+    flow.setStatus(action === "approve" ? "success" : "denied");
+  }), [app, claimCode, flow]);
 
   const approve = useCallback(async () => await runAction("approve"), [runAction]);
   const deny = useCallback(async () => await runAction("deny"), [runAction]);
   const retry = useCallback(() => {
-    setError(null);
-    setStatus("loading");
+    flow.reset("loading");
     setInspectRun((run) => run + 1);
-  }, []);
+  }, [flow]);
 
-  const visibleStatus = claimCode == null ? "invalid" : status;
+  const visibleStatus = claimCode == null ? "invalid" : flow.status;
   return {
     status: visibleStatus,
     claimCode,
     agent: details?.agent ?? null,
     userHint: details?.user_hint ?? null,
     expiresAt: details != null ? new Date(details.expires_at_millis) : null,
-    error,
+    error: flow.error,
     isLoading: visibleStatus === "loading" || visibleStatus === "redirecting" || visibleStatus === "approving" || visibleStatus === "denying",
     approve,
     deny,
@@ -177,7 +160,7 @@ export function AgentAuthConfirmation({ fullPage = true }: { fullPage?: boolean 
     );
   }
 
-  if (agentAuth.status === "approved") {
+  if (agentAuth.status === "success") {
     return (
       <MessageCard title={t("Agent Connected")} fullPage={fullPage}>
         <Typography>

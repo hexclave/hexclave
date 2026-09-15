@@ -1144,57 +1144,39 @@ enum DraftThemeMode {
   CUSTOM
 }
 
-model CliAuthAttempt {
+// One "sign in on another device" attempt. Used by both the CLI login flow
+// (`/auth/cli/*`) and agent auth (`/agent/*`): a device that has no browser
+// creates the attempt, a human confirms it in a browser, and the device polls
+// `pollingCode` once to receive `refreshToken`. `loginCode` is the code the
+// human sees/types. Agent attempts additionally carry the agent's self-description
+// (`agentName` is non-null exactly for agent attempts) and can be denied.
+//
+// The table keeps its original "CliAuthAttempt" name in the database because
+// renaming a live table would break the previous release, which addresses it
+// by name in raw SQL.
+model DeviceAuthAttempt {
   tenancyId String @db.Uuid
 
-  id           String    @default(uuid()) @db.Uuid
-  pollingCode      String    @unique
-  loginCode        String    @unique
+  id               String    @default(uuid()) @db.Uuid
+  pollingCode      String    @unique(map: "CliAuthAttempt_pollingCode_key")
+  loginCode        String    @unique(map: "CliAuthAttempt_loginCode_key")
   refreshToken     String?
   anonRefreshToken String?
   expiresAt        DateTime
   usedAt           DateTime?
+  deniedAt         DateTime?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@id([tenancyId, id])
-  @@index([tenancyId, createdAt(sort: Desc), id(sort: Desc)], name: "CliAuthAttempt_tenancyId_createdAt_id_idx")
-}
-
-// One agent's attempt to register with a project. Mirrors CliAuthAttempt (same
-// device-flow shape, same tenancy-DB placement) but is intentionally a separate
-// table: agent registrations carry identity metadata, are approved through a
-// dedicated confirm page, and end with a *new* session on the approving user
-// rather than sharing the browser's refresh token like the CLI flow does.
-model AgentAuthAttempt {
-  tenancyId String @db.Uuid
-
-  id               String    @default(uuid()) @db.Uuid
-  agentName        String
+  agentName        String?
   agentDescription String?
   agentUrl         String?
   userHint         String?
-  // Short human-typeable code shown on the confirm page. Unique per tenancy
-  // only, because the confirm page always knows which project it belongs to.
-  claimCode        String
-  pollToken        String    @unique
-  anonProjectUserId String?  @db.Uuid
-  approvedByUserId String?   @db.Uuid
-  approvedAt       DateTime?
-  deniedAt         DateTime?
-  // The agent's session refresh token, set on approval and handed out exactly
-  // once through poll (usedAt is set atomically when it is consumed).
-  refreshToken     String?
-  usedAt           DateTime?
-  expiresAt        DateTime
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@id([tenancyId, id])
-  @@unique([tenancyId, claimCode])
-  @@index([tenancyId, createdAt(sort: Desc), id(sort: Desc)], name: "AgentAuthAttempt_tenancyId_createdAt_id_idx")
+  @@id([tenancyId, id], map: "CliAuthAttempt_pkey")
+  @@index([tenancyId, createdAt(sort: Desc), id(sort: Desc)], name: "CliAuthAttempt_tenancyId_createdAt_id_idx")
+  @@map("CliAuthAttempt")
 }
 
 model UserNotificationPreference {

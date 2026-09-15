@@ -1858,16 +1858,6 @@ const AgentAuthNotEnabled = createKnownErrorConstructor(
   () => [] as const,
 );
 
-const AgentAuthInvalidPollToken = createKnownErrorConstructor(
-  KnownError,
-  "AGENT_AUTH_INVALID_POLL_TOKEN",
-  () => [
-    400,
-    "The poll token is invalid or does not exist.",
-  ] as const,
-  () => [] as const,
-);
-
 const AgentAuthInvalidClaimCode = createKnownErrorConstructor(
   KnownError,
   "AGENT_AUTH_INVALID_CLAIM_CODE",
@@ -2079,7 +2069,6 @@ export const KnownErrors = {
   AnalyticsQueryError,
   AnalyticsNotEnabled,
   AgentAuthNotEnabled,
-  AgentAuthInvalidPollToken,
   AgentAuthInvalidClaimCode,
   TooManyImageAttachments,
   ImageAttachmentTooLarge,

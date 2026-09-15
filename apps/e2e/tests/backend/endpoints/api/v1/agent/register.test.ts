@@ -148,7 +148,7 @@ it("reports pending while nobody has approved", async ({ expect }) => {
   expect(poll).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 200,
-      "body": { "status": "pending" },
+      "body": { "status": "waiting" },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
@@ -161,11 +161,11 @@ it("rejects an unknown poll token", async ({ expect }) => {
     NiceResponse {
       "status": 400,
       "body": {
-        "code": "AGENT_AUTH_INVALID_POLL_TOKEN",
-        "error": "The poll token is invalid or does not exist.",
+        "code": "INVALID_POLLING_CODE",
+        "error": "The polling code is invalid or does not exist.",
       },
       "headers": Headers {
-        "x-stack-known-error": "AGENT_AUTH_INVALID_POLL_TOKEN",
+        "x-stack-known-error": "INVALID_POLLING_CODE",
         <some fields may have been hidden>,
       },
     }
@@ -189,7 +189,7 @@ it("approves an agent, hands the session to the poller exactly once, and tags th
           "url": "https://example.com/agent",
         },
         "expires_at_millis": <stripped field 'expires_at_millis'>,
-        "status": "pending",
+        "status": "waiting",
         "user_hint": "alice@example.com",
       },
       "headers": Headers { <some fields may have been hidden> },
@@ -200,11 +200,11 @@ it("approves an agent, hands the session to the poller exactly once, and tags th
   const lowerCaseNoDash = registration.claim_code.toLowerCase().replace("-", " ");
   const approve = await confirmAgent(lowerCaseNoDash, "approve");
   expect(approve.status).toBe(200);
-  expect(approve.body.status).toBe("approved");
+  expect(approve.body.status).toBe("success");
 
   const poll = await pollAgent(registration.poll_token);
   expect(poll.status).toBe(201);
-  expect(poll.body.status).toBe("approved");
+  expect(poll.body.status).toBe("success");
   expect(poll.body.session.user_id).toBe(user.userId);
   expect(poll.body.session.refresh_token).not.toBe(user.refreshToken);
 
@@ -292,7 +292,7 @@ it("revoking the agent session before the first poll reports expired and never h
     }
   `);
 
-  // The attempt is consumed; it does not flip back to approved on later polls.
+  // The attempt is consumed; it does not flip back to success on later polls.
   const secondPoll = await pollAgent(registration.poll_token);
   expect(secondPoll.body.status).toBe("used");
 });
@@ -383,7 +383,7 @@ it("requires a signed-in, non-anonymous human to confirm", async ({ expect }) =>
   expect(selfApprove.body.code).toBe("ANONYMOUS_AUTHENTICATION_NOT_ALLOWED");
 
   const poll = await pollAgent(registration.poll_token);
-  expect(poll.body).toEqual({ status: "pending" });
+  expect(poll.body).toEqual({ status: "waiting" });
 });
 
 it("rejects an unknown claim code", async ({ expect }) => {

@@ -1,4 +1,4 @@
-import { approveAgentAuthAttempt, assertAgentAuthEnabled, denyAgentAuthAttempt, getPendingAgentAuthAttemptByClaimCode } from "@/lib/agent-auth";
+import { approveAgentAuthAttempt, assertAgentAuthEnabled, denyAgentAuthAttempt, getWaitingAgentAuthAttemptByClaimCode } from "@/lib/agent-auth";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { adaptSchema, clientOrHigherAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
@@ -42,7 +42,7 @@ export const POST = createSmartRouteHandler({
       }).defined(),
       user_hint: yupString().nullable().defined(),
       expires_at_millis: yupNumber().defined(),
-      status: yupString().oneOf(["pending", "approved", "denied"]).defined(),
+      status: yupString().oneOf(["waiting", "success", "denied"]).defined(),
     }).defined(),
   }),
   handler: async ({ auth, body }, fullReq) => {
@@ -51,26 +51,20 @@ export const POST = createSmartRouteHandler({
       throw new KnownErrors.AnonymousAuthenticationNotAllowed();
     }
 
-    const attempt = await getPendingAgentAuthAttemptByClaimCode(auth.tenancy, body.claim_code);
+    const attempt = await getWaitingAgentAuthAttemptByClaimCode(auth.tenancy, body.claim_code);
 
-    let status: "pending" | "approved" | "denied" = "pending";
+    let status: "waiting" | "success" | "denied" = "waiting";
     switch (body.action) {
       case "inspect": {
         break;
       }
       case "approve": {
-        await approveAgentAuthAttempt({
-          tenancy: auth.tenancy,
-          attemptId: attempt.id,
-          agentName: attempt.agentName,
-          approvingUserId: auth.user.id,
-          fullReq,
-        });
-        status = "approved";
+        await approveAgentAuthAttempt({ tenancy: auth.tenancy, attempt, approvingUserId: auth.user.id, fullReq });
+        status = "success";
         break;
       }
       case "deny": {
-        await denyAgentAuthAttempt({ tenancy: auth.tenancy, attemptId: attempt.id });
+        await denyAgentAuthAttempt({ tenancy: auth.tenancy, attempt });
         status = "denied";
         break;
       }

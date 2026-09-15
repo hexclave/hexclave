@@ -5,20 +5,24 @@ import { expect } from "vitest";
 export const preMigration = async (sql: Sql) => {
   const projectId = `test-${randomUUID()}`;
   const tenancyId = randomUUID();
-  const otherTenancyId = randomUUID();
   const userId = randomUUID();
   const refreshTokenId = randomUUID();
+  const cliAttemptId = randomUUID();
 
   await sql`INSERT INTO "Project" ("id", "createdAt", "updatedAt", "displayName", "description", "isProductionMode") VALUES (${projectId}, NOW(), NOW(), 'Test', '', false)`;
   await sql`INSERT INTO "Tenancy" ("id", "createdAt", "updatedAt", "projectId", "branchId", "hasNoOrganization") VALUES (${tenancyId}::uuid, NOW(), NOW(), ${projectId}, 'main', 'TRUE'::"BooleanTrue")`;
-  await sql`INSERT INTO "Tenancy" ("id", "createdAt", "updatedAt", "projectId", "branchId", "hasNoOrganization") VALUES (${otherTenancyId}::uuid, NOW(), NOW(), ${projectId}, 'other', 'TRUE'::"BooleanTrue")`;
   await sql`INSERT INTO "ProjectUser" ("projectUserId", "tenancyId", "mirroredProjectId", "mirroredBranchId", "createdAt", "updatedAt", "lastActiveAt") VALUES (${userId}::uuid, ${tenancyId}::uuid, ${projectId}, 'main', NOW(), NOW(), NOW())`;
   await sql`
     INSERT INTO "ProjectUserRefreshToken" ("id", "tenancyId", "projectUserId", "createdAt", "updatedAt", "lastActiveAt", "refreshToken")
     VALUES (${refreshTokenId}::uuid, ${tenancyId}::uuid, ${userId}::uuid, NOW(), NOW(), NOW(), ${`rt-${randomUUID()}`})
   `;
+  // A CLI attempt created by the previous release, before the agent columns existed.
+  await sql`
+    INSERT INTO "CliAuthAttempt" ("tenancyId", "id", "pollingCode", "loginCode", "expiresAt", "updatedAt")
+    VALUES (${tenancyId}::uuid, ${cliAttemptId}::uuid, ${`poll-${randomUUID()}`}, ${`login-${randomUUID()}`}, NOW() + INTERVAL '10 minutes', NOW())
+  `;
 
-  return { tenancyId, otherTenancyId, refreshTokenId };
+  return { tenancyId, refreshTokenId, cliAttemptId };
 };
 
 export const postMigration = async (sql: Sql, ctx: Awaited<ReturnType<typeof preMigration>>) => {
@@ -27,38 +31,52 @@ export const postMigration = async (sql: Sql, ctx: Awaited<ReturnType<typeof pre
   expect(sessions).toHaveLength(1);
   expect(sessions[0].agentName).toBeNull();
 
-  const insertAttempt = (tenancyId: string, claimCode: string, pollToken: string) => sql`
-    INSERT INTO "AgentAuthAttempt" ("tenancyId", "id", "agentName", "claimCode", "pollToken", "expiresAt", "updatedAt")
-    VALUES (${tenancyId}::uuid, ${randomUUID()}::uuid, 'Test Agent', ${claimCode}, ${pollToken}, NOW() + INTERVAL '10 minutes', NOW())
+  // Existing CLI attempts are plain, never-denied device attempts.
+  const cliRows = await sql`
+    SELECT "deniedAt", "agentName", "agentDescription", "agentUrl", "userHint", "refreshToken", "usedAt"
+    FROM "CliAuthAttempt"
+    WHERE "tenancyId" = ${ctx.tenancyId}::uuid AND "id" = ${ctx.cliAttemptId}::uuid
   `;
-
-  await insertAttempt(ctx.tenancyId, "ABCD-EFGH", `poll-${randomUUID()}`);
-
-  // Claim codes are unique per tenancy...
-  await expect(insertAttempt(ctx.tenancyId, "ABCD-EFGH", `poll-${randomUUID()}`)).rejects.toThrow(/AgentAuthAttempt_tenancyId_claimCode_key/);
-  // ...but may repeat across tenancies.
-  await insertAttempt(ctx.otherTenancyId, "ABCD-EFGH", `poll-${randomUUID()}`);
-
-  // Poll tokens are unique globally.
-  const pollToken = `poll-${randomUUID()}`;
-  await insertAttempt(ctx.tenancyId, "WXYZ-1234", pollToken);
-  await expect(insertAttempt(ctx.otherTenancyId, "WXYZ-1234", pollToken)).rejects.toThrow(/AgentAuthAttempt_pollToken_key/);
-
-  const rows = await sql`
-    SELECT "agentDescription", "agentUrl", "userHint", "anonProjectUserId", "approvedByUserId", "approvedAt", "deniedAt", "refreshToken", "usedAt"
-    FROM "AgentAuthAttempt"
-    WHERE "tenancyId" = ${ctx.tenancyId}::uuid AND "claimCode" = 'ABCD-EFGH'
-  `;
-  expect(rows).toHaveLength(1);
-  expect(rows[0]).toMatchObject({
+  expect(cliRows).toHaveLength(1);
+  expect(cliRows[0]).toMatchObject({
+    deniedAt: null,
+    agentName: null,
     agentDescription: null,
     agentUrl: null,
     userHint: null,
-    anonProjectUserId: null,
-    approvedByUserId: null,
-    approvedAt: null,
-    deniedAt: null,
     refreshToken: null,
     usedAt: null,
   });
+
+  // Agent attempts live in the same table with the agent columns filled in.
+  const loginCode = "ABCD-EFGH";
+  const pollingCode = `poll-${randomUUID()}`;
+  await sql`
+    INSERT INTO "CliAuthAttempt" ("tenancyId", "id", "pollingCode", "loginCode", "agentName", "agentDescription", "agentUrl", "userHint", "expiresAt", "updatedAt")
+    VALUES (${ctx.tenancyId}::uuid, ${randomUUID()}::uuid, ${pollingCode}, ${loginCode}, 'Test Agent', 'Triage tickets', 'https://example.com', 'alice@example.com', NOW() + INTERVAL '10 minutes', NOW())
+  `;
+  const agentRows = await sql`SELECT "agentName", "agentDescription", "agentUrl", "userHint", "deniedAt" FROM "CliAuthAttempt" WHERE "loginCode" = ${loginCode}`;
+  expect(agentRows).toHaveLength(1);
+  expect(agentRows[0]).toMatchObject({
+    agentName: "Test Agent",
+    agentDescription: "Triage tickets",
+    agentUrl: "https://example.com",
+    userHint: "alice@example.com",
+    deniedAt: null,
+  });
+
+  // The pre-existing uniqueness of both codes still holds.
+  await expect(sql`
+    INSERT INTO "CliAuthAttempt" ("tenancyId", "id", "pollingCode", "loginCode", "expiresAt", "updatedAt")
+    VALUES (${ctx.tenancyId}::uuid, ${randomUUID()}::uuid, ${`poll-${randomUUID()}`}, ${loginCode}, NOW() + INTERVAL '10 minutes', NOW())
+  `).rejects.toThrow(/CliAuthAttempt_loginCode_key/);
+  await expect(sql`
+    INSERT INTO "CliAuthAttempt" ("tenancyId", "id", "pollingCode", "loginCode", "expiresAt", "updatedAt")
+    VALUES (${ctx.tenancyId}::uuid, ${randomUUID()}::uuid, ${pollingCode}, ${`login-${randomUUID()}`}, NOW() + INTERVAL '10 minutes', NOW())
+  `).rejects.toThrow(/CliAuthAttempt_pollingCode_key/);
+
+  // Denial is recorded on the row itself.
+  await sql`UPDATE "CliAuthAttempt" SET "deniedAt" = NOW() WHERE "loginCode" = ${loginCode}`;
+  const denied = await sql`SELECT "deniedAt" FROM "CliAuthAttempt" WHERE "loginCode" = ${loginCode}`;
+  expect(denied[0].deniedAt).not.toBeNull();
 };

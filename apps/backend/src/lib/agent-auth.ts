@@ -1,35 +1,27 @@
 import { usersCrudHandlers } from "@/app/api/latest/users/crud";
-import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
+import { globalPrismaClient } from "@/prisma-client";
 import { KnownErrors } from "@hexclave/shared";
-import { generateSecureRandomString } from "@hexclave/shared/dist/utils/crypto";
-import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { validateRedirectUrl as validateRedirectUrlAgainstTrustedDomains } from "@hexclave/shared/dist/utils/redirect-urls";
+import { completeDeviceAuthAttempt, consumeDeviceAuthAttempt, createDeviceAuthAttempt, denyDeviceAuthAttempt, DeviceAuthAgentDescriptor, DeviceAuthAttempt, DeviceAuthAttemptStatus, getDeviceAuthAttemptByPollingCode, getDeviceAuthAttemptStatus, getWaitingDeviceAuthAttemptByLoginCode, revokeSessionByRefreshToken } from "./device-auth";
 import { getHostedHandlerTrustedDomain, validateRedirectUrl } from "./redirect-urls";
 import { getApiUrlForRequest } from "./request-api-url";
 import { Tenancy } from "./tenancies";
-import { createAuthTokens, generateAccessTokenFromRefreshTokenIfValid, revokeAllRefreshTokenSessionsForUser, revokeRefreshTokenSession } from "./tokens";
+import { createAuthTokens, generateAccessTokenFromRefreshTokenIfValid, revokeRefreshTokenSession } from "./tokens";
 
 /**
  * Agent auth lets an AI agent obtain its own session on a Hexclave project.
  *
- * The flow deliberately does not invent a new principal type or token format.
- * An agent is a *session* on a real user's account, tagged with the agent's
- * name (ProjectUserRefreshToken.agentName), so every existing Hexclave
- * mechanism — RBAC, teams, account settings, session revocation, audit — works
- * for agents unchanged. What is new is how that session comes to exist:
- *
- *   1. register  — the agent describes itself and immediately gets an
- *                  anonymous session (so it can start right away if the app
- *                  allows anonymous users) plus a short claim code.
- *   2. confirm   — a signed-in user opens the confirm page, sees which agent
- *                  is asking, and approves or denies.
- *   3. poll      — the agent exchanges its poll token, exactly once, for the
- *                  new session on the approving user's account.
- *
- * The shape mirrors the CLI device flow (auth/cli), which is well understood
- * by tools already. It differs in that the agent receives a *new* session
- * rather than a copy of the browser's refresh token, so revoking the agent
- * never signs the human out.
+ * It is the device-auth flow (see device-auth.ts) with three twists:
+ *   - the attempt describes the agent (`agentName` etc.) so the human can see
+ *     who is asking on the confirm page, and the human may *deny* it;
+ *   - the agent gets an anonymous session at registration so it can start
+ *     right away if the app allows anonymous users;
+ *   - approval mints a *new* session on the approving user's account, tagged
+ *     with the agent's name (ProjectUserRefreshToken.agentName), instead of
+ *     sharing the browser's session. Every existing mechanism — RBAC, teams,
+ *     account settings, session revocation — works for agents unchanged, and
+ *     revoking the agent never signs the human out.
  */
 
 export const AGENT_AUTH_APP_ID = "agent-auth";
@@ -107,207 +99,127 @@ export function getAgentConfirmUrl(handlerUrl: URL, claimCode: string): string {
   return url.toString();
 }
 
-export type AgentAuthAttemptStatus = "pending" | "approved" | "denied" | "expired" | "used";
+export type AgentAuthAttempt = DeviceAuthAttempt & { agentName: string };
 
-export function getAgentAuthAttemptStatus(attempt: {
-  usedAt: Date | null,
-  deniedAt: Date | null,
-  approvedAt: Date | null,
-  expiresAt: Date,
-}): AgentAuthAttemptStatus {
-  if (attempt.usedAt != null) return "used";
-  if (attempt.deniedAt != null) return "denied";
-  if (attempt.approvedAt != null) return "approved";
-  if (attempt.expiresAt < new Date()) return "expired";
-  return "pending";
+function isAgentAuthAttempt(attempt: DeviceAuthAttempt): attempt is AgentAuthAttempt {
+  return attempt.agentName != null;
 }
 
-export type AgentDescriptor = {
-  name: string,
-  description: string | null,
-  url: string | null,
-};
-
-export async function createAgentAuthAttempt(options: {
+/**
+ * Registers an agent: creates an anonymous user the agent can act as right
+ * away, and a device-auth attempt whose login code is the short claim code
+ * shown to the human. The anonymous session is minted last so a failed
+ * attempt row never leaves behind a live session nobody can find.
+ */
+export async function registerAgent(options: {
   tenancy: Tenancy,
-  agent: AgentDescriptor,
-  userHint: string | null,
+  agent: DeviceAuthAgentDescriptor,
   expiresInMillis: number,
   fullReq: { headers: Record<string, string[] | undefined> },
 }) {
   const { tenancy } = options;
-  const prisma = await getPrismaClientForTenancy(tenancy);
-
   const anonymousUser = await usersCrudHandlers.adminCreate({
     tenancy,
     data: { is_anonymous: true },
     allowedErrorTypes: [],
   });
-
-  const pollToken = generateSecureRandomString();
-  const expiresAt = new Date(Date.now() + options.expiresInMillis);
-
-  // Claim codes are short, so a collision within one tenancy is unlikely but
-  // possible. Retry a few times before giving up.
-  for (let attemptNumber = 0; ; attemptNumber++) {
-    const claimCode = generateClaimCode();
-    const existing = await prisma.agentAuthAttempt.findUnique({
-      where: { tenancyId_claimCode: { tenancyId: tenancy.id, claimCode } },
-      select: { id: true },
-    });
-    if (existing != null) {
-      if (attemptNumber >= 5) {
-        throw new HexclaveAssertionError("Could not generate a unique agent auth claim code after several tries", { tenancyId: tenancy.id });
-      }
-      continue;
-    }
-    const attempt = await prisma.agentAuthAttempt.create({
-      data: {
-        tenancyId: tenancy.id,
-        agentName: options.agent.name,
-        agentDescription: options.agent.description,
-        agentUrl: options.agent.url,
-        userHint: options.userHint,
-        claimCode,
-        pollToken,
-        anonProjectUserId: anonymousUser.id,
-        expiresAt,
-      },
-    });
-    // The anonymous session is minted last: if the attempt row fails to write,
-    // no refresh token exists that nobody can revoke through the flow. If
-    // token minting itself fails, the attempt is a pending row with a claim
-    // code nobody knows, which simply expires.
-    const anonymousTokens = await createAuthTokens({
+  const anonymousTokens = await createAuthTokens({
+    tenancy,
+    projectUserId: anonymousUser.id,
+    apiUrl: getApiUrlForRequest(options.fullReq),
+    agentName: options.agent.name,
+  });
+  let attempt;
+  try {
+    attempt = await createDeviceAuthAttempt({
       tenancy,
-      projectUserId: anonymousUser.id,
-      apiUrl: getApiUrlForRequest(options.fullReq),
-      agentName: options.agent.name,
+      expiresInMillis: options.expiresInMillis,
+      anonRefreshToken: anonymousTokens.refreshToken,
+      generateLoginCode: generateClaimCode,
+      agent: options.agent,
     });
-    return {
-      attempt,
-      anonymousSession: {
-        userId: anonymousUser.id,
-        accessToken: anonymousTokens.accessToken,
-        refreshToken: anonymousTokens.refreshToken,
-      },
-    };
+  } catch (error) {
+    // Without the attempt row nothing references this session, so nobody could
+    // ever revoke it through the flow.
+    await revokeRefreshTokenSession({ tenancyId: tenancy.id, refreshTokenId: anonymousTokens.refreshTokenId });
+    throw error;
   }
+  return {
+    attempt,
+    anonymousSession: {
+      userId: anonymousUser.id,
+      accessToken: anonymousTokens.accessToken,
+      refreshToken: anonymousTokens.refreshToken,
+    },
+  };
 }
 
-export async function getPendingAgentAuthAttemptByClaimCode(tenancy: Tenancy, rawClaimCode: string) {
+export async function getWaitingAgentAuthAttemptByClaimCode(tenancy: Tenancy, rawClaimCode: string): Promise<AgentAuthAttempt> {
   const claimCode = normalizeClaimCode(rawClaimCode) ?? throwErr(new KnownErrors.AgentAuthInvalidClaimCode());
-  const prisma = await getPrismaClientForTenancy(tenancy);
-  const attempt = await prisma.agentAuthAttempt.findUnique({
-    where: { tenancyId_claimCode: { tenancyId: tenancy.id, claimCode } },
-  });
-  if (attempt == null || getAgentAuthAttemptStatus(attempt) !== "pending") {
+  const attempt = await getWaitingDeviceAuthAttemptByLoginCode(tenancy, claimCode);
+  if (attempt == null || !isAgentAuthAttempt(attempt)) {
     throw new KnownErrors.AgentAuthInvalidClaimCode();
   }
   return attempt;
 }
 
 /**
- * Approves a pending attempt on behalf of `approvingUserId`, minting the
- * agent's session. The UPDATE is conditional on the attempt still being
- * pending so two concurrent approvals (or an approval racing a denial) cannot
- * both succeed; the loser sees the attempt as no longer pending.
+ * Approves a waiting attempt on behalf of `approvingUserId` by minting a
+ * *new* session on their account (tagged with the agent's name) and attaching
+ * it to the attempt. Unlike the CLI, the browser's own session is never shared
+ * with the agent, so revoking the agent never signs the human out.
  */
 export async function approveAgentAuthAttempt(options: {
   tenancy: Tenancy,
-  attemptId: string,
-  agentName: string,
+  attempt: AgentAuthAttempt,
   approvingUserId: string,
   fullReq: { headers: Record<string, string[] | undefined> },
-}) {
-  const { tenancy } = options;
-  const prisma = await getPrismaClientForTenancy(tenancy);
-
+}): Promise<void> {
+  const { tenancy, attempt } = options;
   const tokens = await createAuthTokens({
     tenancy,
     projectUserId: options.approvingUserId,
     expiresAt: new Date(Date.now() + agentAuthDefaults.agentSessionExpiresInMillis),
     apiUrl: getApiUrlForRequest(options.fullReq),
-    agentName: options.agentName,
+    agentName: attempt.agentName,
   });
 
-  const revokeMintedSession = () => revokeRefreshTokenSession({ tenancyId: tenancy.id, refreshTokenId: tokens.refreshTokenId });
-
-  let updated;
+  // The session exists before the attempt references it. If the reference is
+  // never written (error, or we lost the race against another approve/deny),
+  // nobody would ever hand the session to the agent, so it must not linger as
+  // a live session on the user's account.
+  let completed: boolean;
   try {
-    updated = await prisma.agentAuthAttempt.updateMany({
-      where: {
-        tenancyId: tenancy.id,
-        id: options.attemptId,
-        approvedAt: null,
-        deniedAt: null,
-        usedAt: null,
-        expiresAt: { gt: new Date() },
-      },
-      data: {
-        approvedAt: new Date(),
-        approvedByUserId: options.approvingUserId,
-        refreshToken: tokens.refreshToken,
-      },
-    });
+    completed = await completeDeviceAuthAttempt({ tenancy, attemptId: attempt.id, refreshToken: tokens.refreshToken });
   } catch (error) {
-    // The session was minted before the attempt could reference it; without
-    // that reference nobody would ever hand it to the agent, so it must not
-    // linger as a live session on the user's account.
-    await revokeMintedSession();
+    await revokeRefreshTokenSession({ tenancyId: tenancy.id, refreshTokenId: tokens.refreshTokenId });
     throw error;
   }
-
-  if (updated.count === 0) {
-    // We lost the race; the session we just minted must not outlive it.
-    await revokeMintedSession();
+  if (!completed) {
+    await revokeRefreshTokenSession({ tenancyId: tenancy.id, refreshTokenId: tokens.refreshTokenId });
     throw new KnownErrors.AgentAuthInvalidClaimCode();
   }
 }
 
-export async function denyAgentAuthAttempt(options: { tenancy: Tenancy, attemptId: string }) {
-  const prisma = await getPrismaClientForTenancy(options.tenancy);
-  const updated = await prisma.agentAuthAttempt.updateMany({
-    where: {
-      tenancyId: options.tenancy.id,
-      id: options.attemptId,
-      approvedAt: null,
-      deniedAt: null,
-      usedAt: null,
-      expiresAt: { gt: new Date() },
-    },
-    data: { deniedAt: new Date() },
-  });
-  if (updated.count === 0) {
+/** Denies a waiting attempt and signs the agent out of the anonymous session it got at registration. */
+export async function denyAgentAuthAttempt(options: { tenancy: Tenancy, attempt: AgentAuthAttempt }): Promise<void> {
+  const { tenancy, attempt } = options;
+  if (!await denyDeviceAuthAttempt({ tenancy, attemptId: attempt.id })) {
     throw new KnownErrors.AgentAuthInvalidClaimCode();
   }
-
-  // A denied agent should not keep acting as the anonymous user it got at
-  // registration, so revoke that user's sessions as part of the denial.
-  const attempt = await prisma.agentAuthAttempt.findUnique({
-    where: { tenancyId_id: { tenancyId: options.tenancy.id, id: options.attemptId } },
-    select: { anonProjectUserId: true },
-  });
-  if (attempt?.anonProjectUserId != null) {
-    await revokeAllRefreshTokenSessionsForUser({ tenancyId: options.tenancy.id, projectUserId: attempt.anonProjectUserId });
+  if (attempt.anonRefreshToken != null) {
+    await revokeSessionByRefreshToken({ tenancyId: tenancy.id, refreshToken: attempt.anonRefreshToken });
   }
 }
 
 export type AgentAuthPollResult =
-  | { status: "pending" }
-  | { status: "denied" }
-  | { status: "expired" }
-  | { status: "used" }
-  | { status: "approved", refreshToken: string, accessToken: string, userId: string };
+  | { status: Exclude<DeviceAuthAttemptStatus, "success"> }
+  | { status: "success", refreshToken: string, accessToken: string, userId: string };
 
 /**
- * Hands the agent's session to the poller exactly once. The refresh token is
- * cleared in the same conditional UPDATE that sets usedAt, so a second poller
- * (or a replay) can never retrieve it.
- *
- * Everything that can fail (looking up the session, signing the access token)
- * happens *before* that UPDATE. Consuming first would turn a transient error
- * into a permanent one: the agent would retry and only ever see `used`.
+ * Hands the approved session to the agent exactly once. Everything that can
+ * fail (looking the session up, signing the access token) happens *before*
+ * the attempt is consumed, because a consumed attempt can never be retried.
  */
 export async function pollAgentAuthAttempt(options: {
   tenancy: Tenancy,
@@ -315,19 +227,16 @@ export async function pollAgentAuthAttempt(options: {
   fullReq: { headers: Record<string, string[] | undefined> },
 }): Promise<AgentAuthPollResult> {
   const { tenancy } = options;
-  const prisma = await getPrismaClientForTenancy(tenancy);
-  const attempt = await prisma.agentAuthAttempt.findUnique({ where: { pollToken: options.pollToken } });
-  if (attempt == null || attempt.tenancyId !== tenancy.id) {
-    throw new KnownErrors.AgentAuthInvalidPollToken();
+  const attempt = await getDeviceAuthAttemptByPollingCode(tenancy, options.pollToken);
+  if (attempt == null || !isAgentAuthAttempt(attempt)) {
+    throw new KnownErrors.InvalidPollingCodeError();
   }
 
-  const status = getAgentAuthAttemptStatus(attempt);
-  if (status !== "approved") {
+  const status = getDeviceAuthAttemptStatus(attempt);
+  if (status !== "success") {
     return { status };
   }
-
-  const refreshToken = attempt.refreshToken ?? throwErr("Approved agent auth attempt has no refresh token; approveAgentAuthAttempt always sets both together", { attemptId: attempt.id });
-  const userId = attempt.approvedByUserId ?? throwErr("Approved agent auth attempt has no approving user; approveAgentAuthAttempt always sets both together", { attemptId: attempt.id });
+  const refreshToken = attempt.refreshToken ?? throwErr("Device auth attempt in status 'success' has no refresh token; getDeviceAuthAttemptStatus guarantees otherwise", { attemptId: attempt.id });
 
   const refreshTokenObj = await globalPrismaClient.projectUserRefreshToken.findUnique({
     where: { refreshToken },
@@ -338,35 +247,25 @@ export async function pollAgentAuthAttempt(options: {
     refreshTokenObj,
     apiUrl: getApiUrlForRequest(options.fullReq),
   });
-  if (accessToken == null) {
-    // The approving user revoked the agent session (or was deleted) between
+  if (accessToken == null || refreshTokenObj == null) {
+    // The approving user revoked the agent's session (or was deleted) between
     // approval and the agent's first poll. Nothing is left to hand over, so
-    // consume the attempt and report it like an expired one; the agent has
-    // to register again.
-    await prisma.agentAuthAttempt.updateMany({
-      where: { tenancyId: tenancy.id, id: attempt.id, usedAt: null },
-      data: { usedAt: new Date(), refreshToken: null },
-    });
+    // spend the attempt and report it like an expired one; the agent has to
+    // register again.
+    await consumeDeviceAuthAttempt({ tenancy, attemptId: attempt.id });
     return { status: "expired" };
   }
 
-  const claimed = await prisma.agentAuthAttempt.updateMany({
-    where: { tenancyId: tenancy.id, id: attempt.id, usedAt: null, refreshToken: { not: null } },
-    data: { usedAt: new Date(), refreshToken: null },
-  });
-  if (claimed.count === 0) {
+  if (await consumeDeviceAuthAttempt({ tenancy, attemptId: attempt.id }) == null) {
     return { status: "used" };
   }
 
-  // Handoff is the moment the agent switches identities. Its pre-approval
-  // anonymous session must not survive it: the human never sees that session
-  // in their account settings (it belongs to a different, anonymous user), so
-  // this is the only place it can be cleaned up. Revoking here rather than at
-  // approval keeps the agent working as the anonymous user right up until it
-  // holds the real session.
-  if (attempt.anonProjectUserId != null) {
-    await revokeAllRefreshTokenSessionsForUser({ tenancyId: tenancy.id, projectUserId: attempt.anonProjectUserId });
+  // Handoff is when the agent switches identities. The anonymous session it
+  // used until now belongs to a throwaway user the human never sees in their
+  // account settings, so this is the only place it can be cleaned up.
+  if (attempt.anonRefreshToken != null) {
+    await revokeSessionByRefreshToken({ tenancyId: tenancy.id, refreshToken: attempt.anonRefreshToken });
   }
 
-  return { status: "approved", refreshToken, accessToken, userId };
+  return { status: "success", refreshToken, accessToken, userId: refreshTokenObj.projectUserId };
 }

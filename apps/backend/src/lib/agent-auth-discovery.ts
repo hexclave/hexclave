@@ -223,8 +223,8 @@ Poll every 3-5 seconds. \`status\` is one of:
 
 | status     | meaning                                                          |
 | ---------- | ---------------------------------------------------------------- |
-| \`pending\`  | The user has not decided yet. Keep polling.                      |
-| \`approved\` | Success. \`session\` contains your tokens. **Returned only once.** |
+| \`waiting\`  | The user has not decided yet. Keep polling.                      |
+| \`success\`  | Approved. \`session\` contains your tokens. **Returned only once.** |
 | \`denied\`   | The user said no. Stop; do not register again without asking.    |
 | \`expired\`  | Nobody approved in time. Register again if the user still wants. |
 | \`used\`     | You already received the session. Use the tokens you stored.     |
