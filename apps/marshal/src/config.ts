@@ -440,14 +440,12 @@ export const BUILDER_MACHINE_BY_MEMORY_MB: Partial<Record<number, { machineType:
   16384: { machineType: "e2-standard-4", diskSizeGb: 50 },
   32768: { machineType: "e2-standard-8", diskSizeGb: 100 },
 };
-// The Fly builder guests for an EXPLICITLY sized builder. An unsized Fly builder keeps the
-// guests it always had (BUILDER_GUEST / RAILPACK_BUILDER_GUEST below) rather than being
-// raised to the 8GB default of the shared ladder: that default is GCP's floor, and silently
-// quadrupling every Dockerfile build's machine on Fly is not something a no-op deploy file
-// change should do.
+// Four performance CPUs keep image extraction and compilation off the shared-CPU
+// bottleneck. The default 8GB guest leaves room for both the 4GB snapshot tmpfs
+// and build processes; larger explicit memory requests retain their allocation.
 export const FLY_BUILDER_GUEST_BY_MEMORY_MB: Partial<Record<number, FlyGuest>> = {
-  8192: { cpu_kind: "performance", cpus: 2, memory_mb: 8192 },
-  16384: { cpu_kind: "performance", cpus: 2, memory_mb: 16384 },
+  8192: { cpu_kind: "performance", cpus: 4, memory_mb: 8192 },
+  16384: { cpu_kind: "performance", cpus: 4, memory_mb: 16384 },
   32768: { cpu_kind: "performance", cpus: 4, memory_mb: 32768 },
 };
 export const DEFAULT_BUILDER_MEMORY_MB = 8192;
@@ -482,7 +480,7 @@ export function builderMachineFor(options: { requestedMemoryMb: number | null, i
 }
 
 /**
- * The Fly builder guest for a deployment. Unsized keeps the historical guests;
+ * The Fly builder guest for a deployment. Unsized uses the default guest;
  * a sized request is floored at what a Railpack build needs, like GCP.
  */
 export function flyBuilderGuestFor(options: { requestedMemoryMb: number | null, isRailpackBuild: boolean }): FlyGuest {
@@ -511,13 +509,9 @@ export function buildkitTmpfsSize(memoryMb: number): string {
   return `${Math.max(1, Math.floor((memoryMb * 6) / 10 / 1024))}g`;
 }
 
-// The Fly guests an UNSIZED build runs on. Railpack builds get a bigger machine: every
-// builder is ephemeral (no image cache) and the railpack-builder base image is large — real-Fly
-// QA measured the default guest timing out at 15 minutes on base-image extraction alone. The
-// 16g is the ceiling for two performance CPUs (Fly allows 8g per CPU) and splits ~10/6 between
-// the snapshot-store tmpfs and the build itself.
-export const BUILDER_GUEST: FlyGuest = { cpu_kind: "shared", cpus: 2, memory_mb: 2048 };
-export const RAILPACK_BUILDER_GUEST: FlyGuest = { cpu_kind: "performance", cpus: 2, memory_mb: 16384 };
+// Railpack keeps its larger memory floor for the generated base-image layers.
+export const BUILDER_GUEST: FlyGuest = { cpu_kind: "performance", cpus: 4, memory_mb: 8192 };
+export const RAILPACK_BUILDER_GUEST: FlyGuest = { cpu_kind: "performance", cpus: 4, memory_mb: 16384 };
 // A cap, not a reservation — unused tmpfs pages cost nothing. Sized so the store cannot fill
 // before the guest's remaining ~6g is what limits the build, since ENOSPC from inside a
 // buildkit step is a far more confusing failure than running out of memory.
