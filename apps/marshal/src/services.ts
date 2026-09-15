@@ -1074,49 +1074,59 @@ export async function completeBuild(options: {
   const existing = await readDeployment(options.ns, options.deploymentId);
   if (existing === null) return;
   const provider = await providerForNamespace(options.ns);
+  const completed = await withReconciliationLease(options.ns, sourceLeaseKey(existing.source_id), async (lease) => {
+    const current = await readDeploymentVersioned(options.ns, options.deploymentId);
+    // Terminal already (a retried webhook, or the stale-build backstop got there
+    // first): the first outcome wins.
+    if (current === null || current.value.status !== "building") return null;
+    await lease.assertOwned();
+
+    if (options.status === "failed") {
+      const failed = failDeployment(current.value, options.errorText ?? "the build failed");
+      return await replaceDeployment(failed, current.etag) === null ? null : failed;
+    }
+
+    const images = parseBuildImages(provider, options.metadataJson, current.value);
+    // Only the targets that were BUILT need a digest from the build. A prebuilt
+    // target was resolved when the deployment was created and is already in
+    // `images`; asking the build for one would fail every mixed deployment.
+    const missing = current.value.targets
+      .filter((target) => targetIsBuilt(target) && lookup(images, target.service_key) === undefined)
+      .map((target) => target.service_key);
+    if (missing.length > 0) {
+      // The harness reports a digest per target; a missing one means the build
+      // ended in a state Marshal cannot map to images, which is a failure rather
+      // than something to half-apply.
+      const failed = failDeployment(current.value, `the build reported no image for ${missing.join(", ")}`);
+      return await replaceDeployment(failed, current.etag) === null ? null : failed;
+    }
+
+    const deploying: StoredDeployment = {
+      ...current.value,
+      status: "deploying",
+      // MERGED, not replaced: the prebuilt entries were resolved before the build
+      // started and the build knows nothing about them.
+      images: { ...current.value.images, ...images },
+      services: Object.fromEntries(Object.entries(current.value.services).map(([key, service]): [string, DeploymentServiceState] => [key, { ...service, status: "pending" }])),
+    };
+    return await replaceDeployment(deploying, current.etag) === null ? null : deploying;
+  });
+  // A duplicate callback must not delete the builder while the callback that
+  // committed completion is still archiving its logs outside the source lease.
+  if (completed === null) return;
   try {
-    await withReconciliationLease(options.ns, sourceLeaseKey(existing.source_id), async (lease) => {
-      const current = await readDeploymentVersioned(options.ns, options.deploymentId);
-      // Terminal already (a retried webhook, or the stale-build backstop got there
-      // first): the first outcome wins.
-      if (current === null || current.value.status !== "building") return;
-      await lease.assertOwned();
-
-      if (options.status === "failed") {
-        await replaceDeployment(failDeployment(current.value, options.errorText ?? "the build failed"), current.etag);
-        await persistDeploymentLog(provider, current.value);
-        await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
-        return;
-      }
-
-      const images = parseBuildImages(provider, options.metadataJson, current.value);
-      // Only the targets that were BUILT need a digest from the build. A prebuilt
-      // target was resolved when the deployment was created and is already in
-      // `images`; asking the build for one would fail every mixed deployment.
-      const missing = current.value.targets
-        .filter((target) => targetIsBuilt(target) && lookup(images, target.service_key) === undefined)
-        .map((target) => target.service_key);
-      if (missing.length > 0) {
-        // The harness reports a digest per target; a missing one means the build
-        // ended in a state Marshal cannot map to images, which is a failure rather
-        // than something to half-apply.
-        await replaceDeployment(failDeployment(current.value, `the build reported no image for ${missing.join(", ")}`), current.etag);
-        await persistDeploymentLog(provider, current.value);
-        await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
-        return;
-      }
-
-      await replaceDeployment({
-        ...current.value,
-        status: "deploying",
-        // MERGED, not replaced: the prebuilt entries were resolved before the build
-        // started and the build knows nothing about them.
-        images: { ...current.value.images, ...images },
-        services: Object.fromEntries(Object.entries(current.value.services).map(([key, service]) => [key, { ...service, status: "pending" as const }])),
-      }, current.etag);
-      await persistDeploymentLog(provider, current.value);
-      await deleteValidatedUploadBestEffort(options.ns, options.deploymentId);
-    });
+    // The committed image refs are sufficient to start rollout. Log archival and
+    // source cleanup use immutable deployment identity, so they need neither the
+    // source lease nor a place ahead of runtime creation. Await all work before
+    // deleting the builder, including when one task fails.
+    const results = await Promise.allSettled([
+      persistDeploymentLog(provider, completed),
+      deleteValidatedUploadBestEffort(options.ns, options.deploymentId),
+      ...(completed.status === "deploying" ? [advanceDeployment(options.ns, options.deploymentId)] : []),
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
+    }
   } finally {
     await provider.deleteBuilder(existing);
   }
@@ -1246,6 +1256,15 @@ async function applyNextService(ns: string, deployment: StoredDeployment, lease:
     const updated: StoredDeployment = { ...deployment, services: { ...deployment.services, [next.service_key]: state } };
     if (state.status === "failed") {
       return await writeDeployment(ns, deployment, failDeployment(updated, state.error ?? `${next.service_key} failed to deploy`));
+    }
+    // Finish in the same write as the last successful service. Requiring a
+    // further poll adds a full client polling interval after rollout is done.
+    if (Object.values(updated.services).every((service) => service.status === "deployed")) {
+      return await writeDeployment(ns, deployment, {
+        ...updated,
+        status: "succeeded",
+        finished_at_millis: updated.finished_at_millis ?? Date.now(),
+      });
     }
     return await writeDeployment(ns, deployment, updated);
   }
