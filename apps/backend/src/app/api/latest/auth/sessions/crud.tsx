@@ -1,4 +1,4 @@
-import { recordExternalDbSyncDeletion } from "@/lib/external-db-sync";
+import { revokeRefreshTokenSession } from "@/lib/tokens";
 import { globalPrismaClient } from "@/prisma-client";
 import { createCrudHandlers } from "@/route-handlers/crud-handler";
 import { SmartRequestAuth } from "@/route-handlers/smart-request";
@@ -73,17 +73,6 @@ export const sessionsCrudHandlers = createLazyProxy(() => createCrudHandlers(ses
       throw new KnownErrors.CannotDeleteCurrentSession();
     }
 
-    await recordExternalDbSyncDeletion(globalPrismaClient, {
-      tableName: "ProjectUserRefreshToken",
-      tenancyId: auth.tenancy.id,
-      refreshTokenId: params.id,
-    });
-
-    await globalPrismaClient.projectUserRefreshToken.deleteMany({
-      where: {
-        tenancyId: auth.tenancy.id,
-        id: params.id,
-      },
-    });
+    await revokeRefreshTokenSession({ tenancyId: auth.tenancy.id, refreshTokenId: params.id });
   },
 }));

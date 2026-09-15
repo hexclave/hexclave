@@ -84,6 +84,40 @@ it("registers an agent and returns a claim code, confirm URL, poll token and ano
   expect(response.body.expires_at_millis).toBeGreaterThan(Date.now());
 });
 
+it("builds the confirm URL on the project's own app when one is configured or passed", async ({ expect }) => {
+  await createProjectWithAgentAuth();
+  await Project.updateConfig({
+    "domains.trustedDomains.app": { baseUrl: "https://app.example.com", handlerPath: "/auth" },
+    "domains.trustedDomains.wild": { baseUrl: "https://*.preview.example.com", handlerPath: "/handler" },
+  });
+
+  const implicit = await registerAgent();
+  expect(implicit.body.confirm_url).toBe(`https://app.example.com/auth/agent-auth-confirm?code=${encodeURIComponent(implicit.body.claim_code)}`);
+
+  const explicit = await registerAgent({ app_url: "https://pr-42.preview.example.com/some/page" });
+  expect(explicit.body.confirm_url).toBe(`https://pr-42.preview.example.com/handler/agent-auth-confirm?code=${encodeURIComponent(explicit.body.claim_code)}`);
+
+  const untrusted = await niceBackendFetch("/api/v1/agent/register", {
+    method: "POST",
+    accessType: "client",
+    body: { agent: { name: "Claude Code" }, app_url: "https://evil.example.org" },
+  });
+  expect(untrusted).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "REDIRECT_URL_NOT_WHITELISTED",
+        "details": { "redirect_url": "https://evil.example.org" },
+        "error": "Redirect URL not whitelisted. Did you forget to add this domain to the trusted domains list on the Hexclave dashboard?",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "REDIRECT_URL_NOT_WHITELISTED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
 it("lets the anonymous session call the API only when anonymous users are explicitly allowed", async ({ expect }) => {
   await createProjectWithAgentAuth();
   const { body } = await registerAgent();
@@ -179,6 +213,14 @@ it("approves an agent, hands the session to the poller exactly once, and tags th
   const me = await niceBackendFetch("/api/v1/users/me", { accessType: "client", userAuth: agentAuth });
   expect(me.status).toBe(200);
   expect(me.body.id).toBe(user.userId);
+
+  // Handing over the real session ends the pre-approval anonymous one.
+  const anonymousRefresh = await niceBackendFetch("/api/v1/auth/sessions/current/refresh", {
+    method: "POST",
+    accessType: "client",
+    userAuth: { refreshToken: registration.anonymous_session.refresh_token },
+  });
+  expect(anonymousRefresh.status).toBe(401);
 
   const sessions = await niceBackendFetch(`/api/v1/auth/sessions?user_id=${user.userId}`, { accessType: "server" });
   expect(sessions.status).toBe(200);

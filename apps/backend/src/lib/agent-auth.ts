@@ -3,11 +3,11 @@ import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { KnownErrors } from "@hexclave/shared";
 import { generateSecureRandomString } from "@hexclave/shared/dist/utils/crypto";
 import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
-import { recordExternalDbSyncDeletion, recordExternalDbSyncRefreshTokenDeletionsForUser } from "./external-db-sync";
-import { getHostedHandlerTrustedDomain } from "./redirect-urls";
+import { validateRedirectUrl as validateRedirectUrlAgainstTrustedDomains } from "@hexclave/shared/dist/utils/redirect-urls";
+import { getHostedHandlerTrustedDomain, validateRedirectUrl } from "./redirect-urls";
 import { getApiUrlForRequest } from "./request-api-url";
 import { Tenancy } from "./tenancies";
-import { createAuthTokens, generateAccessTokenFromRefreshTokenIfValid } from "./tokens";
+import { createAuthTokens, generateAccessTokenFromRefreshTokenIfValid, revokeAllRefreshTokenSessionsForUser, revokeRefreshTokenSession } from "./tokens";
 
 /**
  * Agent auth lets an AI agent obtain its own session on a Hexclave project.
@@ -70,16 +70,39 @@ export function normalizeClaimCode(input: string): string | null {
   return `${stripped.slice(0, 4)}-${stripped.slice(4)}`;
 }
 
-export function getAgentConfirmUrl(tenancy: Tenancy, claimCode: string): string {
-  // Prefer the developer's own app so the user approves where they are already
-  // signed in; fall back to the Hexclave-hosted handler, which exists for every
-  // project and needs no deployment at all.
-  const firstDomain = Object.values(tenancy.config.domains.trustedDomains)
+/**
+ * Builds the URL the human opens to approve the agent. Like every other
+ * backend-emitted deep link (email verification, team invites, CLI auth), it
+ * points at the app's SDK handler (`<app>/<handlerPath>/agent-auth-confirm`),
+ * which then redirects to a custom `urls.agentAuthConfirm` route if the
+ * developer configured one — the backend never needs to know SDK-side routes.
+ *
+ * Which app? The CLI flow lets the caller pass `appUrl`; agents can do the
+ * same (`app_url`, validated against the trusted domains) when they know
+ * which site they are talking to. Otherwise we pick the trusted domain that
+ * has a concrete (wildcard-free) base URL, falling back to the Hexclave-hosted
+ * handler, which exists for every project and needs no deployment at all.
+ */
+export function getAgentConfirmHandlerUrl(tenancy: Tenancy, appUrl: string | null): URL {
+  if (appUrl != null) {
+    if (!validateRedirectUrl(appUrl, tenancy)) {
+      throw new KnownErrors.RedirectUrlNotWhitelisted(appUrl);
+    }
+    // The handler path belongs to the trusted domain the app URL matched; a
+    // localhost URL (allowed via allowLocalhost) matches none and gets the default.
+    const domain = Object.values(tenancy.config.domains.trustedDomains)
+      .find((domain) => validateRedirectUrlAgainstTrustedDomains(appUrl, { allowLocalhost: false, trustedDomains: [domain.baseUrl] }));
+    return new URL(domain?.handlerPath ?? "/handler", appUrl);
+  }
+  const concreteDomain = Object.values(tenancy.config.domains.trustedDomains)
     .find((domain) => domain.baseUrl != null && !domain.baseUrl.includes("*"));
-  const base = firstDomain?.baseUrl != null
-    ? new URL(firstDomain.handlerPath, firstDomain.baseUrl)
+  return concreteDomain?.baseUrl != null
+    ? new URL(concreteDomain.handlerPath, concreteDomain.baseUrl)
     : new URL("/handler", getHostedHandlerTrustedDomain(tenancy.project.id));
-  const url = new URL(`${base.pathname.replace(/\/$/, "")}/agent-auth-confirm`, base);
+}
+
+export function getAgentConfirmUrl(handlerUrl: URL, claimCode: string): string {
+  const url = new URL(`${handlerUrl.pathname.replace(/\/$/, "")}/agent-auth-confirm`, handlerUrl);
   url.searchParams.set("code", claimCode);
   return url.toString();
 }
@@ -208,24 +231,7 @@ export async function approveAgentAuthAttempt(options: {
     agentName: options.agentName,
   });
 
-  const revokeMintedSession = async () => {
-    // Refresh tokens are mirrored to external DBs / ClickHouse, and deletions
-    // are only picked up if they are recorded in DeletedRow first (there is
-    // no DB trigger), so never delete a session row without recording it.
-    const minted = await globalPrismaClient.projectUserRefreshToken.findUnique({
-      where: { refreshToken: tokens.refreshToken },
-      select: { id: true, tenancyId: true },
-    });
-    if (minted == null || minted.tenancyId !== tenancy.id) return;
-    await recordExternalDbSyncDeletion(globalPrismaClient, {
-      tableName: "ProjectUserRefreshToken",
-      tenancyId: tenancy.id,
-      refreshTokenId: minted.id,
-    });
-    await globalPrismaClient.projectUserRefreshToken.deleteMany({
-      where: { tenancyId: tenancy.id, id: minted.id },
-    });
-  };
+  const revokeMintedSession = () => revokeRefreshTokenSession({ tenancyId: tenancy.id, refreshTokenId: tokens.refreshTokenId });
 
   let updated;
   try {
@@ -283,13 +289,7 @@ export async function denyAgentAuthAttempt(options: { tenancy: Tenancy, attemptI
     select: { anonProjectUserId: true },
   });
   if (attempt?.anonProjectUserId != null) {
-    await recordExternalDbSyncRefreshTokenDeletionsForUser(globalPrismaClient, {
-      tenancyId: options.tenancy.id,
-      projectUserId: attempt.anonProjectUserId,
-    });
-    await globalPrismaClient.projectUserRefreshToken.deleteMany({
-      where: { tenancyId: options.tenancy.id, projectUserId: attempt.anonProjectUserId },
-    });
+    await revokeAllRefreshTokenSessionsForUser({ tenancyId: options.tenancy.id, projectUserId: attempt.anonProjectUserId });
   }
 }
 
@@ -356,6 +356,16 @@ export async function pollAgentAuthAttempt(options: {
   });
   if (claimed.count === 0) {
     return { status: "used" };
+  }
+
+  // Handoff is the moment the agent switches identities. Its pre-approval
+  // anonymous session must not survive it: the human never sees that session
+  // in their account settings (it belongs to a different, anonymous user), so
+  // this is the only place it can be cleaned up. Revoking here rather than at
+  // approval keeps the agent working as the anonymous user right up until it
+  // holds the real session.
+  if (attempt.anonProjectUserId != null) {
+    await revokeAllRefreshTokenSessionsForUser({ tenancyId: tenancy.id, projectUserId: attempt.anonProjectUserId });
   }
 
   return { status: "approved", refreshToken, accessToken, userId };

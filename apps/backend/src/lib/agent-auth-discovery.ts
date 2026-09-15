@@ -118,7 +118,8 @@ ${headers} \\
       "description": "<one sentence on what you want to do>",
       "url": "<optional homepage>"
     },
-    "user_hint": "<optional: the email of the person who should approve>"
+    "user_hint": "<optional: the email of the person who should approve>",
+    "app_url": "<optional: the URL of the app you are working in, so the confirm link opens there>"
   }'
 \`\`\`
 

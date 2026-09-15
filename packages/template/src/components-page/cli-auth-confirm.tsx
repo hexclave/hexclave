@@ -4,28 +4,14 @@ import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises
 import { Typography } from "@hexclave/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageCard } from "../components/message-cards/message-card";
-import { useTranslation } from "../lib/translations";
+import { postConfirmationRequest, redirectRestrictedUserToCompleteSignIn, toError, useUrlQueryParam } from "../lib/device-auth-confirmation";
 import { hexclaveAppInternalsSymbol } from "../lib/hexclave-app/common";
 import type { StackClientApp } from "../lib/hexclave-app/apps/interfaces/client-app";
 import { useStackApp } from "../lib/hooks";
+import { useTranslation } from "../lib/translations";
 
 async function postCliAuthComplete(app: StackClientApp, body: Record<string, unknown>) {
-  return await app[hexclaveAppInternalsSymbol].sendRequest("/auth/cli/complete", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
-
-async function ensureCliCompleteOk(result: Response) {
-  if (!result.ok) {
-    throw new Error(`Authorization failed: ${result.status} ${await result.text()}`);
-  }
-}
-
-async function completeCliAuthWithRefreshToken(app: StackClientApp, loginCode: string, refreshToken: string) {
-  const result = await postCliAuthComplete(app, { login_code: loginCode, refresh_token: refreshToken });
-  await ensureCliCompleteOk(result);
+  return await postConfirmationRequest(app, { endpoint: "/auth/cli/complete", body });
 }
 
 // Hexclave rebrand: sessionStorage key — straight rename (per-tab, low TTL).
@@ -41,10 +27,6 @@ function isConfirmed(loginCode: string): boolean {
 
 function clearConfirmed() {
   sessionStorage.removeItem(CLI_AUTH_CONFIRMED_KEY);
-}
-
-function getError(err: unknown): Error {
-  return err instanceof Error ? err : new Error(String(err));
 }
 
 function getObjectField(data: unknown, fieldName: string): unknown {
@@ -82,10 +64,7 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
   const [error, setError] = useState<Error | null>(null);
   const autoCompleteRef = useRef(false);
   const authorizeInProgressRef = useRef(false);
-  const [loginCode] = useState(() => {
-    if (typeof window === 'undefined') return null;
-    return new URLSearchParams(window.location.search).get("login_code");
-  });
+  const loginCode = useUrlQueryParam("login_code");
   const [confirmed] = useState(() => {
     if (typeof window === 'undefined') return false;
     return loginCode != null && isConfirmed(loginCode);
@@ -102,7 +81,7 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
     if (!refreshToken) {
       throw new Error("Could not retrieve session token");
     }
-    await completeCliAuthWithRefreshToken(app, loginCode, refreshToken);
+    await postCliAuthComplete(app, { login_code: loginCode, refresh_token: refreshToken });
   }, [app, loginCode, user]);
 
   useEffect(() => {
@@ -117,7 +96,7 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
         clearConfirmed();
         setStatus("success");
       } catch (err) {
-        setError(getError(err));
+        setError(toError(err));
         setStatus("error");
       }
     });
@@ -142,11 +121,7 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
         if (user.isRestricted) {
           markConfirmed(loginCode);
           setStatus("redirecting");
-          await (
-            user.isAnonymous
-              ? app.redirectToSignUp({ replace: true })
-              : app.redirectToOnboarding({ replace: true })
-          );
+          await redirectRestrictedUserToCompleteSignIn(app, user);
           return;
         }
         await completeWithCurrentUser();
@@ -156,19 +131,11 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
       }
 
       const checkResult = await postCliAuthComplete(app, { login_code: loginCode, mode: "check" });
-      if (!checkResult.ok) {
-        throw new Error(`Failed to verify login code: ${checkResult.status} ${await checkResult.text()}`);
-      }
       const checkData: unknown = await checkResult.json();
       const cliSessionState = getStringField(checkData, "cli_session_state") ?? null;
 
       if (cliSessionState === "anonymous") {
         const claimResult = await postCliAuthComplete(app, { login_code: loginCode, mode: "claim-anon-session" });
-
-        if (!claimResult.ok) {
-          throw new Error(`Failed to claim anonymous session: ${claimResult.status} ${await claimResult.text()}`);
-        }
-
         const tokens: unknown = await claimResult.json();
         const accessToken = getStringField(tokens, "access_token");
         const refreshToken = getStringField(tokens, "refresh_token");
@@ -189,7 +156,7 @@ export function useCliAuthConfirmation(): CliAuthConfirmationState {
       setStatus("redirecting");
       await app.redirectToSignIn({ replace: true });
     } catch (err) {
-      setError(getError(err));
+      setError(toError(err));
       setStatus("error");
     } finally {
       authorizeInProgressRef.current = false;

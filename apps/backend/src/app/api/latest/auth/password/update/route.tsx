@@ -1,5 +1,5 @@
-import { recordExternalDbSyncRefreshTokenDeletionsForUser } from "@/lib/external-db-sync";
-import { getPrismaClientForTenancy, globalPrismaClient, retryTransaction } from "@/prisma-client";
+import { revokeAllRefreshTokenSessionsForUser } from "@/lib/tokens";
+import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { getPasswordError } from "@hexclave/shared/dist/helpers/password";
@@ -79,22 +79,10 @@ export const POST = createSmartRouteHandler({
     });
 
     // reset all other refresh tokens
-    await recordExternalDbSyncRefreshTokenDeletionsForUser(globalPrismaClient, {
+    await revokeAllRefreshTokenSessionsForUser({
       tenancyId: tenancy.id,
       projectUserId: user.id,
       excludeRefreshToken: refreshToken?.[0],
-    });
-
-    await globalPrismaClient.projectUserRefreshToken.deleteMany({
-      where: {
-        tenancyId: tenancy.id,
-        projectUserId: user.id,
-        ...refreshToken ? {
-          NOT: {
-            refreshToken: refreshToken[0],
-          },
-        } : {},
-      },
     });
 
     return {

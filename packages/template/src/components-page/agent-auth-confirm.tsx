@@ -4,10 +4,10 @@ import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises
 import { Typography } from "@hexclave/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageCard } from "../components/message-cards/message-card";
-import { useTranslation } from "../lib/translations";
-import { hexclaveAppInternalsSymbol } from "../lib/hexclave-app/common";
+import { postConfirmationRequest, redirectRestrictedUserToCompleteSignIn, toError, useUrlQueryParam } from "../lib/device-auth-confirmation";
 import type { StackClientApp } from "../lib/hexclave-app/apps/interfaces/client-app";
 import { useStackApp } from "../lib/hooks";
+import { useTranslation } from "../lib/translations";
 
 /**
  * Human side of Hexclave agent auth. The agent (an LLM tool, a bot, ...) has
@@ -56,10 +56,6 @@ type ConfirmResponse = {
   status: "pending" | "approved" | "denied",
 };
 
-function getError(err: unknown): Error {
-  return err instanceof Error ? err : new Error(String(err));
-}
-
 function isConfirmResponse(data: unknown): data is ConfirmResponse {
   if (typeof data !== "object" || data === null) return false;
   if (!("agent" in data) || !("status" in data) || !("expires_at_millis" in data) || !("user_hint" in data)) return false;
@@ -68,16 +64,10 @@ function isConfirmResponse(data: unknown): data is ConfirmResponse {
 }
 
 async function postAgentConfirm(app: StackClientApp, claimCode: string, action: "inspect" | "approve" | "deny"): Promise<ConfirmResponse> {
-  const result = await app[hexclaveAppInternalsSymbol].sendRequest("/agent/register/confirm", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ claim_code: claimCode, action }),
+  const result = await postConfirmationRequest(app, {
+    endpoint: "/agent/register/confirm",
+    body: { claim_code: claimCode, action },
   });
-  if (!result.ok) {
-    // The backend's message for known errors (invalid code, expired, already
-    // used) is written for end users, so it is safe to surface directly.
-    throw new Error(`Agent authorization failed: ${result.status} ${await result.text()}`);
-  }
   const data: unknown = await result.json();
   if (!isConfirmResponse(data)) {
     throw new Error("Unexpected response from the agent authorization endpoint");
@@ -88,10 +78,7 @@ async function postAgentConfirm(app: StackClientApp, claimCode: string, action: 
 export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
   const app = useStackApp();
   const user = app.useUser({ includeRestricted: true });
-  const [claimCode] = useState(() => {
-    if (typeof window === "undefined") return null;
-    return new URLSearchParams(window.location.search).get("code");
-  });
+  const claimCode = useUrlQueryParam("code");
   const [status, setStatus] = useState<Exclude<AgentAuthConfirmationStatus, "invalid">>("loading");
   const [details, setDetails] = useState<ConfirmResponse | null>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -117,7 +104,7 @@ export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
         }
         if (user.isRestricted) {
           setStatus("redirecting");
-          await (user.isAnonymous ? app.redirectToSignUp({ replace: true }) : app.redirectToOnboarding({ replace: true }));
+          await redirectRestrictedUserToCompleteSignIn(app, user);
           return;
         }
         const response = await postAgentConfirm(app, claimCode, "inspect");
@@ -126,7 +113,7 @@ export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
         setStatus("ready");
       } catch (err) {
         if (cancelled) return;
-        setError(getError(err));
+        setError(toError(err));
         setStatus("error");
       }
     });
@@ -145,7 +132,7 @@ export function useAgentAuthConfirmation(): AgentAuthConfirmationState {
       setDetails(response);
       setStatus(action === "approve" ? "approved" : "denied");
     } catch (err) {
-      setError(getError(err));
+      setError(toError(err));
       setStatus("error");
     } finally {
       actionInProgressRef.current = false;

@@ -70,7 +70,7 @@ it("lists recent registrations and active agent sessions without leaking secrets
   expect(response.status).toBe(200);
   expect(response.body.summary).toMatchInlineSnapshot(`
     {
-      "active_agent_sessions_in_window": 3,
+      "active_agent_sessions_in_window": 2,
       "agent_session_window_limit": 200,
       "attempt_window_limit": 50,
       "attempts_in_window": 3,
@@ -83,9 +83,10 @@ it("lists recent registrations and active agent sessions without leaking secrets
   const statuses = Object.fromEntries(response.body.recent_attempts.map((a: { agent_name: string, status: string }) => [a.agent_name, a.status]));
   expect(statuses).toEqual({ "Pending Bot": "pending", "Approved Bot": "used", "Denied Bot": "denied" });
   // Every registration mints an anonymous session tagged with the agent name (so it is visible and revocable
-  // from day one); approval adds a second, non-anonymous one on the approver's account, and denial revokes the
-  // anonymous one. So: pending (1) + approved (2) + denied (0).
-  expect(response.body.agent_sessions).toHaveLength(3);
+  // from day one). Approval mints a non-anonymous one on the approver's account, and the anonymous one is
+  // revoked the moment the agent polls it; denial revokes the anonymous one too. So: pending (1) + approved
+  // and polled (1) + denied (0).
+  expect(response.body.agent_sessions).toHaveLength(2);
   const approvedSessions = response.body.agent_sessions.filter((s: { user_id: string }) => s.user_id === user.userId);
   expect(approvedSessions).toHaveLength(1);
   expect(approvedSessions[0].agent_name).toBe("Approved Bot");

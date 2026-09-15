@@ -1,4 +1,4 @@
-import { agentAuthDefaults, assertAgentAuthEnabled, createAgentAuthAttempt, getAgentConfirmUrl } from "@/lib/agent-auth";
+import { agentAuthDefaults, assertAgentAuthEnabled, createAgentAuthAttempt, getAgentConfirmHandlerUrl, getAgentConfirmUrl } from "@/lib/agent-auth";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, clientOrHigherAuthTypeSchema, urlSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 
@@ -20,6 +20,7 @@ export const POST = createSmartRouteHandler({
         url: urlSchema.max(300).optional().meta({ openapiField: { description: "Homepage or documentation URL of the agent.", exampleValue: "https://example.com/agent" } }),
       }).defined(),
       user_hint: yupString().trim().max(256).optional().meta({ openapiField: { description: "Optional hint (usually an email) about which user is expected to approve. Purely informational, shown on the confirm page.", exampleValue: "alice@example.com" } }),
+      app_url: urlSchema.max(300).optional().meta({ openapiField: { description: "URL of the app the agent is connecting to, if known. Must be one of the project's trusted domains; the confirm URL is then built on that app so the user approves where they are already signed in.", exampleValue: "https://app.example.com" } }),
       expires_in_millis: yupNumber().min(1000 * 30).max(agentAuthDefaults.maxAttemptExpiresInMillis).default(agentAuthDefaults.attemptExpiresInMillis),
     }).defined(),
   }),
@@ -40,6 +41,8 @@ export const POST = createSmartRouteHandler({
   }),
   handler: async ({ auth, body }, fullReq) => {
     assertAgentAuthEnabled(auth.tenancy);
+    // Validated before anything is written so a bad app_url has no side effects.
+    const confirmHandlerUrl = getAgentConfirmHandlerUrl(auth.tenancy, body.app_url ?? null);
 
     const { attempt, anonymousSession } = await createAgentAuthAttempt({
       tenancy: auth.tenancy,
@@ -58,7 +61,7 @@ export const POST = createSmartRouteHandler({
       bodyType: "json",
       body: {
         claim_code: attempt.claimCode,
-        confirm_url: getAgentConfirmUrl(auth.tenancy, attempt.claimCode),
+        confirm_url: getAgentConfirmUrl(confirmHandlerUrl, attempt.claimCode),
         poll_token: attempt.pollToken,
         expires_at_millis: attempt.expiresAt.getTime(),
         anonymous_session: {

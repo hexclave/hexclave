@@ -378,6 +378,11 @@
                     "example": "alice@example.com",
                     "description": "Optional hint (usually an email) about which user is expected to approve. Purely informational, shown on the confirm page."
                   },
+                  "app_url": {
+                    "type": "string",
+                    "example": "https://app.example.com",
+                    "description": "URL of the app the agent is connecting to, if known. Must be one of the project's trusted domains; the confirm URL is then built on that app so the user approves where they are already signed in."
+                  },
                   "expires_in_millis": {
                     "type": "number",
                     "default": 900000
@@ -387,7 +392,8 @@
                   "agent"
                 ],
                 "example": {
-                  "user_hint": "alice@example.com"
+                  "user_hint": "alice@example.com",
+                  "app_url": "https://app.example.com"
                 }
               }
             }
