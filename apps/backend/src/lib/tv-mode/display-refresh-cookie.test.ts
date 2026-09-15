@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CookieWrite, ResponseCookieOptions } from "@/lib/runtime/request-context";
 import {
   clearTvDisplayRefreshCookie,
@@ -36,6 +36,11 @@ function createAffectedPersistentJar() {
 }
 
 describe("TV display refresh cookie policy", () => {
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "");
+    vi.stubEnv("NEXT_PUBLIC_STACK_DASHBOARD_URL", "");
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -138,7 +143,7 @@ describe("TV display refresh cookie policy", () => {
 
   it("uses SameSite=None only for a distinct secure display origin", () => {
     vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("HEXCLAVE_TV_DISPLAY_ORIGIN", "https://tv.example.com");
+    vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "https://tv.example.com");
     vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_API_URL", "https://api.example.com");
     vi.stubEnv("NEXT_PUBLIC_STACK_API_URL", "https://api.example.com");
     const set = vi.fn();
@@ -148,9 +153,9 @@ describe("TV display refresh cookie policy", () => {
     }
   });
 
-  it("uses the dashboard URL fallback for a distinct secure display origin", () => {
+  it("supports the legacy dashboard URL alias for a distinct secure display origin", () => {
     vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("NEXT_PUBLIC_BROWSER_STACK_DASHBOARD_URL", "https://tv.example.com");
+    vi.stubEnv("NEXT_PUBLIC_STACK_DASHBOARD_URL", "https://tv.example.com");
     vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_API_URL", "https://api.example.com");
     vi.stubEnv("NEXT_PUBLIC_STACK_API_URL", "https://api.example.com");
     const set = vi.fn();
@@ -162,7 +167,9 @@ describe("TV display refresh cookie policy", () => {
 
   it("keeps SameSite=Strict for same-site and development displays", () => {
     vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("HEXCLAVE_TV_DISPLAY_ORIGIN", "https://api.example.com");
+    vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "https://api.example.com");
+    vi.stubEnv("HEXCLAVE_TV_DISPLAY_ORIGIN", "https://stale.example.com");
+    vi.stubEnv("NEXT_PUBLIC_BROWSER_STACK_DASHBOARD_URL", "https://stale.example.com");
     vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_API_URL", "https://api.example.com");
     vi.stubEnv("NEXT_PUBLIC_STACK_API_URL", "https://api.example.com");
     const set = vi.fn();
@@ -170,7 +177,7 @@ describe("TV display refresh cookie policy", () => {
     expect(set.mock.calls[1][2]).toEqual(expect.objectContaining({ sameSite: "strict" }));
 
     vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("HEXCLAVE_TV_DISPLAY_ORIGIN", "https://tv.example.com");
+    vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "https://tv.example.com");
     setTvDisplayRefreshCookie({ set }, "tv-refresh", "secret");
     expect(set.mock.calls.at(-1)?.[2]).toEqual(expect.objectContaining({ secure: false, sameSite: "strict" }));
   });

@@ -1,13 +1,25 @@
-import { describe, expect, it } from "vitest";
-import { buildTvDisplayUrl, isLocalTvDisplayUrl } from "./display-url";
+import { describe, expect, it, vi } from "vitest";
+import { getPublicEnvVar } from "@/lib/env";
+import { buildTvDisplayUrl, getConfiguredTvDisplayUrl, isLocalTvDisplayUrl } from "./display-url";
+
+vi.mock("@/lib/env", () => ({ getPublicEnvVar: vi.fn() }));
 
 describe("TV display URL", () => {
-  it("prefers the configured browser dashboard origin", () => {
+  it("prefers the configured dashboard origin", () => {
     expect(buildTvDisplayUrl({
-      browserDashboardUrl: "https://dashboard.example.com/projects/project-fixture",
-      dashboardUrl: "https://fallback.example.com",
+      dashboardUrl: "https://dashboard.example.com/projects/project-fixture",
       currentOrigin: "http://localhost:8101",
     })).toBe("https://dashboard.example.com/tv");
+  });
+
+  it("does not consult the browser-specific override for configured TV links", () => {
+    vi.mocked(getPublicEnvVar).mockImplementation((name) => name === "NEXT_PUBLIC_STACK_DASHBOARD_URL"
+      ? "https://dashboard.example.com"
+      : "https://stale.example.com");
+    expect(getConfiguredTvDisplayUrl("http://localhost:8101")).toBe("https://dashboard.example.com/tv");
+    expect(getPublicEnvVar).toHaveBeenCalledTimes(1);
+    expect(getPublicEnvVar).toHaveBeenCalledWith("NEXT_PUBLIC_STACK_DASHBOARD_URL");
+    vi.mocked(getPublicEnvVar).mockReset();
   });
 
   it("falls back through the configured dashboard and current browser origins", () => {
@@ -21,21 +33,21 @@ describe("TV display URL", () => {
 
   it("skips empty or malformed configured origins", () => {
     expect(buildTvDisplayUrl({
-      browserDashboardUrl: "",
       dashboardUrl: "not a URL",
       currentOrigin: "http://localhost:8101",
     })).toBe("http://localhost:8101/tv");
-    expect(buildTvDisplayUrl({ browserDashboardUrl: "not a URL" })).toBeNull();
+    expect(buildTvDisplayUrl({ dashboardUrl: "" })).toBeNull();
+    expect(buildTvDisplayUrl({ dashboardUrl: "not a URL" })).toBeNull();
   });
 
   it("skips unsupported protocols and continues to later candidates", () => {
     expect(buildTvDisplayUrl({
-      browserDashboardUrl: "file:///tmp/dashboard",
-      dashboardUrl: "https://dashboard.example.com",
+      dashboardUrl: "file:///tmp/dashboard",
+      currentOrigin: "https://dashboard.example.com",
     })).toBe("https://dashboard.example.com/tv");
     expect(buildTvDisplayUrl({
-      browserDashboardUrl: "ftp://dashboard.example.com",
-      dashboardUrl: "file:///tmp/dashboard",
+      dashboardUrl: "ftp://dashboard.example.com",
+      currentOrigin: "file:///tmp/dashboard",
     })).toBeNull();
   });
 
