@@ -874,6 +874,9 @@ importers:
       '@ai-sdk/mcp':
         specifier: ^1.0.21
         version: 1.0.21(zod@3.25.76)
+      '@hexclave/dashboard-ui-components':
+        specifier: workspace:*
+        version: link:../../packages/dashboard-ui-components
       '@hexclave/next':
         specifier: workspace:*
         version: link:../../packages/next

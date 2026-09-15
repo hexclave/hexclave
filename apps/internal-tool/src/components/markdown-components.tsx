@@ -16,9 +16,9 @@ function CopyBtn({ text, size = "xs" }: { text: string; size?: "xs" | "sm" }) {
         });
       }}
       className={clsx(
-        "shrink-0 rounded transition-colors",
+        "shrink-0 rounded transition-colors hover:transition-none",
         size === "xs" ? "p-0.5" : "p-1",
-        copied ? "text-green-500" : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+        copied ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground"
       )}
       title={copied ? "Copied!" : "Copy"}
       type="button"
@@ -38,8 +38,8 @@ const InlineCode = memo(function InlineCode({ children }: { children?: React.Rea
   const showCopy = isUrl || isCommand || isPath || text.length > 15;
 
   return (
-    <code className="inline-flex items-center gap-1 max-w-full rounded px-1.5 py-0.5 bg-gray-100 text-[11px] font-mono leading-relaxed break-all">
-      <span className={clsx("min-w-0", isUrl ? "text-blue-500" : "text-gray-800")}>
+    <code className="inline-flex max-w-full items-center gap-1 break-all rounded bg-foreground/[0.07] px-1.5 py-0.5 font-mono text-[11px] leading-relaxed">
+      <span className={clsx("min-w-0", isUrl ? "text-blue-600 dark:text-blue-400" : "text-foreground")}>
         {text}
       </span>
       {showCopy && <CopyBtn text={text} size="xs" />}
@@ -52,16 +52,16 @@ const CodeBlock = memo(function CodeBlock({ children, className }: { children?: 
   const language = className?.replace("language-", "").toUpperCase() ?? "";
 
   return (
-    <div className="relative group my-2.5 rounded-lg bg-gray-50 ring-1 ring-gray-200 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-200 bg-gray-100/50">
-        <span className="text-[9px] font-medium text-gray-400 uppercase tracking-wider">
+    <div className="group relative my-2.5 overflow-hidden rounded-lg bg-foreground/[0.04] ring-1 ring-foreground/[0.08]">
+      <div className="flex items-center justify-between border-b border-black/[0.06] bg-foreground/[0.03] px-3 py-1.5 dark:border-white/[0.06]">
+        <span className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
           {language || "CODE"}
         </span>
         <CopyBtn text={text} size="xs" />
       </div>
       <div className="overflow-x-auto">
         <pre className="p-3 text-[11px] font-mono leading-relaxed">
-          <code className="text-gray-800">{children}</code>
+          <code className="text-foreground">{children}</code>
         </pre>
       </div>
     </div>
@@ -72,7 +72,7 @@ const SmartLink = memo(function SmartLink({ href, children }: { href?: string; c
   return (
     <a
       href={href}
-      className="text-blue-500 hover:text-blue-600 hover:underline underline-offset-2 break-all"
+      className="break-all text-blue-600 underline-offset-2 hover:underline dark:text-blue-400"
       target="_blank"
       rel="noopener noreferrer"
     >
@@ -83,13 +83,13 @@ const SmartLink = memo(function SmartLink({ href, children }: { href?: string; c
 
 export const markdownComponents = {
   p: ({ children }: { children?: React.ReactNode }) => (
-    <p className="text-[13px] text-gray-800 mb-2.5 last:mb-0 leading-relaxed">{children}</p>
+    <p className="mb-2.5 text-[13px] leading-relaxed text-foreground last:mb-0">{children}</p>
   ),
   ul: ({ children }: { children?: React.ReactNode }) => (
-    <ul className="text-[13px] text-gray-800 mb-2.5 pl-4 space-y-1 list-disc marker:text-gray-400">{children}</ul>
+    <ul className="mb-2.5 list-disc space-y-1 pl-4 text-[13px] text-foreground marker:text-muted-foreground">{children}</ul>
   ),
   ol: ({ children }: { children?: React.ReactNode }) => (
-    <ol className="text-[13px] text-gray-800 mb-2.5 pl-4 space-y-1.5 list-decimal marker:text-gray-500">{children}</ol>
+    <ol className="mb-2.5 list-decimal space-y-1.5 pl-4 text-[13px] text-foreground marker:text-muted-foreground">{children}</ol>
   ),
   li: ({ children }: { children?: React.ReactNode }) => (
     <li className="leading-relaxed pl-0.5">{children}</li>
@@ -102,41 +102,41 @@ export const markdownComponents = {
   },
   pre: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
   strong: ({ children }: { children?: React.ReactNode }) => (
-    <strong className="font-semibold text-gray-900">{children}</strong>
+    <strong className="font-semibold text-foreground">{children}</strong>
   ),
   em: ({ children }: { children?: React.ReactNode }) => (
-    <em className="italic text-gray-600">{children}</em>
+    <em className="italic text-muted-foreground">{children}</em>
   ),
   a: SmartLink,
   table: ({ children }: { children?: React.ReactNode }) => (
-    <div className="overflow-x-auto my-2.5 rounded-lg ring-1 ring-gray-200">
+    <div className="my-2.5 overflow-x-auto rounded-lg ring-1 ring-foreground/[0.08]">
       <table className="w-full text-[11px]">{children}</table>
     </div>
   ),
   thead: ({ children }: { children?: React.ReactNode }) => (
-    <thead className="bg-gray-50 border-b border-gray-200">{children}</thead>
+    <thead className="border-b border-black/[0.06] bg-foreground/[0.04] dark:border-white/[0.06]">{children}</thead>
   ),
   tbody: ({ children }: { children?: React.ReactNode }) => (
-    <tbody className="divide-y divide-gray-100">{children}</tbody>
+    <tbody className="divide-y divide-black/[0.06] dark:divide-white/[0.06]">{children}</tbody>
   ),
   tr: ({ children }: { children?: React.ReactNode }) => <tr>{children}</tr>,
   th: ({ children }: { children?: React.ReactNode }) => (
-    <th className="px-2.5 py-1.5 text-left font-semibold text-gray-800 whitespace-nowrap">{children}</th>
+    <th className="whitespace-nowrap px-2.5 py-1.5 text-left font-semibold text-foreground">{children}</th>
   ),
   td: ({ children }: { children?: React.ReactNode }) => (
-    <td className="px-2.5 py-1.5 text-gray-600">{children}</td>
+    <td className="px-2.5 py-1.5 text-muted-foreground">{children}</td>
   ),
   h1: ({ children }: { children?: React.ReactNode }) => (
-    <h1 className="text-base font-semibold text-gray-900 mt-3 mb-2 first:mt-0">{children}</h1>
+    <h1 className="mb-2 mt-3 text-base font-semibold text-foreground first:mt-0">{children}</h1>
   ),
   h2: ({ children }: { children?: React.ReactNode }) => (
-    <h2 className="text-[14px] font-semibold text-gray-900 mt-3 mb-1.5 first:mt-0">{children}</h2>
+    <h2 className="mb-1.5 mt-3 text-[14px] font-semibold text-foreground first:mt-0">{children}</h2>
   ),
   h3: ({ children }: { children?: React.ReactNode }) => (
-    <h3 className="text-[13px] font-semibold text-gray-900 mt-2.5 mb-1 first:mt-0">{children}</h3>
+    <h3 className="mb-1 mt-2.5 text-[13px] font-semibold text-foreground first:mt-0">{children}</h3>
   ),
   blockquote: ({ children }: { children?: React.ReactNode }) => (
-    <blockquote className="border-l-2 border-purple-400 pl-3 my-2 text-gray-500 italic">{children}</blockquote>
+    <blockquote className="my-2 border-l-2 border-purple-500/60 pl-3 italic text-muted-foreground">{children}</blockquote>
   ),
-  hr: () => <hr className="my-3 border-gray-200" />,
+  hr: () => <hr className="my-3 border-border" />,
 };

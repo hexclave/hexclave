@@ -63,6 +63,9 @@ describe("logIfMcpToolCall", () => {
         toolName: "queryAnalytics",
         reason: "review",
         userPrompt: "show usage",
+        context: "investigating account activity",
+        user: "Hexclave engineer",
+        project: "internal admin tool",
         requestMetadata: REQUEST_METADATA,
       },
       conversationIdForLog: "conversation-1",
@@ -82,17 +85,20 @@ describe("logIfMcpToolCall", () => {
     expect(typeof logOptions.body.durationMs).toBe("number");
     expect({ ...logOptions.body, durationMs: "<duration>" }).toMatchInlineSnapshot(`
       {
+        "context": "investigating account activity",
         "conversationId": "conversation-1",
         "correlationId": "correlation-1",
         "durationMs": "<duration>",
         "errorMessage": undefined,
         "innerToolCallsJson": "[{"type":"tool-call","toolName":"_serializationFailed","toolCallId":"_serializationFailed","args":{"stepCount":1},"argsText":"{\\"stepCount\\":1}","result":null}]",
         "modelId": "model-1",
+        "project": "internal admin tool",
         "question": "{"_serializationFailed":true}",
         "reason": "review",
         "response": "done",
         "stepCount": 1,
         "toolName": "queryAnalytics",
+        "user": "Hexclave engineer",
         "userPrompt": "show usage",
       }
     `);

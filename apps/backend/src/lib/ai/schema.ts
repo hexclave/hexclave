@@ -23,9 +23,9 @@ export const requestBodySchema = yupObject({
     toolName: yupString().defined(),
     reason: yupString().defined(),
     userPrompt: yupString().defined(),
-    context: yupString().optional().nullable(),
-    user: yupString().optional().nullable(),
-    project: yupString().optional().nullable(),
+    context: yupString().max(2_000).optional().nullable(),
+    user: yupString().max(256).optional().nullable(),
+    project: yupString().max(256).optional().nullable(),
     conversationId: yupString().optional().nullable(),
     requestMetadata: yupObject({
       transport: yupString().oneOf(["skill-ask", "mcp-ask-hexclave"]).defined(),

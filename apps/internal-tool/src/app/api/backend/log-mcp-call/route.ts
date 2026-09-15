@@ -3,6 +3,7 @@ import { handleApiError, readJsonBody, successResponse, zJsonArrayString } from 
 import { callReducerStrict, opt } from "@/lib/server/spacetimedb-client";
 import { getServiceSpacetimeToken } from "@/lib/server/spacetimedb-token";
 import { z } from "zod";
+import { MAX_MCP_ACTOR_FIELD_LENGTH, MAX_MCP_CONTEXT_LENGTH } from "../../../../../spacetimedb/src/mcp-call-limits";
 
 const bodySchema = z.object({
   correlationId: z.string(),
@@ -17,6 +18,9 @@ const bodySchema = z.object({
   durationMs: z.number().int().nonnegative(),
   modelId: z.string(),
   errorMessage: z.string().optional(),
+  context: z.string().max(MAX_MCP_CONTEXT_LENGTH).optional(),
+  user: z.string().max(MAX_MCP_ACTOR_FIELD_LENGTH).optional(),
+  project: z.string().max(MAX_MCP_ACTOR_FIELD_LENGTH).optional(),
 });
 
 export async function POST(req: Request): Promise<Response> {
@@ -37,6 +41,9 @@ export async function POST(req: Request): Promise<Response> {
       body.durationMs,
       body.modelId,
       opt(body.errorMessage),
+      opt(body.context),
+      opt(body.user),
+      opt(body.project),
     ]);
     return successResponse();
   } catch (err) {

@@ -7,6 +7,7 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
 import AddManualQaReducer from "../add_manual_qa_reducer";
+import ClearDemoSeedReducer from "../clear_demo_seed_reducer";
 import ClearMcpQaReviewReducer from "../clear_mcp_qa_review_reducer";
 import DeleteAiQueryLogReducer from "../delete_ai_query_log_reducer";
 import DeleteFeedbackReducer from "../delete_feedback_reducer";
@@ -23,6 +24,7 @@ import UpdateQaEntryWithPublishReducer from "../update_qa_entry_with_publish_red
 import UpsertQaFromCallAndMarkReviewedReducer from "../upsert_qa_from_call_and_mark_reviewed_reducer";
 
 export type AddManualQaParams = __Infer<typeof AddManualQaReducer>;
+export type ClearDemoSeedParams = __Infer<typeof ClearDemoSeedReducer>;
 export type ClearMcpQaReviewParams = __Infer<typeof ClearMcpQaReviewReducer>;
 export type DeleteAiQueryLogParams = __Infer<typeof DeleteAiQueryLogReducer>;
 export type DeleteFeedbackParams = __Infer<typeof DeleteFeedbackReducer>;
