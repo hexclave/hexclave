@@ -341,12 +341,35 @@ function getTanStackStartRequestHeader(name: string): string | null {
   }
   return getRequestHeader(name) ?? null;
 }
+
+/**
+ * TanStack Start keeps the event of the request it is currently handling in an AsyncLocalStorage stored on a global
+ * symbol (see `request-response.ts` in `@tanstack/start-server-core`), and every one of its request accessors throws
+ * an internal error when there is no such request. It exposes no way to ask whether a request is in flight, so we read
+ * that storage ourselves; otherwise server code that plans a redirect outside a request would surface TanStack's
+ * internal AsyncLocalStorage error instead of our own setup error. If TanStack ever renames the symbol we report "no
+ * request", which is the conservative answer: callers then treat the redirect target as cross-origin.
+ */
+function hasActiveTanStackStartRequest(): boolean {
+  const eventStorage: unknown = Reflect.get(globalThis, Symbol.for("tanstack-start:event-storage"));
+  if (eventStorage == null || typeof eventStorage !== "object") {
+    return false;
+  }
+  const getStore: unknown = Reflect.get(eventStorage, "getStore");
+  if (typeof getStore !== "function") {
+    return false;
+  }
+  return Reflect.apply(getStore, eventStorage, []) != null;
+}
 // END_PLATFORM
 
 async function getServerRequestHost(): Promise<string | null> {
   // IF_PLATFORM next
   return (await sc.headers?.())?.get("host") ?? null;
   // ELSE_IF_PLATFORM tanstack-start
+  if (!hasActiveTanStackStartRequest()) {
+    return null;
+  }
   return getTanStackStartRequestHeader("host");
   // ELSE_PLATFORM
   return null;
@@ -662,6 +685,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   private readonly _trustedParentDomainCache = createCache<[string], string | null>(
     async ([domain]) => await this._getTrustedParentDomain(domain)
   );
+  // Retain domains across token-store snapshots because a later update can see cookies already deleted by an earlier update.
+  private readonly _knownCustomRefreshCookieDomains = new Set<string>();
 
   private _anonymousSignUpInProgress: Promise<{ accessToken: string, refreshToken: string }> | null = null;
   private _prefetchedCrossDomainHandoffParams: CrossDomainHandoffParams | null = null;
@@ -1553,7 +1578,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       }
     });
   }
-  private _queueCustomRefreshCookieUpdate(refreshToken: string | null, updatedAt: number | null, context: "browser" | "server") {
+  private _queueCustomRefreshCookieUpdate(
+    refreshToken: string | null,
+    updatedAt: number | null,
+    context: "browser" | "server",
+    previousCustomDomains: string[],
+  ) {
     runAsynchronously(async () => {
       this._mostRecentQueuedCookieRefreshIndex++;
       const updateIndex = this._mostRecentQueuedCookieRefreshIndex;
@@ -1563,12 +1593,6 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       } else {
         hostname = await getServerRequestHost();
       }
-      if (!hostname) {
-        console.warn("No hostname found when queueing custom refresh cookie update");
-        return;
-      }
-      const domain = await this._trustedParentDomainCache.getOrWait([hostname], "read-write");
-
       const cookieOptions = { maxAge: 60 * 60 * 24 * 365, noOpIfServerComponent: true };
       const setCookie = async (targetDomain: string, value: string | null) => {
         const name = this._getCustomRefreshCookieName(targetDomain);
@@ -1580,11 +1604,27 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
       };
 
+      const value = refreshToken && updatedAt ? this._formatRefreshCookieValue(refreshToken, updatedAt) : null;
+      if (!hostname) {
+        // Server cookie writes can happen without request headers; use prior custom names to recover
+        // trusted domains, and retain the default cookie because the current host is unknown.
+        const domains = new Set<string>();
+        for (const previousDomain of new Set(previousCustomDomains)) {
+          const domain = await this._trustedParentDomainCache.getOrWait([`_.${previousDomain}`], "read-write");
+          if (updateIndex !== this._mostRecentQueuedCookieRefreshIndex) return;
+          if (domain.status !== "error" && domain.data != null) domains.add(domain.data);
+        }
+        if (updateIndex !== this._mostRecentQueuedCookieRefreshIndex) return;
+        await Promise.all([...domains].map((domain) => setCookie(domain, value)));
+        return;
+      }
+
+      const domain = await this._trustedParentDomainCache.getOrWait([hostname], "read-write");
       if (domain.status === "error" || !domain.data || updateIndex !== this._mostRecentQueuedCookieRefreshIndex) {
         return;
       }
-      const value = refreshToken && updatedAt ? this._formatRefreshCookieValue(refreshToken, updatedAt) : null;
       await setCookie(domain.data, value);
+      this._knownCustomRefreshCookieDomains.add(domain.data);
       const isSecure = await isSecureCookieContext();
       const defaultName = this._getRefreshTokenDefaultCookieNameForSecure(isSecure);
       if (context === "browser") {
@@ -1650,7 +1690,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
             const domain = this._getDomainFromCustomRefreshCookieName(name);
             deleteCookieClient(name, domain ? { domain } : {});
           });
-          this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "browser");
+          const previousCustomDomains = cookieNamesToDelete
+            .map((name) => this._getDomainFromCustomRefreshCookieName(name))
+            .filter((domain): domain is string => domain !== null);
+          previousCustomDomains.forEach((domain) => this._knownCustomRefreshCookieDomains.add(domain));
+          this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "browser", [...this._knownCustomRefreshCookieDomains]);
           hasSucceededInWriting = true;
         } catch (e) {
           if (!isBrowserLike()) {
@@ -1687,8 +1731,20 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         if (isBrowserLike()) {
           return this._getBrowserCookieTokenStore();
         } else {
+          // IF_PLATFORM next
+          const existingStore = this._nextServerCookiesTokenStores.get(cookieHelper.identity);
+          if (existingStore !== undefined) {
+            return existingStore;
+          }
+          // END_PLATFORM
+
           const tokens = this._getTokensFromCookies(cookieHelper.getAll());
           const store = new Store<TokenObject>(tokens);
+          // IF_PLATFORM next
+          // Next returns a stable cookies object for the lifetime of a request. Keying by that identity lets parallel
+          // Server Components share their session and in-flight refresh without leaking state across requests.
+          this._nextServerCookiesTokenStores.set(cookieHelper.identity, store);
+          // END_PLATFORM
           store.onChange((value) => {
             runAsynchronously(async () => {
               // TODO HACK this is a bit of a hack; while the order happens to work in practice (because the only actual
@@ -1723,7 +1779,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
                   }),
                 );
               }
-              this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "server");
+              const previousCustomDomains = cookieNamesToDelete
+                .map((name) => this._getDomainFromCustomRefreshCookieName(name))
+                .filter((domain): domain is string => domain !== null);
+              previousCustomDomains.forEach((domain) => this._knownCustomRefreshCookieDomains.add(domain));
+              this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "server", [...this._knownCustomRefreshCookieDomains]);
             });
           });
           return store;

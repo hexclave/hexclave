@@ -142,6 +142,8 @@ describe('validateRedirectUrl', () => {
         expect(validateRedirectHostname('12345678-1234-4234-8234-123456789abc.built-with-hexclave.com', tenancy)).toBe(true);
         expect(validateRedirectHostname('12345678-1234-4234-8234-123456789abc.built-with-stack-auth.com', tenancy)).toBe(true);
         expect(validateRedirectHostname('other-project.built-with-hexclave.com', tenancy)).toBe(false);
+        expect(validateRedirectHostname('example.deploy.built-with-hexclave.com', tenancy)).toBe(false);
+        expect(validateRedirectUrl('https://example.deploy.built-with-hexclave.com/handler/oauth-callback', tenancy)).toBe(false);
         expect(validateRedirectHostname('other-project.built-with-stack-auth.com', tenancy)).toBe(false);
         expect(validateRedirectHostname('evil.example.test', tenancy)).toBe(false);
       });

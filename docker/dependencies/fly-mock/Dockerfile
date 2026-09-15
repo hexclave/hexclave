@@ -6,8 +6,15 @@ FROM node:22-slim
 # never talks to real Fly.
 #
 # Deterministic behaviors tests rely on:
-# - Machines are "started" immediately on create/update/start; /wait returns
-#   instantly. Every machine lifecycle event appends a line to the app's logs.
+# - Machines are "started" immediately on create, on update of a running
+#   machine, and on start. Updating a machine that is NOT running mirrors real
+#   Fly instead: it goes through a short `replacing` transition and is then left
+#   `stopped` ("machine was in a non-started state prior to the update so leaving
+#   the new version stopped"), and /start is rejected with 412 while it is still
+#   `replacing` (real Fly: "unable to start machine from current state"). /wait
+#   really waits for the requested state (polling; 408 on timeout). POST /stop
+#   and /suspend exist so tests can park a machine the way autostop would.
+#   Every machine lifecycle event appends a line to the app's logs.
 # - Hostnames ending in ".verified.test" get clientStatus "Ready" immediately;
 #   all others stay "Awaiting configuration" with DNS-validation records.
 # - Adding a hostname that already exists on the SAME app errors with
@@ -148,11 +155,25 @@ function imageRefJson(image) {
   };
 }
 
+// How long an update of a non-running machine stays in `replacing` before it settles to
+// `stopped`. Long enough that a single fire-and-forget /start reliably lands inside it (that
+// is the production race being modelled), short enough not to slow the e2e suite down.
+const REPLACING_MILLIS = 1500;
+const STARTABLE_STATES = new Set(["stopped", "suspended", "created"]);
+
+function settle(machine) {
+  if (machine.state === "replacing" && Date.now() >= machine.settleAt) {
+    machine.state = "stopped";
+    appendLog(machine.app, `machine was in a non-started state prior to the update so leaving the new version stopped`, { instance: machine.id });
+  }
+  return machine.state;
+}
+
 function machineJson(machine) {
   return {
     id: machine.id,
     name: machine.name,
-    state: machine.state,
+    state: settle(machine),
     region: machine.region,
     instance_id: machine.instanceId,
     image_ref: imageRefJson(machine.config?.image),
@@ -305,6 +326,7 @@ async function handleRequest(req, res) {
         dedicatedIps: app.dedicatedIps,
         machines: [...app.machinesById.values()].map((machine) => ({
           id: machine.id,
+          state: settle(machine),
           image: machine.config.image,
           metadata: machine.config.metadata ?? {},
           env: machine.config.env ?? {},
@@ -399,6 +421,51 @@ async function handleRequest(req, res) {
     return sendJson(res, 404, { error: "App not found" });
   }
 
+  // Certificate requirements. Real Fly serves these ONLY over the Machines REST API — the
+  // GraphQL certificate type has no ownership field at all — and Marshal reads the DNS a
+  // hostname needs from here, so a mock without this route makes every domain report no
+  // records. Mirrors the real response shape (dns_requirements + validation).
+  const certMatch = /^\/certificates\/([^/]+)$/.exec(subPath);
+  if (certMatch && req.method === "GET") {
+    const hostname = decodeURIComponent(certMatch[1]);
+    const cert = app.certsByHostname.get(hostname);
+    if (!cert) return sendJson(res, 404, { error: "certificate not found" });
+    const json = certJson(cert);
+    const verified = json.clientStatus === "Ready";
+    // Same suffix convention certJson uses for a verified hostname, one step earlier: it
+    // models a hostname whose ownership proof has landed but whose certificate has not
+    // issued, which is the only way to exercise the "issuing" state without a real CA.
+    const issuing = !verified && hostname.endsWith(".issuing.test");
+    return sendJson(res, 200, {
+      hostname,
+      configured: verified,
+      acme_requested: true,
+      status: verified ? "Ready" : "Awaiting configuration",
+      dns_provider: "mockregistry",
+      rate_limited_until: null,
+      certificates: [],
+      validation: {
+        dns_configured: verified,
+        alpn_configured: false,
+        http_configured: false,
+        ownership_txt_configured: issuing,
+      },
+      dns_requirements: {
+        a: app.sharedIpv4 ? [app.sharedIpv4] : [],
+        aaaa: app.dedicatedIps.filter((ip) => ip.type === "v6").map((ip) => ip.address),
+        cname: `mock00.${appName}.fly.dev`,
+        acme_challenge: { name: `_acme-challenge.${hostname}`, target: `${hostname}.mock00.flydns.net.` },
+        ownership: { name: `_fly-ownership.${hostname}`, app_value: `app-mock00`, org_value: `org-mock00` },
+      },
+      validation_errors: verified ? [] : [{
+        code: "IPV6_NOT_FOUND",
+        message: "No AAAA records were found for your domain",
+        remediation: "Add AAAA records pointing to your app's IPv6 addresses, or add a _fly-ownership TXT record to verify domain ownership",
+        timestamp: new Date().toISOString(),
+      }],
+    });
+  }
+
   // Volumes. Real Fly answers a create with 201 (not 200) and rejects a shrink,
   // so the mock does both — those are exactly the behaviours Marshal codes against.
   if (subPath === "/volumes" && req.method === "GET") {
@@ -456,6 +523,8 @@ async function handleRequest(req, res) {
       instanceId: `inst-${machineCounter}-1`,
       config: body.config ?? {},
       updates: 1,
+      settleAt: 0,
+      app,
     };
     attachVolumes(app, machine);
     app.machinesById.set(machine.id, machine);
@@ -493,9 +562,18 @@ async function handleRequest(req, res) {
       detachVolumes(app, machine.id);
       machine.config = body.config ?? machine.config;
       attachVolumes(app, machine);
-      machine.state = "started";
       machine.instanceId = `inst-${machine.id}-${++machine.updates}`;
       appendLog(app, `Machine updated to image ${machine.config.image ?? "unknown"}`, { instance: machine.id });
+      // Real Fly restarts a RUNNING machine onto the new config, but leaves a stopped or
+      // suspended one stopped — after a transition during which /start is refused. The
+      // caller has to come back and start it once that settles; a mock that booted it
+      // here would hide a caller that never does.
+      if (settle(machine) === "started") {
+        machine.state = "started";
+      } else {
+        machine.state = "replacing";
+        machine.settleAt = Date.now() + REPLACING_MILLIS;
+      }
       return sendJson(res, 200, machineJson(machine));
     }
     if (machineSub === "" && req.method === "DELETE") {
@@ -507,22 +585,36 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, {});
     }
     if (machineSub === "/start" && req.method === "POST") {
+      const state = settle(machine);
+      if (state === "started") return sendJson(res, 200, {});
+      if (!STARTABLE_STATES.has(state)) {
+        // Fly's own wording (seen verbatim in production service logs), status 412.
+        return sendJson(res, 412, { error: `failed to change machine state: unable to start machine from current state: '${state}'` });
+      }
       machine.state = "started";
       appendLog(app, `Machine started`, { instance: machine.id });
       return sendJson(res, 200, {});
     }
-    if (machineSub === "/stop" && req.method === "POST") {
-      machine.state = "stopped";
-      appendLog(app, `Machine stopped`, { instance: machine.id });
+    if ((machineSub === "/stop" || machineSub === "/suspend") && req.method === "POST") {
+      machine.state = machineSub === "/stop" ? "stopped" : "suspended";
+      appendLog(app, `Machine ${machine.state}`, { instance: machine.id });
       return sendJson(res, 200, {});
     }
     if (machineSub.startsWith("/wait") && req.method === "GET") {
       // Mirror the real /wait contract enough to catch regressions: timeout caps at 60s
-      // (SMOKE-RESULTS deviation #5 — larger values 400), and a stale instance_id is a 400.
+      // (SMOKE-RESULTS deviation #5 — larger values 400), a stale instance_id is a 400, and
+      // the call really does wait for the state (408 when it does not arrive) — so a caller
+      // that forgets to start a machine sees the timeout here, not only on real Fly.
       const timeout = Number(url.searchParams.get("timeout") ?? "60");
       if (Number.isFinite(timeout) && timeout > 60) return sendJson(res, 400, { error: "timeout exceeds 60s" });
       const wantInstance = url.searchParams.get("instance_id");
       if (wantInstance !== null && wantInstance !== machine.instanceId) return sendJson(res, 400, { error: "instance_id mismatch" });
+      const wantState = url.searchParams.get("state") ?? "started";
+      const deadline = Date.now() + timeout * 1000;
+      while (settle(machine) !== wantState) {
+        if (Date.now() >= deadline) return sendJson(res, 408, { error: `timeout reached waiting for machine's state to change to ${wantState}` });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       return sendJson(res, 200, { ok: true });
     }
   }

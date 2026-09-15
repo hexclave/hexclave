@@ -1,3 +1,11 @@
+import type { McpCallLogRow } from "./types";
+export const QA_REVIEW_FAILED_THRESHOLD_MS = 2 * 60 * 1000;
+export function qaReviewStartedAt(row: McpCallLogRow): Date {
+  const requested = toDate(row.qaReviewRequestedAt);
+  const created = toDate(row.createdAt);
+  return requested > created ? requested : created;
+}
+
 /**
  * SpacetimeDB timestamps are { __timestamp_micros_since_unix_epoch__: bigint }.
  * Convert to a JS Date.

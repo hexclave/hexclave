@@ -157,6 +157,20 @@ jobs:
       - name: Wait on ClickHouse
         run: pnpm exec wait-on http://localhost:8136/ping
 
+      # Marshal's health endpoint does not check its dependencies. Older base branches
+      # may not ship Marshal or the GCP mock yet, so only wait for services they contain.
+      - name: Wait on deployment storage
+        if: ${{ hashFiles('apps/marshal/package.json') != '' }}
+        run: pnpm exec wait-on --timeout 60000 http://localhost:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}21/
+
+      - name: Wait on fly-mock
+        if: ${{ hashFiles('docker/dependencies/fly-mock/Dockerfile') != '' }}
+        run: pnpm exec wait-on --timeout 60000 http://localhost:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}48/health
+
+      - name: Wait on gcp-mock
+        if: ${{ hashFiles('docker/dependencies/gcp-mock/Dockerfile') != '' }}
+        run: pnpm exec wait-on --timeout 60000 http://localhost:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}49/health
+
       - name: Initialize database
         run: pnpm run db:init
 
@@ -188,6 +202,19 @@ jobs:
       - name: Backfill Bulldozer from Postgres
         if: ${{ hashFiles('apps/bulldozer-js/package.json') != '' }}
         run: pnpm run db:backfill-bulldozer-from-prisma
+
+      # Deployment E2E tests need the checked-out branch's Marshal in both
+      # migration phases; NODE_ENV=test loads its committed mock configuration.
+      - name: Start marshal in background
+        if: ${{ hashFiles('apps/marshal/package.json') != '' }}
+        uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
+        with:
+          run: NODE_ENV=test pnpm run start:marshal &
+          wait-on: |
+            http://localhost:${{ env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX || '81' }}47/health
+          tail: true
+          wait-for: 30s
+          log-output-if: true
 
       - name: Start stack-backend in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
@@ -408,6 +435,20 @@ jobs:
       - name: Wait on ClickHouse
         run: pnpm exec wait-on http://localhost:8136/ping
 
+      # Marshal's health endpoint does not check its dependencies. Older base branches
+      # may not ship Marshal or the GCP mock yet, so only wait for services they contain.
+      - name: Wait on deployment storage
+        if: ${{ hashFiles('apps/marshal/package.json') != '' }}
+        run: pnpm exec wait-on --timeout 60000 http://localhost:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}21/
+
+      - name: Wait on fly-mock
+        if: ${{ hashFiles('docker/dependencies/fly-mock/Dockerfile') != '' }}
+        run: pnpm exec wait-on --timeout 60000 http://localhost:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}48/health
+
+      - name: Wait on gcp-mock
+        if: ${{ hashFiles('docker/dependencies/gcp-mock/Dockerfile') != '' }}
+        run: pnpm exec wait-on --timeout 60000 http://localhost:${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}49/health
+
       - name: Initialize database
         run: pnpm run db:init
   
@@ -434,6 +475,19 @@ jobs:
       # fresh bulldozer-js store so the backend's payment reads aren't empty.
       - name: Backfill Bulldozer from Postgres
         run: pnpm run db:backfill-bulldozer-from-prisma
+
+      # Deployment E2E tests need the checked-out branch's Marshal in both
+      # migration phases; NODE_ENV=test loads its committed mock configuration.
+      - name: Start marshal in background
+        if: ${{ hashFiles('apps/marshal/package.json') != '' }}
+        uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
+        with:
+          run: NODE_ENV=test pnpm run start:marshal &
+          wait-on: |
+            http://localhost:${{ env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX || '81' }}47/health
+          tail: true
+          wait-for: 30s
+          log-output-if: true
 
       - name: Start stack-backend in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7

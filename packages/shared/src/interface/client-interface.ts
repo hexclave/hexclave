@@ -452,7 +452,19 @@ export class HexclaveClientInterface {
         client,
         clientAuthentication,
         refreshToken.token,
-        allowInsecure ? { [oauth.allowInsecureRequests]: true } : undefined,
+        {
+          ...(allowInsecure ? { [oauth.allowInsecureRequests]: true } : {}),
+          [oauth.customFetch]: (url, options) => fetch(url, {
+            ...options,
+            headers: {
+              ...options.headers,
+              // Next.js <15 can cache otherwise-identical POST requests during static generation.
+              "X-Hexclave-Random-Nonce": generateSecureRandomString(),
+            },
+            // Cloudflare Workers does not support RequestInit.cache.
+            ...("WebSocketPair" in globalVar ? {} : { cache: "no-store" }),
+          }),
+        },
       );
 
       const response = await this._processResponse(rawResponse);

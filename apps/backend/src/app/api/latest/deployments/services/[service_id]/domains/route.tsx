@@ -1,10 +1,67 @@
-import { HOSTNAME_REGEX, definitionFromServiceRow, domainPortForService, domainPortProblem, getServiceRowOrThrow, marshalNamespaceForTenancy } from "@/lib/deployments";
+import { HOSTNAME_REGEX, definitionFromServiceRow, domainPortForService, domainPortProblem, getServiceRowOrThrow, marshalNamespaceForTenancy, normalizeHostnameOrThrow } from "@/lib/deployments";
 import { MarshalApiError, getMarshalClientOrThrow, getMarshalDeploymentsConfigOrNull, sanitizeMarshalError } from "@/lib/deployments/marshal-client";
-import { getPrismaClientForTenancy } from "@/prisma-client";
+import { Tenancy } from "@/lib/tenancies";
+import { PrismaClientTransaction, getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, serverOrHigherAuthTypeSchema, userSpecifiedIdSchema, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError, StatusError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { randomUUID } from "node:crypto";
+
+/**
+ * Answers a POST that finds the hostname already on THIS service.
+ *
+ * A replayed create is not an error. Two ordinary things replay this request: the SDK
+ * resolves a ring of API hosts and re-issues the call on the next one whenever a host times
+ * out or answers 5xx (`_withFallback` in client-interface.ts, which does not distinguish
+ * POST from GET), and the dashboard's Add button stays live while the first request is in
+ * flight, which is several seconds because attaching allocates public IPs and requests a
+ * certificate. Either way the first attempt already committed the row, so the caller got
+ * exactly what it asked for — answering 400 told users their domain had failed to be added
+ * while it was in fact live and serving.
+ *
+ * Re-asserts the runtime attachment rather than only reading the row back, so a replay also
+ * repairs a first attempt that died between committing the row and reaching the runtime.
+ * That is safe because the runtime's attach is idempotent for the SAME service key, which is
+ * the only case that reaches here — a hostname held by a sibling service is still rejected.
+ *
+ * Unlike the first-request path this NEVER deletes the row when the runtime call fails: the
+ * row is not this request's to roll back, and the domain it names may already be serving. A
+ * failure is captured and the row's own state is reported; the domain then reads as
+ * "deploy first" until the next deploy re-attaches it, exactly as an orphaned row does today.
+ */
+async function respondToDuplicateDomain(
+  prisma: PrismaClientTransaction,
+  tenancy: Tenancy,
+  service: { serviceId: string, provisionedAt: Date | null },
+  domain: { id: string, hostname: string, isPrimary: boolean, verified: boolean },
+) {
+  let verified = domain.verified;
+  if (service.provisionedAt != null && getMarshalDeploymentsConfigOrNull() != null) {
+    try {
+      const result = await getMarshalClientOrThrow().putDomain(marshalNamespaceForTenancy(tenancy), domain.hostname, service.serviceId);
+      verified = result.verified;
+    } catch (e) {
+      if (!(e instanceof MarshalApiError && e.status === 404)) {
+        captureError("deployments-domain-add-replay-reattach", e);
+      }
+    }
+  }
+  if (verified !== domain.verified) {
+    await prisma.deploymentDomain.update({
+      where: { tenancyId_id: { tenancyId: tenancy.id, id: domain.id } },
+      data: { verified },
+    });
+  }
+  return {
+    statusCode: 201,
+    bodyType: "json",
+    body: {
+      hostname: domain.hostname,
+      is_primary: domain.isPrimary,
+      verified,
+    },
+  } as const;
+}
 
 export const POST = createSmartRouteHandler({
   metadata: {
@@ -37,6 +94,7 @@ export const POST = createSmartRouteHandler({
     }).defined(),
   }),
   handler: async ({ auth, params, body }) => {
+    normalizeHostnameOrThrow(body.hostname);
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const row = await getServiceRowOrThrow(prisma, auth.tenancy, params.service_id);
     // The service's ports must be able to hold a domain — see domainPortProblem for both
@@ -66,9 +124,13 @@ export const POST = createSmartRouteHandler({
       },
     });
     if (existing != null) {
-      throw new StatusError(400, existing.serviceId === params.service_id
-        ? `The domain ${JSON.stringify(body.hostname)} is already added to this service.`
-        : `The domain ${JSON.stringify(body.hostname)} is already added to another service in this project. Remove it there first.`);
+      // A sibling service holding the hostname is a genuine conflict — the caller has to
+      // choose. The same hostname on THIS service is a replay of a request that already
+      // succeeded, which is not.
+      if (existing.serviceId !== params.service_id) {
+        throw new StatusError(400, `The domain ${JSON.stringify(body.hostname)} is already added to another service in this project. Remove it there first.`);
+      }
+      return await respondToDuplicateDomain(prisma, auth.tenancy, row, existing);
     }
 
     // Reserve tenancy-wide ownership before touching Marshal. The unique index is the
@@ -98,7 +160,13 @@ export const POST = createSmartRouteHandler({
         },
       });
       if (raceWinner != null) {
-        throw new StatusError(400, `The domain ${JSON.stringify(body.hostname)} is already added to a service in this project.`);
+        // Same distinction as above, reached when the replay arrives CONCURRENTLY rather
+        // than after the first attempt committed — the ring hops on a timeout, so the
+        // request it gave up on can still be in flight.
+        if (raceWinner.serviceId !== params.service_id) {
+          throw new StatusError(400, `The domain ${JSON.stringify(body.hostname)} is already added to another service in this project. Remove it there first.`);
+        }
+        return await respondToDuplicateDomain(prisma, auth.tenancy, row, raceWinner);
       }
       throw new HexclaveAssertionError("A deployment domain reservation was skipped without a hostname conflict");
     }

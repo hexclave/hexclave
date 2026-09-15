@@ -318,6 +318,7 @@ describe("transactions listing performance", () => {
     customerId: `listing-user-${index % 25}`,
     paymentProvider: "stripe",
     createdAtMillis: 1_000 + index,
+    renewalTargetSubscriptionId: null,
   });
   const fillTenancy = async (db: Awaited<ReturnType<typeof newPaymentsDb>>["db"], schema: ReturnType<typeof createPaymentsSchema>, from: number, to: number) => {
     for (let i = from; i < to; i++) {

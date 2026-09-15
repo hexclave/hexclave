@@ -2,10 +2,8 @@ import { generateSecureRandomString } from "@hexclave/shared/dist/utils/crypto";
 import type { ExpectStatic } from "vitest";
 import { niceBackendFetch } from "../../../../backend-helpers";
 
-// Shared drivers for e2e suites that exercise the workflow engine. Extracted from
-// workflows.test.ts so the growth suites (growth-workflows.test.ts, action-workflows.test.ts, ...)
-// can drive the same engine without duplicating the tick/poll/CRUD choreography. Behavior-identical
-// to the originals; workflows.test.ts remains the canonical consumer.
+// Shared drivers for e2e suites that exercise the workflow engine.
+// workflows.test.ts remains the canonical consumer.
 
 export const CRON_AUTH = { "authorization": "Bearer mock_cron_secret" };
 

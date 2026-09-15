@@ -296,7 +296,7 @@ function PersistedWorkflowDetail({ workflow, onClose }: { workflow: AdminWorkflo
 
       <DesignCategoryTabs
         categories={[
-          { id: "runs", label: "Runs", count: workflow.stats.activeRuns + workflow.stats.sleepingRuns },
+          { id: "runs", label: "Runs", count: workflow.stats.totalRuns },
           { id: "code", label: "Code", count: versionsLoad.data?.length ?? 0 },
         ]}
         selectedCategory={tab}

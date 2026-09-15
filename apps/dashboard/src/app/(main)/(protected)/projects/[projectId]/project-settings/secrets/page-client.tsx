@@ -24,6 +24,7 @@ import { PROJECT_SECRET_KEY_REGEX } from "@hexclave/shared/dist/project-secrets"
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { yupString } from "@hexclave/shared/dist/schema-fields";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as yup from "yup";
 import { PageLayout } from "../../page-layout";
@@ -143,9 +144,12 @@ function formatUpdatedAt(millis: number): string {
 export default function PageClient() {
   const hexclaveAdminApp = useAdminApp();
   const project = hexclaveAdminApp.useProject();
+  const searchParams = useSearchParams();
+  const addSecret = searchParams.get("addSecret") === "true";
 
   const [rows, setRows] = useState<SecretRow[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [isSetSecretDialogOpen, setIsSetSecretDialogOpen] = useState(addSecret);
   // Refreshes race: the "Set secret" button is usable while the slow
   // mount-time load is still in flight, and this page has no periodic poll to
   // self-correct — so a superseded response writing its stale snapshot last
@@ -181,6 +185,8 @@ export default function PageClient() {
         title="Project secrets"
         actions={
           <SetSecretDialog
+            open={isSetSecretDialogOpen}
+            onOpenChange={setIsSetSecretDialogOpen}
             trigger={<Button>Set secret</Button>}
             onDone={refresh}
           />
@@ -193,7 +199,7 @@ export default function PageClient() {
           </div>
         )}
         {rows != null && rows.length === 0 && (
-          <DesignAlert variant="info" description="No secrets set. Set a value for every secret() key used by the services export of your hexclave.deploy.ts — hexclave deploy fails and lists any that are still missing." />
+          <DesignAlert variant="info" description="No secrets set. Set a value for every secret() key used by the deploy export of your hexclave.deploy.ts — hexclave deploy fails and lists any that are still missing." />
         )}
         {rows != null && rows.length > 0 && (
           <div className="divide-y divide-border/60">

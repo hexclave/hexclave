@@ -16,12 +16,12 @@ import { wait } from "@hexclave/shared/dist/utils/promises";
 const MAX_STREAM_MS = 3 * 60 * 1000;
 // After a page that produced lines. A busy service should feel live.
 const ACTIVE_POLL_INTERVAL_MS = 2000;
-// An idle service backs off to this. Every poll is a Fly logs API call, and a
+// An idle service backs off to this. Every poll is a provider logging API call, and a
 // tab left open on a quiet service would otherwise bill one every two seconds
 // for as long as someone leaves the browser running.
 const MAX_IDLE_POLL_INTERVAL_MS = 10_000;
 
-// How far back a request with no cursor starts. Fly answers a cursor-less read
+// How far back a request with no cursor starts. The runtime answers a cursor-less read
 // with roughly its last hundred lines, which is the right thing for "open the
 // tab and see what it's doing" — so this is deliberately NOT a synthesized
 // `now - N minutes`, which would return nothing at all for a service that has
@@ -32,7 +32,7 @@ const NO_CURSOR = undefined;
  * `since_millis` as a cursor, or undefined for "start at the tail".
  *
  * Anything unparseable is treated as absent rather than rejected — but it must
- * not be passed through, because Fly SILENTLY IGNORES a malformed cursor and
+ * not be passed through, because providers can silently ignore a malformed cursor and
  * answers with its default window instead of erroring. Forwarding one would
  * replay a hundred lines the reader has already seen and look like a glitch.
  */
@@ -73,8 +73,8 @@ export const GET = createSmartRouteHandler({
   handler: async ({ auth, params, query }) => {
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const row = await getServiceRowOrThrow(prisma, auth.tenancy, params.service_id);
-    // A service the runtime has never applied has no app to read logs from, and
-    // Fly answers a missing app with an empty page — which would render as a
+    // A service the runtime has never applied has no resource to read logs from, and
+    // providers answer a missing runtime with an empty page — which would render as a
     // silent, permanently-empty stream. Say why instead.
     if (row.provisionedAt == null) {
       throw new StatusError(400, "This service has not been deployed yet, so it has no runtime logs. Run `hexclave deploy` first.");

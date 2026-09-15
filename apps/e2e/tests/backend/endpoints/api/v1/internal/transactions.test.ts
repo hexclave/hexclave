@@ -162,6 +162,7 @@ it("includes TEST_MODE subscription", async () => {
           },
         ],
         "id": "<stripped UUID>",
+        "renewal_target_subscription_id": null,
         "test_mode": true,
         "type": "purchase",
       },
@@ -218,6 +219,7 @@ it("includes TEST_MODE one-time purchase", async () => {
           },
         ],
         "id": "<stripped UUID>",
+        "renewal_target_subscription_id": null,
         "test_mode": true,
         "type": "purchase",
       },
@@ -261,6 +263,7 @@ it("includes item quantity change entries", async () => {
           },
         ],
         "id": "<stripped UUID>",
+        "renewal_target_subscription_id": null,
         "test_mode": false,
         "type": "manual-item-quantity-change",
       },
@@ -372,6 +375,7 @@ it("omits subscription-renewal entries for subscription creation invoices", asyn
   const creationInvoiceEvent = {
     id: `evt_sub_invoice_creation_${idSuffix}`,
     type: "invoice.payment_succeeded",
+    created: Math.floor(Date.now() / 1000),
     account: accountId,
     data: {
       object: {
@@ -385,6 +389,7 @@ it("omits subscription-renewal entries for subscription creation invoices", asyn
   const renewalInvoiceEvent = {
     id: `evt_sub_invoice_cycle_${idSuffix}`,
     type: "invoice.payment_succeeded",
+    created: Math.floor(Date.now() / 1000),
     account: accountId,
     data: {
       object: {
@@ -501,6 +506,7 @@ it("books subscription-renewal money when a free trial converts via subscription
   const creationRes = await sendStripeWebhook({
     id: `evt_trial_create_${idSuffix}`,
     type: "invoice.payment_succeeded",
+    created: Math.floor(Date.now() / 1000),
     account: accountId,
     data: {
       object: {
@@ -533,6 +539,7 @@ it("books subscription-renewal money when a free trial converts via subscription
   const cycleRes = await sendStripeWebhook({
     id: `evt_trial_cycle_${idSuffix}`,
     type: "invoice.payment_succeeded",
+    created: Math.floor(Date.now() / 1000),
     account: accountId,
     data: {
       object: {
@@ -733,6 +740,7 @@ it("returns server-granted subscriptions in transactions", async () => {
             },
           ],
           "id": "<stripped UUID>",
+          "renewal_target_subscription_id": null,
           "test_mode": false,
           "type": "purchase",
         },

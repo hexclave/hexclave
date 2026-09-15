@@ -24,6 +24,7 @@ export type AdminWorkflow = {
   isPaused: boolean,
   pausedAtMillis: number | null,
   stats: {
+    totalRuns: number,
     activeRuns: number,
     sleepingRuns: number,
     failed7d: number,
@@ -143,6 +144,7 @@ export function adminWorkflowFromCrud(crud: WorkflowSummaryJson): AdminWorkflow 
     isPaused: crud.is_paused,
     pausedAtMillis: crud.paused_at_millis,
     stats: {
+      totalRuns: crud.stats.total_runs,
       activeRuns: crud.stats.active_runs,
       sleepingRuns: crud.stats.sleeping_runs,
       failed7d: crud.stats.failed_7d,

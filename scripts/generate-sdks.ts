@@ -140,6 +140,24 @@ withGeneratorLock(async () => {
     "src/tanstack-start-server-context.d.ts",
   ]);
 
+  function hasGeneratedContent(relativePath: string, platforms: string[]) {
+    const sourcePath = path.join(srcDir, relativePath);
+    if (!fs.statSync(sourcePath).isFile()) {
+      return true;
+    }
+
+    const source = fs.readFileSync(sourcePath);
+    if (source.includes(0)) {
+      return true;
+    }
+
+    const content = source.toString("utf-8");
+    // A file whose entire contents are excluded by platform macros must not be
+    // generated: the standard header would otherwise turn it into a non-empty
+    // test file that Vitest collects as a suite with no tests.
+    return content.trim().length === 0 || processMacros(content, platforms).trim().length > 0;
+  }
+
   // Copy package-template.json to package.json in the template,
   // applying macros and adding a comment field.
   const packageTemplateContent = fs.readFileSync(
@@ -159,6 +177,10 @@ withGeneratorLock(async () => {
       return baseEditFn({ relativePath, content, platforms: PLATFORMS["js"] });
     },
     filterFn: (relativePath) => {
+      if (!hasGeneratedContent(relativePath, PLATFORMS["js"])) {
+        return false;
+      }
+
       const jsGeneratedFiles = new Set([
         "scripts/generate-env.ts",
         "src/generated/.gitignore",
@@ -199,7 +221,9 @@ withGeneratorLock(async () => {
     editFn: (relativePath, content) => {
       return baseEditFn({ relativePath, content, platforms: PLATFORMS["next"] });
     },
-    filterFn: (relativePath) => !tanstackStartOnlyTemplateFiles.has(relativePath),
+    filterFn: (relativePath) => {
+      return hasGeneratedContent(relativePath, PLATFORMS["next"]) && !tanstackStartOnlyTemplateFiles.has(relativePath);
+    },
   });
 
   generateFromTemplate({
@@ -208,7 +232,9 @@ withGeneratorLock(async () => {
     editFn: (relativePath, content) => {
       return baseEditFn({ relativePath, content, platforms: PLATFORMS["react"] });
     },
-    filterFn: (relativePath) => !tanstackStartOnlyTemplateFiles.has(relativePath),
+    filterFn: (relativePath) => {
+      return hasGeneratedContent(relativePath, PLATFORMS["react"]) && !tanstackStartOnlyTemplateFiles.has(relativePath);
+    },
   });
 
   generateFromTemplate({
@@ -217,7 +243,9 @@ withGeneratorLock(async () => {
     editFn: (relativePath, content) => {
       return baseEditFn({ relativePath, content, platforms: PLATFORMS["tanstack-start"] });
     },
-    filterFn: (relativePath) => !templateOnlyFiles.has(relativePath),
+    filterFn: (relativePath) => {
+      return hasGeneratedContent(relativePath, PLATFORMS["tanstack-start"]) && !templateOnlyFiles.has(relativePath);
+    },
   });
 }).catch((error) => {
   console.error(error);

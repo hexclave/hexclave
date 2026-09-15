@@ -1,5 +1,6 @@
 import apiVersions from "@/generated/api-versions.json";
 import routes from "@/generated/routes.json";
+import { getConfiguredTvDisplayOrigin } from "@/lib/tv-mode/display-origin";
 import { RoutePatternIndex } from "./route-pattern-index";
 
 const migrationRouteIndexes = new Map<string, RoutePatternIndex<(typeof routes)[number]>>();
@@ -23,6 +24,7 @@ const corsAllowedRequestHeaders = [
   "x-stack-random-nonce",
   "x-stack-client-version",
   "x-stack-disable-artificial-development-delay",
+  "x-stack-tv-snapshot-contract",
   "x-stack-access-type",
   "x-stack-publishable-client-key",
   "x-stack-secret-server-key",
@@ -55,15 +57,88 @@ function withHexclaveHeaderAliases(headers: string[]): string[] {
 const corsAllowedRequestHeadersWithAliases = withHexclaveHeaderAliases(corsAllowedRequestHeaders);
 const corsAllowedResponseHeadersWithAliases = withHexclaveHeaderAliases(corsAllowedResponseHeaders);
 
+// The configured TV origin is process-scoped, so resolve its fallback chain once
+// instead of repeating environment lookups for every request.
+const configuredTvOrigin = getConfiguredTvDisplayOrigin();
+
+import.meta.vitest?.test("TV snapshot contract header is allowed by browser CORS", ({ expect }) => {
+  const headers = new Headers(getCorsHeadersInit(new Request(
+    "http://localhost/api/v1/internal/tv-mode/profiles/company-pulse/snapshot",
+  )));
+  expect(headers.get("access-control-allow-headers")).toContain("x-hexclave-tv-snapshot-contract");
+});
+
+import.meta.vitest?.test("only the configured TV origin receives credentialed CORS", ({ expect }) => {
+  const allowed = new Headers(getCorsHeadersInitForTvOrigin(new Request(
+    "https://api.hexclave.example/api/latest/tv-displays/auth/refresh",
+    { headers: { origin: "https://tv.hexclave.example" } },
+  ), "https://tv.hexclave.example"));
+  expect(allowed.get("access-control-allow-origin")).toBe("https://tv.hexclave.example");
+  expect(allowed.get("access-control-allow-credentials")).toBe("true");
+  expect(allowed.get("vary")).toContain("Origin");
+
+  const rejected = new Headers(getCorsHeadersInitForTvOrigin(new Request(
+    "https://api.hexclave.example/api/latest/tv-displays/auth/refresh",
+    { headers: { origin: "https://untrusted.example" } },
+  ), "https://tv.hexclave.example"));
+  expect(rejected.get("access-control-allow-origin")).toBe("*");
+  expect(rejected.has("access-control-allow-credentials")).toBe(false);
+
+  const ordinaryApi = new Headers(getCorsHeadersInitForTvOrigin(new Request(
+    "https://api.hexclave.example/api/latest/users/me",
+    { headers: { origin: "https://tv.hexclave.example" } },
+  ), "https://tv.hexclave.example"));
+  expect(ordinaryApi.get("access-control-allow-origin")).toBe("*");
+  expect(ordinaryApi.has("access-control-allow-credentials")).toBe(false);
+  expect(ordinaryApi.get("vary")).not.toContain("Origin");
+
+  const malformedConfiguration = new Headers(getCorsHeadersInitForTvOrigin(new Request(
+    "https://api.hexclave.example/api/latest/tv-displays/auth/refresh",
+    { headers: { origin: "https://tv.hexclave.example" } },
+  ), "not a URL"));
+  expect(malformedConfiguration.get("access-control-allow-origin")).toBe("*");
+  expect(malformedConfiguration.has("access-control-allow-credentials")).toBe(false);
+  expect(malformedConfiguration.get("vary")).not.toContain("Origin");
+
+  const nonHttpConfiguration = new Headers(getCorsHeadersInitForTvOrigin(new Request(
+    "https://api.hexclave.example/api/latest/tv-displays/auth/refresh",
+    { headers: { origin: "null" } },
+  ), "file:///tv"));
+  expect(nonHttpConfiguration.get("access-control-allow-origin")).toBe("*");
+  expect(nonHttpConfiguration.has("access-control-allow-credentials")).toBe(false);
+  expect(nonHttpConfiguration.get("vary")).not.toContain("Origin");
+});
+
 export function getCorsHeadersInit(request: Request): HeadersInit | undefined {
-  return new URL(request.url).pathname.startsWith("/api/") ? {
-    "Access-Control-Allow-Origin": "*",
+  return getCorsHeadersInitForTvOrigin(request, configuredTvOrigin);
+}
+
+function getCorsHeadersInitForTvOrigin(request: Request, configuredTvOrigin: string): HeadersInit | undefined {
+  const pathname = getCanonicalPathname(new URL(request.url).pathname);
+  if (!pathname.startsWith("/api/")) return undefined;
+  const requestOrigin = request.headers.get("origin");
+  const isTvDisplayRequest = pathname.startsWith("/api/latest/tv-displays/")
+    || pathname.startsWith("/api/v1/tv-displays/");
+  const parsedTvUrl = configuredTvOrigin === "" ? null : URL.parse(configuredTvOrigin);
+  const configuredTvUrl = parsedTvUrl?.protocol === "http:" || parsedTvUrl?.protocol === "https:"
+    ? parsedTvUrl
+    : null;
+  const allowCredentialedTvOrigin = isTvDisplayRequest
+    && requestOrigin != null
+    && configuredTvUrl != null
+    && requestOrigin === configuredTvUrl.origin;
+  return {
+    "Access-Control-Allow-Origin": allowCredentialedTvOrigin ? requestOrigin : "*",
+    ...(allowCredentialedTvOrigin ? { "Access-Control-Allow-Credentials": "true" } : {}),
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Max-Age": "86400",
     "Access-Control-Allow-Headers": corsAllowedRequestHeadersWithAliases.join(", "),
     "Access-Control-Expose-Headers": corsAllowedResponseHeadersWithAliases.join(", "),
-    "Vary": corsAllowedRequestHeadersWithAliases.join(", "),
-  } : undefined;
+    "Vary": [
+      ...(isTvDisplayRequest && configuredTvUrl != null ? ["Origin"] : []),
+      ...corsAllowedRequestHeadersWithAliases,
+    ].join(", "),
+  };
 }
 
 export type PipelineResult = {
@@ -157,6 +232,15 @@ import.meta.vitest?.test("getCanonicalPathname normalizes literal slashes only",
   expect(getCanonicalPathname("/api/v1")).toBe("/api/v1");
   // Percent-encoded slashes are data, not path separators — they must survive untouched.
   expect(getCanonicalPathname("/api/v1/users/foo%2Fbar")).toBe("/api/v1/users/foo%2Fbar");
+});
+
+import.meta.vitest?.test("TV CORS classification uses the canonical pathname", ({ expect }) => {
+  const headers = new Headers(getCorsHeadersInitForTvOrigin(new Request(
+    "https://api.hexclave.example/api//latest/tv-displays/auth/refresh/",
+    { headers: { origin: "https://tv.hexclave.example" } },
+  ), "https://tv.hexclave.example"));
+  expect(headers.get("access-control-allow-origin")).toBe("https://tv.hexclave.example");
+  expect(headers.get("access-control-allow-credentials")).toBe("true");
 });
 
 import.meta.vitest?.test("runRequestPipeline 308-redirects noncanonical paths", async ({ expect }) => {

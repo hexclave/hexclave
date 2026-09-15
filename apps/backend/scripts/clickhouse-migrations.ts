@@ -17,6 +17,18 @@ export async function runClickhouseMigrations() {
     client.command({ query: SYNC_METADATA_TABLE_SQL }),
   ]);
 
+  // Removing an app's schema definitions only keeps fresh installations clean. Drop the
+  // retired Growth views first, then their backing tables, so existing installations converge
+  // to the same schema without relying on dependencies or CASCADE behavior.
+  await Promise.all([
+    client.command({ query: "DROP VIEW IF EXISTS default.growth_daily_metrics" }),
+    client.command({ query: "DROP VIEW IF EXISTS default.growth_daily_ad_metrics" }),
+  ]);
+  await Promise.all([
+    client.command({ query: "DROP TABLE IF EXISTS analytics_internal.growth_daily_metrics" }),
+    client.command({ query: "DROP TABLE IF EXISTS analytics_internal.growth_daily_ad_metrics" }),
+  ]);
+
   // Create all tables in parallel
   await Promise.all([
     client.command({ query: EVENTS_TABLE_BASE_SQL }),
@@ -33,8 +45,6 @@ export async function runClickhouseMigrations() {
     client.command({ query: REFRESH_TOKENS_TABLE_BASE_SQL }),
     client.command({ query: CONNECTED_ACCOUNTS_TABLE_BASE_SQL }),
     client.command({ query: CLICKMAP_EVENTS_TABLE_SQL }),
-    client.command({ query: GROWTH_DAILY_METRICS_TABLE_BASE_SQL }),
-    client.command({ query: GROWTH_DAILY_AD_METRICS_TABLE_BASE_SQL }),
   ]);
 
   await client.command({ query: CLICKMAP_EVENTS_ADD_DEAD_COLUMN_SQL });
@@ -61,8 +71,6 @@ export async function runClickhouseMigrations() {
     client.command({ query: NOTIFICATION_PREFERENCES_VIEW_SQL }),
     client.command({ query: REFRESH_TOKENS_VIEW_SQL }),
     client.command({ query: CONNECTED_ACCOUNTS_VIEW_SQL }),
-    client.command({ query: GROWTH_DAILY_METRICS_VIEW_SQL }),
-    client.command({ query: GROWTH_DAILY_AD_METRICS_VIEW_SQL }),
   ]);
 
   // Data migrations (mutations)
@@ -83,14 +91,10 @@ export async function runClickhouseMigrations() {
   }
 
   // Row policies in parallel
-  // NOTE: keep this list in sync with GROWTH_AGENT_QUERYABLE_TABLES in
-  // src/lib/growth/metric-catalog.ts (pinned by metric-catalog.test.ts) — the growth agent's
-  // catalog validation assumes exactly these tables are readable by limited_user.
   const tables = [
     "events", "users", "contact_channels", "teams", "team_member_profiles",
     "team_permissions", "team_invitations", "email_outboxes",
     "project_permissions", "notification_preferences", "refresh_tokens", "connected_accounts",
-    "growth_daily_metrics", "growth_daily_ad_metrics",
   ];
   await Promise.all(tables.map(table =>
     client.command({
@@ -670,65 +674,6 @@ FINAL
 WHERE sync_is_deleted = 0;
 `;
 
-// Wide per-day growth metric store: one Float64 per (metric_id, date), written by the growth
-// metric rollup (src/lib/growth/metric-store.ts). ReplacingMergeTree(computed_at) so the rollup can
-// re-emit overlapping windows idempotently — the newest computation of a (metric_id, date) pair
-// wins, and the default view applies FINAL so readers never see pre-merge duplicates (precedent:
-// the connected_accounts view). The metric_id vocabulary lives in
-// src/lib/growth/metric-catalog.ts, not here.
-const GROWTH_DAILY_METRICS_TABLE_BASE_SQL = `
-CREATE TABLE IF NOT EXISTS analytics_internal.growth_daily_metrics (
-    project_id String,
-    branch_id String,
-    date Date,
-    metric_id LowCardinality(String),
-    value Float64,
-    computed_at DateTime64(3, 'UTC') DEFAULT now64(3)
-)
-ENGINE ReplacingMergeTree(computed_at)
-ORDER BY (project_id, branch_id, metric_id, date);
-`;
-
-const GROWTH_DAILY_METRICS_VIEW_SQL = `
-CREATE OR REPLACE VIEW default.growth_daily_metrics
-SQL SECURITY DEFINER
-AS
-SELECT *
-FROM analytics_internal.growth_daily_metrics
-FINAL;
-`;
-
-// Ad-platform daily account metrics, kept SEPARATE from growth_daily_metrics because the two
-// tables live in different timezones: `date` here is the AD ACCOUNT's local day exactly as the
-// platform reports it, never converted to UTC. Converting would silently shift spend across day
-// boundaries and make reconciliation against the platform's own UI impossible; instead the account
-// timezone is stored alongside so consumers can reason about the offset explicitly.
-const GROWTH_DAILY_AD_METRICS_TABLE_BASE_SQL = `
-CREATE TABLE IF NOT EXISTS analytics_internal.growth_daily_ad_metrics (
-    project_id String,
-    branch_id String,
-    date Date,
-    account_id String,
-    account_timezone String,
-    currency LowCardinality(String),
-    spend_minor Int64,
-    impressions Int64,
-    clicks Int64,
-    computed_at DateTime64(3, 'UTC') DEFAULT now64(3)
-)
-ENGINE ReplacingMergeTree(computed_at)
-ORDER BY (project_id, branch_id, account_id, date);
-`;
-
-const GROWTH_DAILY_AD_METRICS_VIEW_SQL = `
-CREATE OR REPLACE VIEW default.growth_daily_ad_metrics
-SQL SECURITY DEFINER
-AS
-SELECT *
-FROM analytics_internal.growth_daily_ad_metrics
-FINAL;
-`;
-
 // ─── Column comments ────────────────────────────────────────────────
 // Applied to the default.* views after creation so that DESCRIBE TABLE
 // returns useful descriptions for each column. The AI assistant uses
@@ -881,26 +826,6 @@ const COLUMN_COMMENT_STATEMENTS: string[] = [
   `ALTER TABLE default.connected_accounts COMMENT COLUMN provider 'OAuth/SSO provider name, e.g. google, github'`,
   `ALTER TABLE default.connected_accounts COMMENT COLUMN provider_account_id 'User account ID at the external provider'`,
   `ALTER TABLE default.connected_accounts COMMENT COLUMN created_at 'When this account was linked (UTC)'`,
-
-  // ── growth_daily_metrics ──
-  `ALTER TABLE default.growth_daily_metrics COMMENT COLUMN project_id 'Project identifier. Auto-filtered by row-level security — do not use in WHERE clauses'`,
-  `ALTER TABLE default.growth_daily_metrics COMMENT COLUMN branch_id 'Branch identifier. Auto-filtered by row-level security — do not use in WHERE clauses'`,
-  `ALTER TABLE default.growth_daily_metrics COMMENT COLUMN date 'The UTC day this value describes. For flow metrics this is the day the activity happened; for snapshot metrics it is the day the state was captured'`,
-  `ALTER TABLE default.growth_daily_metrics COMMENT COLUMN metric_id 'Which metric this row stores (e.g. new_users, dau, revenue_cents) — see the growth metrics context for the catalog of ids, units, and flow-vs-snapshot semantics. Always filter or group by metric_id; mixing metrics in one aggregate is meaningless'`,
-  `ALTER TABLE default.growth_daily_metrics COMMENT COLUMN value 'Metric value as Float64. The unit depends on metric_id: plain counts, cents, percent (0-100), or seconds — see the growth metrics context'`,
-  `ALTER TABLE default.growth_daily_metrics COMMENT COLUMN computed_at 'When this row was computed (UTC). Rows are re-emitted on every rollup; the view already deduplicates to the newest computation per (metric_id, date)'`,
-
-  // ── growth_daily_ad_metrics ──
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN project_id 'Project identifier. Auto-filtered by row-level security — do not use in WHERE clauses'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN branch_id 'Branch identifier. Auto-filtered by row-level security — do not use in WHERE clauses'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN date 'The AD ACCOUNT local day exactly as the ad platform reports it — NOT UTC and never converted. Joining to growth_daily_metrics.date (UTC days) can be off by up to 1 day in either direction; always state the timezone basis when correlating the two tables'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN account_id 'Ad platform account identifier (e.g. a Meta ad account id). One row per account per day'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN account_timezone 'IANA timezone of the ad account (e.g. America/Los_Angeles) that the date column is expressed in. Empty string when the platform did not report one'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN currency 'ISO 4217 currency code of the ad account. spend_minor is in this currency minor units. Empty string when the platform did not report one'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN spend_minor 'Ad spend for that account-local day, in the account currency minor units (e.g. cents for USD). Not necessarily the same currency as revenue metrics'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN impressions 'Ad impressions for that account-local day'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN clicks 'Ad clicks for that account-local day'`,
-  `ALTER TABLE default.growth_daily_ad_metrics COMMENT COLUMN computed_at 'When this row was fetched from the ad platform (UTC). The view already deduplicates to the newest fetch per (account_id, date)'`,
 ];
 
 const COLUMN_COMMENT_TABLES = [
@@ -916,8 +841,6 @@ const COLUMN_COMMENT_TABLES = [
   "notification_preferences",
   "refresh_tokens",
   "connected_accounts",
-  "growth_daily_metrics",
-  "growth_daily_ad_metrics",
 ];
 
 function buildColumnCommentSql(): string[] {

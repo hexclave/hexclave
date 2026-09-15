@@ -5,6 +5,7 @@
       "esnext"
     ],
     "strict": true,
+    "allowJs": true,
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
@@ -20,6 +21,7 @@
   },
   "include": [
     "src/**/*.ts",
+    "src/live-proxy-fixture/*.mjs",
     "vitest.config.ts",
     "tsdown.config.ts"
   ],

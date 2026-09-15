@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
-import { StackProvider, StackTheme } from "@hexclave/next";
+import { HexclaveProvider, HexclaveTheme } from "@hexclave/next";
 import { getHexclaveClientApp } from "../hexclave";
 import Loading from "./loading";
 import "./globals.css";
@@ -26,13 +26,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {app == null ? (
           <Loading />
         ) : (
-          <StackProvider app={app}>
-            <StackTheme>
+          <HexclaveProvider app={app}>
+            <HexclaveTheme>
               <Suspense fallback={<Loading />}>
                 {children}
               </Suspense>
-            </StackTheme>
-          </StackProvider>
+            </HexclaveTheme>
+          </HexclaveProvider>
         )}
       </body>
     </html>

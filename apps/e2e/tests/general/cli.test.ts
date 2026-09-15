@@ -443,7 +443,10 @@ describe("Stack CLI", () => {
       fs.mkdirSync(path.join(deployDir, "api"));
       fs.writeFileSync(path.join(deployDir, "api", "server.js"), "console.log('api');\n");
       // Two files: the project config, and the deploy file holding the services.
-      const writeConfigFile = (allowClientTeamCreation: boolean) => fs.writeFileSync(path.join(deployDir, "hexclave.config.ts"),
+      // They are pushed by two DIFFERENT commands — `hexclave deploy` ships the
+      // services and never touches the configuration.
+      const configFilePath = path.join(deployDir, "hexclave.config.ts");
+      const writeConfigFile = (allowClientTeamCreation: boolean) => fs.writeFileSync(configFilePath,
         `export const config = { teams: { allowClientTeamCreation: ${allowClientTeamCreation} } };\n`);
       fs.writeFileSync(path.join(deployDir, "hexclave.deploy.ts"), [
         // The `deploymentGroupId` export names this deployment group — which
@@ -477,9 +480,19 @@ describe("Stack CLI", () => {
         "});",
         "",
       ].join("\n"));
+      // Pushed with `config push`, so the deploy below has a known config to
+      // leave alone. Then changed on disk WITHOUT being pushed: the assertion
+      // after the deploy is that the deploy did not publish this edit.
       writeConfigFile(true);
+      const configPushRes = await runCli(
+        ["config", "push", "--cloud-project-id", createdProjectId, "--config-file", configFilePath],
+      );
+      if (configPushRes.exitCode !== 0) {
+        throw new Error(`config push exited ${configPushRes.exitCode}. stderr: ${configPushRes.stderr}`);
+      }
+      writeConfigFile(false);
       const { stdout, stderr, exitCode } = await runCli(
-        ["deploy", "--cloud-project-id", createdProjectId, "--deploy-file", path.join(deployDir, "hexclave.deploy.ts"), "--config-push"],
+        ["deploy", "--cloud-project-id", createdProjectId, "--deploy-file", path.join(deployDir, "hexclave.deploy.ts")],
         {},
         deployDir,
         90_000,
@@ -507,10 +520,10 @@ describe("Stack CLI", () => {
       expect(occurrencesOf("Waiting for the remote build...")).toBe(1);
       expect(stderr).toContain("[web] deployed");
       expect(stderr).toContain("[db] deployed");
-      // The definitions were synced server-side — but NOT the config file's
+      // The definitions were synced server-side — but NOT the deploy file's
       // `devCommand`, which `hexclave dev` runs locally and the CLI therefore
-      // never sends (the config above sets one, so this also covers that a
-      // devCommand in the config file doesn't trip the sync route).
+      // never sends (web declares one above, so this also covers that a
+      // devCommand doesn't trip the sync route).
       // OPENAI also proves the secret-default path end to end: nothing set a
       // value for OPENAI_KEY, so this deploy only succeeded because the CLI
       // sent `secret("OPENAI_KEY", "sk-default")`'s default with the deploy
@@ -564,7 +577,9 @@ describe("Stack CLI", () => {
       expect(missingSecretRes.stderr).toContain("NEEDS_A_VALUE");
       expect(missingSecretRes.stderr).toContain("Project Settings > Secrets");
 
-      // The config export was pushed because --config-push was passed.
+      // Deploying is not publishing: the config file next to the deploy file was
+      // changed to `false` before the deploy and never pushed, so the project
+      // must still hold what `config push` put there.
       const readBranchConfig = async () => {
         const configRes = await runCli([
           "exec", "--cloud-project-id", createdProjectId,
@@ -577,9 +592,22 @@ describe("Stack CLI", () => {
       };
       expect(await readBranchConfig()).toMatchObject({ teams: { allowClientTeamCreation: true } });
 
-      // --service-id deploys just that service, and a deploy without
-      // --config-push leaves the (changed) config export unpushed.
+      // Services can no longer live in the config file, and a `deploy` export
+      // there is refused rather than ignored: pushing it silently would leave
+      // the author believing their services had been published.
+      fs.writeFileSync(configFilePath, [
+        "export const config = { teams: { allowClientTeamCreation: false } };",
+        "export const deploy = () => ({ services: {} });",
+        "",
+      ].join("\n"));
+      const configWithDeployRes = await runCli(
+        ["config", "push", "--cloud-project-id", createdProjectId, "--config-file", configFilePath],
+      );
+      expect(configWithDeployRes.exitCode).not.toBe(0);
+      expect(configWithDeployRes.stderr).toContain("hexclave.deploy.ts");
       writeConfigFile(false);
+
+      // --service-id deploys just that service.
       const singleRun = await runCli(
         ["deploy", "--cloud-project-id", createdProjectId, "--deploy-file", path.join(deployDir, "hexclave.deploy.ts"), "--service-id", "db"],
         {},

@@ -192,7 +192,7 @@ async function countInFlightRunsOnOlderVersions(tenancyId: string, workflowId: s
 
 // ─── Listing workflows with stats ──────────────────────────────────────────
 
-type StatsRow = { workflowId: string, active: number, sleeping: number, failed7d: number };
+type StatsRow = { workflowId: string, total: number, active: number, sleeping: number, failed7d: number };
 type VolumeRow = { workflowId: string, day: Date, count: number };
 
 export async function listWorkflowsWithStats(tenancy: Tenancy): Promise<WorkflowSummaryJson[]> {
@@ -223,6 +223,9 @@ export async function listWorkflowsWithStats(tenancy: Tenancy): Promise<Workflow
 
   const stats = await globalPrismaClient.$replica().$queryRaw<StatsRow[]>(Prisma.sql`
     SELECT "workflowId",
+      -- The dashboard's Runs tab shows the full retained history, not only
+      -- the operationally active subset counted by the fields below.
+      COUNT(*)::int AS "total",
       COUNT(*) FILTER (WHERE "state" IN ('QUEUED', 'RUNNING'))::int AS "active",
       COUNT(*) FILTER (WHERE "state" = 'SLEEPING')::int AS "sleeping",
       COUNT(*) FILTER (WHERE "state" = 'FAILED' AND "completedAt" > NOW() - interval '7 days')::int AS "failed7d"
@@ -262,6 +265,7 @@ export async function listWorkflowsWithStats(tenancy: Tenancy): Promise<Workflow
       is_paused: definition.pausedAt != null,
       paused_at_millis: definition.pausedAt?.getTime() ?? null,
       stats: {
+        total_runs: stat?.total ?? 0,
         active_runs: stat?.active ?? 0,
         sleeping_runs: stat?.sleeping ?? 0,
         failed_7d: stat?.failed7d ?? 0,

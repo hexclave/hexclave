@@ -13,7 +13,6 @@ export type {
   DesignDialogVariant,
 } from "../../../../../packages/dashboard-ui-components/src/components/dialog";
 export * from "./analytics-card";
-export * from "./choice-chip";
 export * from "./design-tokens";
 export {
   DesignEditableGrid,
@@ -28,7 +27,5 @@ export type {
 } from "./editable-grid";
 export * from "./list";
 export * from "./menu";
-export * from "./metric-delta";
 export * from "./select";
-export * from "./setup-timeline";
 export * from "./table";

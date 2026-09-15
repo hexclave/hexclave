@@ -200,9 +200,9 @@ export function DeploymentsList({ project, openDeploymentId, onOpenDeployment, o
           <RocketLaunchIcon className="h-8 w-8 text-muted-foreground" />
           <Typography type="h3" className="text-base font-semibold">No deployments yet</Typography>
           <Typography type="p" className="max-w-md text-sm text-muted-foreground">
-            Define your services in the <code className="font-mono">deployment</code> export of{" "}
-            <code className="font-mono">hexclave.deploy.ts</code>, give the file an{" "}
-            <code className="font-mono">id</code>, then run <code className="font-mono">hexclave deploy</code>.
+            Define your services in the <code className="font-mono">deploy</code> export of{" "}
+            <code className="font-mono">hexclave.deploy.ts</code>, give the file a{" "}
+            <code className="font-mono">deploymentGroupId</code>, then run <code className="font-mono">hexclave deploy</code>.
             Each deploy shows up here with the services it shipped, tagged with the id of the deploy file it came from.
           </Typography>
         </div>

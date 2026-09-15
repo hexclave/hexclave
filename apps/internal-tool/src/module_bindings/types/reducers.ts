@@ -7,16 +7,34 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
 import AddManualQaReducer from "../add_manual_qa_reducer";
+import ClearMcpQaReviewReducer from "../clear_mcp_qa_review_reducer";
+import DeleteAiQueryLogReducer from "../delete_ai_query_log_reducer";
+import DeleteFeedbackReducer from "../delete_feedback_reducer";
+import DeleteMcpCallLogReducer from "../delete_mcp_call_log_reducer";
 import DeleteQaEntryReducer from "../delete_qa_entry_reducer";
+import LogAiQueryReducer from "../log_ai_query_reducer";
+import LogFeedbackReducer from "../log_feedback_reducer";
 import LogMcpCallReducer from "../log_mcp_call_reducer";
-import MarkHumanReviewedReducer from "../mark_human_reviewed_reducer";
-import UpdateHumanCorrectionReducer from "../update_human_correction_reducer";
+import SetHumanReviewedReducer from "../set_human_reviewed_reducer";
+import TouchSessionReducer from "../touch_session_reducer";
+import UpdateAiQueryUsageReducer from "../update_ai_query_usage_reducer";
 import UpdateMcpQaReviewReducer from "../update_mcp_qa_review_reducer";
+import UpdateQaEntryWithPublishReducer from "../update_qa_entry_with_publish_reducer";
+import UpsertQaFromCallAndMarkReviewedReducer from "../upsert_qa_from_call_and_mark_reviewed_reducer";
 
 export type AddManualQaParams = __Infer<typeof AddManualQaReducer>;
+export type ClearMcpQaReviewParams = __Infer<typeof ClearMcpQaReviewReducer>;
+export type DeleteAiQueryLogParams = __Infer<typeof DeleteAiQueryLogReducer>;
+export type DeleteFeedbackParams = __Infer<typeof DeleteFeedbackReducer>;
+export type DeleteMcpCallLogParams = __Infer<typeof DeleteMcpCallLogReducer>;
 export type DeleteQaEntryParams = __Infer<typeof DeleteQaEntryReducer>;
+export type LogAiQueryParams = __Infer<typeof LogAiQueryReducer>;
+export type LogFeedbackParams = __Infer<typeof LogFeedbackReducer>;
 export type LogMcpCallParams = __Infer<typeof LogMcpCallReducer>;
-export type MarkHumanReviewedParams = __Infer<typeof MarkHumanReviewedReducer>;
-export type UpdateHumanCorrectionParams = __Infer<typeof UpdateHumanCorrectionReducer>;
+export type SetHumanReviewedParams = __Infer<typeof SetHumanReviewedReducer>;
+export type TouchSessionParams = __Infer<typeof TouchSessionReducer>;
+export type UpdateAiQueryUsageParams = __Infer<typeof UpdateAiQueryUsageReducer>;
 export type UpdateMcpQaReviewParams = __Infer<typeof UpdateMcpQaReviewReducer>;
+export type UpdateQaEntryWithPublishParams = __Infer<typeof UpdateQaEntryWithPublishReducer>;
+export type UpsertQaFromCallAndMarkReviewedParams = __Infer<typeof UpsertQaFromCallAndMarkReviewedReducer>;
 
