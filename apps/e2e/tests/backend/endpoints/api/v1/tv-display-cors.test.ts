@@ -4,7 +4,7 @@ it("permits credentialed TV preflights only from the configured dashboard on bot
   const dashboardOrigin = new URL(STACK_DASHBOARD_BASE_URL).origin;
   for (const alias of ["latest", "v1"]) {
     for (const origin of [dashboardOrigin, "https://untrusted-tv.example.com"]) {
-      const response = await niceFetch(new URL(`/api/${alias}/tv-displays/auth/refresh`, STACK_BACKEND_BASE_URL), {
+      const response = await niceFetch(new URL(`/api/${encodeURIComponent(alias)}/tv-displays/auth/refresh`, STACK_BACKEND_BASE_URL), {
         method: "OPTIONS",
         headers: {
           origin,

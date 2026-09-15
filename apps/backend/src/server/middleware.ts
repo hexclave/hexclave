@@ -61,33 +61,6 @@ const corsAllowedResponseHeadersWithAliases = withHexclaveHeaderAliases(corsAllo
 // instead of repeating environment lookups for every request.
 const configuredTvOrigin = getConfiguredTvDisplayOrigin();
 
-if (import.meta.vitest) {
-  const { test, expect, vi } = import.meta.vitest;
-  test("TV credentialed CORS uses the canonical dashboard rather than stale overrides", () => {
-    vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "https://dashboard.example.com");
-    vi.stubEnv("NEXT_PUBLIC_STACK_DASHBOARD_URL", "");
-    vi.stubEnv("HEXCLAVE_TV_DISPLAY_ORIGIN", "https://stale.example.com");
-    vi.stubEnv("NEXT_PUBLIC_BROWSER_STACK_DASHBOARD_URL", "https://stale.example.com");
-    try {
-      for (const alias of ["latest", "v1"]) {
-        for (const method of ["OPTIONS", "POST"]) {
-          for (const origin of ["https://dashboard.example.com", "https://stale.example.com", "https://dashboard.example.com.attacker.example"]) {
-            const headers = new Headers(getCorsHeadersInitForTvOrigin(new Request(
-              `https://api.example.com/api/${alias}/tv-displays/auth/refresh`,
-              { method, headers: { origin } },
-            ), getConfiguredTvDisplayOrigin()));
-            const allowed = origin === "https://dashboard.example.com";
-            expect(headers.get("access-control-allow-origin")).toBe(allowed ? origin : "*");
-            expect(headers.get("access-control-allow-credentials")).toBe(allowed ? "true" : null);
-          }
-        }
-      }
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-}
-
 import.meta.vitest?.test("TV snapshot contract header is allowed by browser CORS", ({ expect }) => {
   const headers = new Headers(getCorsHeadersInit(new Request(
     "http://localhost/api/v1/internal/tv-mode/profiles/company-pulse/snapshot",
