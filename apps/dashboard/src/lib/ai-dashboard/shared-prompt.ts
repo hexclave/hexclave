@@ -1,6 +1,16 @@
 import { BUNDLED_DASHBOARD_UI_TYPES, BUNDLED_TYPE_DEFINITIONS } from "@/generated/bundled-type-definitions";
 import { ALL_APPS_FRONTEND, type AppId, getItemPath, hasNavigationItems } from "@/lib/apps-frontend";
-import { buildHexclaveHeaders, type CurrentUser } from "@/lib/api-headers";
+import type { CurrentUser } from "@/lib/api-headers";
+
+export type DashboardMessagePart = {
+  type: "text",
+  text: string,
+  providerOptions?: Record<string, unknown>,
+};
+export type DashboardMessage = {
+  role: string,
+  content: string | DashboardMessagePart[],
+};
 
 /**
  * Builds a formatted list of available dashboard routes based on enabled apps.
@@ -17,7 +27,7 @@ export function buildAvailableRoutes(enabledAppIds: AppId[]): string {
   routes.push({ path: "/project-settings", label: "Project Settings" });
 
   // Dynamic routes from enabled apps
-  for (const appId of enabledAppIds) {
+  for (const appId of [...enabledAppIds].sort()) {
     const appFrontend = ALL_APPS_FRONTEND[appId as keyof typeof ALL_APPS_FRONTEND];
     if (!hasNavigationItems(appFrontend)) {
       continue;
@@ -35,74 +45,8 @@ export function buildAvailableRoutes(enabledAppIds: AppId[]): string {
   return `\nAVAILABLE DASHBOARD ROUTES (use ONLY these with window.dashboardNavigate):\n${routeList}\nDo NOT use any paths not listed above.`;
 }
 
-export async function selectRelevantFiles(
-  prompt: string,
-  backendBaseUrl: string,
-  currentUser?: CurrentUser,
-): Promise<string[]> {
-  const availableFiles = BUNDLED_TYPE_DEFINITIONS.map((f: { path: string }) => f.path);
-
-  const systemPromptText = `You are a code assistant helping to generate dashboard code for Hexclave.
-
-Your task is to select which Hexclave SDK type definition files you'll need to generate the requested dashboard.
-
-IMPORTANT GUIDELINES:
-- DO NOT be conservative in file selection - when in doubt, INCLUDE the file
-- If a file might be relevant to the dashboard, SELECT IT
-- For user/team dashboards: select users and/or teams files
-- For project info: select projects files
-- Always select server-app.ts as it contains the main SDK interface
-- It's better to include extra files than to miss necessary types
-
-Available files:
-${availableFiles.map(f => `- ${f}`).join('\n')}
-
-Respond with ONLY a JSON object: { "selectedFiles": ["file1.ts", "file2.ts"] }
-No markdown, no explanation — just the JSON.`;
-
-  try {
-    const authHeaders = await buildHexclaveHeaders(currentUser);
-    const response = await fetch(`${backendBaseUrl}/api/latest/ai/query/generate`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders },
-      body: JSON.stringify({
-        quality: "dumb",
-        speed: "fast",
-        systemPrompt: "command-center-ask-ai",
-        tools: [],
-        messages: [{
-          role: "user",
-          content: `${systemPromptText}\n\nDashboard request: "${prompt}"\n\nWhich type definition files do you need? When uncertain, err on the side of INCLUDING more files rather than fewer.`,
-        }],
-      }),
-    });
-
-    const result = await response.json() as { content?: Array<{ type: string, text?: string }> };
-    const content = Array.isArray(result.content) ? result.content : [];
-    const textBlock = content.find((b) => b.type === "text");
-    const responseText = textBlock?.text;
-
-    if (!responseText) {
-      return availableFiles;
-    }
-
-    const jsonMatch = responseText.match(/\{[\s\S]*"selectedFiles"[\s\S]*\}/);
-    if (!jsonMatch) {
-      return availableFiles;
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]) as { selectedFiles?: string[] };
-    if (!Array.isArray(parsed.selectedFiles) || parsed.selectedFiles.length === 0) {
-      return availableFiles;
-    }
-
-    const selected = parsed.selectedFiles.filter((f) => availableFiles.includes(f));
-
-    return selected;
-  } catch (e) {
-    console.log("[selectRelevantFiles] failed, returning all files:", e);
-    return availableFiles;
-  }
+function getAllTypeDefinitionFiles(): string[] {
+  return BUNDLED_TYPE_DEFINITIONS.map((f: { path: string }) => f.path);
 }
 
 function stripComments(source: string): string {
@@ -134,32 +78,15 @@ ${fileContents.join('\n')}
   `.trim();
 }
 
-function extractUserPromptText(messages: Array<{ role: string, content: unknown }>): string {
-  const lastUserMessage = [...messages].reverse().find(m => m.role === "user");
-  if (typeof lastUserMessage?.content === "string") {
-    return lastUserMessage.content;
-  }
-  if (Array.isArray(lastUserMessage?.content)) {
-    const textPart = (lastUserMessage.content as Array<{ type: string, text?: string }>).find(c => c.type === "text");
-    return textPart?.text ?? "dashboard";
-  }
-  return "dashboard";
-}
-
-export async function buildDashboardMessages(
-  backendBaseUrl: string,
-  currentUser: CurrentUser | undefined,
-  messages: Array<{ role: string, content: unknown }>,
+export function buildDashboardMessages(
+  _backendBaseUrl: string,
+  _currentUser: CurrentUser | undefined,
+  _messages: Array<{ role: string, content: unknown }>,
   currentSource?: string,
   enabledAppIds?: AppId[],
-): Promise<Array<{ role: string, content: string }>> {
-  const promptForFileSelection = extractUserPromptText(messages);
-  const selectedFiles = await selectRelevantFiles(promptForFileSelection, backendBaseUrl, currentUser);
-  const typeDefinitions = loadSelectedTypeDefinitions(selectedFiles);
-
+): Promise<DashboardMessage[]> {
+  const typeDefinitions = loadSelectedTypeDefinitions(getAllTypeDefinitionFiles());
   const availableRoutes = enabledAppIds ? buildAvailableRoutes(enabledAppIds) : "";
-
-  const contextMessages: Array<{ role: string, content: string }> = [];
 
   const dashboardUiDocsHeader = [
     "DashboardUI component documentation (READ THIS BEFORE USING ANY COMPONENT):",
@@ -172,27 +99,45 @@ export async function buildDashboardMessages(
     "bare type signatures are NOT enough to use the components correctly.",
   ].join("\n");
 
+  const cachedText = `Here are the type definitions for the Hexclave SDK:\n${typeDefinitions}\n\n${dashboardUiDocsHeader}\n${BUNDLED_DASHBOARD_UI_TYPES}`;
+  const contextMessages: DashboardMessage[] = [];
+
+  contextMessages.push({
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: cachedText,
+        providerOptions: {
+          openrouter: { cacheControl: { type: "ephemeral" } },
+        },
+      },
+    ],
+  });
+  contextMessages.push({
+    role: "assistant",
+    content: "I have the SDK reference material and UI component types. What dashboard would you like me to create or edit?",
+  });
+
+  const tailParts: string[] = [];
+  if (availableRoutes) {
+    tailParts.push(availableRoutes.trimStart());
+  }
   if (currentSource != null && currentSource.length > 0) {
+    tailParts.push(`Here is the current dashboard source code:\n\`\`\`tsx\n${currentSource}\n\`\`\``);
+  }
+  if (tailParts.length > 0) {
     contextMessages.push({
       role: "user",
-      content: `Here is the current dashboard source code:\n\`\`\`tsx\n${currentSource}\n\`\`\`\n\nHere are the type definitions:\n${typeDefinitions}\n\n${dashboardUiDocsHeader}\n${BUNDLED_DASHBOARD_UI_TYPES}${availableRoutes}`,
+      content: tailParts.join("\n\n"),
     });
     contextMessages.push({
       role: "assistant",
-      content: "I understand the current dashboard code, type definitions, and available routes. I've also read the JSDoc on every DashboardUI component I plan to use and will follow each component's canonical pattern. What changes would you like to make?",
-    });
-  } else {
-    contextMessages.push({
-      role: "user",
-      content: `Here are the type definitions for the Hexclave SDK:\n${typeDefinitions}\n\n${dashboardUiDocsHeader}\n${BUNDLED_DASHBOARD_UI_TYPES}${availableRoutes}`,
-    });
-    contextMessages.push({
-      role: "assistant",
-      content: "I have the type definitions and available routes. I've also read the JSDoc on every DashboardUI component I plan to use and will follow each component's canonical pattern. What dashboard would you like me to create?",
+      content: "Got it. What changes would you like me to make?",
     });
   }
 
-  return contextMessages;
+  return Promise.resolve(contextMessages);
 }
 
 export { BUNDLED_DASHBOARD_UI_TYPES };
