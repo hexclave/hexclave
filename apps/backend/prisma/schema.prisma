@@ -1582,6 +1582,33 @@ enum PurchaseCreationSource {
   API_GRANT
 }
 
+enum PromoCodeDiscountType {
+  percent
+  amount
+}
+
+enum PromoCodeSubscriptionBehavior {
+  first_payment
+  fixed_duration
+  forever
+}
+
+enum PromoCodeAvailabilityType {
+  always
+  between_dates
+}
+
+enum PromoCodeRedemptionStatus {
+  pending
+  succeeded
+  released
+}
+
+enum PromoCodeRedemptionPurchaseKind {
+  one_time
+  subscription
+}
+
 model Subscription {
   id           String       @default(uuid()) @db.Uuid
   tenancyId    String       @db.Uuid
@@ -1720,6 +1747,74 @@ model SubscriptionInvoice {
   @@unique([tenancyId, stripeInvoiceId])
   @@index([tenancyId, createdAt], name: "SubscriptionInvoice_tenancyId_createdAt_idx")
 }
+
+model PromoCode {
+  id        String @default(uuid()) @db.Uuid
+  tenancyId String @db.Uuid
+
+  codeName       String
+  discountType   PromoCodeDiscountType
+  discountAmount Decimal               @db.Decimal(10, 4)
+  currency       String                @default("USD")
+
+  // null = all products; otherwise Hexclave catalog product IDs.
+  applicableProductIds Json?
+
+  maxRedemptions     Int?
+  numRedemptions     Int @default(0)
+  pendingRedemptions Int @default(0)
+
+  subscriptionBehavior                PromoCodeSubscriptionBehavior
+  subscriptionDiscountDurationMonths  Int?
+
+  availabilityType PromoCodeAvailabilityType
+  startsAt         DateTime?
+  endsAt           DateTime?
+
+  pausedAt DateTime?
+  endedAt  DateTime?
+
+  stripeCouponId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  redemptions PromoCodeRedemption[]
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, codeName])
+  @@index([tenancyId, createdAt])
+}
+
+model PromoCodeRedemption {
+  id          String @default(uuid()) @db.Uuid
+  tenancyId   String @db.Uuid
+  promoCodeId String @db.Uuid
+
+  customerId   String
+  customerType CustomerType
+
+  status       PromoCodeRedemptionStatus
+  purchaseKind PromoCodeRedemptionPurchaseKind
+
+  stripePaymentIntentId String?
+  stripeSubscriptionId  String?
+  oneTimePurchaseId     String? @db.Uuid
+  subscriptionId        String? @db.Uuid
+  stripeDiscountId      String?
+
+  subscriptionDiscountRemovedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  promoCode PromoCode @relation(fields: [tenancyId, promoCodeId], references: [tenancyId, id], onDelete: Cascade)
+
+  @@id([tenancyId, id])
+  @@index([tenancyId, promoCodeId, status])
+  @@index([tenancyId, stripePaymentIntentId])
+  @@index([tenancyId, stripeSubscriptionId])
+}
+
 
 // Durable backup of Bulldozer `payments-manual-transactions` (refunds today).
 // Dual-written from the refund routes; also filled by a one-off HTTP export from

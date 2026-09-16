@@ -2491,6 +2491,7 @@ export class HexclaveClientInterface {
       to_product_id: string,
       price_id?: string,
       quantity?: number,
+      promo_codes?: string[],
     },
     session: InternalSession | null,
   ): Promise<void> {
@@ -2506,10 +2507,41 @@ export class HexclaveClientInterface {
           to_product_id: options.to_product_id,
           price_id: options.price_id,
           quantity: options.quantity,
+          promo_codes: options.promo_codes,
         }),
       },
       session,
     );
+  }
+
+  async validateCustomerPromoCodes(
+    options: {
+      customer_type: "user" | "team",
+      customer_id: string,
+      product_id: string,
+      price_id?: string,
+      quantity?: number,
+      promo_codes: string[],
+    },
+    session: InternalSession | null,
+  ): Promise<{ original_amount: string, net_amount: string, recurring_amount: string, applied_code_names: string[] }> {
+    const response = await this.sendClientRequest(
+      urlString`/payments/products/${options.customer_type}/${options.customer_id}/validate-promo-codes`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          product_id: options.product_id,
+          price_id: options.price_id,
+          quantity: options.quantity,
+          promo_codes: options.promo_codes,
+        }),
+      },
+      session,
+    );
+    return await response.json();
   }
 
   async createCheckoutUrl(
@@ -2519,6 +2551,7 @@ export class HexclaveClientInterface {
     session: InternalSession | null,
     returnUrl?: string,
     requestType: "client" | "server" | "admin" = "client",
+    promoOptions?: { allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean },
   ): Promise<string> {
     const productBody = typeof productIdOrInline === "string" ?
       { product_id: productIdOrInline } :
@@ -2531,7 +2564,14 @@ export class HexclaveClientInterface {
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({ customer_type, customer_id, ...productBody, return_url: returnUrl }),
+        body: JSON.stringify({
+          customer_type,
+          customer_id,
+          ...productBody,
+          return_url: returnUrl,
+          allow_promo_codes: promoOptions?.allowPromoCodes === true,
+          allow_stacking_promo_codes: promoOptions?.allowPromoCodes === true && promoOptions.allowStackingPromoCodes === true,
+        }),
       },
       session,
       requestType,
