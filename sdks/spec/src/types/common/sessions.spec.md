@@ -17,6 +17,13 @@ createdAt: Date
 isImpersonation: bool
   Whether this is an impersonation session (admin viewing as user).
 
+agentName: string | null
+  Set when the session was minted for an AI agent through the agent auth
+  protocol (`POST /agent/register` + human approval on the `agentAuthConfirm`
+  handler page). It is the agent's self-reported name and is shown to users so
+  they can recognise and revoke the agent's session. `null` for regular
+  sessions. Maps from the `agent_name` field of the sessions API.
+
 lastUsedAt: Date | null
   When the session was last used for an API request.
 

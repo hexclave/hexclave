@@ -189,6 +189,545 @@
         }
       }
     },
+    "/agent/auth.md": {
+      "get": {
+        "summary": "Agent auth guide (auth.md)",
+        "description": "A Markdown guide, written for AI agents, that explains how to register with this project and obtain a session. All commands are pre-filled with the project's values. Only the project ID header is required to read it.",
+        "parameters": [
+          {
+            "name": "x-stack-project-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "x-stack-branch-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "x-stack-publishable-client-key",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Agent Auth"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/agent/auth.md",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/discovery": {
+      "get": {
+        "summary": "Agent auth discovery document",
+        "description": "Machine-readable description of this project's agent-auth endpoints. Companion to /agent/auth.md. Only the project ID header is required to read it.",
+        "parameters": [
+          {
+            "name": "x-stack-project-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "x-stack-branch-id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "x-stack-publishable-client-key",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Agent Auth"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/agent/discovery",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "issuer": {
+                      "type": "string"
+                    },
+                    "registration_endpoint": {
+                      "type": "string"
+                    },
+                    "token_endpoint": {
+                      "type": "string"
+                    },
+                    "revocation_endpoint": {
+                      "type": "string"
+                    },
+                    "agent_auth_md": {
+                      "type": "string"
+                    },
+                    "hexclave_agent_auth": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "project_id": {
+                          "type": "string"
+                        },
+                        "project_display_name": {
+                          "type": "string"
+                        },
+                        "publishable_client_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            null
+                          ]
+                        },
+                        "publishable_client_key_required": {
+                          "type": "boolean"
+                        },
+                        "poll_endpoint": {
+                          "type": "string"
+                        },
+                        "confirm_endpoint": {
+                          "type": "string"
+                        },
+                        "sessions_endpoint": {
+                          "type": "string"
+                        },
+                        "anonymous_session_header": {
+                          "type": "object"
+                        },
+                        "claim_code_format": {
+                          "type": "string"
+                        },
+                        "default_attempt_lifetime_millis": {
+                          "type": "number"
+                        },
+                        "agent_session_lifetime_millis": {
+                          "type": "number"
+                        },
+                        "required_headers": {
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "enabled",
+                        "project_id",
+                        "project_display_name",
+                        "publishable_client_key_required",
+                        "poll_endpoint",
+                        "confirm_endpoint",
+                        "sessions_endpoint",
+                        "anonymous_session_header",
+                        "claim_code_format",
+                        "default_attempt_lifetime_millis",
+                        "agent_session_lifetime_millis",
+                        "required_headers"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "issuer",
+                    "registration_endpoint",
+                    "token_endpoint",
+                    "revocation_endpoint",
+                    "agent_auth_md",
+                    "hexclave_agent_auth"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/register": {
+      "post": {
+        "summary": "Register an AI agent",
+        "description": "Starts the agent-auth flow. The agent describes itself and receives (a) an anonymous session it can use immediately (send `x-hexclave-allow-anonymous-user: true` with those requests), (b) a short claim code and confirm URL to show to a human, and (c) a poll token to exchange for the approved session. Requires the Agent Auth app to be enabled for the project.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "agent": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "example": "Claude Code",
+                        "description": "Human-readable name of the agent, shown to the user on the confirm page and in their session list."
+                      },
+                      "description": {
+                        "type": "string",
+                        "example": "Triage support tickets",
+                        "description": "What the agent intends to do with the access."
+                      },
+                      "url": {
+                        "type": "string",
+                        "example": "https://example.com/agent",
+                        "description": "Homepage or documentation URL of the agent."
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ]
+                  },
+                  "user_hint": {
+                    "type": "string",
+                    "example": "alice@example.com",
+                    "description": "Optional hint (usually an email) about which user is expected to approve. Purely informational, shown on the confirm page."
+                  },
+                  "app_url": {
+                    "type": "string",
+                    "example": "https://app.example.com",
+                    "description": "URL of the app the agent is connecting to, if known. Must be one of the project's trusted domains; the confirm URL is then built on that app so the user approves where they are already signed in."
+                  },
+                  "expires_in_millis": {
+                    "type": "number",
+                    "default": 900000
+                  }
+                },
+                "required": [
+                  "agent"
+                ],
+                "example": {
+                  "user_hint": "alice@example.com",
+                  "app_url": "https://app.example.com"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Agent Auth"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/agent/register",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "claim_code": {
+                      "type": "string",
+                      "example": "K7PQ-3XWM",
+                      "description": "Short code the user types or sees on the confirm page."
+                    },
+                    "confirm_url": {
+                      "type": "string",
+                      "example": "https://app.example.com/handler/agent-auth-confirm?code=K7PQ-3XWM",
+                      "description": "URL to show or open for the user; already includes the claim code."
+                    },
+                    "poll_token": {
+                      "type": "string",
+                      "example": "<poll token>",
+                      "description": "Secret held by the agent. Send it to /agent/register/poll to check for approval."
+                    },
+                    "expires_at_millis": {
+                      "type": "number"
+                    },
+                    "anonymous_session": {
+                      "type": "object",
+                      "properties": {
+                        "user_id": {
+                          "type": "string"
+                        },
+                        "access_token": {
+                          "type": "string"
+                        },
+                        "refresh_token": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "user_id",
+                        "access_token",
+                        "refresh_token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "claim_code",
+                    "confirm_url",
+                    "poll_token",
+                    "expires_at_millis",
+                    "anonymous_session"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/register/confirm": {
+      "post": {
+        "summary": "Inspect, approve, or deny an agent registration",
+        "description": "Used by the agent-auth-confirm page. `inspect` returns the agent's details for the claim code; `approve` creates a new session for the agent on the calling user's account; `deny` rejects the registration.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "claim_code": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "inspect",
+                      "approve",
+                      "deny"
+                    ]
+                  }
+                },
+                "required": [
+                  "claim_code",
+                  "action"
+                ],
+                "example": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "Agent Auth"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/agent/register/confirm",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "agent": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            null
+                          ]
+                        },
+                        "url": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            null
+                          ]
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ]
+                    },
+                    "user_hint": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        null
+                      ]
+                    },
+                    "expires_at_millis": {
+                      "type": "number"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "waiting",
+                        "success",
+                        "denied"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "agent",
+                    "expires_at_millis",
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/register/poll": {
+      "post": {
+        "summary": "Poll for agent approval",
+        "description": "Checks whether the human has approved the agent registration. Once approved (`success`), the agent's session tokens are returned exactly once; subsequent polls report `used`. Poll roughly every few seconds while the status is `waiting`.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "poll_token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "poll_token"
+                ],
+                "example": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "Agent Auth"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/agent/register/poll",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "waiting",
+                        "success",
+                        "denied",
+                        "expired",
+                        "used"
+                      ]
+                    },
+                    "session": {
+                      "type": "object",
+                      "properties": {
+                        "user_id": {
+                          "type": "string"
+                        },
+                        "access_token": {
+                          "type": "string"
+                        },
+                        "refresh_token": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "user_id",
+                        "access_token",
+                        "refresh_token"
+                      ],
+                      "description": "Only present when status is `success`."
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "waiting",
+                        "success",
+                        "denied",
+                        "expired",
+                        "used"
+                      ]
+                    },
+                    "session": {
+                      "type": "object",
+                      "properties": {
+                        "user_id": {
+                          "type": "string"
+                        },
+                        "access_token": {
+                          "type": "string"
+                        },
+                        "refresh_token": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "user_id",
+                        "access_token",
+                        "refresh_token"
+                      ],
+                      "description": "Only present when status is `success`."
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/analytics/query": {
       "post": {
         "summary": "Run analytics query",
@@ -7486,6 +8025,15 @@
                           },
                           "is_impersonation": {
                             "type": "boolean"
+                          },
+                          "agent_name": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              null
+                            ]
                           },
                           "last_used_at": {
                             "type": "number"

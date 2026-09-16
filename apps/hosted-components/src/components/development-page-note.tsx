@@ -16,6 +16,7 @@ export type DevelopmentPageKey =
   | "error"
   | "teamInvitation"
   | "cliAuthConfirm"
+  | "agentAuthConfirm"
   | "onboarding";
 
 type DevelopmentPageNoteProps = {

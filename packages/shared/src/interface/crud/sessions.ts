@@ -22,6 +22,8 @@ export const sessionsCrudReadSchema = yupObject({
   user_id: yupString().uuid().defined(),
   created_at: yupNumber().defined(),
   is_impersonation: yupBoolean().defined(),
+  // Name of the AI agent this session was minted for via agent auth, or null for regular sessions.
+  agent_name: yupString().nullable().defined(),
   last_used_at: yupNumber().optional(),
   is_current_session: yupBoolean(),
   // TODO move this to a shared type

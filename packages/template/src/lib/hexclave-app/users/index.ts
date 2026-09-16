@@ -325,6 +325,8 @@ export type ActiveSession = {
   userId: string,
   createdAt: Date,
   isImpersonation: boolean,
+  /** Name of the AI agent this session belongs to (see agent auth), or null for regular sessions. */
+  agentName: string | null,
   lastUsedAt: Date | undefined,
   isCurrentSession: boolean,
   geoInfo?: GeoInfo,
