@@ -116,6 +116,36 @@ describe("OAuth with wildcard domains", () => {
     expect(response.tokenResponse.status).toBe(200);
   });
 
+  it("should work with a wildcard port domain", async ({ expect }) => {
+    const { adminAccessToken } = await Project.createAndSwitch({
+      config: {
+        oauth_providers: [{ id: "spotify", type: "shared" }],
+      }
+    });
+    await InternalApiKey.createAndSetProjectKeys();
+
+    const configResponse = await niceBackendFetch("/api/v1/internal/config/override/environment", {
+      method: "PATCH",
+      accessType: "admin",
+      headers: {
+        'x-stack-admin-access-token': adminAccessToken,
+      },
+      body: {
+        config_override_string: JSON.stringify({
+          'domains.trustedDomains.wildcard-port': {
+            baseUrl: 'http://*.localhost:*',
+            handlerPath: '/some-callback-url',
+          },
+          'domains.allowLocalhost': false,
+        }),
+      },
+    });
+    expect(configResponse.status).toBe(200);
+
+    const response = await Auth.OAuth.signIn();
+    expect(response.tokenResponse.status).toBe(200);
+  });
+
   it("should FAIL with single wildcard that doesn't match", async ({ expect }) => {
     const { adminAccessToken } = await Project.createAndSwitch({
       config: {

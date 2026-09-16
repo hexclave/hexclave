@@ -453,13 +453,19 @@ export const urlSchema = yupString().test({
   test: (value) => value == null || isValidUrl(value)
 });
 const wildcardUrlPlaceholder = 'wildcard-placeholder';
+const wildcardPortPattern = /^(https?:\/\/[^/?#\\\s]*):\*(?=[/?#]|$)/i;
 
 function parseUrlWithWildcards(value: string): URL {
   // URL cannot parse :*. Substitute a numeric port only at the end of the authority,
   // before replacing hostname wildcards, so partial ports and wildcards in paths still fail validation.
-  return new URL(value
-    .replace(/^(https?:\/\/[^/?#\\]*):\*(?=[/?#]|$)/i, '$1:65535')
+  const hasWildcardPort = wildcardPortPattern.test(value);
+  const url = new URL(value
+    .replace(wildcardPortPattern, '$1:65535')
     .replace(/\*/g, wildcardUrlPlaceholder));
+  if (hasWildcardPort && (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '')) {
+    throw new TypeError('Any-port wildcard cannot include URL credentials, query, or fragment');
+  }
+  return url;
 }
 
 /**
@@ -522,6 +528,28 @@ export const wildcardProtocolAndDomainSchema = wildcardUrlSchema.test({
       return false;
     }
   }
+});
+import.meta.vitest?.test("wildcard URL schemas support whole-port wildcards without accepting unmatchable URL components", ({ expect }) => {
+  for (const pattern of ["https://example.com:*", "https://*.example.com:*", "https://**.example.com:*"]) {
+    expect(wildcardUrlSchema.isValidSync(pattern)).toBe(true);
+    expect(wildcardProtocolAndDomainSchema.isValidSync(pattern)).toBe(true);
+  }
+  for (const pattern of [
+    "https://user:pass@example.com:*",
+    "https://example.com:*?query=value",
+    "https://example.com:*#fragment",
+    "https://example.com:**",
+    "https://example.com:4*",
+    "https://example.com:*5",
+    "https://example.com:*:443",
+    "https://example.com:\t*",
+    "https://example.com:\n*",
+  ]) {
+    expect(wildcardUrlSchema.isValidSync(pattern)).toBe(false);
+    expect(wildcardProtocolAndDomainSchema.isValidSync(pattern)).toBe(false);
+  }
+  expect(wildcardUrlSchema.isValidSync("https://*.example.com:*/handler")).toBe(true);
+  expect(wildcardProtocolAndDomainSchema.isValidSync("https://*.example.com:*/handler")).toBe(false);
 });
 export const jsonSchema = yupMixed().nullable().defined().transform((value) => JSON.parse(JSON.stringify(value)));
 export const jsonStringSchema = yupString().test("json", (params) => `${params.path} is not valid JSON`, (value) => {
