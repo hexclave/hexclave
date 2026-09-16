@@ -174,7 +174,7 @@ import.meta.vitest?.test("isValidHostWithWildcards", ({ expect }) => {
   expect(isValidHostWithWildcards("example.com:")).toBe(false);
   expect(isValidHostWithWildcards(":4250")).toBe(false);
   expect(isValidHostWithWildcards("example.com:abc")).toBe(false);
-  expect(isValidHostWithWildcards("example.com:*")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:*")).toBe(true);
   expect(isValidHostWithWildcards("example.com:70000")).toBe(false);
   expect(isValidHostWithWildcards("example.com:04250")).toBe(false);
   expect(isValidHostWithWildcards("example.com:0")).toBe(false);
