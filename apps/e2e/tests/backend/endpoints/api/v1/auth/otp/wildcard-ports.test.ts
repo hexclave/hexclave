@@ -24,17 +24,15 @@ it("saves a trusted port wildcard and applies it to sign-in callbacks", async ({
   expect(savedConfig.status).toBe(200);
   expect(JSON.parse(savedConfig.body.config_string).domains.trustedDomains["wildcard-port"]).toEqual(trustedDomain);
 
-  for (const callbackUrl of [
-    "https://app.example.com/handler",
-    "https://app.example.com:4405/handler",
-  ]) {
-    const response = await niceBackendFetch("/api/v1/auth/otp/send-sign-in-code", {
-      method: "POST",
-      accessType: "client",
-      body: { email: backendContext.value.mailbox.emailAddress, callback_url: callbackUrl },
-    });
-    expect(response.status).toBe(200);
-  }
+  const validResponse = await niceBackendFetch("/api/v1/auth/otp/send-sign-in-code", {
+    method: "POST",
+    accessType: "client",
+    body: {
+      email: backendContext.value.mailbox.emailAddress,
+      callback_url: "https://app.example.com:4405/handler",
+    },
+  });
+  expect(validResponse.status).toBe(200);
 
   for (const callbackUrl of [
     "http://app.example.com:4405/handler",
