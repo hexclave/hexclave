@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { environmentConfigSchema } from "./config/schema";
 import { wildcardProtocolAndDomainSchema, wildcardUrlSchema } from "./schema-fields";
 import { validateRedirectUrl } from "./utils/redirect-urls";
 import { isValidHostWithWildcards } from "./utils/urls";
@@ -67,6 +68,17 @@ describe("trusted domain port wildcards", () => {
     }
   });
 
+  it("preserves a port wildcard through environment configuration validation", async () => {
+    const domains = {
+      allowLocalhost: false,
+      trustedDomains: {
+        development: { baseUrl: "https://*.example.com:*", handlerPath: "/handler" },
+      },
+    };
+    const config = await environmentConfigSchema.validate({ domains });
+    expect(config.domains).toEqual(domains);
+  });
+
   it.each(["https://example.com:*", "https://*.example.com:*", "https://**.example.com:*"])(
     "matches configured %s across ports without changing the protocol or hostname scope",
     (pattern) => {
@@ -92,4 +104,11 @@ describe("trusted domain port wildcards", () => {
       expect(validateRedirectUrl(`https://${host}:4405/handler`, config)).toBe(false);
     },
   );
+
+  it("keeps a specific port restricted to that port", () => {
+    const config = { trustedDomains: [wildcardUrlSchema.validateSync("https://*.example.com:4405")] };
+    expect(validateRedirectUrl("https://app.example.com:4405/handler", config)).toBe(true);
+    expect(validateRedirectUrl("https://app.example.com:4406/handler", config)).toBe(false);
+    expect(validateRedirectUrl("https://app.example.com/handler", config)).toBe(false);
+  });
 });

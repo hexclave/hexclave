@@ -452,8 +452,18 @@ export const urlSchema = yupString().test({
   message: (params) => `${params.path} is not a valid URL`,
   test: (value) => value == null || isValidUrl(value)
 });
+const wildcardUrlPlaceholder = 'wildcard-placeholder';
+
+function parseUrlWithWildcards(value: string): URL {
+  // URL cannot parse :*. Substitute a numeric port only at the end of the authority,
+  // before replacing hostname wildcards, so partial ports and wildcards in paths still fail validation.
+  return new URL(value
+    .replace(/^(https?:\/\/[^/?#\\]*):\*(?=[/?#]|$)/i, '$1:65535')
+    .replace(/\*/g, wildcardUrlPlaceholder));
+}
+
 /**
- * URL schema that supports wildcard patterns in hostnames (e.g., "https://*.example.com", "http://*:8080")
+ * URL schema supporting hostname wildcards and an explicit any-port suffix (e.g., "https://*.example.com:*").
  */
 export const wildcardUrlSchema = yupString().test({
   name: 'no-spaces',
@@ -472,18 +482,15 @@ export const wildcardUrlSchema = yupString().test({
 
     // For wildcard URLs, validate the structure by replacing wildcards with placeholders
     try {
-      const PLACEHOLDER = 'wildcard-placeholder';
-      // Replace wildcards with valid placeholders for URL parsing
-      const normalizedUrl = value.replace(/\*/g, PLACEHOLDER);
-      const url = new URL(normalizedUrl);
+      const url = parseUrlWithWildcards(value);
 
-      // Only allow wildcards in the hostname; reject anywhere else
+      // Only allow hostname wildcards and the whole-port wildcard handled above.
       if (
-        url.username.includes(PLACEHOLDER) ||
-        url.password.includes(PLACEHOLDER) ||
-        url.pathname.includes(PLACEHOLDER) ||
-        url.search.includes(PLACEHOLDER) ||
-        url.hash.includes(PLACEHOLDER)
+        url.username.includes(wildcardUrlPlaceholder) ||
+        url.password.includes(wildcardUrlPlaceholder) ||
+        url.pathname.includes(wildcardUrlPlaceholder) ||
+        url.search.includes(wildcardUrlPlaceholder) ||
+        url.hash.includes(wildcardUrlPlaceholder)
       ) {
         return false;
       }
@@ -494,7 +501,7 @@ export const wildcardUrlSchema = yupString().test({
       }
 
       // Extract original hostname pattern from the input
-      const hostPattern = url.hostname.split(PLACEHOLDER).join('*');
+      const hostPattern = url.hostname.split(wildcardUrlPlaceholder).join('*');
 
       // Validate the wildcard hostname pattern using the existing function
       return isValidHostnameWithWildcards(hostPattern);
@@ -509,10 +516,7 @@ export const wildcardProtocolAndDomainSchema = wildcardUrlSchema.test({
   test: (value) => {
     if (value == null) return true;
     try {
-      const PLACEHOLDER = 'wildcard-placeholder';
-      // Replace wildcards with valid placeholders for URL parsing
-      const normalized = value.replace(/\*/g, PLACEHOLDER);
-      const url = new URL(normalized);
+      const url = parseUrlWithWildcards(value);
       return url.protocol !== '' && url.hostname !== '' && url.pathname === '/' && url.search === '' && url.hash === '';
     } catch (e) {
       return false;
