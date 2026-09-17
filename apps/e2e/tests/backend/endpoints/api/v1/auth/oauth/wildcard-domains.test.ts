@@ -2,7 +2,7 @@ import { describe } from "vitest";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { it, updateCookiesFromResponse } from "../../../../../../helpers";
 import { withPortPrefix } from "../../../../../../helpers/ports";
-import { Auth, InternalApiKey, Project, niceBackendFetch } from "../../../../../backend-helpers";
+import { Auth, InternalApiKey, Project, backendContext, niceBackendFetch } from "../../../../../backend-helpers";
 
 const oauthMockServerPort = withPortPrefix("07");
 
@@ -117,7 +117,7 @@ describe("OAuth with wildcard domains", () => {
     expect(response.tokenResponse.status).toBe(200);
   });
 
-  it("should work with a wildcard port domain", async ({ expect }) => {
+  it("should complete OAuth on a non-default HTTPS port with a wildcard port domain", async ({ expect }) => {
     const { adminAccessToken } = await Project.createAndSwitch({
       config: {
         oauth_providers: [{ id: "spotify", type: "shared" }],
@@ -134,8 +134,8 @@ describe("OAuth with wildcard domains", () => {
       body: {
         config_override_string: JSON.stringify({
           'domains.trustedDomains.wildcard-port': {
-            baseUrl: 'http://*.localhost:*',
-            handlerPath: '/some-callback-url',
+            baseUrl: 'https://*.example.com:*',
+            handlerPath: '/handler/oauth-callback',
           },
           'domains.allowLocalhost': false,
         }),
@@ -143,7 +143,7 @@ describe("OAuth with wildcard domains", () => {
     });
     expect(configResponse.status).toBe(200);
 
-    const redirectUrl = "http://stack-test.localhost:4405/some-callback-url";
+    const redirectUrl = "https://app.example.com:4405/handler/oauth-callback";
     const authorize = await Auth.OAuth.authorize({ redirectUrl });
     const { authorizeResponse, innerCallbackUrl } = await Auth.OAuth.getInnerCallbackUrl(authorize);
     const callbackResponse = await niceBackendFetch(innerCallbackUrl, {
@@ -156,7 +156,36 @@ describe("OAuth with wildcard domains", () => {
     const outerCallbackUrl = new URL(callbackResponse.headers.get("location") ?? throwErr("missing OAuth callback redirect location"));
     expect(outerCallbackUrl.origin).toBe(new URL(redirectUrl).origin);
     expect(outerCallbackUrl.pathname).toBe(new URL(redirectUrl).pathname);
-    expect(outerCallbackUrl.searchParams.get("code")).toEqual(expect.any(String));
+    expect(outerCallbackUrl.searchParams.get("state")).toBe("this-is-some-state");
+    const authorizationCode = outerCallbackUrl.searchParams.get("code") ?? throwErr("missing OAuth authorization code");
+    const projectKeys = backendContext.value.projectKeys;
+    if (projectKeys === "no-project") throwErr("missing project keys for OAuth token exchange");
+
+    const tokenResponse = await niceBackendFetch("/api/v1/auth/oauth/token", {
+      method: "POST",
+      accessType: "client",
+      body: {
+        client_id: projectKeys.projectId,
+        client_secret: projectKeys.publishableClientKey ?? throwErr("missing OAuth publishable client key"),
+        code: authorizationCode,
+        redirect_uri: redirectUrl,
+        code_verifier: Auth.OAuth.testCodeVerifier,
+        grant_type: "authorization_code",
+      },
+    });
+    expect(tokenResponse).toMatchObject({
+      status: 200,
+      body: { access_token: expect.any(String), refresh_token: expect.any(String) },
+    });
+
+    const userResponse = await niceBackendFetch("/api/v1/users/me", {
+      accessType: "client",
+      userAuth: { accessToken: tokenResponse.body.access_token },
+    });
+    expect(userResponse).toMatchObject({
+      status: 200,
+      body: { primary_email: backendContext.value.mailbox.emailAddress },
+    });
   });
 
   it("should FAIL with single wildcard that doesn't match", async ({ expect }) => {
