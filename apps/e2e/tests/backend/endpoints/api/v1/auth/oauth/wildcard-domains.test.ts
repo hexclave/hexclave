@@ -1,5 +1,5 @@
 import { describe } from "vitest";
-import { it } from "../../../../../../helpers";
+import { it, updateCookiesFromResponse } from "../../../../../../helpers";
 import { withPortPrefix } from "../../../../../../helpers/ports";
 import { Auth, InternalApiKey, Project, niceBackendFetch } from "../../../../../backend-helpers";
 
@@ -142,8 +142,20 @@ describe("OAuth with wildcard domains", () => {
     });
     expect(configResponse.status).toBe(200);
 
-    const response = await Auth.OAuth.signIn();
-    expect(response.tokenResponse.status).toBe(200);
+    const redirectUrl = "http://stack-test.localhost:4405/some-callback-url";
+    const authorize = await Auth.OAuth.authorize({ redirectUrl });
+    const { authorizeResponse, innerCallbackUrl } = await Auth.OAuth.getInnerCallbackUrl(authorize);
+    const callbackResponse = await niceBackendFetch(innerCallbackUrl, {
+      redirect: "manual",
+      headers: {
+        cookie: updateCookiesFromResponse("", authorizeResponse),
+      },
+    });
+    expect(callbackResponse.status).toBe(303);
+    const outerCallbackUrl = new URL(callbackResponse.headers.get("location") ?? "");
+    expect(outerCallbackUrl.origin).toBe(new URL(redirectUrl).origin);
+    expect(outerCallbackUrl.pathname).toBe(new URL(redirectUrl).pathname);
+    expect(outerCallbackUrl.searchParams.get("code")).toEqual(expect.any(String));
   });
 
   it("should FAIL with single wildcard that doesn't match", async ({ expect }) => {
