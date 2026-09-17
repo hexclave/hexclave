@@ -1,4 +1,5 @@
 import { describe } from "vitest";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { it, updateCookiesFromResponse } from "../../../../../../helpers";
 import { withPortPrefix } from "../../../../../../helpers/ports";
 import { Auth, InternalApiKey, Project, niceBackendFetch } from "../../../../../backend-helpers";
@@ -152,7 +153,7 @@ describe("OAuth with wildcard domains", () => {
       },
     });
     expect(callbackResponse.status).toBe(303);
-    const outerCallbackUrl = new URL(callbackResponse.headers.get("location") ?? "");
+    const outerCallbackUrl = new URL(callbackResponse.headers.get("location") ?? throwErr("missing OAuth callback redirect location"));
     expect(outerCallbackUrl.origin).toBe(new URL(redirectUrl).origin);
     expect(outerCallbackUrl.pathname).toBe(new URL(redirectUrl).pathname);
     expect(outerCallbackUrl.searchParams.get("code")).toEqual(expect.any(String));
