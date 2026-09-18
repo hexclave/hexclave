@@ -4,7 +4,7 @@ import { hexclaveAppInternalsSymbol, TvProfileRequestError } from "@/lib/hexclav
 import { clearToasts, Toaster } from "@/components/ui";
 import { getTvBuiltInProfile, type TvDisplayResource, type TvProfileResource } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { formatTvDisplayPairingCode, getPairingFailureNotice, TvDisplayManagement } from "./display-management";
 
 const display: TvDisplayResource = {
@@ -56,6 +56,16 @@ function getCompanyPulseProfile() {
 function renderManagement(adminApp: object, profiles: TvProfileResource[] = [getCompanyPulseProfile()]) {
   return render(<><TvDisplayManagement adminApp={adminApp} profiles={profiles} /><Toaster /></>);
 }
+
+// Radix scrolls the focused option; jsdom has no layout/scroll implementation.
+const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+beforeAll(() => {
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => undefined });
+});
+afterAll(() => {
+  if (scrollIntoViewDescriptor == null) Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+  else Object.defineProperty(HTMLElement.prototype, "scrollIntoView", scrollIntoViewDescriptor);
+});
 
 afterEach(() => {
   cleanup();
@@ -462,20 +472,19 @@ describe("TV display pairing feedback", () => {
     expect(screen.getAllByText("Profile: Company Pulse")).toHaveLength(2);
   });
 
-  it("preserves exact-financial acknowledgment in the refined pairing form", async () => {
+  it.each(["exact", "redacted"] as const)("pairs a %s profile without a second checkbox and preserves server acknowledgement", async (visibility) => {
     const baseProfile = getCompanyPulseProfile();
     const exactProfile: TvProfileResource = {
       ...baseProfile,
       configuration: {
         ...baseProfile.configuration,
-        financialVisibility: "exact",
+        financialVisibility: visibility,
       },
     };
-    const adminApp = {
-      [hexclaveAppInternalsSymbol]: {
-        sendRequest: async () => jsonResponse({ displays: [] }),
-      },
-    };
+    const sendRequest = vi.fn(async (_path: string, options: RequestInit) => options.method === "POST"
+      ? approvalResponse()
+      : jsonResponse({ displays: [] }));
+    const adminApp = { [hexclaveAppInternalsSymbol]: { sendRequest } };
 
     renderManagement(adminApp, [exactProfile]);
 
@@ -483,9 +492,115 @@ describe("TV display pairing feedback", () => {
     fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
     fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Office Display" } });
     const pairButton = screen.getByRole("button", { name: "Pair Display" });
-    expect(pairButton.hasAttribute("disabled")).toBe(true);
-
-    fireEvent.click(screen.getByText(/I understand that this physical display/));
     expect(pairButton.hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByText("Exact Financial Values Enabled") != null).toBe(visibility === "exact");
+    expect(sendRequest.mock.calls.filter(([, options]) => options.method === "POST")).toHaveLength(0);
+    fireEvent.click(pairButton);
+    await waitFor(() => expect(screen.getByLabelText("Pairing code")).toHaveProperty("value", ""));
+    expect(screen.getByLabelText("Display name")).toHaveProperty("value", "");
+    const post = sendRequest.mock.calls.find(([, options]) => options.method === "POST");
+    if (post == null || typeof post[1].body !== "string") throw new Error("Missing pairing payload");
+    expect(JSON.parse(post[1].body)).toMatchObject({ profileId: exactProfile.id, acknowledgeExactFinancials: visibility === "exact" });
+  });
+
+  it("updates the pairing notice and acknowledgement when switching away from an exact profile", async () => {
+    const base = getCompanyPulseProfile();
+    const exact: TvProfileResource = { ...base, configuration: { ...base.configuration, financialVisibility: "exact" } };
+    const redacted: TvProfileResource = { ...base, id: "private-profile", configuration: { ...base.configuration, displayName: "Private Profile", financialVisibility: "redacted" } };
+    const sendRequest = vi.fn(async (_path: string, options: RequestInit) => options.method === "POST"
+      ? approvalResponse()
+      : jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } }, [exact, redacted]);
+    await screen.findByText("No Displays Paired Yet");
+    expect(screen.getByText("Exact Financial Values Enabled")).toBeTruthy();
+    fireEvent.keyDown(screen.getByLabelText("Assigned Profile"), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "Private Profile" }));
+    expect(screen.queryByText("Exact Financial Values Enabled")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Lobby" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pair Display" }));
+    await waitFor(() => expect(screen.getByLabelText("Pairing code")).toHaveProperty("value", ""));
+    const post = sendRequest.mock.calls.find(([, options]) => options.method === "POST");
+    if (post == null || typeof post[1].body !== "string") throw new Error("Missing pairing payload");
+    expect(JSON.parse(post[1].body)).toMatchObject({ profileId: redacted.id, acknowledgeExactFinancials: false });
+  });
+
+  it("keeps a server-side privacy change blocked and preserves the form for review", async () => {
+    const sendRequest = vi.fn(async (_path: string, options: RequestInit) => {
+      if (options.method === "POST") throw new TvProfileRequestError(428);
+      return jsonResponse({ displays: [] });
+    });
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } });
+    await screen.findByText("No Displays Paired Yet");
+    fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Lobby" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pair Display" }));
+    await screen.findByText("Profile Privacy Changed");
+    expect(screen.getByLabelText("Pairing code")).toHaveProperty("value", "ABCD-EFGH");
+    expect(screen.getByLabelText("Display name")).toHaveProperty("value", "Lobby");
+    expect(sendRequest.mock.calls.filter(([, options]) => options.method === "POST")).toHaveLength(1);
+  });
+
+  it("does not pair without an available profile", async () => {
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } }, []);
+    await screen.findByText("No Displays Paired Yet");
+    fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Lobby" } });
+    expect(screen.getByRole("button", { name: "Pair Display" }).hasAttribute("disabled")).toBe(true);
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["exact", "redacted"] as const)("confirms a %s assignment through Save without a second checkbox", async (visibility) => {
+    const base = getCompanyPulseProfile();
+    const target: TvProfileResource = {
+      ...base,
+      id: "9edb72fc-20eb-4c6b-a8b2-8f93d940f037",
+      configuration: { ...base.configuration, displayName: "Privacy Test", financialVisibility: visibility },
+    };
+    const sendRequest = vi.fn(async (_path: string, options: RequestInit) => options.method === "PATCH"
+      ? jsonResponse({ success: true })
+      : jsonResponse({ displays: [display] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } }, [base, target]);
+    await screen.findByRole("button", { name: "Assignment Saved" });
+    const assignmentSelect = document.getElementById(`tv-display-profile-${display.id}`);
+    if (assignmentSelect == null) throw new Error("Assignment selector missing");
+    fireEvent.keyDown(assignmentSelect, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "Privacy Test" }));
+    expect(screen.queryByText("Allow this physical display to show exact financial values.")).toBeNull();
+    expect(screen.queryByText("Exact Financial Values Enabled")).toBeNull();
+    expect(screen.queryByText("Exact Financial Values Hidden")).toBeNull();
+    expect(screen.queryByText("This profile shows exact financial values. Saving will apply this setting to the display.") != null).toBe(visibility === "exact");
+    expect(sendRequest.mock.calls.filter(([, options]) => options.method === "PATCH")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Save Assignment" }));
+    await waitFor(() => expect(sendRequest.mock.calls.filter(([, options]) => options.method === "PATCH")).toHaveLength(1));
+    const patch = sendRequest.mock.calls.find(([, options]) => options.method === "PATCH");
+    if (patch == null || typeof patch[1].body !== "string") throw new Error("Missing assignment payload");
+    expect(JSON.parse(patch[1].body)).toMatchObject({ profileId: target.id, acknowledgeExactFinancials: visibility === "exact" });
+    await waitFor(() => expect(screen.queryByText("This profile shows exact financial values. Saving will apply this setting to the display.")).toBeNull());
+  });
+
+  it("can confirm an existing profile that now requires financial acknowledgement", async () => {
+    const base = getCompanyPulseProfile();
+    const exactProfile: TvProfileResource = { ...base, configuration: { ...base.configuration, financialVisibility: "exact" } };
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [display] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } }, [exactProfile]);
+    const save = await screen.findByRole("button", { name: "Save Assignment" });
+    expect(save.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText("Exact Financial Values Enabled")).toBeTruthy();
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not repeat a financial banner on a saved exact-value display", async () => {
+    const base = getCompanyPulseProfile();
+    const exactProfile: TvProfileResource = { ...base, configuration: { ...base.configuration, financialVisibility: "exact" } };
+    const sendRequest = vi.fn(async () => jsonResponse({ displays: [{ ...display, exactFinancialsAcknowledged: true, profileFinancialVisibility: "exact" }] }));
+    renderManagement({ [hexclaveAppInternalsSymbol]: { sendRequest } }, [exactProfile]);
+    await screen.findByRole("button", { name: "Assignment Saved" });
+    // The single notice belongs to new-display pairing, not the saved row.
+    expect(screen.getAllByText("Exact Financial Values Enabled")).toHaveLength(1);
+    expect(screen.queryByText("This profile shows exact financial values. Saving will apply this setting to the display.")).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });

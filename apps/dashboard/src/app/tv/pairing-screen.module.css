@@ -1,0 +1,117 @@
+/* Independent TV surfaces stay dark even when the dashboard uses light mode.
+ * A positioned, opaque stage sits above the dashboard's body::before ambient
+ * layer. Isolation alone would not prevent that layer washing out the screen. */
+.stage {
+  /* Scale the original 48rem card as one layout. Independently sizing its
+   * width and text against the viewport made short TVs stretch it sideways.
+   * Leave vertical room for the extra connection-interrupted message. */
+  --pairing-unit: min(1rem, 1.85vh, 1.9vw);
+  --pairing-unit: min(1rem, 1.85svh, 1.9vw);
+  --background: 227 39% 5%;
+  --foreground: 210 40% 98%;
+  --muted-foreground: 215 22% 78%;
+  --border: 217 25% 26%;
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  color-scheme: dark;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: min(4vh, 4vw);
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  text-align: center;
+}
+
+.card {
+  width: min(100%, calc(48 * var(--pairing-unit)));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(2.5 * var(--pairing-unit));
+  background-image: linear-gradient(hsl(222 35% 10%), hsl(222 35% 10%));
+  box-shadow: none;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: calc(4 * var(--pairing-unit));
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  width: calc(5 * var(--pairing-unit));
+  height: calc(5 * var(--pairing-unit));
+  border-radius: 30%;
+  color: #a5f3fc;
+  background: #17323e;
+}
+.icon svg { width: 55%; height: 55%; }
+.kicker {
+  margin-top: calc(2 * var(--pairing-unit));
+  color: #a5f3fc;
+  font-size: calc(0.875 * var(--pairing-unit));
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+.title {
+  margin-top: var(--pairing-unit);
+  font-size: calc(3.75 * var(--pairing-unit));
+  font-weight: 600;
+  letter-spacing: -0.045em;
+  line-height: 1.1;
+}
+.copy, .footnote {
+  max-width: calc(36 * var(--pairing-unit));
+  color: hsl(var(--muted-foreground));
+  font-size: calc(1.125 * var(--pairing-unit));
+  line-height: 1.5;
+}
+.copy { margin-top: calc(1.25 * var(--pairing-unit)); }
+.codePanel {
+  margin-top: calc(2.5 * var(--pairing-unit));
+  width: 100%;
+  padding: calc(2 * var(--pairing-unit)) calc(1.5 * var(--pairing-unit));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(1.5 * var(--pairing-unit));
+  background: hsl(var(--background));
+}
+.code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: calc(5.5 * var(--pairing-unit));
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+.pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(0.75 * var(--pairing-unit));
+  font-size: var(--pairing-unit);
+}
+.pending svg { width: calc(1.25 * var(--pairing-unit)); height: calc(1.25 * var(--pairing-unit)); }
+.warning {
+  margin-top: calc(0.75 * var(--pairing-unit));
+  color: #fde68a;
+  font-size: calc(0.875 * var(--pairing-unit));
+}
+.footnote {
+  margin-top: calc(1.5 * var(--pairing-unit));
+  font-size: calc(0.875 * var(--pairing-unit));
+}
+
+/* On narrow portrait screens, let helper copy wrap at a readable size instead
+ * of shrinking it to the television layout's proportional scale. */
+@media (max-width: 600px) and (orientation: portrait) {
+  .content { padding: calc(2 * var(--pairing-unit)); }
+  .copy, .pending { font-size: 0.875rem; }
+  .footnote, .warning, .kicker { font-size: 0.75rem; }
+}

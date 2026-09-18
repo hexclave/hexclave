@@ -2,8 +2,9 @@
 
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import IndependentTvPageClient, { getTvDisplayRequestHeaders, resolveTvDisplayApiBase } from "./page-client";
+import IndependentTvPageClient, { getTvDisplayRequestHeaders, PairingScreen, resolveTvDisplayApiBase } from "./page-client";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
@@ -27,6 +28,31 @@ afterEach(() => {
 });
 
 describe("independent TV display requests", () => {
+  it.each([false, true])("keeps the complete pairing code and instructions visible when interrupted=%s", (error) => {
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(createElement(PairingScreen, {
+      challenge: {
+        challengeId: "927dfeac-2e80-4311-8180-4879b687bfc0",
+        pairingCode: "A2BC3DEF",
+        deviceSecret: "display-secret-with-at-least-32-characters",
+        expiresAt: "2026-08-19T01:00:00.000Z",
+        pollingIntervalSeconds: 5,
+      },
+      error,
+    }));
+    expect(container.querySelector('[aria-label="Pairing code"]')?.textContent).toBe("A2BC-3DEF");
+    expect(container.textContent).toContain("choose Pair Display");
+    expect(container.textContent).toContain("Codes expire after 10 minutes.");
+    expect(container.textContent.includes("Connection interrupted.")).toBe(error);
+    expect(container.querySelector('[aria-live="polite"]')).not.toBeNull();
+  });
+
+  it.each([false, true])("shows readable pairing preparation or retry feedback when error=%s", (error) => {
+    const markup = renderToStaticMarkup(createElement(PairingScreen, { challenge: null, error }));
+    expect(markup).toContain(error ? "Retrying automatically" : "Preparing a secure pairing code");
+    expect(markup).not.toContain('aria-label="Pairing code"');
+  });
+
   it("keeps the configured API origin when the Quick Tunnel opt-in is disabled", () => {
     expect(resolveTvDisplayApiBase({
       browserOrigin: "https://phase-one-box.trycloudflare.com",

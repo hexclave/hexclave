@@ -137,7 +137,6 @@ export function TvDisplayManagement({
       ? defaultProfileId
       : profiles[0]?.id ?? "company-pulse",
   );
-  const [acknowledgeExact, setAcknowledgeExact] = useState(false);
   const [pairing, setPairing] = useState(false);
   const [pairingError, setPairingError] = useState<ActionNotice | null>(null);
   const pairingInFlight = useRef(false);
@@ -223,7 +222,7 @@ export function TvDisplayManagement({
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
   const normalizedPairingCode = pairingCode.replaceAll("-", "");
   const pair = async () => {
-    if (pairingInFlight.current) return;
+    if (pairingInFlight.current || selectedProfile == null) return;
     pairingInFlight.current = true;
     setPairing(true);
     setPairingError(null);
@@ -233,7 +232,9 @@ export function TvDisplayManagement({
         pairingCode: normalizedPairingCode,
         profileId,
         displayName: nextDisplayName,
-        acknowledgeExactFinancials: acknowledgeExact,
+        // Pair Display confirms the profile's visible notice without a second
+        // opt-in. A stale redacted profile still sends false and fails closed.
+        acknowledgeExactFinancials: selectedProfile.configuration.financialVisibility === "exact",
       });
       pendingPairing.current = {
         displayName: nextDisplayName,
@@ -244,7 +245,6 @@ export function TvDisplayManagement({
       setPairingCode("");
       setPendingPairingCaret(null);
       setDisplayName("");
-      setAcknowledgeExact(false);
       toast({
         variant: "success",
         title: "Pairing Approved",
@@ -319,21 +319,20 @@ export function TvDisplayManagement({
             </div>
             <div className="space-y-2">
               <label htmlFor="new-tv-display-profile" className="text-xs font-medium text-foreground">Assigned Profile</label>
-              <DesignSelectorDropdown triggerId="new-tv-display-profile" value={profileId} onValueChange={(value) => {
-                setProfileId(value);
-                setAcknowledgeExact(false);
-              }} options={profileOptions} size="lg" />
+              <DesignSelectorDropdown triggerId="new-tv-display-profile" value={profileId} onValueChange={setProfileId} options={profileOptions} size="lg" />
             </div>
           </div>
           {selectedProfile?.configuration.financialVisibility === "exact" ? (
-            <label className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-3 text-sm text-foreground">
-              <input type="checkbox" checked={acknowledgeExact} onChange={(event) => setAcknowledgeExact(event.target.checked)} className="mt-0.5" />
-              <span>I understand that this physical display will show exact financial values visible to people nearby.</span>
-            </label>
+            <DesignAlert
+              variant="info"
+              title="Exact Financial Values Enabled"
+              description="This profile has Show exact financial values enabled. The paired display will show exact amounts to anyone nearby."
+              glassmorphic
+            />
           ) : null}
           {pairingError == null ? null : <DesignAlert {...pairingError} glassmorphic />}
           <div className="flex justify-end border-t border-foreground/[0.07] pt-4">
-            <DesignButton type="button" size="lg" loading={pairing} disabled={!TV_DISPLAY_PAIRING_CODE_PATTERN.test(normalizedPairingCode) || displayName.trim().length === 0 || (selectedProfile?.configuration.financialVisibility === "exact" && !acknowledgeExact)} onClick={pair} className="w-full gap-2 rounded-xl sm:w-auto">
+            <DesignButton type="button" size="lg" loading={pairing} disabled={!TV_DISPLAY_PAIRING_CODE_PATTERN.test(normalizedPairingCode) || displayName.trim().length === 0 || selectedProfile == null} onClick={pair} className="w-full gap-2 rounded-xl sm:w-auto">
               <BroadcastIcon className="h-4 w-4" weight="fill" /> Pair Display
             </DesignButton>
           </div>
@@ -390,7 +389,6 @@ function DisplayRow({ adminApp, display, profiles, onChanged, onRemoved }: {
 }) {
   const [name, setName] = useState(display.displayName);
   const [profileId, setProfileId] = useState(display.profileId);
-  const [acknowledgeExact, setAcknowledgeExact] = useState(display.exactFinancialsAcknowledged);
   const [savedAssignment, setSavedAssignment] = useState({
     name: display.displayName,
     profileId: display.profileId,
@@ -403,21 +401,23 @@ function DisplayRow({ adminApp, display, profiles, onChanged, onRemoved }: {
   const normalizedName = name.trim();
   const hasChanges = normalizedName !== savedAssignment.name
     || profileId !== savedAssignment.profileId
-    || acknowledgeExact !== savedAssignment.acknowledgeExact;
+    || (profile?.configuration.financialVisibility === "exact" && !savedAssignment.acknowledgeExact);
   const canSave = hasChanges
     && normalizedName.length > 0
-    && profile != null
-    && (profile.configuration.financialVisibility !== "exact" || acknowledgeExact);
+    && profile != null;
   const save = async () => {
+    if (!canSave) return;
     setSaveError(null);
     try {
       await updateTvDisplayOrThrow(adminApp, display.id, {
         displayName: normalizedName,
         profileId,
-        acknowledgeExactFinancials: acknowledgeExact,
+        // Save is the confirmation of the selected profile's visible privacy
+        // notice. Keep the server's per-display acknowledgement requirement.
+        acknowledgeExactFinancials: profile.configuration.financialVisibility === "exact",
       });
       setName(normalizedName);
-      setSavedAssignment({ name: normalizedName, profileId, acknowledgeExact });
+      setSavedAssignment({ name: normalizedName, profileId, acknowledgeExact: profile.configuration.financialVisibility === "exact" });
       toast({
         variant: "success",
         title: "Assignment Updated",
@@ -477,19 +477,14 @@ function DisplayRow({ adminApp, display, profiles, onChanged, onRemoved }: {
               <label htmlFor={`tv-display-profile-${display.id}`} className="text-xs font-medium text-foreground">Assigned Profile</label>
               <DesignSelectorDropdown triggerId={`tv-display-profile-${display.id}`} value={profileId} onValueChange={(value) => {
                 setProfileId(value);
-                setAcknowledgeExact(false);
                 setSaveError(null);
               }} options={profileOptions} size="lg" />
             </div>
           </div>
-          {profile?.configuration.financialVisibility === "exact" && !acknowledgeExact ? (
-            <label className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-3 text-sm text-foreground">
-              <input type="checkbox" checked={acknowledgeExact} onChange={(event) => {
-                setAcknowledgeExact(event.target.checked);
-                setSaveError(null);
-              }} className="mt-0.5" />
-              <span>Allow this physical display to show exact financial values.</span>
-            </label>
+          {hasChanges && profile?.configuration.financialVisibility === "exact" ? (
+            <p className="text-xs text-muted-foreground">
+              This profile shows exact financial values. Saving will apply this setting to the display.
+            </p>
           ) : null}
           {saveError == null ? null : <DesignAlert {...saveError} glassmorphic />}
           <div className="flex flex-wrap items-center justify-end gap-2 border-t border-foreground/[0.07] pt-3">

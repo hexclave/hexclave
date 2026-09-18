@@ -215,8 +215,12 @@ function renderPairing() {
   replaceRoot(stage);
 }
 
-function metric(label, value, detail, hero = false) {
+function metric(label, value, detail, hero = false, textValue = false) {
   const container = createElement("div", `tv-metric${hero ? " tv-metric-hero" : ""}`);
+  container.dataset.textValue = String(textValue);
+  // Reserve panel width for every character without measuring/reflowing the
+  // screen in JavaScript. Exact financial amounts must never be truncated.
+  if (hero && !textValue) container.style.setProperty("--tv-hero-width-size", `${Math.min(22, 100 / Math.max(1, String(value).length))}cqw`);
   container.append(
     createElement("p", "tv-metric-label", label),
     createElement("p", "tv-metric-value", value),
@@ -571,10 +575,11 @@ function revenueScreen(screen, highlight) {
     exact ? formatExactUsd(data.financials.paidRevenueCents) : "Hidden",
     `${formatSignedPercent(data.revenueChangePercent)} vs previous 30 days${exact ? "" : " · exact values off"}`,
     true,
+    !exact,
   ));
   const metrics = createElement("div", "tv-metric-grid tv-metric-grid-two");
   metrics.append(
-    metric("Payment Success", data.paymentSuccess.percent == null ? "Insufficient Data" : `${data.paymentSuccess.percent}%`, `${data.paymentSuccess.applicableAttempts} terminal outcomes`),
+    metric("Payment Success", data.paymentSuccess.percent == null ? "Insufficient Data" : `${data.paymentSuccess.percent}%`, `${data.paymentSuccess.applicableAttempts} terminal outcomes`, false, data.paymentSuccess.percent == null),
     metric("Active subscriptions", data.activeSubscriptions.toLocaleString()),
     metric("New subscriptions", `+${data.newSubscriptions}`),
     metric("Past Due", data.pastDueSubscriptions.toLocaleString()),
@@ -610,6 +615,7 @@ function emailScreen(screen, highlight) {
     data.deliveryRatePercent == null ? "Insufficient data" : `${data.deliveryRatePercent}%`,
     data.deliveryRatePercent == null ? "At least 20 confirmed outcomes required" : `${data.assessableSends.toLocaleString()} confirmed outcomes`,
     true,
+    data.deliveryRatePercent == null,
   ));
   const metrics = createElement("div", "tv-metric-grid tv-metric-grid-two");
   metrics.append(

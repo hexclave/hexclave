@@ -10,6 +10,7 @@ import {
   ShieldWarningIcon,
 } from "@phosphor-icons/react";
 import { useId, type ComponentType, type ReactNode } from "react";
+import styles from "./screen-layout.module.css";
 import type {
   TvAudienceMomentumScreen,
   TvEmailHealthScreen,
@@ -138,16 +139,22 @@ function getNiceChartScale(maximumValue: number): { maximum: number, ticks: numb
   };
 }
 
-function TvMetric({ label, value, detail, hero = false }: {
+function TvMetric({ label, value, detail, hero = false, textValue = false }: {
   label: string,
   value: string,
   detail?: string,
   hero?: boolean,
+  textValue?: boolean,
 }) {
   return (
-    <div className="min-w-0">
+    <div className={styles.metric} data-hero={hero} data-text-value={textValue}>
       <p className="text-[clamp(0.68rem,0.8vw,2rem)] font-semibold uppercase tracking-[0.18em] text-white/[0.42]">{label}</p>
-      <p className={`${hero ? "mt-3 text-[clamp(3.5rem,6.8vw,17rem)]" : "mt-2 text-[clamp(1.45rem,2.2vw,5.6rem)]"} font-semibold leading-none tabular-nums tracking-[-0.055em] text-white`}>
+      <p
+        className={`${hero ? "mt-3" : "mt-2"} font-semibold leading-none tabular-nums tracking-[-0.055em] text-white`}
+        // Reserve width for every character of an exact amount/count rather
+        // than truncating financial values or wrapping a number across lines.
+        style={hero && !textValue ? { fontSize: `clamp(1rem, min(6.8vw, 16cqh, ${Math.min(22, 100 / Math.max(1, value.length))}cqw), 17rem)`, whiteSpace: "nowrap" } : undefined}
+      >
         {value}
       </p>
       {detail == null ? null : <p className="mt-3 text-[clamp(0.75rem,0.95vw,2.3rem)] text-white/45">{detail}</p>}
@@ -165,7 +172,7 @@ function TvScreenFrame({ eyebrow, title, description, icon, accentClassName, hea
   children: ReactNode,
 }) {
   return (
-    <section className="flex h-full min-h-0 flex-col px-[clamp(2rem,5vw,14rem)] pb-[clamp(3rem,6vh,12rem)] pt-[clamp(5rem,8vh,16rem)]">
+    <section className={`${styles.frame} flex h-full min-h-0 flex-col`}>
       <header className="flex shrink-0 items-start justify-between gap-[clamp(2rem,4vw,8rem)]">
         <div className="min-w-0 flex-1">
           <div className={`mb-3 flex items-center gap-3 text-[clamp(0.7rem,0.82vw,2rem)] font-semibold uppercase tracking-[0.22em] ${accentClassName}`}>
@@ -178,7 +185,7 @@ function TvScreenFrame({ eyebrow, title, description, icon, accentClassName, hea
           <div className="shrink-0">{headerAccessory}</div>
         )}
       </header>
-      <div className="mt-[clamp(1.5rem,4vh,8rem)] min-h-0 flex-1">{children}</div>
+      <div className={`${styles.body} min-h-0 flex-1`}>{children}</div>
     </section>
   );
 }
@@ -205,6 +212,12 @@ function TvChartHeader({
   );
 }
 
+export function getTvAxisLabelIndices(count: number): number[] {
+  // Keep endpoints and at most seven evenly spaced labels; retain every data point.
+  const labels = Math.min(count, 7);
+  return Array.from({ length: labels }, (_, index) => labels === 1 ? 0 : Math.round(index * (count - 1) / (labels - 1)));
+}
+
 function TvLineChart({ points, color, label }: { points: TvTrendPoint[], color: string, label: string }) {
   const gradientId = useId().replaceAll(":", "");
   const maximumValue = Math.max(...points.map((point) => point.value), 1);
@@ -215,7 +228,7 @@ function TvLineChart({ points, color, label }: { points: TvTrendPoint[], color: 
   ).join(" ");
   const yAxisValues = scale.ticks;
   return (
-    <div className="relative h-full min-h-[11rem] pl-[clamp(2.4rem,2.8vw,6rem)]" role="img" aria-label={label}>
+    <div className="relative h-full min-h-0 pl-[clamp(2.4rem,2.8vw,6rem)]" role="img" aria-label={label}>
       <div className="absolute bottom-[12%] left-0 top-[12%] flex flex-col justify-between text-right text-[clamp(0.66rem,0.72vw,1.75rem)] font-medium tabular-nums text-white/[0.38]">
         {yAxisValues.map((value) => <span key={value}>{formatCompact(Math.round(value))}</span>)}
       </div>
@@ -233,7 +246,7 @@ function TvLineChart({ points, color, label }: { points: TvTrendPoint[], color: 
           <polyline points={coordinates} fill="none" stroke={color} strokeWidth="2.4" vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <div className="absolute inset-x-0 bottom-0 flex justify-between text-[clamp(0.68rem,0.76vw,1.85rem)] font-medium text-white/[0.48]">
-          {points.map((point) => <span key={point.label}>{point.label}</span>)}
+          {getTvAxisLabelIndices(points.length).map((index) => <span key={index}>{points[index].label}</span>)}
         </div>
       </div>
     </div>
@@ -250,7 +263,7 @@ function TvStackedBars({ points, colors, labels }: {
   const chartMaximum = scale.maximum;
   const yAxisValues = scale.ticks;
   return (
-    <div className="relative flex h-full min-h-[12rem] flex-col pl-[clamp(2.4rem,2.8vw,6rem)]" role="img" aria-label={`${labels.join(", ")} by day`}>
+    <div className="relative flex h-full min-h-0 flex-col pl-[clamp(2.4rem,2.8vw,6rem)]" role="img" aria-label={`${labels.join(", ")} by day`}>
       <div className="mb-4 flex justify-end gap-5">
         {labels.map((label, index) => (
           <span key={label} className="flex items-center gap-2 text-[clamp(0.65rem,0.75vw,1.8rem)] text-white/45">
@@ -307,7 +320,7 @@ function Insight({
       {explanatory
         ? <InfoIcon className="mt-0.5 h-[clamp(1.25rem,1.1vw,2.5rem)] w-[clamp(1.25rem,1.1vw,2.5rem)] shrink-0" weight="fill" />
         : <CheckCircleIcon className="mt-0.5 h-[clamp(1.25rem,1.1vw,2.5rem)] w-[clamp(1.25rem,1.1vw,2.5rem)] shrink-0" weight="fill" />}
-      <p className="text-[clamp(0.78rem,0.95vw,2.24rem)] leading-relaxed text-white/[0.76]">{children}</p>
+      <p className={styles.insightText}>{children}</p>
     </div>
   );
 }
@@ -391,9 +404,9 @@ function GlassPanel({
     amber: "border-amber-300/[0.12] bg-[radial-gradient(circle_at_12%_8%,rgba(251,191,36,0.15),transparent_42%),linear-gradient(145deg,rgba(251,191,36,0.055),rgba(255,255,255,0.018))] shadow-[0_30px_100px_rgba(217,119,6,0.08)]",
   }[tone];
   return (
-    <div className={`relative min-h-0 overflow-hidden rounded-[clamp(1.5rem,2vw,5rem)] border backdrop-blur-sm ${toneClass} ${className ?? ""}`}>
+    <div className={`${styles.panel} relative min-h-0 overflow-hidden rounded-[clamp(1.5rem,2vw,5rem)] border backdrop-blur-sm ${toneClass} ${className ?? ""}`}>
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.035),transparent_24%)]" />
-      <div className="relative h-full min-h-0">{children}</div>
+      <div className={`${styles.panelContent} relative h-full min-h-0`}>{children}</div>
     </div>
   );
 }
@@ -465,7 +478,7 @@ function LivePulseScreen({
                     ? ShieldWarningIcon
                     : InfoIcon;
                 return (
-                  <div key={fact.label} className="rounded-[clamp(1rem,1vw,2.5rem)] border border-cyan-100/[0.09] bg-black/15 p-[clamp(0.8rem,1.2vw,2.8rem)]">
+                  <div key={fact.label} className={`${styles.healthCard} rounded-[clamp(1rem,1vw,2.5rem)] border border-cyan-100/[0.09] bg-black/15`}>
                     <p className="text-[clamp(0.62rem,0.72vw,1.72rem)] font-semibold uppercase tracking-[0.14em] text-cyan-300/80">{fact.label}</p>
                     <p className="mt-3 text-[clamp(1.25rem,1.65vw,4rem)] font-semibold text-white">{fact.value}</p>
                     <p className={`mt-1 flex items-center gap-1.5 text-[clamp(0.65rem,0.75vw,1.8rem)] ${visual.className}`}>
@@ -568,11 +581,12 @@ function RevenuePaymentsScreen({
             <TvMetric
               label="Gross Collected Revenue · 30d"
               value={financials.visibility === "exact" ? formatTvExactUsd(financials.paidRevenueCents) : "Hidden"}
+              textValue={financials.visibility !== "exact"}
               detail={`${formatTvSignedPercent(data.revenueChangePercent)} vs previous 30 days${financials.visibility === "exact" ? "" : " · exact values off"}`}
               hero
             />
             <div className="grid grid-cols-2 gap-6">
-              <TvMetric label="Payment Success" value={data.paymentSuccess.percent == null ? "Insufficient Data" : `${data.paymentSuccess.percent}%`} detail={`${data.paymentSuccess.applicableAttempts} terminal outcomes`} />
+              <TvMetric label="Payment Success" value={data.paymentSuccess.percent == null ? "Insufficient Data" : `${data.paymentSuccess.percent}%`} textValue={data.paymentSuccess.percent == null} detail={`${data.paymentSuccess.applicableAttempts} terminal outcomes`} />
               <TvMetric label="Active subscriptions" value={data.activeSubscriptions.toLocaleString()} />
               <TvMetric label="New subscriptions" value={`+${data.newSubscriptions}`} />
               <TvMetric label="Past Due" value={data.pastDueSubscriptions.toLocaleString()} />
@@ -611,7 +625,7 @@ function EmailHealthScreen({
       <div className="grid h-full min-h-0 grid-cols-[0.76fr_1.24fr] gap-[clamp(2rem,5vw,12rem)]">
         <GlassPanel tone="amber" className="h-full">
           <div className="flex h-full min-h-0 flex-col justify-between p-[clamp(1.5rem,2.3vw,5.5rem)]">
-            <TvMetric label="Delivery rate · 7d" value={data.deliveryRatePercent == null ? "Insufficient data" : `${data.deliveryRatePercent}%`} detail={data.deliveryRatePercent == null ? "At least 20 confirmed outcomes required" : `${data.assessableSends.toLocaleString()} confirmed outcomes`} hero />
+            <TvMetric label="Delivery rate · 7d" value={data.deliveryRatePercent == null ? "Insufficient data" : `${data.deliveryRatePercent}%`} textValue={data.deliveryRatePercent == null} detail={data.deliveryRatePercent == null ? "At least 20 confirmed outcomes required" : `${data.assessableSends.toLocaleString()} confirmed outcomes`} hero />
             <div className="grid grid-cols-2 gap-x-8 gap-y-5">
               <TvMetric label="Delivered" value={formatCompact(data.delivered)} />
               <TvMetric label="Bounced" value={formatCompact(data.bounced)} />

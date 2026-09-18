@@ -80,6 +80,32 @@ afterEach(async () => {
 });
 
 describe("TV Box actual renderer orchestration", () => {
+  it.each([
+    ["insufficient-data", "email-health", "Insufficient data"],
+    ["financial-redacted", "revenue-payments", "Hidden"],
+  ])("uses text-sized hero metrics for %s without dropping submetrics or the verdict", async (variant, screenId, value) => {
+    const fixture = createSnapshot(variant);
+    fixture.profile.playlist = [screenId];
+    fixture.profile.screenDurations = fixture.profile.screenDurations.filter((entry) => entry.screenId === screenId);
+    await launch({ mode: "fixture-preview", snapshot: fixture });
+    expect(document.querySelector('.tv-metric-hero[data-text-value="true"] .tv-metric-value')?.textContent).toBe(value);
+    expect(document.querySelectorAll(".tv-metric-grid .tv-metric")).toHaveLength(4);
+    expect(document.querySelector(".tv-insight-copy")?.textContent.length).toBeGreaterThan(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves every digit of long numeric hero values while reserving width for them", async () => {
+    const fixture = createSnapshot();
+    const live = fixture.screens.find((screen) => screen.id === "live-pulse");
+    if (live == null) throw new Error("Missing live pulse fixture");
+    live.data.liveUsers = 123456789;
+    await launch({ mode: "fixture-preview", snapshot: fixture });
+    const hero = document.querySelector(".tv-metric-hero");
+    expect(hero?.getAttribute("data-text-value")).toBe("false");
+    expect(hero?.querySelector(".tv-metric-value")?.textContent).toBe((123456789).toLocaleString());
+    expect(hero?.style.getPropertyValue("--tv-hero-width-size")).toBe(`${100 / (123456789).toLocaleString().length}cqw`);
+  });
+
   it("signals module readiness before waiting for the backend", async () => {
     const ready = vi.fn();
     window.addEventListener("hexclave-tv-box-ready", ready, { once: true });

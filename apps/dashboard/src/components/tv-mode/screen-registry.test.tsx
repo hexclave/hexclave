@@ -1,5 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { formatTvExactUsd, formatTvSignedPercent } from "./screen-registry";
+import { renderToStaticMarkup } from "react-dom/server";
+import { getTvFixtureSnapshot } from "@/lib/tv-mode/fixtures";
+import { formatTvExactUsd, formatTvSignedPercent, getTvAxisLabelIndices, renderTvScreen } from "./screen-registry";
+
+describe("TV layout content", () => {
+  it("bounds axis labels without dropping either endpoint", () => {
+    expect(getTvAxisLabelIndices(0)).toEqual([]);
+    expect(getTvAxisLabelIndices(1)).toEqual([0]);
+    expect(getTvAxisLabelIndices(7)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(getTvAxisLabelIndices(24)).toEqual([0, 4, 8, 12, 15, 19, 23]);
+  });
+
+  it("uses status typography for insufficient email outcomes and retains submetrics", () => {
+    const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse");
+    const email = snapshot?.screens.find((screen) => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Email fixture missing");
+    email.data.deliveryRatePercent = null;
+    const html = renderToStaticMarkup(renderTvScreen(email));
+    expect(html).toContain('data-hero="true" data-text-value="true"');
+    expect(html).toContain("Insufficient data");
+    for (const label of ["Delivered", "Bounced", "Errors", "In progress"]) expect(html).toContain(label);
+  });
+});
 
 describe("formatTvExactUsd", () => {
   function formatExpectedUsd(cents: number, fractionDigits: number): string {
