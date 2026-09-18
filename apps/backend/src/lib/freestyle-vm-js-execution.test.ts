@@ -10,17 +10,19 @@ import {
 function createFakeVm(options: {
   exitCode?: number | null,
   resultJson?: string,
-  deleteError?: Error,
-  deleteHangs?: boolean,
+  // One entry per delete attempt; the last entry repeats for any further attempts.
+  deleteOutcomes?: (Error | "hangs" | "ok")[],
   onPtyOpen?: () => void,
 } = {}) {
   const writes = new Map<string, string>();
   const directories: string[] = [];
   const commands: string[] = [];
   const detach = vi.fn();
+  const deleteOutcomes = options.deleteOutcomes ?? ["ok"];
   const deleteVm = vi.fn(() => {
-    if (options.deleteHangs === true) return new Promise<void>(() => {});
-    if (options.deleteError != null) throw options.deleteError;
+    const outcome = deleteOutcomes[Math.min(deleteVm.mock.calls.length - 1, deleteOutcomes.length - 1)];
+    if (outcome === "hangs") return new Promise<void>(() => {});
+    if (outcome !== "ok") throw outcome;
     return Promise.resolve();
   });
   const vm: FreestyleExecutionVm = {
@@ -117,21 +119,46 @@ describe("executeJavascriptInFreestyleVm", () => {
     expect(fake.deleteVm).toHaveBeenCalledOnce();
   });
 
-  test("reports cleanup failures without replacing a successful result", async () => {
-    const cleanupError = new Error("delete failed");
-    const fake = createFakeVm({ deleteError: cleanupError });
+  test("retries a transiently failing delete and reports nothing once it succeeds", async () => {
+    const fake = createFakeVm({ deleteOutcomes: [new TypeError("fetch failed"), "ok"] });
     const onCleanupError = vi.fn();
 
     await expect(executeJavascriptInFreestyleVm({
       snapshotId: "sandbox-snapshot",
       code: "export default () => ({ status: 'ok', data: 42 });",
       nodeModules: new Map(),
+      cleanupRetryDelayBaseMs: 1,
       scheduleCleanup: vi.fn(),
       onCleanupError,
       createVm: async () => fake.vm,
     })).resolves.toEqual({ status: "ok", data: { rendered: true } });
 
-    expect(onCleanupError).toHaveBeenCalledWith("vm-test", cleanupError);
+    expect(fake.deleteVm).toHaveBeenCalledTimes(2);
+    expect(onCleanupError).not.toHaveBeenCalled();
+  });
+
+  test("reports cleanup failures with every attempt's error without replacing a successful result", async () => {
+    const cleanupErrors = [new Error("delete failed 1"), new Error("delete failed 2"), new Error("delete failed 3")];
+    const fake = createFakeVm({ deleteOutcomes: cleanupErrors });
+    const onCleanupError = vi.fn();
+
+    await expect(executeJavascriptInFreestyleVm({
+      snapshotId: "sandbox-snapshot",
+      code: "export default () => ({ status: 'ok', data: 42 });",
+      nodeModules: new Map(),
+      cleanupRetryDelayBaseMs: 1,
+      scheduleCleanup: vi.fn(),
+      onCleanupError,
+      createVm: async () => fake.vm,
+    })).resolves.toEqual({ status: "ok", data: { rendered: true } });
+
+    expect(fake.deleteVm).toHaveBeenCalledTimes(3);
+    expect(onCleanupError).toHaveBeenCalledOnce();
+    const [vmId, reported] = onCleanupError.mock.calls[0];
+    expect(vmId).toBe("vm-test");
+    expect(reported).toBeInstanceOf(AggregateError);
+    expect(reported.errors).toEqual(cleanupErrors);
+    expect(reported.cause).toBe(cleanupErrors[2]);
   });
 
   test("schedules deletion without delaying an aborted invocation", async () => {
@@ -199,7 +226,7 @@ describe("executeJavascriptInFreestyleVm", () => {
   });
 
   test("reports cleanup timeout without delaying a successful result", async () => {
-    const fake = createFakeVm({ deleteHangs: true });
+    const fake = createFakeVm({ deleteOutcomes: ["hangs"] });
     const onCleanupError = vi.fn();
 
     await expect(executeJavascriptInFreestyleVm({
@@ -212,10 +239,15 @@ describe("executeJavascriptInFreestyleVm", () => {
       createVm: async () => fake.vm,
     })).resolves.toEqual({ status: "ok", data: { rendered: true } });
 
+    // The timeout budget spans all attempts, so a hanging delete is not retried.
+    expect(fake.deleteVm).toHaveBeenCalledOnce();
     expect(onCleanupError).toHaveBeenCalledOnce();
     expect(onCleanupError).toHaveBeenCalledWith(
       "vm-test",
-      expect.objectContaining({ name: "TimeoutError" }),
+      expect.objectContaining({
+        errors: [expect.objectContaining({ name: "TimeoutError" })],
+        cause: expect.objectContaining({ name: "TimeoutError" }),
+      }),
     );
   });
 });
