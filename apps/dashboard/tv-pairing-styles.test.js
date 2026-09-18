@@ -17,8 +17,8 @@ describe("TV pairing viewport fallback", () => {
         for (const selector of declaration.parent.selectors) sizes.set(normalize(selector), normalize(declaration.value));
       });
     });
-    for (const selector of copySelectors) expect(sizes.get(selector), selector).toBe("min(0.875rem, calc(1.5 * var(--pairing-unit)))");
-    for (const selector of footnoteSelectors) expect(sizes.get(selector), selector).toBe("min(0.75rem, calc(1.3 * var(--pairing-unit)))");
+    for (const selector of copySelectors) expect(sizes.get(selector), selector).toBe("clamp(0.75rem, calc(1.5 * var(--pairing-unit)), 0.875rem)");
+    for (const selector of footnoteSelectors) expect(sizes.get(selector), selector).toBe("clamp(0.6875rem, calc(1.3 * var(--pairing-unit)), 0.75rem)");
   });
 
   it.each([
