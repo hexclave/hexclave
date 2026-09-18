@@ -424,7 +424,7 @@ function LivePulseScreen({
 }) {
   return (
     <TvScreenFrame eyebrow="Right Now" title="Live Pulse" description="Current activity and source-level signals Hexclave can verify." icon={<ActivityIcon className="h-[1.3em] w-[1.3em]" weight="fill" />} accentClassName="text-cyan-300" headerAccessory={headerAccessory}>
-      <div className="grid h-full min-h-0 grid-cols-[0.75fr_1.25fr] gap-[clamp(2rem,5vw,12rem)]">
+      <div className={`${styles.screenGrid} grid h-full min-h-0`}>
         <GlassPanel tone="cyan" className="h-full">
           <div className="flex h-full min-h-0 flex-col justify-between p-[clamp(1.5rem,2.5vw,6rem)]">
             <div>
@@ -530,7 +530,7 @@ function AudienceMomentumScreen({
       : `${analytics.data.qualifyingSessions.toLocaleString()} ${analytics.data.qualifyingSessions === 1 ? "Session" : "Sessions"}`;
   return (
     <TvScreenFrame eyebrow="Seven-Day Audience" title="Audience Momentum" description="Whether new attention is becoming sustained, returning activity." icon={<ChartLineUpIcon className="h-[1.3em] w-[1.3em]" weight="fill" />} accentClassName="text-violet-300" headerAccessory={headerAccessory}>
-      <div className="grid h-full min-h-0 grid-cols-[0.72fr_1.28fr] gap-[clamp(2rem,5vw,12rem)]">
+      <div className={`${styles.screenGrid} grid h-full min-h-0`}>
         <GlassPanel tone="violet" className="h-full">
           <div className="flex h-full min-h-0 flex-col justify-between p-[clamp(1.5rem,2.3vw,5.5rem)]">
             <TvMetric label="Total Users · 7d" value={data.totalUsers.toLocaleString()} detail={`${data.userGrowthPercent}% growth over the last 7 days`} hero />
@@ -575,7 +575,7 @@ function RevenuePaymentsScreen({
     : financials.normalizedRevenueTrend;
   return (
     <TvScreenFrame eyebrow="Trailing 30 Days" title="Revenue & Payments" description="Gross collected revenue and subscription collection health." icon={<CurrencyDollarIcon className="h-[1.3em] w-[1.3em]" weight="fill" />} accentClassName="text-emerald-300" headerAccessory={headerAccessory}>
-      <div className="grid h-full min-h-0 grid-cols-[0.78fr_1.22fr] gap-[clamp(2rem,5vw,12rem)]">
+      <div className={`${styles.screenGrid} grid h-full min-h-0`}>
         <GlassPanel tone="emerald" className="h-full">
           <div className="flex h-full min-h-0 flex-col justify-between p-[clamp(1.5rem,2.3vw,5.5rem)]">
             <TvMetric
@@ -622,7 +622,7 @@ function EmailHealthScreen({
 }) {
   return (
     <TvScreenFrame eyebrow="Seven-Day Delivery" title="Email Health" description="Whether customer messages are reaching recipients reliably." icon={<EnvelopeSimpleIcon className="h-[1.3em] w-[1.3em]" weight="fill" />} accentClassName="text-amber-300" headerAccessory={headerAccessory}>
-      <div className="grid h-full min-h-0 grid-cols-[0.76fr_1.24fr] gap-[clamp(2rem,5vw,12rem)]">
+      <div className={`${styles.screenGrid} grid h-full min-h-0`}>
         <GlassPanel tone="amber" className="h-full">
           <div className="flex h-full min-h-0 flex-col justify-between p-[clamp(1.5rem,2.3vw,5.5rem)]">
             <TvMetric label="Delivery rate · 7d" value={data.deliveryRatePercent == null ? "Insufficient data" : `${data.deliveryRatePercent}%`} textValue={data.deliveryRatePercent == null} detail={data.deliveryRatePercent == null ? "At least 20 confirmed outcomes required" : `${data.assessableSends.toLocaleString()} confirmed outcomes`} hero />

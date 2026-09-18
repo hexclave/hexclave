@@ -262,8 +262,9 @@ h1 {
 
 @media (max-width: 600px) and (orientation: portrait) {
   .tv-pairing-card { padding: calc(2 * var(--pairing-unit)); }
-  .tv-pairing-copy, .tv-pairing-pending { font-size: 0.875rem; }
-  .tv-pairing-footnote, .tv-pairing-warning, .tv-pairing-card > .tv-kicker { font-size: 0.75rem; }
+  /* Match /tv: short portrait viewports must also fit retry feedback. */
+  .tv-pairing-copy, .tv-pairing-pending { font-size: min(0.875rem, 2.8vh); }
+  .tv-pairing-footnote, .tv-pairing-warning, .tv-pairing-card > .tv-kicker { font-size: min(0.75rem, 2.4vh); }
 }
 
 .tv-live-dot,

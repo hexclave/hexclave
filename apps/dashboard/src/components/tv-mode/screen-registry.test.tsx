@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { getTvFixtureSnapshot } from "@/lib/tv-mode/fixtures";
+import { TvEmailHealthScreenSchema } from "@hexclave/shared/dist/interface/admin-tv-mode";
+import styles from "./screen-layout.module.css";
 import { formatTvExactUsd, formatTvSignedPercent, getTvAxisLabelIndices, renderTvScreen } from "./screen-registry";
 
 describe("TV layout content", () => {
+  it("uses the shared grid only for data screens, not terminal source states", () => {
+    for (const variant of ["default", "empty", "unavailable", "partial-failure"] as const) {
+      const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse", variant);
+      if (snapshot == null) throw new Error("Layout fixture missing");
+      for (const screen of snapshot.screens) {
+        const html = renderToStaticMarkup(renderTvScreen(screen));
+        expect(html.includes(styles.screenGrid)).toBe(screen.data != null);
+        expect(html).not.toContain("grid-cols-[");
+      }
+    }
+  });
+
   it("bounds axis labels without dropping either endpoint", () => {
     expect(getTvAxisLabelIndices(0)).toEqual([]);
     expect(getTvAxisLabelIndices(1)).toEqual([0]);
@@ -12,13 +26,14 @@ describe("TV layout content", () => {
   });
 
   it("uses status typography for insufficient email outcomes and retains submetrics", () => {
-    const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse");
+    const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse", "insufficient-data");
     const email = snapshot?.screens.find((screen) => screen.id === "email-health");
     if (email?.data == null) throw new Error("Email fixture missing");
-    email.data.deliveryRatePercent = null;
+    expect(TvEmailHealthScreenSchema.isValidSync(email, { strict: true })).toBe(true);
     const html = renderToStaticMarkup(renderTvScreen(email));
     expect(html).toContain('data-hero="true" data-text-value="true"');
     expect(html).toContain("Insufficient data");
+    expect(html).not.toContain("Delivery remained above 99%");
     for (const label of ["Delivered", "Bounced", "Errors", "In progress"]) expect(html).toContain(label);
   });
 });

@@ -40,7 +40,9 @@ describe("independent TV display requests", () => {
       },
       error,
     }));
-    expect(container.querySelector('[aria-label="Pairing code"]')?.textContent).toBe("A2BC-3DEF");
+    const liveRegion = container.querySelector('[aria-live="polite"]');
+    expect(liveRegion?.textContent).toContain("A2BC-3DEF");
+    expect(liveRegion?.querySelector("p")?.hasAttribute("aria-label")).toBe(false);
     expect(container.textContent).toContain("choose Pair Display");
     expect(container.textContent).toContain("Codes expire after 10 minutes.");
     expect(container.textContent.includes("Connection interrupted.")).toBe(error);
@@ -50,7 +52,7 @@ describe("independent TV display requests", () => {
   it.each([false, true])("shows readable pairing preparation or retry feedback when error=%s", (error) => {
     const markup = renderToStaticMarkup(createElement(PairingScreen, { challenge: null, error }));
     expect(markup).toContain(error ? "Retrying automatically" : "Preparing a secure pairing code");
-    expect(markup).not.toContain('aria-label="Pairing code"');
+    expect(markup).not.toContain("A2BC-3DEF");
   });
 
   it("keeps the configured API origin when the Quick Tunnel opt-in is disabled", () => {

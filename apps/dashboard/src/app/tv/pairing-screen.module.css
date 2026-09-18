@@ -116,10 +116,10 @@
   font-size: calc(0.875 * var(--pairing-unit));
 }
 
-/* On narrow portrait screens, let helper copy wrap at a readable size instead
- * of shrinking it to the television layout's proportional scale. */
+/* Keep portrait helper copy readable, but cap it by height too so retry
+ * feedback still fits when browser chrome leaves a short viewport. */
 @media (max-width: 600px) and (orientation: portrait) {
   .content { padding: calc(2 * var(--pairing-unit)); }
-  .copy, .pending { font-size: 0.875rem; }
-  .footnote, .warning, .kicker { font-size: 0.75rem; }
+  .copy, .pending { font-size: min(0.875rem, 2.8vh); }
+  .footnote, .warning, .kicker { font-size: min(0.75rem, 2.4vh); }
 }

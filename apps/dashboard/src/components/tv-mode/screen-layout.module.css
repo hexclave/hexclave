@@ -8,7 +8,7 @@
   margin-top: 2.5vh;
 }
 
-.body > div {
+.screenGrid {
   gap: 3vw;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
 }

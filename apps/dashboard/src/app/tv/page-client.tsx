@@ -105,7 +105,7 @@ export function PairingScreen({ challenge, error }: { challenge: TvDisplayPairin
             </div>
           ) : (
             <>
-              <p className={styles.code} aria-label="Pairing code">
+              <p className={styles.code}>
                 {code.slice(0, 4)}-{code.slice(4)}
               </p>
               {error ? <p className={styles.warning}>Connection interrupted. Retrying automatically…</p> : null}
