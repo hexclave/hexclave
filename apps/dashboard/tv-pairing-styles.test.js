@@ -4,17 +4,21 @@ import { describe, expect, it } from "vitest";
 
 describe("TV pairing viewport fallback", () => {
   it.each([
-    ["./src/app/tv/pairing-screen.module.css", ".copy, .pending", ".footnote, .warning, .kicker"],
-    ["./public/tv-box/tv-box.css", ".tv-pairing-copy, .tv-pairing-pending", ".tv-pairing-footnote, .tv-pairing-warning, .tv-pairing-card > .tv-kicker"],
-  ])("bounds portrait helper typography by viewport height in %s", (file, copy, footnote) => {
+    ["./src/app/tv/pairing-screen.module.css", [".copy", ".pending"], [".footnote", ".warning", ".kicker"]],
+    ["./public/tv-box/tv-box.css", [".tv-pairing-copy", ".tv-pairing-pending"], [".tv-pairing-footnote", ".tv-pairing-warning", ".tv-pairing-card > .tv-kicker"]],
+  ])("bounds portrait helper typography by the height-aware pairing unit in %s", (file, copySelectors, footnoteSelectors) => {
     const css = postcss.parse(readFileSync(new URL(file, import.meta.url), "utf8"));
+    const normalize = (text) => text.replace(/\s+/g, " ").trim();
     const sizes = new Map();
     css.walkAtRules("media", (rule) => {
-      if (rule.params !== "(max-width: 600px) and (orientation: portrait)") return;
-      rule.walkDecls("font-size", (declaration) => sizes.set(declaration.parent.selector, declaration.value));
+      const features = normalize(rule.params).replace(/\)\s*and\s*\(/g, ") and (").split(" and ").sort();
+      if (features.join(" and ") !== "(max-width: 600px) and (orientation: portrait)") return;
+      rule.walkDecls("font-size", (declaration) => {
+        for (const selector of declaration.parent.selectors) sizes.set(normalize(selector), normalize(declaration.value));
+      });
     });
-    expect(sizes.get(copy)).toBe("min(0.875rem, 2.8vh)");
-    expect(sizes.get(footnote)).toBe("min(0.75rem, 2.4vh)");
+    for (const selector of copySelectors) expect(sizes.get(selector), selector).toBe("min(0.875rem, calc(1.5 * var(--pairing-unit)))");
+    for (const selector of footnoteSelectors) expect(sizes.get(selector), selector).toBe("min(0.75rem, calc(1.3 * var(--pairing-unit)))");
   });
 
   it.each([
