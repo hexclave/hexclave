@@ -6,11 +6,11 @@
    * width and text against the viewport made short TVs stretch it sideways.
    * Leave vertical room for the extra connection-interrupted message. */
   --pairing-unit: min(1rem, 1.85vh, 1.9vw);
-  --pairing-unit: min(1rem, 1.85svh, 1.9vw);
   --background: 227 39% 5%;
   --foreground: 210 40% 98%;
   --muted-foreground: 215 22% 78%;
   --border: 217 25% 26%;
+
   position: relative;
   z-index: 1;
   isolation: isolate;
@@ -24,6 +24,14 @@
   background: hsl(var(--background));
   color: hsl(var(--foreground));
   text-align: center;
+}
+
+/* Custom properties accept unknown units, so an unconditional svh declaration
+ * would replace the usable vh fallback even in a browser without svh support. */
+@supports (height: 1svh) {
+  .stage {
+    --pairing-unit: min(1rem, 1.85svh, 1.9vw);
+  }
 }
 
 .card {

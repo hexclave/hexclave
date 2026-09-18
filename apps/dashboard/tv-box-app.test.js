@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTvBoxDocument } from "./src/app/tv-box/document.ts";
 import { createTvFixtureSnapshot, getTvProfileFixture } from "./src/lib/tv-mode/fixtures.ts";
+import { getTvAxisLabelIndices } from "./src/components/tv-mode/screen-registry.tsx";
 import {
   DISPLAY_SESSION_RETRY_INITIAL_MS,
   DISPLAY_SESSION_RETRY_MAXIMUM_MS,
@@ -80,6 +81,24 @@ afterEach(async () => {
 });
 
 describe("TV Box actual renderer orchestration", () => {
+  it.each([0, 1, 2, 7, 8, 24, 31])("matches /tv's labels for %s points without dropping chart data", async (count) => {
+    const fixture = createSnapshot();
+    const live = fixture.screens.find((screen) => screen.id === "live-pulse");
+    if (live == null) throw new Error("Missing live pulse fixture");
+    const points = Array.from({ length: count }, (_, index) => ({ label: `Hour ${index}`, value: index + 1 }));
+    live.data.hourlyActivity = points;
+    await launch({ mode: "fixture-preview", snapshot: fixture });
+    const chart = document.querySelector('[aria-label="Current UTC day activity"]');
+    if (chart == null) throw new Error("Missing live pulse chart");
+    expect([...chart.querySelectorAll(".tv-line-x-axis span")].map((label) => label.textContent))
+      .toEqual(getTvAxisLabelIndices(count).map((index) => points[index].label));
+    const polyline = chart.querySelector("polyline");
+    if (polyline == null) throw new Error("Missing chart polyline");
+    const coordinates = polyline.getAttribute("points");
+    expect(coordinates?.trim() === "" ? [] : coordinates?.split(" ")).toHaveLength(count);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["insufficient-data", "email-health", "Insufficient data"],
     ["financial-redacted", "revenue-payments", "Hidden"],

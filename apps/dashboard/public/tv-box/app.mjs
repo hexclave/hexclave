@@ -326,7 +326,13 @@ function lineChart(points, color, label) {
     }),
   );
   const xAxis = createElement("div", "tv-line-x-axis");
-  for (const point of points) xAxis.append(createElement("span", null, point.label));
+  // Match /tv's endpoint-inclusive sampling without importing React into the
+  // appliance runtime. Only labels are sampled; the polyline retains all points.
+  const labelCount = Math.min(points.length, 7);
+  for (let index = 0; index < labelCount; index += 1) {
+    const pointIndex = labelCount === 1 ? 0 : Math.round(index * (points.length - 1) / (labelCount - 1));
+    xAxis.append(createElement("span", null, points[pointIndex].label));
+  }
   plot.append(svg, xAxis);
   chart.append(yAxis, plot);
   return chart;

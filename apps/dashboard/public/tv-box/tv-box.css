@@ -113,11 +113,18 @@ h1 {
   /* Match /tv's compact card: size text, spacing and panel together, reserving
    * room for retry feedback. CSS-only scaling avoids work on the Pi's CPU. */
   --pairing-unit: min(1rem, 1.85vh, 1.9vw);
-  --pairing-unit: min(1rem, 1.85svh, 1.9vw);
+
   padding: min(4vh, 4vw);
   background: hsl(227 39% 5%);
   color: hsl(210 40% 98%);
   line-height: 1.5;
+}
+
+/* Gate the unit itself: custom properties do not reject unsupported units. */
+@supports (height: 1svh) {
+  .tv-pairing-stage {
+    --pairing-unit: min(1rem, 1.85svh, 1.9vw);
+  }
 }
 
 .tv-icon {
