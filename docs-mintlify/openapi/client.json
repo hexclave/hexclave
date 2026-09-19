@@ -3943,6 +3943,16 @@
                     ],
                     "description": "Inline product definition. Either this or product_id should be given."
                   },
+                  "allow_promo_codes": {
+                    "type": "boolean",
+                    "example": false,
+                    "description": "When true, the purchase page shows a promo-code field."
+                  },
+                  "allow_stacking_promo_codes": {
+                    "type": "boolean",
+                    "example": false,
+                    "description": "When true with allow_promo_codes, multiple promo codes may be applied."
+                  },
                   "return_url": {
                     "type": "string",
                     "example": "https://myapp.com/purchase-success",
@@ -3957,6 +3967,8 @@
                   "customer_type": "user",
                   "customer_id": "user_1234567890abcdef",
                   "product_id": "prod_premium_monthly",
+                  "allow_promo_codes": false,
+                  "allow_stacking_promo_codes": false,
                   "return_url": "https://myapp.com/purchase-success"
                 }
               }
@@ -4017,6 +4029,15 @@
                     "example": 1,
                     "description": "The quantity to purchase",
                     "default": 1
+                  },
+                  "promo_codes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "example": "SAVE10",
+                      "description": "Promo code name as typed by the customer."
+                    },
+                    "default": []
                   }
                 },
                 "required": [
@@ -4244,6 +4265,12 @@
                         "boolean",
                         "null"
                       ]
+                    },
+                    "allow_promo_codes": {
+                      "type": "boolean"
+                    },
+                    "allow_stacking_promo_codes": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -4251,7 +4278,91 @@
                     "already_bought_non_stackable",
                     "conflicting_products",
                     "replaces_stripe_subscription",
-                    "test_mode"
+                    "test_mode",
+                    "allow_promo_codes",
+                    "allow_stacking_promo_codes"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/payments/purchases/validate-promo-codes": {
+      "post": {
+        "summary": "Validate Promo Codes",
+        "description": "Validates promo codes for a purchase URL without redeeming them.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "full_code": {
+                    "type": "string"
+                  },
+                  "price_id": {
+                    "type": "string"
+                  },
+                  "quantity": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "promo_codes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "example": "SAVE10",
+                      "description": "Promo code name as typed by the customer."
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "full_code",
+                  "price_id"
+                ],
+                "example": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/payments/purchases/validate-promo-codes",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "original_amount": {
+                      "type": "string"
+                    },
+                    "net_amount": {
+                      "type": "string"
+                    },
+                    "recurring_amount": {
+                      "type": "string"
+                    },
+                    "applied_code_names": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "original_amount",
+                    "net_amount",
+                    "recurring_amount",
+                    "applied_code_names"
                   ]
                 }
               }

@@ -98,6 +98,8 @@ it("lists oauth providers", async ({ expect }) => {
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
