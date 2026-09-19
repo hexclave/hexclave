@@ -269,6 +269,124 @@ describe.each(["base", "in-memory"] as const)("Bulldozer (%s)", backend => {
     ]);
   });
 
+  it("orders and paginates concat groups using the shared input ordering", async () => {
+    const compareGroupKeys = (a: PiledriverObject, b: PiledriverObject) => stringCompare(JSON.stringify(a), JSON.stringify(b));
+    const groupBy = declareGroupByTable({
+      groupKeyExtractor: async row => Number(row.rowData),
+      groupKeyComparator: compareGroupKeys,
+    });
+    let snapshot = await initializedSnapshot(backend, [[
+      { type: "initTable", tableId: "storeA", table: defineStoredTable(), inputTables: {} },
+      { type: "initTable", tableId: "storeB", table: defineStoredTable(), inputTables: {} },
+      { type: "initTable", tableId: "groupsA", table: groupBy, inputTables: { input: "storeA" } },
+      { type: "initTable", tableId: "groupsB", table: groupBy, inputTables: { input: "storeB" } },
+      { type: "initTable", tableId: "concat", table: defineConcatTable(), inputTables: { a: "groupsA", b: "groupsB" } },
+    ]]);
+
+    snapshot = await set(snapshot, "storeA", "a1", 1);
+    snapshot = await set(snapshot, "storeA", "a3", 3);
+    snapshot = await set(snapshot, "storeA", "a4", 4);
+    snapshot = await set(snapshot, "storeB", "b2", 2);
+    snapshot = await set(snapshot, "storeB", "b4", 4);
+
+    const listGroups = async (range: Record<string, PiledriverObject> = {}) =>
+      await collect(snapshot.listGroups({ tableId: "concat", range }));
+    const lastGroupKey = (groups: { groupKey: PiledriverObject }[]) => {
+      const group = groups.at(-1);
+      if (group === undefined) throw new Error("Expected a non-empty group page");
+      return group.groupKey;
+    };
+    const full = await listGroups();
+    expect(full).toEqual([{ groupKey: 1 }, { groupKey: 2 }, { groupKey: 3 }, { groupKey: 4 }]);
+    expect(full.filter(group => group.groupKey === 4)).toHaveLength(1);
+    expect(await listGroups({ limit: 3 })).toEqual(full.slice(0, 3));
+
+    const firstPage = await listGroups({ limit: 2 });
+    const secondPage = await listGroups({ gt: lastGroupKey(firstPage), limit: 2 });
+    expect([...firstPage, ...secondPage]).toEqual(full);
+
+    const reverseFull = await listGroups({ reverse: true });
+    expect(reverseFull).toEqual([...full].reverse());
+    const reverseFirstPage = await listGroups({ reverse: true, limit: 2 });
+    const reverseSecondPage = await listGroups({ reverse: true, lt: lastGroupKey(reverseFirstPage), limit: 2 });
+    expect([...reverseFirstPage, ...reverseSecondPage]).toEqual(reverseFull);
+  });
+
+  it("closes concat input group iterators when iteration ends early", async () => {
+    let closed = false;
+    const stored = defineStoredTable();
+    const tracked = {
+      ...stored,
+      async * listGroups(options: Parameters<typeof stored.listGroups>[0]) {
+        try {
+          for await (const group of stored.listGroups(options)) yield group;
+        } finally {
+          closed = true;
+        }
+      },
+    };
+    let snapshot = await initializedSnapshot(backend, [[
+      { type: "initTable", tableId: "tracked", table: tracked, inputTables: {} },
+      { type: "initTable", tableId: "other", table: defineStoredTable(), inputTables: {} },
+      { type: "initTable", tableId: "concat", table: defineConcatTable(), inputTables: { a: "tracked", b: "other" } },
+    ]]);
+    snapshot = await set(snapshot, "tracked", "row", "value");
+
+    closed = false;
+    expect(await collect(snapshot.listGroups({ tableId: "concat", range: { limit: 1 } }))).toEqual([{ groupKey: null }]);
+    expect(closed).toBe(true);
+
+    closed = false;
+    for await (const group of snapshot.listGroups({ tableId: "concat", range: {} })) {
+      expect(group).toEqual({ groupKey: null });
+      break;
+    }
+    expect(closed).toBe(true);
+  });
+
+  it("closes acquired concat iterators when a later input fails during acquisition", async () => {
+    let closed = false;
+    const stored = defineStoredTable();
+    const tracked = {
+      ...stored,
+      listGroups(options: Parameters<typeof stored.listGroups>[0]) {
+        const inner = stored.listGroups(options)[Symbol.asyncIterator]();
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => inner.next(),
+              async return() {
+                closed = true;
+                const result = await inner.return?.();
+                return result ?? { done: true, value: undefined };
+              },
+            };
+          },
+        };
+      },
+    };
+    let shouldThrow = false;
+    const throwingStored = defineStoredTable();
+    const throwing = {
+      ...throwingStored,
+      listGroups(options: Parameters<typeof throwingStored.listGroups>[0]) {
+        if (shouldThrow) throw new Error("concat input acquisition failed");
+        return throwingStored.listGroups(options);
+      },
+    };
+    let snapshot = await initializedSnapshot(backend, [[
+      { type: "initTable", tableId: "tracked", table: tracked, inputTables: {} },
+      { type: "initTable", tableId: "throwing", table: throwing, inputTables: {} },
+      { type: "initTable", tableId: "concat", table: defineConcatTable(), inputTables: { a: "tracked", z: "throwing" } },
+    ]]);
+    snapshot = await set(snapshot, "tracked", "row", "value");
+    shouldThrow = true;
+    closed = false;
+
+    await expect(collect(snapshot.listGroups({ tableId: "concat", range: {} }))).rejects.toThrow("concat input acquisition failed");
+    expect(closed).toBe(true);
+  });
+
   it("left joins rows by derived keys and updates when either side changes", async () => {
     const join = declareLeftJoinTable({
       leftJoinKeyExtractor: async row => (row.rowData as { key: string }).key,
