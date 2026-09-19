@@ -111,6 +111,7 @@ it("should map convex ctx identity to partial user", async ({ expect }) => {
     name: user.displayName,
     email: user.primaryEmail,
     email_verified: user.primaryEmailVerified,
+    selected_team_id: "selected-team-id",
     is_anonymous: user.isAnonymous,
     is_restricted: user.isRestricted,
     restricted_reason: user.restrictedReason,
@@ -128,10 +129,26 @@ it("should map convex ctx identity to partial user", async ({ expect }) => {
     displayName: user.displayName,
     primaryEmail: user.primaryEmail,
     primaryEmailVerified: user.primaryEmailVerified,
+    selectedTeamId: "selected-team-id",
     isAnonymous: user.isAnonymous,
     isRestricted: false,
     restrictedReason: null,
   });
+});
+
+it("should map a missing selected_team_id claim to a null selectedTeamId", async ({ expect }) => {
+  const { clientApp } = await createApp({});
+  await signIn(clientApp);
+
+  const user = await clientApp.getUser({ or: "throw" });
+  const ctx: any = {
+    auth: {
+      getUserIdentity: async () => ({ subject: user.id }),
+    },
+  };
+
+  const partialUser = await clientApp.getPartialUser({ from: "convex", ctx });
+  expect(partialUser?.selectedTeamId).toBeNull();
 });
 
 it("should return null partial user when convex identity is absent", async ({ expect }) => {

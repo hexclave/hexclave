@@ -301,7 +301,12 @@ export type TokenPartialUser = Pick<
   | "isMultiFactorRequired"
   | "isRestricted"
   | "restrictedReason"
->
+> & {
+  /**
+   * The ID of the user's selected team, read from the `selected_team_id` claim of the access token or Convex identity.
+   */
+  readonly selectedTeamId: string | null,
+}
 
 export type SyncedPartialUser = TokenPartialUser & Pick<
   User,
@@ -355,6 +360,12 @@ export function userUpdateOptionsToCrud(options: UserUpdateOptions): CurrentUser
 
 
 export type ServerBaseUser = {
+  /**
+   * The selected team is a `ServerTeam` when non-null, so `listUsers()` returns full member details
+   * without fetching the team again.
+   */
+  readonly selectedTeam: ServerTeam | null,
+
   setPrimaryEmail(email: string | null, options?: { verified?: boolean | undefined }): Promise<void>,
 
   readonly lastActiveAt: Date,
