@@ -34,6 +34,8 @@ With hosted components:
 - You do **not** need a `/handler/[...]` catch-all in your app for the default sign-in flow.
 - Redirect helpers such as `redirectToSignIn()` send people to those hosted pages, then back to your app.
 
+After sign-in, the client SDK finishes the return on your origin and establishes the session. Protect pages with `useUser({ or: "redirect" })` in a Client Component - that both sends unauthenticated visitors to hosted sign-in and records the current URL so they come back here. You do not need to read callback query parameters yourself.
+
 This is the path Setup and the CLI onboarding flow recommend.
 
 ## Own handler on your domain

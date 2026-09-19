@@ -12,7 +12,7 @@ You'll need Hexclave set up with a server app (`hexclaveServerApp`). If you don'
 
 Open **Emails → Email Settings** in the dashboard. Hexclave needs somewhere to send from.
 
-**While developing**, leave **Shared** selected. Built-in auth mail (verification, password reset, magic link) already works. Custom `sendEmail` calls also go out on shared — Hexclave wraps them as "dev emails" so recipients know they aren't from your domain yet.
+**While developing**, leave **Shared** selected. Built-in auth mail (verification, password reset, magic link) already works. Custom `sendEmail` calls also go out on shared — Hexclave wraps them as "dev emails" so recipients know they aren't from your domain yet. Those messages are delivered to real inboxes; if one is missing, check spam and **Emails → Sent** in the dashboard.
 
 A [development environment](/guides/going-further/local-vs-cloud-dashboard) can only use Shared. Configure the other providers in the [cloud dashboard](https://app.hexclave.com).
 
@@ -34,7 +34,7 @@ Every send is one of two categories:
 - **Marketing** — promotional or informational. Users can unsubscribe; Hexclave appends an unsubscribe link.
 
 <Warning>
-  Never send marketing content as transactional mail. That can get your domain blacklisted.
+  Never send marketing content as transactional mail - that can get your domain blacklisted. Never send transactional mail as marketing either: users can unsubscribe, and then they would stop getting receipts and other required mail.
 </Warning>
 
 Set the category when you send (`notificationCategoryName`) or inside the template / draft with `<NotificationCategory>`. If you omit it everywhere, the category stays undefined and **unsubscribe preferences are not applied** — prefer setting it explicitly.
@@ -152,6 +152,18 @@ await hexclaveServerApp.sendEmail({
 });
 ```
 
+**An address that isn't a user yet:**
+
+```typescript
+await hexclaveServerApp.sendEmail({
+  emails: ["billing@acme.com"],
+  subject: "Your receipt",
+  html: "<p>Thanks for your purchase.</p>",
+});
+```
+
+Use `emails` when you have an inbox but no Hexclave user for it (a billing contact, someone who paid without signing up). If they already have an account, pass `userIds` instead.
+
 **Dashboard draft:**
 
 ```typescript
@@ -172,7 +184,7 @@ type SendEmailOptions =
       variables?: Record<string, unknown>;
       scheduledAt?: Date;
     }
-  & ({ userIds: string[] } | { allUsers: true })
+  & ({ userIds: string[] } | { allUsers: true } | { emails: string[] })
   & ({ html: string } | { templateId: string } | { draftId: string });
 ```
 
