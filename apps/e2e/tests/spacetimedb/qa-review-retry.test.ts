@@ -58,7 +58,7 @@ describe.skipIf(!canRun)("qa review retry lifecycle", () => {
     const correlationId = crypto.randomUUID();
 
     const insert = await callReducer(token, "log_mcp_call", [
-      correlationId, opt(null), "tool", "reason", "prompt", marker, "response", 0, "[]", 0n, "model", opt(null),
+      correlationId, opt(null), "tool", "reason", "prompt", marker, "response", 0, "[]", 0n, "model", opt(null), opt(null), opt(null), opt(null),
     ]);
     expect(insert.ok, insert.body).toBe(true);
 

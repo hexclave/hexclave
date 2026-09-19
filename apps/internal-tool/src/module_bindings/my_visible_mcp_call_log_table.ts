@@ -43,4 +43,7 @@ export default __t.row({
   publishedToQa: __t.bool().name("published_to_qa"),
   publishedAt: __t.option(__t.timestamp()).name("published_at"),
   qaReviewRequestedAt: __t.timestamp().name("qa_review_requested_at"),
+  context: __t.string(),
+  user: __t.string(),
+  project: __t.string(),
 });

@@ -22,11 +22,11 @@ async function runBounded<T>(items: T[], limit: number, worker: (item: T) => Pro
 
 // log_mcp_call arg order (see module index.ts): correlationId, conversationId?,
 // toolName, reason, userPrompt, question, response, stepCount, innerToolCallsJson,
-// durationMs, modelId, errorMessage?.
+// durationMs, modelId, errorMessage?, context?, user?, project?.
 async function insertMcpCall(token: string, correlationId: string, question: string): Promise<void> {
   const res = await callReducer(token, "log_mcp_call", [
     correlationId, opt(null), "ask_hexclave", "reason", "prompt", question, "response",
-    1, "[]", 0n, "model", opt(null),
+    1, "[]", 0n, "model", opt(null), opt(null), opt(null), opt(null),
   ]);
   if (!res.ok) throw new Error(`log_mcp_call failed: ${res.body}`);
 }

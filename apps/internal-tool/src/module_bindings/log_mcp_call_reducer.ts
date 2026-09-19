@@ -23,4 +23,7 @@ export default {
   durationMs: __t.u64(),
   modelId: __t.string(),
   errorMessage: __t.option(__t.string()),
+  context: __t.option(__t.string()),
+  user: __t.option(__t.string()),
+  project: __t.option(__t.string()),
 };

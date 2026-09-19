@@ -18,5 +18,11 @@ export const params = {
   beforeCreatedAtMicros: __t.option(__t.u64()),
   beforeId: __t.option(__t.u64()),
   limit: __t.u32(),
+  createdAtOrAfterMicros: __t.option(__t.u64()),
+  systemPromptId: __t.option(__t.string()),
+  modelId: __t.option(__t.string()),
+  mode: __t.option(__t.string()),
+  isAuthenticated: __t.option(__t.bool()),
+  hasError: __t.option(__t.bool()),
 };
 export const returnType = AiQueryLogPage
