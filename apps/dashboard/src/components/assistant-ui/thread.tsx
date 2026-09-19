@@ -65,6 +65,7 @@ export const Thread: FC<{
   runningStatusMessages?: string[],
   composerAttachments?: boolean,
   attachmentAdapter?: AttachmentAdapter,
+  composerTopContent?: React.ReactNode,
   /** Custom welcome / empty-state node. Defaults to the email-template welcome. */
   welcome?: ReactNode,
   /** Overrides for the assistant message content slots (Text / tools / etc.). */
@@ -77,7 +78,7 @@ export const Thread: FC<{
    * general-purpose dashboard AI chats (command center, companion widget).
    */
   agentEjectFooter?: boolean,
-}> = ({ useOffWhiteLightMode = false, composerPlaceholder, hideMessageActions = false, runningStatusMessages, composerAttachments = false, attachmentAdapter, welcome, assistantContentComponents, autoFocusComposer = true, agentEjectFooter = false }) => {
+}> = ({ useOffWhiteLightMode = false, composerPlaceholder, hideMessageActions = false, runningStatusMessages, composerAttachments = false, attachmentAdapter, composerTopContent, welcome, assistantContentComponents, autoFocusComposer = true, agentEjectFooter = false }) => {
   return (
     <HideMessageActionsContext.Provider value={hideMessageActions}>
       <HasRunningStatusContext.Provider value={!!runningStatusMessages}>
@@ -119,7 +120,7 @@ export const Thread: FC<{
 
                   <div className="sticky bottom-0 mt-2 flex w-full max-w-[var(--thread-max-width)] flex-col items-center justify-end pt-6 pb-3">
                     <ThreadScrollToBottom />
-                    <Composer placeholder={composerPlaceholder} autoFocus={autoFocusComposer} />
+                    <Composer placeholder={composerPlaceholder} topContent={composerTopContent} autoFocus={autoFocusComposer} useOffWhiteLightMode={useOffWhiteLightMode} />
                     {agentEjectFooter && <AgentEjectFooter />}
                   </div>
                 </ThreadPrimitive.Viewport>
@@ -529,11 +530,15 @@ const ComposerStaticInput: FC<{ placeholder?: string, autoFocus?: boolean }> = (
   );
 };
 
-const Composer: FC<{ placeholder?: ComposerPlaceholder, autoFocus?: boolean }> = ({ placeholder, autoFocus = true }) => {
+const Composer: FC<{ placeholder?: ComposerPlaceholder, topContent?: React.ReactNode, autoFocus?: boolean, useOffWhiteLightMode?: boolean }> = ({ placeholder, topContent, autoFocus = true, useOffWhiteLightMode = false }) => {
   const attachmentsEnabled = useComposerAttachmentsEnabled();
   return (
-    <ComposerPrimitive.Root className="group/composer relative flex w-full flex-col rounded-2xl border border-black/[0.08] dark:border-foreground/[0.08] bg-white/95 dark:bg-background/80 shadow-sm ring-1 ring-black/[0.06] dark:ring-white/[0.06] transition-all duration-150 hover:transition-none focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500/30">
+    <ComposerPrimitive.Root className={cn(
+      "group/composer relative flex w-full flex-col rounded-2xl border border-border/20 dark:border-foreground/[0.08] shadow-sm ring-1 ring-foreground/[0.04] transition-all duration-150 hover:transition-none focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500/30",
+      useOffWhiteLightMode ? "bg-card backdrop-blur-xl dark:bg-background/80" : "bg-background/95 dark:bg-background/80",
+    )}>
       {attachmentsEnabled && <ComposerAttachmentsRow />}
+      {topContent}
       {typeof placeholder === "object" ? (
         <ComposerAnimatedInput
           prefix={placeholder.prefix}
