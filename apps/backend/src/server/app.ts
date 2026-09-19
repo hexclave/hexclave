@@ -11,6 +11,7 @@ import { gunzipSync } from "node:zlib";
 import { createBackendRequest } from "./backend-request";
 import { compressResponse } from "./compression";
 import { withVercelCronMonitor } from "./cron-monitor";
+import { formatDevelopmentRequestLog } from "./dev-request-log";
 import { handleUncaughtBackendError } from "./error-handler";
 import { getCorsHeadersInit, runRequestPipeline } from "./middleware";
 import { createRequestCompletionLog } from "./request-log";
@@ -53,9 +54,12 @@ export const app = new Elysia({
   .onAfterResponse(({ request, response, set }) => {
     const startedAt = requestStartTimes.get(request);
     if (shouldLogDevelopmentRequests) {
-      const elapsedMilliseconds = startedAt == null ? "unknown" : (performance.now() - startedAt).toFixed(1);
-      const pathname = new URL(request.url).pathname;
-      console.log(`[Elysia] ${request.method} ${pathname} ${getLoggedResponseStatus(response, set.status)} ${elapsedMilliseconds}ms`);
+      console.log(formatDevelopmentRequestLog({
+        method: request.method,
+        pathname: new URL(request.url).pathname,
+        status: getLoggedResponseStatus(response, set.status),
+        elapsedMilliseconds: startedAt == null ? null : performance.now() - startedAt,
+      }));
       return;
     }
 
