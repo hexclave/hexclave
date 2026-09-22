@@ -21,8 +21,8 @@ from hexclave_tv_box.network_agent import (
     NetworkMode,
     OFFLINE_URL,
     PRODUCTION_URL,
-    TEST_SETUP_PASSWORD_ALPHABET,
-    TEST_SETUP_PASSWORD_LENGTH,
+    SETUP_PASSWORD_ALPHABET,
+    SETUP_PASSWORD_LENGTH,
     TvBoxNetworkAgent,
     _generate_setup_password,
     _failure_code,
@@ -292,15 +292,48 @@ class AgentServerTests(unittest.TestCase):
 
 
 class NetworkAgentTests(unittest.TestCase):
-    def test_test_setup_password_is_short_but_still_wpa_personal_compatible(self) -> None:
-        password = _generate_setup_password(test_image=True)
-        self.assertEqual(len(password), TEST_SETUP_PASSWORD_LENGTH)
-        self.assertEqual(TEST_SETUP_PASSWORD_LENGTH, 8)
-        self.assertTrue(all(character in TEST_SETUP_PASSWORD_ALPHABET for character in password))
+    def test_setup_password_is_readable_and_wpa_personal_compatible(self) -> None:
+        password = _generate_setup_password()
+        self.assertEqual(len(password), SETUP_PASSWORD_LENGTH)
+        self.assertEqual(SETUP_PASSWORD_LENGTH, 8)
+        self.assertTrue(all(character in SETUP_PASSWORD_ALPHABET for character in password))
+        self.assertTrue(set(SETUP_PASSWORD_ALPHABET).isdisjoint("01IOilo"))
 
-    def test_production_setup_password_keeps_the_high_entropy_length(self) -> None:
-        password = _generate_setup_password(test_image=False)
-        self.assertGreaterEqual(len(password), 16)
+    def test_setup_password_uses_fresh_secure_choices_for_every_character(self) -> None:
+        with mock.patch("hexclave_tv_box.network_agent.secrets.choice", side_effect=list("ABCDEFGH23456789")) as choose:
+            self.assertEqual(_generate_setup_password(), "ABCDEFGH")
+            self.assertEqual(_generate_setup_password(), "23456789")
+        self.assertEqual(choose.call_args_list, [mock.call(SETUP_PASSWORD_ALPHABET)] * 16)
+
+    def test_controller_uses_simple_setup_password_with_or_without_test_marker(self) -> None:
+        for test_image in (False, True):
+            with self.subTest(test_image=test_image), tempfile.TemporaryDirectory(suffix=".untracked") as directory:
+                root = Path(directory)
+                (root / "identity").mkdir()
+                (root / "identity/hostname").write_text("hexclave-tv-test\n", encoding="utf-8")
+                marker = root / "test-image"
+                if test_image:
+                    marker.write_text("test\n", encoding="utf-8")
+                submitted_passwords: list[str] = []
+
+                def runner(command: list[str], _timeout: int) -> str:
+                    if "passwd-file" in command:
+                        password_file = Path(command[command.index("passwd-file") + 1])
+                        self.assertEqual(password_file.stat().st_mode & 0o777, 0o600)
+                        submitted_passwords.append(password_file.read_text(encoding="utf-8"))
+                    return ""
+
+                with mock.patch("hexclave_tv_box.network_agent.TEST_IMAGE_MARKER", marker):
+                    controller = NetworkManagerController(state_root=root, runtime_root=root / "run", runner=runner)
+                    controller.start_setup()
+                    password = controller.setup_password
+                    self.assertIsNotNone(password)
+                    if password is None:
+                        self.fail("A successfully started AP must publish its setup password.")
+                    self.assertEqual(len(password), 8)
+                    self.assertTrue(all(character in SETUP_PASSWORD_ALPHABET for character in password))
+                    self.assertEqual(submitted_passwords, [f"802-11-wireless-security.psk:{password}\n"])
+                    self.assertEqual(list((root / "run/secrets").iterdir()), [])
 
     def test_test_renderer_origin_accepts_only_one_exact_quick_tunnel_origin(self) -> None:
         origin = "https://pilot-box.trycloudflare.com"

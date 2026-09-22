@@ -43,7 +43,7 @@ The appliance validates one lowercase, single-label, HTTPS `*.trycloudflare.com`
 
 Production images do not contain the build-time test marker and therefore ignore this boot file completely, even if it is later added. Never ship an image whose manifest says `image-channel=test`; rebuild a production image instead of trying to convert a flashed test image.
 
-Test images also stop after exhausting bounded service restart attempts instead of rebooting, retain bounded Cage/Cog failure diagnostics for support collection, and use an eight-character ambiguity-free temporary setup password. Production/pilot images retain automatic reboot recovery and the higher-entropy temporary setup password.
+Test images also stop after exhausting bounded service restart attempts instead of rebooting and retain bounded Cage/Cog failure diagnostics for support collection. Production/pilot images retain automatic reboot recovery. Both channels use an eight-character, randomly generated temporary setup password from the same easy-to-read alphabet; this onboarding behavior does not require test-image mode.
 
 ## Runtime ownership
 

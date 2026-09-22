@@ -45,8 +45,8 @@ MAX_AGENT_CONNECTIONS = 8
 AGENT_LOCK_WAIT_SECONDS = 5
 MAX_KIOSK_HEALTH_BYTES = 256
 SAVED_PROFILE_RETRY_INTERVAL_S = 30
-TEST_SETUP_PASSWORD_LENGTH = 8
-TEST_SETUP_PASSWORD_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+SETUP_PASSWORD_LENGTH = 8
+SETUP_PASSWORD_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
 
 def _failure_code(error: BaseException) -> str:
@@ -108,17 +108,14 @@ def resolve_renderer_url(
     return f"{origin}/tv-box"
 
 
-def _generate_setup_password(*, test_image: bool) -> str:
-    if test_image:
-        # WPA Personal requires at least eight characters. Test appliances use
-        # the minimum length from an ambiguity-free alphabet because this
-        # temporary credential must often be entered manually during repeated
-        # image qualification. Production retains the higher-entropy value.
-        return "".join(
-            secrets.choice(TEST_SETUP_PASSWORD_ALPHABET)
-            for _ in range(TEST_SETUP_PASSWORD_LENGTH)
-        )
-    return secrets.token_urlsafe(12)
+def _generate_setup_password() -> str:
+    # Setup credentials are typed from HDMI in every image channel. Keep the
+    # readable WPA-compatible format independent of development-only features;
+    # start_setup generates a fresh random password for each new AP session.
+    return "".join(
+        secrets.choice(SETUP_PASSWORD_ALPHABET)
+        for _ in range(SETUP_PASSWORD_LENGTH)
+    )
 
 
 def _run(command: Sequence[str], timeout: int = 45) -> str:
@@ -247,12 +244,10 @@ class NetworkManagerController:
         *,
         state_root: Path = STATE_ROOT,
         runtime_root: Path = RUNTIME_ROOT,
-        test_image_marker: Path = TEST_IMAGE_MARKER,
         runner: Callable[[Sequence[str], int], str] = _run,
     ) -> None:
         self.state_root = state_root
         self.runtime_root = runtime_root
-        self.test_image_marker = test_image_marker
         self.runner = runner
         self.setup_ssid: str | None = None
         self.setup_password: str | None = None
@@ -344,7 +339,7 @@ class NetworkManagerController:
         suffix_path = self.state_root / "identity" / "hostname"
         suffix = suffix_path.read_text(encoding="utf-8").strip()[-4:].upper()
         setup_ssid = f"Hexclave TV Box-{suffix}"
-        setup_password = _generate_setup_password(test_image=self.test_image_marker.is_file())
+        setup_password = _generate_setup_password()
         try:
             self._nmcli(
                 "connection", "add", "type", "wifi", "ifname", WIFI_INTERFACE,
