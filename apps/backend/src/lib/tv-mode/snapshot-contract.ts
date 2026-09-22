@@ -8,5 +8,6 @@ export function readTvSnapshotContractVersion(headers: Record<string, string[] |
   if (raw == null) return 1;
   const trimmed = raw.trim();
   if (!/^[1-9]\d*$/.test(trimmed)) return 1;
-  return Number(trimmed);
+  const version = Number(trimmed);
+  return Number.isSafeInteger(version) ? version : 1;
 }

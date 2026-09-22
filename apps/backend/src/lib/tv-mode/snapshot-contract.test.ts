@@ -11,6 +11,8 @@ describe("readTvSnapshotContractVersion", () => {
     ["scientific notation", { "x-hexclave-tv-snapshot-contract": ["1e3"] }],
     ["hexadecimal", { "x-hexclave-tv-snapshot-contract": ["0x10"] }],
     ["leading zero", { "x-hexclave-tv-snapshot-contract": ["03"] }],
+    ["unsafe integer", { "x-hexclave-tv-snapshot-contract": ["9007199254740993"] }],
+    ["overflowing digits", { "x-hexclave-tv-snapshot-contract": ["9".repeat(400)] }],
   ])("falls back to contract 1 for %s", (_label, headers) => {
     expect(readTvSnapshotContractVersion(headers)).toBe(1);
   });
