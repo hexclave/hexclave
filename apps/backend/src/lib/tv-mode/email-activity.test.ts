@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BooleanTrue, EmailOutboxCreatedWith, EmailOutboxSkippedReason } from "@/generated/prisma/client";
 import { getTenancy, type Tenancy } from "@/lib/tenancies";
+import * as emailActivityModule from "@/lib/tv-mode/email-activity";
 import { loadTvEmailSendActivity } from "@/lib/tv-mode/email-activity";
 import { loadEmailScreen } from "@/lib/tv-mode/snapshot";
 import { globalPrismaClient } from "@/prisma-client";
@@ -128,5 +129,26 @@ describe.sequential("TV email sending activity (real DB)", () => {
       id: otherTenancyId, projectId, branchId: "isolated", hasNoOrganization: BooleanTrue.TRUE,
     } });
     expect(await loadTvEmailSendActivity({ ...tenancy, id: otherTenancyId }, now)).toMatchObject({ sent: 0, failed: 0 });
+  });
+
+  it("keeps legacy email metrics when the send activity query fails", async () => {
+    const control = await loadEmailScreen(tenancy, now, false);
+    expect(control.status).toBe("success");
+    const activitySpy = vi.spyOn(emailActivityModule, "loadTvEmailSendActivity")
+      .mockRejectedValue(new Error("simulated read replica failure"));
+    try {
+      const screen = await loadEmailScreen(tenancy, now, true);
+      expect(activitySpy).toHaveBeenCalled();
+      expect(screen.status).toBe("success");
+      if (screen.status !== "success" || control.status !== "success") {
+        throw new Error("Expected a successful email screen despite the enrichment failure.");
+      }
+      expect(screen.screen.data).not.toBeNull();
+      expect(screen.screen.data).not.toHaveProperty("sendActivity");
+      expect(screen.screen.data?.sent).toBe(control.screen.data?.sent);
+      expect(screen.screen.data?.statusTrend).toEqual(control.screen.data?.statusTrend);
+    } finally {
+      activitySpy.mockRestore();
+    }
   });
 });
