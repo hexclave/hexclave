@@ -1,0 +1,5 @@
+image-version=0.1.0-pilot
+image-channel=BUILD_IMAGE_CHANNEL
+renderer-url=https://app.hexclave.com/tv-box
+source-commit=BUILD_SOURCE_COMMIT
+wifi-region=BUILD_WIFI_REGION

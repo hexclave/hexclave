@@ -44,6 +44,8 @@ Use a managed Postgres service for production. The server reads its database URL
 
 Use a managed ClickHouse service or your own ClickHouse cluster. The server reads its ClickHouse URL and credentials from `STACK_CLICKHOUSE_URL`, `STACK_CLICKHOUSE_ADMIN_USER`, `STACK_CLICKHOUSE_ADMIN_PASSWORD`, and `STACK_CLICKHOUSE_EXTERNAL_PASSWORD`, and the database name from `STACK_CLICKHOUSE_DATABASE` (defaults to `default` when unset—set it to match the database you use in ClickHouse).
 
+Self-hosting requires PostgreSQL 15 or newer.
+
 The ClickHouse admin user must be able to create databases, tables, views, users, grants, and row policies. The migration script creates the `analytics_internal` database, views in the configured database, and a limited external user used by analytics queries.
 
 For a quick non-production smoke test, you can run both databases locally:

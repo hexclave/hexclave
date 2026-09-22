@@ -75,6 +75,11 @@ model Tenancy {
   conversations       Conversation[]
   conversationEntryPoints ConversationEntryPoint[]
   conversationMessages ConversationMessage[]
+  tvPresentationProfiles TvPresentationProfile[]
+  tvEventOccurrences TvEventOccurrence[]
+  tvEventEvaluatorStates TvEventEvaluatorState[]
+  tvProfileEventPresentations TvProfileEventPresentation[]
+  tvDisplays TvDisplay[]
   deploymentSources   DeploymentSource[]
   deploymentServices  DeploymentService[]
   deploymentVolumes   DeploymentVolume[]
@@ -92,6 +97,231 @@ model Tenancy {
 
   @@unique([projectId, branchId, organizationId])
   @@unique([projectId, branchId, hasNoOrganization])
+}
+
+enum TvPresentationMode {
+  GENERAL
+}
+
+enum TvFinancialVisibility {
+  REDACTED
+  EXACT
+}
+
+model TvPresentationProfile {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String  @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  displayName           String @db.VarChar(80)
+  normalizedDisplayName String @db.VarChar(80)
+  description           String @default("") @db.VarChar(240)
+  mode                  TvPresentationMode @default(GENERAL)
+
+  defaultDurationSeconds  Int
+  playlist                Json
+  interruptionPreferences Json
+  financialVisibility     TvFinancialVisibility @default(REDACTED)
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenancyId, normalizedDisplayName], map: "TvPresentationProfile_tenancy_name_key")
+  @@index([tenancyId, updatedAt(sort: Desc), id], name: "TvPresentationProfile_tenancy_updatedAt_id_idx")
+}
+
+enum TvDisplayPairingState {
+  PENDING
+  APPROVED
+  CONSUMED
+  REJECTED
+}
+
+model TvDisplay {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String  @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  profileId            String @db.VarChar(128)
+  displayName          String @db.VarChar(80)
+
+  pairedByAdminUserId String @db.Uuid
+  pairedAt             DateTime @default(now())
+  lastSeenAt           DateTime?
+  credentialVersion    Int @default(1)
+
+  financialVisibilityAcknowledgedAt DateTime?
+  financialVisibilityAcknowledgedByAdminUserId String? @db.Uuid
+
+  credentials TvDisplayCredential[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenancyId, updatedAt(sort: Desc), id], name: "TvDisplay_tenancy_updatedAt_id_idx")
+  @@index([tenancyId, profileId], name: "TvDisplay_profile_assignment_idx")
+}
+
+model TvDisplayPairingChallenge {
+  id               String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pairingCode      String @unique @db.VarChar(8)
+  deviceSecretHash String @unique @db.VarChar(64)
+  state            TvDisplayPairingState @default(PENDING)
+
+  expiresAt       DateTime
+  lastPolledAt    DateTime?
+  invalidAttempts Int @default(0)
+
+  approvedTenancyId String? @db.Uuid
+  approvedProfileId String? @db.VarChar(128)
+  approvedDisplayName String? @db.VarChar(80)
+  approvedByAdminUserId String? @db.Uuid
+  approvedAt DateTime?
+  financialVisibilityAcknowledgedAt DateTime?
+  consumedAt DateTime?
+  rejectedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt], name: "TvDisplayPairingChallenge_expiresAt_idx")
+}
+
+model TvDisplayCredential {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  displayId String @db.Uuid
+  display   TvDisplay @relation(fields: [displayId], references: [id], onDelete: Cascade)
+
+  familyId        String @db.Uuid
+  tokenHash       String @unique @db.VarChar(64)
+  parentId        String? @db.Uuid
+  issuedAt        DateTime @default(now())
+  expiresAt       DateTime
+  usedAt          DateTime?
+  revokedAt       DateTime?
+  replacementId  String? @db.Uuid
+
+  @@index([displayId, familyId, revokedAt], name: "TvDisplayCredential_family_idx")
+}
+
+model TvDisplayPairingRateLimitBucket {
+  keyHash   String @db.VarChar(64)
+  operation String @db.VarChar(40)
+  windowStart DateTime
+  attempts  Int @default(0)
+  expiresAt DateTime
+
+  @@id([keyHash, operation, windowStart])
+  @@index([expiresAt], name: "TvDisplayPairingRateLimitBucket_expiresAt_idx")
+}
+
+enum TvEventType {
+  EMAIL_DELIVERY_DEGRADATION
+  USER_MILESTONE
+  SUBSCRIPTION_COLLECTION_DEGRADATION
+}
+
+enum TvEventPresentationClass {
+  CELEBRATION
+  INCIDENT
+  CRITICAL_INCIDENT
+}
+
+enum TvEventOccurrenceLifecycle {
+  OCCURRED
+  ACTIVE
+  RESOLVED
+}
+
+enum TvPresentationSupersededReason {
+  NEWER_CELEBRATION
+  EXPIRED_BEFORE_PRESENTATION
+  POLICY_DISABLED
+  OCCURRENCE_REPLACED
+}
+
+model TvEventOccurrence {
+  id        String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  eventType         TvEventType
+  presentationClass TvEventPresentationClass
+  lifecycle         TvEventOccurrenceLifecycle
+  deduplicationKey  String @db.VarChar(200)
+
+  title         String @db.VarChar(160)
+  summary       String @db.VarChar(480)
+  metricLabel   String @db.VarChar(80)
+  metricValue   String @db.VarChar(120)
+  expectedRange String? @db.VarChar(160)
+  sourceLabel   String @db.VarChar(120)
+
+  aggregateEvidence Json
+
+  occurredAt  DateTime
+  detectedAt  DateTime
+  activatedAt DateTime?
+  escalatedAt DateTime?
+  resolvedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  evaluatorStates TvEventEvaluatorState[] @relation("TvEvaluatorActiveOccurrence")
+  profilePresentations TvProfileEventPresentation[]
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, deduplicationKey], map: "TvEventOccurrence_tenancy_deduplication_key")
+  @@index([tenancyId, lifecycle, presentationClass, activatedAt(sort: Desc), id], name: "TvEventOccurrence_active_lookup_idx")
+  @@index([tenancyId, occurredAt(sort: Desc), id], name: "TvEventOccurrence_occurred_lookup_idx")
+  @@index([tenancyId, resolvedAt(sort: Desc), id], name: "TvEventOccurrence_resolved_lookup_idx")
+}
+
+model TvEventEvaluatorState {
+  tenancyId    String @db.Uuid
+  evaluatorKey String @db.VarChar(100)
+  tenancy      Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  nextEvaluationAt    DateTime
+  breachCount         Int @default(0)
+  criticalBreachCount Int @default(0)
+  recoveryCount       Int @default(0)
+  milestoneBaseline   BigInt?
+  typedState          Json
+
+  activeOccurrenceId String? @db.Uuid
+  // The migration's composite foreign key narrows SET NULL to activeOccurrenceId;
+  // tenancyId remains required and continues to own this evaluator state.
+  activeOccurrence   TvEventOccurrence? @relation("TvEvaluatorActiveOccurrence", fields: [tenancyId, activeOccurrenceId], references: [tenancyId, id], onDelete: SetNull, onUpdate: Cascade, map: "TvEventEvaluatorState_activeOccurrence_fkey")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([tenancyId, evaluatorKey])
+}
+
+model TvProfileEventPresentation {
+  tenancyId    String @db.Uuid
+  profileId    String @db.VarChar(128)
+  occurrenceId String @db.Uuid
+  tenancy      Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  occurrence   TvEventOccurrence @relation(fields: [tenancyId, occurrenceId], references: [tenancyId, id], onDelete: Cascade, onUpdate: Cascade, map: "TvProfileEventPresentation_occurrence_fkey")
+
+  takeoverStartedAt  DateTime?
+  takeoverEndsAt     DateTime?
+  recoveryEndsAt     DateTime?
+  highlightExpiresAt DateTime?
+  animationExpiresAt DateTime?
+  supersededAt       DateTime?
+  supersededReason   TvPresentationSupersededReason?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([tenancyId, profileId, occurrenceId])
+  @@index([tenancyId, profileId, supersededAt, highlightExpiresAt], name: "TvProfileEventPresentation_active_lookup_idx")
 }
 
 enum ManagedEmailDomainStatus {
@@ -1098,6 +1328,7 @@ model EmailOutbox {
   tenancy Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
 
   @@id([tenancyId, id])
+  @@index([tenancyId, createdAt], name: "EmailOutbox_tenancyId_createdAt_idx")
   @@index([tenancyId, finishedSendingAt(sort: Desc), scheduledAtIfNotYetQueued(sort: Desc), priority, id], map: "EmailOutbox_ordering_idx")
   @@index([tenancyId, startedSendingAt], name: "EmailOutbox_tenancyId_startedSendingAt_idx")
   @@index([tenancyId, simpleStatus], map: "EmailOutbox_simple_status_tenancy_idx")
@@ -1387,6 +1618,7 @@ model Subscription {
 
   @@id([tenancyId, id])
   @@unique([tenancyId, stripeSubscriptionId])
+  @@index([tenancyId, createdAt], name: "Subscription_tenancyId_createdAt_idx")
 }
 
 model ProductVersion {
@@ -1424,6 +1656,9 @@ model OneTimePurchase {
   product               Json
   quantity              Int
   stripePaymentIntentId String?
+  amountReceived        Int?
+  currency              String?
+  paidAt                DateTime?
   createdAt             DateTime               @default(now())
   revokedAt             DateTime?
   refundedAt            DateTime?
@@ -1468,6 +1703,13 @@ model SubscriptionInvoice {
   status                        String?
   amountTotal                   Int?
   hostedInvoiceUrl              String?
+  paidAt                        DateTime?
+  // Event time of the newest exact invoice outcome applied; NULL means no exact outcome has been applied.
+  paymentOutcomeEventAt         DateTime?
+  markedUncollectibleAt         DateTime?
+  voidedAt                      DateTime?
+  currency                      String?
+  amountPaid                    Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1476,6 +1718,7 @@ model SubscriptionInvoice {
 
   @@id([tenancyId, id])
   @@unique([tenancyId, stripeInvoiceId])
+  @@index([tenancyId, createdAt], name: "SubscriptionInvoice_tenancyId_createdAt_idx")
 }
 
 // Durable backup of Bulldozer `payments-manual-transactions` (refunds today).

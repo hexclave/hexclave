@@ -1,6 +1,6 @@
 import { UrlPrefetcher } from "@/lib/prefetch/url-prefetcher";
-import SidebarLayout from "./sidebar-layout";
 import { AdminAppProvider } from "./use-admin-app";
+import ProjectLayoutClient from "./layout-client";
 
 export default function Layout(
   props: { children: React.ReactNode, modal?: React.ReactNode }
@@ -11,10 +11,9 @@ export default function Layout(
       {/* Pre-fetch the current URL to prevent request waterfalls */}
       <UrlPrefetcher href="" />
 
-      <SidebarLayout>
+      <ProjectLayoutClient modal={props.modal}>
         {props.children}
-        {props.modal}
-      </SidebarLayout>
+      </ProjectLayoutClient>
     </AdminAppProvider>
   );
 }

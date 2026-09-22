@@ -5,7 +5,22 @@ import {
   type MetricsUserCounts,
   type UserActivityResponse,
 } from "@hexclave/shared/dist/interface/admin-metrics";
+import {
+  TvBuiltInProfileResourceSchema,
+  TvProfileConfigurationSchema,
+  TvProfileResourceSchema,
+  TvSavedProfileResourceSchema,
+  TvSnapshotSchema,
+  TvDisplayResourceSchema,
+  type TvProfileConfiguration,
+  type TvProfileResource,
+  type TvSavedProfileResource,
+  type TvSnapshot,
+  type TvDisplayResource,
+} from "@hexclave/shared/dist/interface/admin-tv-mode";
+import { yupArray, yupBoolean, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import type { InferType } from "yup";
 
 export const hexclaveAppInternalsSymbol = Symbol.for("StackAuth--DO-NOT-USE-OR-YOU-WILL-BE-FIRED--StackAppInternals");
 
@@ -142,12 +157,20 @@ function applyMetricsResponseDefaults(body: MetricsResponse): MetricsResponse {
   };
 }
 
-async function fetchJsonOrThrow(adminApp: object, path: string): Promise<unknown> {
-  const response = await getInternalsHookOrThrow(adminApp, "sendRequest")(path, { method: "GET" }, "admin");
+async function requestJsonOrThrow(
+  adminApp: object,
+  path: string,
+  requestOptions: RequestInit,
+): Promise<unknown> {
+  const response = await getInternalsHookOrThrow(adminApp, "sendRequest")(path, requestOptions, "admin");
   if (!response.ok) {
     throw new HexclaveAssertionError(`Admin app internals request failed: ${path}`);
   }
   return await response.json();
+}
+
+async function fetchJsonOrThrow(adminApp: object, path: string, headers?: HeadersInit): Promise<unknown> {
+  return await requestJsonOrThrow(adminApp, path, { method: "GET", headers });
 }
 
 /**
@@ -179,4 +202,199 @@ export async function fetchMetricsOrThrow(
 
 export async function fetchMetricsUserCountsOrThrow(adminApp: object): Promise<MetricsUserCounts> {
   return await MetricsUserCountsSchema.validate(await fetchJsonOrThrow(adminApp, "/internal/metrics/user-counts"));
+}
+
+export function getTvSnapshotPath(profileId: string): string {
+  return `/internal/tv-mode/profiles/${encodeURIComponent(profileId)}/snapshot`;
+}
+
+export class TvSnapshotRequestError extends Error {
+  override name = "TvSnapshotRequestError";
+
+  constructor(readonly status: number) {
+    super(`TV snapshot request failed with status ${status}.`);
+  }
+}
+
+export async function fetchTvSnapshotOrThrow(
+  adminApp: object,
+  profileId: string,
+  signal?: AbortSignal,
+): Promise<TvSnapshot> {
+  const response = await sendInternalAdminRequest(adminApp, getTvSnapshotPath(profileId), {
+    method: "GET",
+    headers: { "x-hexclave-tv-snapshot-contract": "2" },
+    signal,
+  });
+  if (!response.ok) throw new TvSnapshotRequestError(response.status);
+  return await TvSnapshotSchema.validate(await response.json(), {
+    strict: true,
+  });
+}
+
+const TvProfileListResponseSchema = yupObject({
+  persistenceReady: yupBoolean().defined(),
+  effectiveDefaultProfileId: yupString().defined(),
+  savedProfiles: yupArray(TvSavedProfileResourceSchema).defined(),
+  templates: yupArray(TvBuiltInProfileResourceSchema).defined(),
+}).noUnknown().defined();
+
+const TvProfileResponseSchema = yupObject({
+  profile: TvProfileResourceSchema,
+}).noUnknown().defined();
+
+const TvSavedProfileResponseSchema = yupObject({
+  profile: TvSavedProfileResourceSchema,
+}).noUnknown().defined();
+
+export type TvProfileListResponse = InferType<typeof TvProfileListResponseSchema>;
+
+export class TvProfileRequestError extends Error {
+  override name = "TvProfileRequestError";
+
+  constructor(readonly status: number) {
+    super(`TV profile request failed with status ${status}.`);
+  }
+}
+
+function getTvProfilePath(profileId?: string): string {
+  return profileId == null
+    ? "/internal/tv-mode/profiles"
+    : `/internal/tv-mode/profiles/${encodeURIComponent(profileId)}`;
+}
+
+function jsonRequest(method: "POST" | "PATCH" | "DELETE", body: unknown): RequestInit {
+  return {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+async function requestTvProfileJsonOrThrow(
+  adminApp: object,
+  path: string,
+  requestOptions: RequestInit,
+): Promise<unknown> {
+  const response = await getInternalsHookOrThrow(adminApp, "sendRequest")(path, requestOptions, "admin");
+  if (!response.ok) throw new TvProfileRequestError(response.status);
+  return await response.json();
+}
+
+export async function fetchTvProfilesOrThrow(adminApp: object): Promise<TvProfileListResponse> {
+  return await TvProfileListResponseSchema.validate(
+    await requestTvProfileJsonOrThrow(adminApp, getTvProfilePath(), { method: "GET" }),
+    { strict: true },
+  );
+}
+
+export async function fetchTvProfileOrThrow(adminApp: object, profileId: string): Promise<TvProfileResource> {
+  const response = await TvProfileResponseSchema.validate(
+    await requestTvProfileJsonOrThrow(adminApp, getTvProfilePath(profileId), { method: "GET" }),
+    { strict: true },
+  );
+  return response.profile;
+}
+
+const TvDisplayListResponseSchema = yupObject({
+  displays: yupArray(TvDisplayResourceSchema).defined(),
+}).noUnknown().defined();
+
+const TvDisplayApprovalResponseSchema = yupObject({
+  success: yupBoolean().oneOf([true]).defined(),
+  approvedAt: yupString().defined(),
+  expiresAt: yupString().defined(),
+}).noUnknown().defined();
+
+export async function fetchTvDisplaysOrThrow(adminApp: object): Promise<TvDisplayResource[]> {
+  const response = await requestTvProfileJsonOrThrow(adminApp, "/internal/tv-mode/displays", { method: "GET" });
+  return (await TvDisplayListResponseSchema.validate(response, { strict: true })).displays;
+}
+
+export async function approveTvDisplayOrThrow(adminApp: object, input: {
+  pairingCode: string,
+  profileId: string,
+  displayName: string,
+  acknowledgeExactFinancials: boolean,
+}): Promise<{ approvedAt: string, expiresAt: string }> {
+  const response = await TvDisplayApprovalResponseSchema.validate(
+    await requestTvProfileJsonOrThrow(adminApp, "/internal/tv-mode/displays", jsonRequest("POST", input)),
+    { strict: true },
+  );
+  return { approvedAt: response.approvedAt, expiresAt: response.expiresAt };
+}
+
+export async function updateTvDisplayOrThrow(adminApp: object, displayId: string, input: {
+  profileId: string,
+  displayName: string,
+  acknowledgeExactFinancials: boolean,
+}): Promise<void> {
+  await requestTvProfileJsonOrThrow(
+    adminApp,
+    `/internal/tv-mode/displays/${encodeURIComponent(displayId)}`,
+    jsonRequest("PATCH", input),
+  );
+}
+
+export async function unpairTvDisplayOrThrow(adminApp: object, displayId: string): Promise<void> {
+  await requestTvProfileJsonOrThrow(
+    adminApp,
+    `/internal/tv-mode/displays/${encodeURIComponent(displayId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function createTvProfileOrThrow(
+  adminApp: object,
+  configuration: TvProfileConfiguration,
+): Promise<TvSavedProfileResource> {
+  const validated = await TvProfileConfigurationSchema.validate(configuration, { strict: true });
+  const response = await TvSavedProfileResponseSchema.validate(await requestTvProfileJsonOrThrow(
+    adminApp,
+    getTvProfilePath(),
+    jsonRequest("POST", { configuration: validated }),
+  ), { strict: true });
+  return response.profile;
+}
+
+export async function updateTvProfileOrThrow(
+  adminApp: object,
+  profileId: string,
+  expectedVersion: number,
+  configuration: TvProfileConfiguration,
+): Promise<TvSavedProfileResource> {
+  const validated = await TvProfileConfigurationSchema.validate(configuration, { strict: true });
+  const response = await TvSavedProfileResponseSchema.validate(await requestTvProfileJsonOrThrow(
+    adminApp,
+    getTvProfilePath(profileId),
+    jsonRequest("PATCH", { expectedVersion, configuration: validated }),
+  ), { strict: true });
+  return response.profile;
+}
+
+export async function duplicateTvProfileOrThrow(
+  adminApp: object,
+  source: TvProfileResource,
+  displayName: string,
+): Promise<TvSavedProfileResource> {
+  const response = await TvSavedProfileResponseSchema.validate(await requestTvProfileJsonOrThrow(
+    adminApp,
+    `${getTvProfilePath(source.id)}/duplicate`,
+    jsonRequest("POST", {
+      displayName,
+      expectedSourceVersion: source.version,
+    }),
+  ), { strict: true });
+  return response.profile;
+}
+
+export async function deleteTvProfileOrThrow(
+  adminApp: object,
+  profile: TvSavedProfileResource,
+): Promise<void> {
+  await requestTvProfileJsonOrThrow(
+    adminApp,
+    getTvProfilePath(profile.id),
+    jsonRequest("DELETE", { expectedVersion: profile.version }),
+  );
 }

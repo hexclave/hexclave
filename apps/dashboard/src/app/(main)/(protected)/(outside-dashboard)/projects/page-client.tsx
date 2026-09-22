@@ -34,6 +34,10 @@ const PROJECT_ONBOARDING_STATUSES = projectOnboardingStatusValues;
 const NEW_DASHBOARD_URL = "https://hexclave.com/projects";
 const NEW_DASHBOARD_BANNER_START = new Date("2026-09-17T00:00:00-07:00");
 
+function isNewDashboardBannerEnabled() {
+  return getPublicEnvVar("NEXT_PUBLIC_HEXCLAVE_NEW_DASHBOARD_BANNER_ENABLED") === "true";
+}
+
 function isStackAppInternals(value: unknown): value is HexclaveAppInternals {
   return (
     value != null &&
@@ -217,12 +221,14 @@ function RdeProjectsListPage() {
 
   return (
     <div className="flex-grow p-4">
-      <NewDashboardBanner
-        onTryNewDashboard={() => setNewDashboardPreference(
-          user.clientMetadata,
-          async (clientMetadata) => await user.update({ clientMetadata }),
-        )}
-      />
+      {isNewDashboardBannerEnabled() && (
+        <NewDashboardBanner
+          onTryNewDashboard={() => setNewDashboardPreference(
+            user.clientMetadata,
+            async (clientMetadata) => await user.update({ clientMetadata }),
+          )}
+        />
+      )}
 
       <div className="mb-5 space-y-2">
         <Typography type="h2" className="text-xl font-semibold tracking-tight">
@@ -308,11 +314,13 @@ function ProjectsListPage() {
   const [projectDailySignups, setProjectDailySignups] = useState<Map<string, { date: string, activity: number }[]>>(new Map());
   const [loadingProjectMetrics, setLoadingProjectMetrics] = useState(true);
   const [projectMetricsError, setProjectMetricsError] = useState(false);
-  const [showNewDashboardBanner, setShowNewDashboardBanner] = useState(process.env.NODE_ENV === "development");
+  const [showNewDashboardBanner, setShowNewDashboardBanner] = useState(
+    isNewDashboardBannerEnabled() && process.env.NODE_ENV === "development",
+  );
   const router = useRouter();
 
   useEffect(() => {
-    if (process.env.NODE_ENV === "development") {
+    if (!isNewDashboardBannerEnabled() || process.env.NODE_ENV === "development") {
       return;
     }
 

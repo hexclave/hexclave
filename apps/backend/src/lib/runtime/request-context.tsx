@@ -12,6 +12,7 @@ export type ResponseCookieOptions = {
   maxAge?: number,
   path?: string,
   secure?: boolean,
+  sameSite?: "strict" | "lax" | "none",
 };
 
 export type RequestContext = {
