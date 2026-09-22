@@ -170,7 +170,6 @@ describe.sequential("TV email sending activity (real DB)", () => {
       const screen = await loadEmailScreen(isolatedTenancy, now, true);
       expect(screen.status).toBe("error");
       expect(screen.screen).toMatchObject({ sourceStatus: "error", diagnosticCode: "source-query-failed", data: null });
-      expect(screen.screen.sourceStatus).not.toBe("empty");
     } finally {
       activitySpy.mockRestore();
     }
