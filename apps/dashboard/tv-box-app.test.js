@@ -165,6 +165,7 @@ describe("TV Box actual renderer orchestration", () => {
       metric.querySelector(".tv-metric-value")?.textContent,
     ]));
     expect(metrics.get("Emails sent · 7d")).toBe("0");
+    expect(metrics.get("Errors")).toBe("3");
     expect(document.body.textContent).toContain("No successful sends in this window");
     expect(document.body.textContent).not.toContain("Accepted by mail server");
   });

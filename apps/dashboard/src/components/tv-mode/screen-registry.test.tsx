@@ -83,6 +83,12 @@ describe("TV layout content", () => {
       trend: [{ label: "Sep 22", primary: 0, secondary: 3, tertiary: 0 }],
     };
     const doc = new DOMParser().parseFromString(renderToStaticMarkup(renderTvScreen(email)), "text/html");
+    const metrics = new Map(Array.from(doc.querySelectorAll("[data-hero]"), metric => [
+      metric.querySelector("p")?.textContent,
+      metric.querySelector("p:nth-child(2)")?.textContent,
+    ]));
+    expect(metrics.get("Emails sent · 7d")).toBe("0");
+    expect(metrics.get("Errors")).toBe("3");
     expect(doc.body.textContent).toContain("No successful sends in this window");
     expect(doc.body.textContent).not.toContain("Accepted by mail server");
   });

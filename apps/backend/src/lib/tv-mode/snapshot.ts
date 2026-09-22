@@ -1093,7 +1093,6 @@ async function loadTvEmailSendActivityOrUndefined(tenancy: Tenancy, now: Date): 
   try {
     return await loadTvEmailSendActivity(tenancy, now);
   } catch (cause) {
-    if (cause instanceof TvSnapshotInvariantError) throw cause;
     captureError("tv-snapshot-email-send-activity-failed", new HexclaveAssertionError(
       "TV snapshot email send activity enrichment failed.",
       { cause, projectId: tenancy.project.id, branchId: tenancy.branchId },
