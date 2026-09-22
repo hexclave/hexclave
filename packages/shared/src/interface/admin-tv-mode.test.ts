@@ -156,6 +156,17 @@ describe("TvSnapshotSchema", () => {
     }, { strict: true })).rejects.toMatchObject({ name: "ValidationError" });
   });
 
+  it("defers missing sending-activity fields to the field-level errors", async () => {
+    const email = validSnapshot().screens[3];
+    const error = await TvEmailHealthScreenSchema.validate({
+      ...email, data: { ...email.data, sendActivity: { sent: 250, failed: 0 } },
+    }, { strict: true }).then(() => null, (caught: unknown) => caught);
+    expect(error).toMatchObject({ name: "ValidationError" });
+    if (!(error instanceof Error)) throw new Error("Expected a validation error.");
+    expect(error.message).toContain("trend");
+    expect(error.message).not.toContain("sending totals");
+  });
+
   it.each(["healthy", "ready", "limited", "empty", "insufficient-data", "unavailable", "error", "stale"] as const)(
     "accepts the %s source-health status",
     async (status) => {

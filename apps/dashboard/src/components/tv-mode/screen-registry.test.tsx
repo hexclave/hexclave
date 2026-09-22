@@ -73,6 +73,20 @@ describe("TV layout content", () => {
     }
   });
 
+  it("does not claim server acceptance when a window has no successful sends", () => {
+    const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse", "email-no-receipts");
+    const email = snapshot?.screens.find((screen) => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Email fixture missing");
+    email.data.sendActivity = {
+      sent: 0,
+      failed: 3,
+      trend: [{ label: "Sep 22", primary: 0, secondary: 3, tertiary: 0 }],
+    };
+    const doc = new DOMParser().parseFromString(renderToStaticMarkup(renderTvScreen(email)), "text/html");
+    expect(doc.body.textContent).toContain("No successful sends in this window");
+    expect(doc.body.textContent).not.toContain("Accepted by mail server");
+  });
+
   it("labels monitored sources as categories even when a source has no receipts", () => {
     const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse", "email-no-receipts");
     const live = snapshot?.screens.find((screen) => screen.id === "live-pulse");

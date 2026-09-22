@@ -148,6 +148,27 @@ describe("TV Box actual renderer orchestration", () => {
     }
   });
 
+  it("does not claim server acceptance when a window has no successful sends", async () => {
+    const fixture = createSnapshot("email-no-receipts");
+    const email = fixture.screens.find((screen) => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Missing email fixture");
+    email.data.sendActivity = {
+      sent: 0,
+      failed: 3,
+      trend: [{ label: "Sep 22", primary: 0, secondary: 3, tertiary: 0 }],
+    };
+    fixture.profile.playlist = ["email-health"];
+    fixture.profile.screenDurations = fixture.profile.screenDurations.filter(entry => entry.screenId === "email-health");
+    await launch({ mode: "fixture-preview", snapshot: fixture });
+    const metrics = new Map([...document.querySelectorAll(".tv-metric")].map(metric => [
+      metric.querySelector(".tv-metric-label")?.textContent,
+      metric.querySelector(".tv-metric-value")?.textContent,
+    ]));
+    expect(metrics.get("Emails sent · 7d")).toBe("0");
+    expect(document.body.textContent).toContain("No successful sends in this window");
+    expect(document.body.textContent).not.toContain("Accepted by mail server");
+  });
+
   it("does not describe unconfirmed send volume as live delivery evidence", async () => {
     const fixture = createSnapshot("email-no-receipts");
     fixture.profile.playlist = ["live-pulse"];

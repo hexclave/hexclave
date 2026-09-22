@@ -11,7 +11,9 @@ export function getTvEmailPresentation(data) {
     volumeValue: (data.sendActivity?.sent ?? data.sent).toLocaleString(),
     volumeDetail: data.sendActivity == null
       ? "Includes successful sends and failed attempts"
-      : "Accepted by mail server; delivery may be unconfirmed",
+      : data.sendActivity.sent === 0
+        ? "No successful sends in this window"
+        : "Accepted by mail server; delivery may be unconfirmed",
     rateValue: data.deliveryRatePercent == null
       ? hasNoOutcomes ? "No delivery data" : "Insufficient data"
       : `${data.deliveryRatePercent}%`,

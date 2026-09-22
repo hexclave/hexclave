@@ -2,6 +2,7 @@ import { getAuthorizedTvDisplay } from "@/lib/tv-mode/displays";
 import { readTvDisplayBearerToken } from "@/lib/tv-mode/read-bearer-token";
 import { resolveTvProfile } from "@/lib/tv-mode/profiles";
 import { buildLiveTvSnapshot } from "@/lib/tv-mode/snapshot";
+import { readTvSnapshotContractVersion } from "@/lib/tv-mode/snapshot-contract";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { TvSnapshotSchema } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import { yupNumber, yupObject, yupString, yupTuple } from "@hexclave/shared/dist/schema-fields";
@@ -18,8 +19,7 @@ export const GET = createSmartRouteHandler({
     body: TvSnapshotSchema,
   }),
   handler: async ({ headers }, fullRequest) => {
-    const snapshotContract = fullRequest.headers["x-hexclave-tv-snapshot-contract"]?.at(0)
-      ?? fullRequest.headers["x-stack-tv-snapshot-contract"]?.at(0);
+    const contractVersion = readTvSnapshotContractVersion(fullRequest.headers);
     const accessToken = readTvDisplayBearerToken(headers.authorization?.[0]);
     const authorized = await getAuthorizedTvDisplay(accessToken);
     if (authorized == null) throw new StatusError(401, "tv_display_access_invalid");
@@ -32,8 +32,8 @@ export const GET = createSmartRouteHandler({
       tenancy: authorized.tenancy,
       profileId: authorized.display.profileId,
       resolvedProfile: profile,
-      includeScreenDurations: true,
-      includeEmailSendActivity: snapshotContract === "3",
+      includeScreenDurations: contractVersion >= 2,
+      includeEmailSendActivity: contractVersion >= 3,
       forceFinancialRedaction: !exactFinancialsAcknowledged,
     });
     if (snapshot == null) throw new StatusError(409, "tv_display_profile_unavailable");
@@ -54,8 +54,8 @@ export const GET = createSmartRouteHandler({
         tenancy: currentAuthorized.tenancy,
         profileId: currentAuthorized.display.profileId,
         resolvedProfile: currentProfile,
-        includeScreenDurations: true,
-        includeEmailSendActivity: snapshotContract === "3",
+        includeScreenDurations: contractVersion >= 2,
+        includeEmailSendActivity: contractVersion >= 3,
         forceFinancialRedaction: true,
       });
       if (snapshot == null) throw new StatusError(409, "tv_display_profile_unavailable");

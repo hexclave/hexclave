@@ -15,7 +15,7 @@ it("shows successful SMTP sends and a nonempty TV graph without delivery receipt
       username: "test", password: "test", sender_name: "Test Project", sender_email: "test@example.com",
     } },
   });
-  await Project.updateProjectConfig({ "apps.installed.emails.enabled": true });
+  await Project.updateConfig({ "apps.installed.emails.enabled": true });
   const user = await niceBackendFetch("/api/v1/users", {
     method: "POST", accessType: "server",
     body: { primary_email: backendContext.value.mailbox.emailAddress, primary_email_verified: true },

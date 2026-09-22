@@ -4,7 +4,8 @@ import {
   TvSnapshotSchema,
 } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import { it, niceFetch, type NiceResponse, STACK_BACKEND_BASE_URL, updateCookiesFromResponse } from "../../../../helpers";
-import { Project } from "../../../backend-helpers";
+import { withPortPrefix } from "../../../../helpers/ports";
+import { Project, backendContext, niceBackendFetch, waitForOutboxEmailWithStatus } from "../../../backend-helpers";
 
 const LATEST_REFRESH_COOKIE = "hexclave-tv-display-refresh";
 const V1_REFRESH_COOKIE = "hexclave-tv-display-refresh-v1";
@@ -64,10 +65,10 @@ async function adminJsonRequest(options: {
   });
 }
 
-async function createPairedDisplay(displayName: string) {
+async function createPairedDisplay(displayName: string, createBody?: Parameters<typeof Project.createAndSwitch>[0]) {
   // Keep this file at or below five pairings: the endpoint's per-minute IP
   // limit is shared by every E2E request.
-  const project = await Project.createAndSwitch();
+  const project = await Project.createAndSwitch(createBody);
   const challengeResponse = await publicJsonRequest("/tv-displays/pairing-challenges", { method: "POST" });
   if (challengeResponse.status !== 200) throw new Error(`Expected pairing challenge, received ${challengeResponse.status}.`);
   const challenge = await TvDisplayPairingChallengeSchema.validate(challengeResponse.body, { strict: true });
@@ -107,7 +108,12 @@ it("pairs a narrow display principal, preserves tenancy assignment, and detects 
     challenge,
     project: firstProject,
     statusResponse,
-  } = await createPairedDisplay("E2E Lobby Display");
+  } = await createPairedDisplay("E2E Lobby Display", {
+    config: { email_config: {
+      type: "standard", host: "localhost", port: Number(withPortPrefix("29")),
+      username: "test", password: "test", sender_name: "Test Project", sender_email: "test@example.com",
+    } },
+  });
   const refreshSetCookies = statusResponse.headers.getSetCookie()
     .filter((cookie) => cookie.startsWith(`${LATEST_REFRESH_COOKIE}=`) || cookie.startsWith(`${V1_REFRESH_COOKIE}=`));
   expect(refreshSetCookies).toHaveLength(4);
@@ -129,6 +135,20 @@ it("pairs a narrow display principal, preserves tenancy assignment, and detects 
     expect(refreshSetCookie).toContain("Max-Age=2592000");
   }
 
+  await Project.updateConfig({ "apps.installed.emails.enabled": true });
+  const emailUser = await niceBackendFetch("/api/v1/users", {
+    method: "POST", accessType: "server",
+    body: { primary_email: backendContext.value.mailbox.emailAddress, primary_email_verified: true },
+  });
+  expect(emailUser.status).toBe(201);
+  const subject = "TV display send activity contract";
+  const emailSend = await niceBackendFetch("/api/v1/emails/send-email", {
+    method: "POST", accessType: "server",
+    body: { user_ids: [emailUser.body.id], html: "<p>TV display sending test</p>", subject, notification_category_name: "Transactional" },
+  });
+  expect(emailSend.status).toBe(200);
+  await waitForOutboxEmailWithStatus(subject, "sent");
+
   const snapshotResponse = await publicJsonRequest(
     "/tv-displays/snapshot?projectId=not-trusted&profileId=engineering-office",
     { authorization: pairing.accessToken },
@@ -137,18 +157,21 @@ it("pairs a narrow display principal, preserves tenancy assignment, and detects 
   const snapshot = await TvSnapshotSchema.validate(snapshotResponse.body, { strict: true });
   expect(snapshot.project.id).toBe(firstProject.projectId);
   expect(snapshot.profile.id).toBe("company-pulse");
-  for (const screen of snapshot.screens) {
-    if (screen.id === "email-health") expect(screen).not.toHaveProperty("data.sendActivity");
-  }
-  await Project.updateProjectConfig({ "apps.installed.emails.enabled": true });
+  const emailScreen = snapshot.screens.find((screen) => screen.id === "email-health");
+  if (emailScreen?.data == null) throw new Error("Sent email must produce a TV email data screen");
+  expect(emailScreen.data.sent).toBe(1);
+  expect(emailScreen.data).not.toHaveProperty("sendActivity");
+
   const sendingSnapshotResponse = await publicJsonRequest("/tv-displays/snapshot", {
     authorization: pairing.accessToken,
     snapshotContract: "3",
   });
   expect(sendingSnapshotResponse.status).toBe(200);
   const sendingSnapshot = await TvSnapshotSchema.validate(sendingSnapshotResponse.body, { strict: true });
-  // An empty source has no data payload; the opt-in contract must still validate.
-  expect(sendingSnapshot.profile.screenDurations).toHaveLength(sendingSnapshot.profile.playlist.length);
+  const sendingEmailScreen = sendingSnapshot.screens.find((screen) => screen.id === "email-health");
+  if (sendingEmailScreen?.data == null) throw new Error("Sent email must produce a TV email data screen");
+  expect(sendingEmailScreen.data.sendActivity).toMatchObject({ sent: 1, failed: 0 });
+  expect(sendingEmailScreen.data.sendActivity?.trend.reduce((sum, point) => sum + point.primary, 0)).toBe(1);
 
   const adminBoundaryResponse = await publicJsonRequest("/internal/tv-mode/profiles", {
     authorization: pairing.accessToken,

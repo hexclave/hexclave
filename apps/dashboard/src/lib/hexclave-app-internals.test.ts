@@ -2,15 +2,70 @@ import { describe, expect, it } from "vitest";
 import {
   approveTvDisplayOrThrow,
   fetchTvDisplaysOrThrow,
+  fetchTvSnapshotOrThrow,
   getTvSnapshotPath,
   hexclaveAppInternalsSymbol,
 } from "./hexclave-app-internals";
+import { createTvFixtureSnapshot, getTvProfileFixture } from "./tv-mode/fixtures";
 
 describe("TV snapshot admin path", () => {
   it("keeps the profile as a URL-encoded path resource", () => {
     expect(getTvSnapshotPath("office / north")).toBe(
       "/internal/tv-mode/profiles/office%20%2F%20north/snapshot",
     );
+  });
+
+  it("renegotiates at contract 2 when a legacy backend omits screenDurations", async () => {
+    const profile = getTvProfileFixture("company-pulse");
+    if (profile == null) throw new Error("The fallback test requires the company-pulse fixture.");
+    const snapshot = createTvFixtureSnapshot("fallback-test", profile);
+    if (snapshot.profile.screenDurations == null) {
+      throw new Error("The fallback test requires a fixture with screenDurations.");
+    }
+    const { screenDurations: _screenDurations, ...legacyProfile } = snapshot.profile;
+    const legacySnapshot = { ...snapshot, profile: legacyProfile };
+
+    const requests: Array<{ path: string, options: RequestInit, type: string | undefined }> = [];
+    const adminApp = {
+      [hexclaveAppInternalsSymbol]: {
+        sendRequest: async (path: string, options: RequestInit, type?: string) => {
+          requests.push({ path, options, type });
+          const body = requests.length === 1 ? legacySnapshot : snapshot;
+          return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      },
+    };
+
+    const result = await fetchTvSnapshotOrThrow(adminApp, "company-pulse");
+
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.path)).toEqual([
+      "/internal/tv-mode/profiles/company-pulse/snapshot",
+      "/internal/tv-mode/profiles/company-pulse/snapshot",
+    ]);
+    expect(new Headers(requests[0].options.headers).get("x-hexclave-tv-snapshot-contract")).toBe("3");
+    expect(new Headers(requests[1].options.headers).get("x-hexclave-tv-snapshot-contract")).toBe("2");
+    expect(result.profile.screenDurations).toEqual(snapshot.profile.screenDurations);
+  });
+
+  it("does not re-request when a contract-3 snapshot includes screenDurations", async () => {
+    const profile = getTvProfileFixture("company-pulse");
+    if (profile == null) throw new Error("The contract test requires the company-pulse fixture.");
+    const snapshot = createTvFixtureSnapshot("contract-test", profile);
+    const requests: Array<{ path: string, options: RequestInit }> = [];
+    const adminApp = {
+      [hexclaveAppInternalsSymbol]: {
+        sendRequest: async (path: string, options: RequestInit) => {
+          requests.push({ path, options });
+          return new Response(JSON.stringify(snapshot), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      },
+    };
+
+    await expect(fetchTvSnapshotOrThrow(adminApp, "company-pulse")).resolves.toMatchObject({
+      profile: { id: "company-pulse" },
+    });
+    expect(requests).toHaveLength(1);
   });
 });
 

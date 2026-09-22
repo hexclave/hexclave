@@ -232,12 +232,18 @@ export const TvEmailSendActivitySchema = yupObject({
   name: "sending-totals",
   message: "TV sending totals must match their daily series",
   skipAbsent: true,
-  test: (activity) => (
-    // Yup can run this object test before validating its children.
-    Array.isArray(activity.trend) && activity.trend.every((point: unknown) => point != null)
-    && activity.sent === activity.trend.reduce((sum, point) => sum + point.primary, 0)
-    && activity.failed === activity.trend.reduce((sum, point) => sum + point.secondary, 0)
-  ),
+  test: (activity) => {
+    // Yup can run this object test before validating its children; defer to the
+    // field-level errors unless every compared value is already well-typed.
+    if (
+      typeof activity.sent !== "number" || typeof activity.failed !== "number"
+      || !Array.isArray(activity.trend)
+      || !activity.trend.every((point: { primary: unknown, secondary: unknown } | null | undefined) =>
+        point != null && typeof point.primary === "number" && typeof point.secondary === "number")
+    ) return true;
+    return activity.sent === activity.trend.reduce((sum, point) => sum + point.primary, 0)
+      && activity.failed === activity.trend.reduce((sum, point) => sum + point.secondary, 0);
+  },
 });
 export type TvEmailSendActivity = yup.InferType<typeof TvEmailSendActivitySchema>;
 
