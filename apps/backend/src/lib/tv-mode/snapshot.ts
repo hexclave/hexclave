@@ -19,7 +19,6 @@ import {
   TV_SNAPSHOT_STALE_AFTER_MS,
   type TvAudienceMomentumScreen,
   type TvEmailHealthScreen,
-  type TvEmailSendActivity,
   type TvLivePulseScreen,
   type TvProfileResource,
   type TvReportingWindow,
@@ -1086,21 +1085,6 @@ async function loadRevenueScreen(
   }
 }
 
-// The sending aggregate is an additive contract-3 enrichment; a transient
-// read-replica failure there must not blank the legacy summary/trend the
-// screen already had before contract 3 existed.
-async function loadTvEmailSendActivityOrUndefined(tenancy: Tenancy, now: Date): Promise<TvEmailSendActivity | undefined> {
-  try {
-    return await loadTvEmailSendActivity(tenancy, now);
-  } catch (cause) {
-    captureError("tv-snapshot-email-send-activity-failed", new HexclaveAssertionError(
-      "TV snapshot email send activity enrichment failed.",
-      { cause, projectId: tenancy.project.id, branchId: tenancy.branchId },
-    ));
-    return undefined;
-  }
-}
-
 export async function loadEmailScreen(tenancy: Tenancy, now: Date, includeSendActivity = false): Promise<TvAdapterResult<TvEmailHealthScreen>> {
   const observedAt = now.toISOString();
   const bounds = getRollingWindow(now, 7);
@@ -1194,7 +1178,10 @@ export async function loadEmailScreen(tenancy: Tenancy, now: Date, includeSendAc
         GROUP BY day
         ORDER BY day
       `,
-      includeSendActivity ? loadTvEmailSendActivityOrUndefined(tenancy, now) : undefined,
+      // A send-activity query failure must surface as the visible error state
+      // rather than a "successful" screen with missing metrics, so it is not
+      // caught separately from the summary/trend queries.
+      includeSendActivity ? loadTvEmailSendActivity(tenancy, now) : undefined,
     ]);
     const summary = summaryRows[0];
     const sent = Number(summary.current_finished);

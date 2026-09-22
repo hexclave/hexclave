@@ -14,10 +14,10 @@ describe.sequential("TV email sending activity (real DB)", () => {
   const now = new Date("2026-09-22T12:00:00.000Z");
   let tenancy: Tenancy;
 
-  async function createEmail(createdAt: string, finishedAt: string | null, failed = false) {
+  async function createEmail(createdAt: string, finishedAt: string | null, failed = false, forTenancyId = tenancyId) {
     return await globalPrismaClient.emailOutbox.create({
       data: {
-        tenancyId,
+        tenancyId: forTenancyId,
         createdAt: new Date(createdAt),
         tsxSource: "/* TV sending activity test */",
         isHighPriority: false,
@@ -131,22 +131,46 @@ describe.sequential("TV email sending activity (real DB)", () => {
     expect(await loadTvEmailSendActivity({ ...tenancy, id: otherTenancyId }, now)).toMatchObject({ sent: 0, failed: 0 });
   });
 
-  it("keeps legacy email metrics when the send activity query fails", async () => {
-    const control = await loadEmailScreen(tenancy, now, false);
-    expect(control.status).toBe("success");
+  it("returns the visible error state when the send activity query fails", async () => {
     const activitySpy = vi.spyOn(emailActivityModule, "loadTvEmailSendActivity")
       .mockRejectedValue(new Error("simulated read replica failure"));
     try {
       const screen = await loadEmailScreen(tenancy, now, true);
       expect(activitySpy).toHaveBeenCalled();
-      expect(screen.status).toBe("success");
-      if (screen.status !== "success" || control.status !== "success") {
-        throw new Error("Expected a successful email screen despite the enrichment failure.");
-      }
-      expect(screen.screen.data).not.toBeNull();
-      expect(screen.screen.data).not.toHaveProperty("sendActivity");
-      expect(screen.screen.data?.sent).toBe(control.screen.data?.sent);
-      expect(screen.screen.data?.statusTrend).toEqual(control.screen.data?.statusTrend);
+      expect(screen.status).toBe("error");
+      expect(screen.screen).toMatchObject({
+        sourceStatus: "error",
+        diagnosticCode: "source-query-failed",
+        data: null,
+        insight: null,
+      });
+    } finally {
+      activitySpy.mockRestore();
+    }
+  });
+
+  it("does not report an empty screen when only receipt-free activity exists and its query fails", async () => {
+    // Legacy metrics key off createdAt, so a scheduled email created before the
+    // window but sent inside it is invisible to them; the sending aggregate is
+    // the only source that sees it. If that aggregate fails, an "empty" success
+    // would hide a real send behind a healthy-looking screen.
+    const isolatedTenancyId = randomUUID();
+    await globalPrismaClient.tenancy.create({ data: {
+      id: isolatedTenancyId, projectId, branchId: "activity-failure", hasNoOrganization: BooleanTrue.TRUE,
+    } });
+    const isolatedTenancy = { ...tenancy, id: isolatedTenancyId };
+    await createEmail("2026-09-01T10:00:00Z", "2026-09-22T10:00:00Z", false, isolatedTenancyId);
+    const healthy = await loadEmailScreen(isolatedTenancy, now, true);
+    expect(healthy.status).toBe("success");
+    expect(healthy.screen).toMatchObject({ sourceStatus: "insufficient-data", data: { sent: 0, sendActivity: { sent: 1, failed: 0 } } });
+
+    const activitySpy = vi.spyOn(emailActivityModule, "loadTvEmailSendActivity")
+      .mockRejectedValue(new Error("simulated read replica failure"));
+    try {
+      const screen = await loadEmailScreen(isolatedTenancy, now, true);
+      expect(screen.status).toBe("error");
+      expect(screen.screen).toMatchObject({ sourceStatus: "error", diagnosticCode: "source-query-failed", data: null });
+      expect(screen.screen.sourceStatus).not.toBe("empty");
     } finally {
       activitySpy.mockRestore();
     }
