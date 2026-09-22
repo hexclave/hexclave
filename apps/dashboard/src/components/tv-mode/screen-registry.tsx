@@ -11,6 +11,7 @@ import {
 } from "@phosphor-icons/react";
 import { useId, type ComponentType, type ReactNode } from "react";
 import styles from "./screen-layout.module.css";
+import { getTvEmailPresentation } from "../../../public/tv-box/email-presentation.mjs";
 import type {
   TvAudienceMomentumScreen,
   TvEmailHealthScreen,
@@ -343,7 +344,7 @@ const TV_INSIGHT_FALLBACKS = new Map<TvScreenId, {
   }],
   ["email-health", {
     ready: "No evidence-qualified email delivery insight was identified for this seven-day window.",
-    insufficient: "At least 20 confirmed delivery outcomes are required before delivery health can be assessed.",
+    insufficient: "Completed sends may lack delivery receipts. Delivery health requires at least 20 confirmed outcomes.",
   }],
 ]);
 
@@ -450,7 +451,7 @@ function LivePulseScreen({
                 value={data.todayActiveUsers.toLocaleString()}
                 detail="Current UTC day"
               />
-              <TvMetric label="Monitored sources" value={data.sourceHealth.length.toString()} detail="Reporting now" />
+              <TvMetric label="Monitored sources" value={data.sourceHealth.length.toString()} detail="Source categories" />
             </div>
             <TvInsightArea screenId="live-pulse" sourceStatus={sourceStatus} insight={insight} tone="cyan" />
           </div>
@@ -620,16 +621,17 @@ function EmailHealthScreen({
   sourceStatus: TvEmailHealthScreen["sourceStatus"],
   headerAccessory?: ReactNode,
 }) {
+  const presentation = getTvEmailPresentation(data);
   return (
-    <TvScreenFrame eyebrow="Seven-Day Delivery" title="Email Health" description="Whether customer messages are reaching recipients reliably." icon={<EnvelopeSimpleIcon className="h-[1.3em] w-[1.3em]" weight="fill" />} accentClassName="text-amber-300" headerAccessory={headerAccessory}>
+    <TvScreenFrame eyebrow="Seven-Day Email Activity" title="Email Health" description="Sending activity and confirmed delivery outcomes." icon={<EnvelopeSimpleIcon className="h-[1.3em] w-[1.3em]" weight="fill" />} accentClassName="text-amber-300" headerAccessory={headerAccessory}>
       <div className={`${styles.screenGrid} grid h-full min-h-0`}>
         <GlassPanel tone="amber" className="h-full">
           <div className="flex h-full min-h-0 flex-col justify-between p-[clamp(1.5rem,2.3vw,5.5rem)]">
-            <TvMetric label="Delivery rate · 7d" value={data.deliveryRatePercent == null ? "Insufficient data" : `${data.deliveryRatePercent}%`} textValue={data.deliveryRatePercent == null} detail={data.deliveryRatePercent == null ? "At least 20 confirmed outcomes required" : `${data.assessableSends.toLocaleString()} confirmed outcomes`} hero />
+            <TvMetric label={presentation.volumeLabel} value={presentation.volumeValue} detail={presentation.volumeDetail} hero />
             <div className="grid grid-cols-2 gap-x-8 gap-y-5">
               <TvMetric label="Delivered" value={formatCompact(data.delivered)} />
               <TvMetric label="Bounced" value={formatCompact(data.bounced)} />
-              <TvMetric label="Errors" value={formatCompact(data.errors)} />
+              <TvMetric label="Errors" value={formatCompact(data.sendActivity?.failed ?? data.errors)} />
               <TvMetric label="In progress" value={formatCompact(data.inProgress)} />
             </div>
             <TvInsightArea screenId="email-health" sourceStatus={sourceStatus} insight={insight} tone="amber" />
@@ -637,12 +639,15 @@ function EmailHealthScreen({
         </GlassPanel>
         <GlassPanel tone="amber" className="h-full">
           <div className="grid h-full min-h-0 grid-rows-[auto_1fr] gap-[clamp(1rem,2vh,2.5rem)] p-[clamp(1.25rem,2vw,5rem)]">
-            <TvChartHeader
-              title="Email Delivery Volume"
-              subtitle="Daily send status · trailing 7 days"
-              accentClassName="text-amber-200/55"
-            />
-            <TvStackedBars points={data.statusTrend} colors={["#fbbf24", "#fb7185", "#94a3b8"]} labels={["Delivered", "Error", "In progress"]} />
+            <div className="flex flex-col gap-[min(1.5vw,2cqh)]">
+              <TvMetric label="Delivery rate · 7d" value={presentation.rateValue} textValue={data.deliveryRatePercent == null} detail={presentation.rateDetail} />
+              <TvChartHeader
+                title={presentation.chartTitle}
+                subtitle={presentation.chartSubtitle}
+                accentClassName="text-amber-200/55"
+              />
+            </div>
+            <TvStackedBars points={data.sendActivity?.trend ?? data.statusTrend} colors={["#fbbf24", "#fb7185", "#94a3b8"]} labels={[data.sendActivity == null ? "Delivered" : "Sent", "Error", "In progress"]} />
           </div>
         </GlassPanel>
       </div>

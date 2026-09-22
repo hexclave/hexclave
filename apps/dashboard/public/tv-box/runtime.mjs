@@ -171,7 +171,19 @@ function isEmailScreen(screen) {
     && (screen.data.bounceRatePercent === null || hasFiniteNumber(screen.data, "bounceRatePercent"))
     && hasFiniteNumber(screen.data, "volumeChangePercent")
     && Array.isArray(screen.data.statusTrend)
-    && screen.data.statusTrend.every(isStackedTrendPoint);
+    && screen.data.statusTrend.every(isStackedTrendPoint)
+    && (screen.data.sendActivity === undefined || isEmailSendActivity(screen.data.sendActivity));
+}
+
+function isEmailSendActivity(activity) {
+  const isCount = value => Number.isSafeInteger(value) && value >= 0;
+  return isRecord(activity)
+    && isCount(activity.sent) && isCount(activity.failed)
+    && Array.isArray(activity.trend)
+    && activity.trend.every(point => isStackedTrendPoint(point)
+      && isCount(point.primary) && isCount(point.secondary) && isCount(point.tertiary))
+    && activity.sent === activity.trend.reduce((sum, point) => sum + point.primary, 0)
+    && activity.failed === activity.trend.reduce((sum, point) => sum + point.secondary, 0);
 }
 
 function isTvEvent(event) {

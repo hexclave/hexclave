@@ -418,6 +418,38 @@ export function createTvFixtureSnapshot(projectId: string, profile: TvProfileFix
     }
   }
 
+  if (variant === "email-no-receipts") {
+    if (email.data == null) throwErr("The email-no-receipts fixture requires email data");
+    email.sourceStatus = "insufficient-data";
+    email.insight = null;
+    email.data = {
+      ...email.data,
+      sent: 250,
+      assessableSends: 0,
+      delivered: 0,
+      bounced: 0,
+      errors: 0,
+      inProgress: 0,
+      deliveryRatePercent: null,
+      bounceRatePercent: null,
+      volumeChangePercent: 0,
+      statusTrend: email.data.statusTrend.map((point) => ({ ...point, primary: 0, secondary: 0, tertiary: 0 })),
+      sendActivity: {
+        sent: 250,
+        failed: 0,
+        trend: email.data.statusTrend.map((point, index) => ({
+          ...point, primary: index === 0 ? 250 : 0, secondary: 0, tertiary: 0,
+        })),
+      },
+    };
+    const livePulse = screens.find((screen) => screen.id === "live-pulse");
+    const emailHealth = livePulse?.data?.sourceHealth.find((source) => source.label === "Email delivery");
+    if (emailHealth == null) throwErr("The email-no-receipts fixture requires the Email delivery source");
+    emailHealth.status = "insufficient-data";
+    emailHealth.value = "Limited";
+    emailHealth.detail = "Insufficient data";
+  }
+
   const highlight = variant === "celebration-highlight"
       || variant === "celebration-takeover"
       || variant === "celebration-suspended"
@@ -460,7 +492,7 @@ export function createTvFixtureSnapshot(projectId: string, profile: TvProfileFix
               ? presentedTakeover(resolvedEmailEvent, "recovery-confirmation", profile.interruptionTiming.criticalIncident.recoveryTakeoverSeconds)
               : null;
   const configuredPlaylist = profile.playlist.filter((entry) => entry.enabled).map((entry) => entry.screenId);
-  const playlist: TvProfileFixture["playlist"][number]["screenId"][] = variant === "partial-failure" && configuredPlaylist.includes("email-health")
+  const playlist: TvProfileFixture["playlist"][number]["screenId"][] = (variant === "partial-failure" || variant === "email-no-receipts") && configuredPlaylist.includes("email-health")
     ? ["email-health", ...configuredPlaylist.filter((id) => id !== "email-health")]
     : configuredPlaylist;
 

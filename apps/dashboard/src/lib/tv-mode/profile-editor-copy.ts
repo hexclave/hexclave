@@ -27,6 +27,7 @@ export const TV_STATE_PREVIEWS = [
   { fixture: "financial-redacted", label: "Financial Redaction" },
   { fixture: "empty", label: "Empty" },
   { fixture: "insufficient-data", label: "Insufficient Data" },
+  { fixture: "email-no-receipts", label: "Email Sends Without Receipts" },
   { fixture: "unavailable", label: "Unavailable Source" },
   { fixture: "partial-failure", label: "Partial Failure" },
   { fixture: "error", label: "Fatal Error" },

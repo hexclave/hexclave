@@ -59,6 +59,22 @@ describe("TV Mode centralized fixtures", () => {
       .toEqual(new Set(TV_SCREEN_IDS));
   });
 
+  it("provides a preview of completed sends with no delivery receipts", () => {
+    const snapshot = createTvFixtureSnapshot("project-fixture", getProfile(), "email-no-receipts");
+    const email = snapshot.screens.find((screen) => screen.id === "email-health");
+    expect(snapshot.profile.playlist[0]).toBe("email-health");
+    expect(email).toMatchObject({
+      sourceStatus: "insufficient-data",
+      insight: null,
+      data: { sent: 250, assessableSends: 0, delivered: 0, bounced: 0, errors: 0, inProgress: 0, deliveryRatePercent: null },
+    });
+    expect(email?.data?.sendActivity?.trend.reduce((sum, point) => sum + point.primary, 0)).toBe(250);
+    expect(email?.data?.statusTrend.every((point) => point.primary === 0 && point.secondary === 0 && point.tertiary === 0)).toBe(true);
+    expect(snapshot.screens.find((screen) => screen.id === "live-pulse")?.data?.sourceHealth[0]).toMatchObject({
+      label: "Email delivery", status: "insufficient-data", value: "Limited",
+    });
+  });
+
   it("keeps reporting windows and deterministic evidence in the snapshot", () => {
     const snapshot = createTvFixtureSnapshot("project-fixture", getProfile());
     expect(snapshot.screens.find((screen) => screen.id === "live-pulse")?.window.current).toMatchObject({

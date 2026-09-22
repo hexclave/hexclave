@@ -223,7 +223,7 @@ export async function fetchTvSnapshotOrThrow(
 ): Promise<TvSnapshot> {
   const response = await sendInternalAdminRequest(adminApp, getTvSnapshotPath(profileId), {
     method: "GET",
-    headers: { "x-hexclave-tv-snapshot-contract": "2" },
+    headers: { "x-hexclave-tv-snapshot-contract": "3" },
     signal,
   });
   if (!response.ok) throw new TvSnapshotRequestError(response.status);

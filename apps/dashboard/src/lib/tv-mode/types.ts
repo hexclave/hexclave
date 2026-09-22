@@ -55,6 +55,7 @@ export const TV_FIXTURE_VARIANTS = defineTvFixtureVariants([
   "loading",
   "empty",
   "insufficient-data",
+  "email-no-receipts",
   "unavailable",
   "partial-failure",
   "financial-redacted",

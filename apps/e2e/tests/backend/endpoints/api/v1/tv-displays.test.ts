@@ -19,6 +19,7 @@ async function publicJsonRequest(path: string, options: {
   authorization?: string,
   cookie?: string,
   version?: "latest" | "v1",
+  snapshotContract?: "3",
 }) {
   return await niceFetch(apiUrl(path, options.version), {
     method: options.method ?? "GET",
@@ -26,6 +27,7 @@ async function publicJsonRequest(path: string, options: {
       ...options.body === undefined ? {} : { "content-type": "application/json" },
       ...options.authorization == null ? {} : { authorization: `Bearer ${options.authorization}` },
       ...options.cookie == null ? {} : { cookie: options.cookie },
+      ...options.snapshotContract == null ? {} : { "x-hexclave-tv-snapshot-contract": options.snapshotContract },
     },
     ...options.body === undefined ? {} : { body: JSON.stringify(options.body) },
   });
@@ -135,6 +137,18 @@ it("pairs a narrow display principal, preserves tenancy assignment, and detects 
   const snapshot = await TvSnapshotSchema.validate(snapshotResponse.body, { strict: true });
   expect(snapshot.project.id).toBe(firstProject.projectId);
   expect(snapshot.profile.id).toBe("company-pulse");
+  for (const screen of snapshot.screens) {
+    if (screen.id === "email-health") expect(screen).not.toHaveProperty("data.sendActivity");
+  }
+  await Project.updateProjectConfig({ "apps.installed.emails.enabled": true });
+  const sendingSnapshotResponse = await publicJsonRequest("/tv-displays/snapshot", {
+    authorization: pairing.accessToken,
+    snapshotContract: "3",
+  });
+  expect(sendingSnapshotResponse.status).toBe(200);
+  const sendingSnapshot = await TvSnapshotSchema.validate(sendingSnapshotResponse.body, { strict: true });
+  // An empty source has no data payload; the opt-in contract must still validate.
+  expect(sendingSnapshot.profile.screenDurations).toHaveLength(sendingSnapshot.profile.playlist.length);
 
   const adminBoundaryResponse = await publicJsonRequest("/internal/tv-mode/profiles", {
     authorization: pairing.accessToken,

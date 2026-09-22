@@ -17,7 +17,9 @@ export const GET = createSmartRouteHandler({
     bodyType: yupString().oneOf(["json"]).defined(),
     body: TvSnapshotSchema,
   }),
-  handler: async ({ headers }) => {
+  handler: async ({ headers }, fullRequest) => {
+    const snapshotContract = fullRequest.headers["x-hexclave-tv-snapshot-contract"]?.at(0)
+      ?? fullRequest.headers["x-stack-tv-snapshot-contract"]?.at(0);
     const accessToken = readTvDisplayBearerToken(headers.authorization?.[0]);
     const authorized = await getAuthorizedTvDisplay(accessToken);
     if (authorized == null) throw new StatusError(401, "tv_display_access_invalid");
@@ -31,6 +33,7 @@ export const GET = createSmartRouteHandler({
       profileId: authorized.display.profileId,
       resolvedProfile: profile,
       includeScreenDurations: true,
+      includeEmailSendActivity: snapshotContract === "3",
       forceFinancialRedaction: !exactFinancialsAcknowledged,
     });
     if (snapshot == null) throw new StatusError(409, "tv_display_profile_unavailable");
@@ -52,6 +55,7 @@ export const GET = createSmartRouteHandler({
         profileId: currentAuthorized.display.profileId,
         resolvedProfile: currentProfile,
         includeScreenDurations: true,
+        includeEmailSendActivity: snapshotContract === "3",
         forceFinancialRedaction: true,
       });
       if (snapshot == null) throw new StatusError(409, "tv_display_profile_unavailable");

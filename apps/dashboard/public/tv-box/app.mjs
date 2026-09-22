@@ -27,6 +27,7 @@ import {
 } from "./runtime.mjs";
 import { createCelebrationLayer } from "./effects.mjs";
 import { createIcon } from "./icons.mjs";
+import { getTvEmailPresentation } from "./email-presentation.mjs";
 import { TvRequestTimeoutError, withTvRequestDeadline } from "./request.mjs";
 
 const root = document.querySelector("#tv-box-root");
@@ -250,7 +251,7 @@ function insight(screen, tone) {
       ? "At least 10 completed payment outcomes are required before Payment Success can be assessed."
       : "No evidence-qualified revenue or payment insight was identified for this 30-day window."],
     ["email-health", screen.sourceStatus === "insufficient-data"
-      ? "At least 20 confirmed delivery outcomes are required before delivery health can be assessed."
+      ? "Completed sends may lack delivery receipts. Delivery health requires at least 20 confirmed outcomes."
       : "No evidence-qualified email delivery insight was identified for this seven-day window."],
   ]).get(screen.id);
   if (fallback === undefined) throw new Error(`TV Box has no insight fallback for screen ${screen.id}`);
@@ -484,7 +485,7 @@ function livePulseScreen(screen, highlight) {
   const secondary = createElement("div", "tv-metric-grid tv-metric-grid-two tv-metric-divider");
   secondary.append(
     metric("Active today · UTC", data.todayActiveUsers.toLocaleString(), "Current UTC day"),
-    metric("Monitored sources", String(data.sourceHealth.length), "Reporting now"),
+    metric("Monitored sources", String(data.sourceHealth.length), "Source categories"),
   );
   left.append(primary, secondary, insight(screen, "cyan"));
 
@@ -615,33 +616,38 @@ function emailScreen(screen, highlight) {
     return screenFrame({ eyebrow: terminal.eyebrow, title: "Email Health", description: "Seven-day delivery reliability and sending volume.", tone: "rose", icon: "email", content: terminal.content, highlight });
   }
   const data = screen.data;
+  const presentation = getTvEmailPresentation(data);
   const left = createElement("div", "tv-panel-stack");
   left.append(metric(
-    "Delivery rate · 7d",
-    data.deliveryRatePercent == null ? "Insufficient data" : `${data.deliveryRatePercent}%`,
-    data.deliveryRatePercent == null ? "At least 20 confirmed outcomes required" : `${data.assessableSends.toLocaleString()} confirmed outcomes`,
+    presentation.volumeLabel,
+    presentation.volumeValue,
+    presentation.volumeDetail,
     true,
-    data.deliveryRatePercent == null,
   ));
   const metrics = createElement("div", "tv-metric-grid tv-metric-grid-two");
   metrics.append(
     metric("Delivered", formatCompact(data.delivered)),
     metric("Bounced", formatCompact(data.bounced)),
-    metric("Errors", formatCompact(data.errors)),
+    metric("Errors", formatCompact(data.sendActivity?.failed ?? data.errors)),
     metric("In progress", formatCompact(data.inProgress)),
   );
   left.append(metrics, insight(screen, "amber"));
   const right = createElement("div", "tv-chart-stack");
+  const heading = createElement("div", "tv-email-chart-heading");
+  heading.append(
+    metric("Delivery rate · 7d", presentation.rateValue, presentation.rateDetail, false, data.deliveryRatePercent == null),
+    chartHeader(presentation.chartTitle, presentation.chartSubtitle),
+  );
   right.append(
-    chartHeader("Email Delivery Volume", "Daily send status · trailing 7 days"),
-    stackedBars(data.statusTrend, ["#fbbf24", "#fb7185", "#94a3b8"], ["Delivered", "Error", "In progress"]),
+    heading,
+    stackedBars(data.sendActivity?.trend ?? data.statusTrend, ["#fbbf24", "#fb7185", "#94a3b8"], [data.sendActivity == null ? "Delivered" : "Sent", "Error", "In progress"]),
   );
   const grid = createElement("div", "tv-screen-grid tv-screen-grid-email");
   grid.append(glassPanel("amber", [left]), glassPanel("amber", [right]));
   return screenFrame({
-    eyebrow: "Seven-Day Delivery",
+    eyebrow: "Seven-Day Email Activity",
     title: "Email Health",
-    description: "Whether customer messages are reaching recipients reliably.",
+    description: "Sending activity and confirmed delivery outcomes.",
     tone: "amber",
     icon: "email",
     content: grid,
@@ -1167,7 +1173,7 @@ async function pollPairing() {
 async function loadSnapshot(token, signal) {
   return await request("/tv-displays/snapshot", {
     method: "GET",
-    headers: { authorization: `Bearer ${token}` },
+    headers: { authorization: `Bearer ${token}`, "x-hexclave-tv-snapshot-contract": "3" },
     signal,
   });
 }

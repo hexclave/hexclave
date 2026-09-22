@@ -477,6 +477,12 @@ h1 {
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
+.tv-email-chart-heading {
+  display: flex;
+  flex-direction: column;
+  gap: min(1.5vw, 2cqh);
+}
+
 .tv-panel-stack-live {
   padding: min(2vw, 3vh);
 }

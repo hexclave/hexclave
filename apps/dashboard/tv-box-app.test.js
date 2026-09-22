@@ -100,17 +100,89 @@ describe("TV Box actual renderer orchestration", () => {
   });
 
   it.each([
-    ["insufficient-data", "email-health", "Insufficient data"],
-    ["financial-redacted", "revenue-payments", "Hidden"],
-  ])("uses text-sized hero metrics for %s without dropping submetrics or the verdict", async (variant, screenId, value) => {
+    ["insufficient-data", "email-health", "Insufficient data", ".tv-chart-stack .tv-metric"],
+    ["financial-redacted", "revenue-payments", "Hidden", ".tv-metric-hero"],
+  ])("uses text-sized metrics for %s without dropping submetrics or the verdict", async (variant, screenId, value, selector) => {
     const fixture = createSnapshot(variant);
     fixture.profile.playlist = [screenId];
     fixture.profile.screenDurations = fixture.profile.screenDurations.filter((entry) => entry.screenId === screenId);
     await launch({ mode: "fixture-preview", snapshot: fixture });
-    expect(document.querySelector('.tv-metric-hero[data-text-value="true"] .tv-metric-value')?.textContent).toBe(value);
+    expect(document.querySelector(`${selector}[data-text-value="true"] .tv-metric-value`)?.textContent).toBe(value);
     expect(document.querySelectorAll(".tv-metric-grid .tv-metric")).toHaveLength(4);
     expect(document.querySelector(".tv-insight-copy")?.textContent.length).toBeGreaterThan(0);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["email-no-receipts", "insufficient-data", "default"])("keeps completed send volume separate from confirmed delivery (%s)", async (variant) => {
+    const fixture = createSnapshot(variant);
+    const email = fixture.screens.find((screen) => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Missing email fixture");
+    fixture.profile.playlist = ["email-health"];
+    fixture.profile.screenDurations = fixture.profile.screenDurations.filter(entry => entry.screenId === "email-health");
+    await launch({ mode: "fixture-preview", snapshot: fixture });
+    const metrics = new Map([...document.querySelectorAll(".tv-metric")].map(metric => [
+      metric.querySelector(".tv-metric-label")?.textContent,
+      metric.querySelector(".tv-metric-value")?.textContent,
+    ]));
+    expect(metrics.get(variant === "email-no-receipts" ? "Emails sent · 7d" : "Completed send attempts · 7d")).toBe(email.data.sent.toLocaleString());
+    expect(document.querySelector(".tv-metric-hero")?.dataset.textValue).toBe("false");
+    expect(document.body.textContent).toContain(variant === "email-no-receipts" ? "Sent and failed by send date" : "excludes unconfirmed sends");
+    if (variant === "email-no-receipts") {
+      expect(Object.fromEntries(metrics)).toEqual({
+        "Bounced": "0",
+        "Emails sent · 7d": "250",
+        "Delivered": "0",
+        "Delivery rate · 7d": "No delivery data",
+        "Errors": "0",
+        "In progress": "0",
+      });
+      expect(document.body.textContent).toContain("Email Sending Activity");
+      expect([...document.querySelectorAll(".tv-stacked-bar")].some(bar => Number.parseFloat(bar.style.height) > 0)).toBe(true);
+      expect(document.querySelector(".tv-stacked-segment")?.style.height).toBe("100%");
+      expect(document.body.textContent).toContain("Send activity recorded; delivery receipts unavailable");
+      expect(document.querySelector(".tv-insight-copy")?.textContent).toContain("Completed sends may lack delivery receipts");
+    } else {
+      expect(metrics.get("Delivery rate · 7d")).toBe(email.data.deliveryRatePercent == null
+        ? "Insufficient data"
+        : `${email.data.deliveryRatePercent}%`);
+    }
+  });
+
+  it("does not describe unconfirmed send volume as live delivery evidence", async () => {
+    const fixture = createSnapshot("email-no-receipts");
+    fixture.profile.playlist = ["live-pulse"];
+    fixture.profile.screenDurations = fixture.profile.screenDurations.filter(entry => entry.screenId === "live-pulse");
+    await launch({ mode: "fixture-preview", snapshot: fixture });
+    expect(document.body.textContent).toContain("Monitored sources3Source categories");
+    expect(document.body.textContent).not.toContain("Reporting now");
+  });
+
+  it.each([
+    { sent: 0, inProgress: 12, errors: 0, rate: null, sourceStatus: "insufficient-data", rateText: "Insufficient data" },
+    { sent: 25, inProgress: 0, errors: 25, rate: 0, sourceStatus: "ready", rateText: "0%" },
+  ])("preserves queue and failure evidence when $sent attempts have completed", async ({ sent, inProgress, errors, rate, sourceStatus, rateText }) => {
+    const fixture = createSnapshot("email-no-receipts");
+    const email = fixture.screens.find(screen => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Missing email fixture");
+    email.sourceStatus = sourceStatus;
+    delete email.data.sendActivity;
+    Object.assign(email.data, {
+      sent, inProgress, errors, assessableSends: errors,
+      deliveryRatePercent: rate, bounceRatePercent: rate,
+      statusTrend: email.data.statusTrend.map((point, index) => ({
+        ...point, secondary: index === 0 ? errors : 0, tertiary: index === 0 ? inProgress : 0,
+      })),
+    });
+    await launch({ mode: "fixture-preview", snapshot: fixture });
+    const metrics = new Map([...document.querySelectorAll(".tv-metric")].map(metric => [
+      metric.querySelector(".tv-metric-label")?.textContent,
+      metric.querySelector(".tv-metric-value")?.textContent,
+    ]));
+    expect(metrics.get("Completed send attempts · 7d")).toBe(String(sent));
+    expect(metrics.get("Errors")).toBe(String(errors));
+    expect(metrics.get("In progress")).toBe(String(inProgress));
+    expect(metrics.get("Delivery rate · 7d")).toBe(rateText);
+    expect(metrics.get("Delivered")).toBe("0");
   });
 
   it("preserves every digit of long numeric hero values while reserving width for them", async () => {
@@ -146,6 +218,7 @@ describe("TV Box actual renderer orchestration", () => {
     expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
     await vi.advanceTimersByTimeAsync(DISPLAY_SESSION_RETRY_INITIAL_MS);
     expect(title()).toBe("Live Pulse");
+    expect(fetchMock.mock.calls[2][1].headers.get("x-hexclave-tv-snapshot-contract")).toBe("3");
     expect(fetchMock.mock.calls.map(([url]) => new URL(url).pathname)).toMatchInlineSnapshot(`
       [
         "/api/latest/tv-displays/auth/refresh",

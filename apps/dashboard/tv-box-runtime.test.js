@@ -127,6 +127,19 @@ function createSnapshot() {
 }
 
 describe("TV Box runtime contract", () => {
+  it.each([
+    { sent: 250, failed: 0, trend: [{ label: "Sep 22", primary: 0, secondary: 0, tertiary: 0 }] },
+    { sent: 250, failed: 1, trend: [{ label: "Sep 22", primary: 250, secondary: 0, tertiary: 0 }] },
+    { sent: 250, failed: 0, trend: [{ label: "Sep 22", primary: 250, secondary: 0, tertiary: -1 }] },
+    null,
+  ])("rejects invalid sending activity (%j)", (sendActivity) => {
+    const snapshot = createSnapshot();
+    const email = snapshot.screens.find(screen => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Missing email fixture");
+    email.data.sendActivity = sendActivity;
+    expect(() => assertTvSnapshot(snapshot)).toThrow();
+  });
+
   it.each(TV_FIXTURE_VARIANTS.filter((variant) => variant !== "loading"))("accepts the shared %s snapshot fixture", (variant) => {
     const profile = getTvProfileFixture("company-pulse");
     if (profile == null) throw new Error("Missing company-pulse test fixture.");

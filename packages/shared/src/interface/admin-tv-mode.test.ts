@@ -129,6 +129,33 @@ describe("TvSnapshotSchema", () => {
     }, { strict: true })).rejects.toThrow("email outcome counts are inconsistent");
   });
 
+  it("accepts sending activity independently of delivery receipts", async () => {
+    const email = validSnapshot().screens[3];
+    await expect(TvEmailHealthScreenSchema.validate({
+      ...email,
+      sourceStatus: "insufficient-data",
+      insight: null,
+      data: {
+        ...email.data, sent: 250, assessableSends: 0, delivered: 0, bounced: 0, errors: 0,
+        deliveryRatePercent: null, bounceRatePercent: null,
+        sendActivity: { sent: 250, failed: 0, trend: [{ label: "Sep 22", primary: 250, secondary: 0, tertiary: 0 }] },
+      },
+    }, { strict: true })).resolves.toBeDefined();
+  });
+
+  it.each([
+    { sent: 250, failed: 0 },
+    { sent: 250, failed: 0, trend: [null] },
+    { sent: 250, failed: 0, trend: [{ label: "Sep 22", primary: 0, secondary: 0, tertiary: 0 }] },
+    { sent: 250, failed: 1, trend: [{ label: "Sep 22", primary: 250, secondary: 0, tertiary: 0 }] },
+    { sent: 250, failed: 0, trend: [{ label: "Sep 22", primary: 250, secondary: 0, tertiary: -1 }] },
+  ])("rejects invalid sending activity (%j)", async (sendActivity) => {
+    const email = validSnapshot().screens[3];
+    await expect(TvEmailHealthScreenSchema.validate({
+      ...email, data: { ...email.data, sendActivity },
+    }, { strict: true })).rejects.toMatchObject({ name: "ValidationError" });
+  });
+
   it.each(["healthy", "ready", "limited", "empty", "insufficient-data", "unavailable", "error", "stale"] as const)(
     "accepts the %s source-health status",
     async (status) => {

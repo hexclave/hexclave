@@ -9,6 +9,7 @@ import {
   type TvEventPresentation,
 } from "@/lib/tv-mode/events";
 import { resolveTvProfile } from "@/lib/tv-mode/profiles";
+import { loadTvEmailSendActivity } from "@/lib/tv-mode/email-activity";
 import { getPrismaClientForTenancy, getPrismaSchemaForTenancy, sqlQuoteIdent } from "@/prisma-client";
 import {
   calculateTvEmailRates,
@@ -1084,7 +1085,7 @@ async function loadRevenueScreen(
   }
 }
 
-async function loadEmailScreen(tenancy: Tenancy, now: Date): Promise<TvAdapterResult<TvEmailHealthScreen>> {
+export async function loadEmailScreen(tenancy: Tenancy, now: Date, includeSendActivity = false): Promise<TvAdapterResult<TvEmailHealthScreen>> {
   const observedAt = now.toISOString();
   const bounds = getRollingWindow(now, 7);
   const emptyScreen: TvEmailHealthScreen = {
@@ -1108,7 +1109,7 @@ async function loadEmailScreen(tenancy: Tenancy, now: Date): Promise<TvAdapterRe
     const schema = await getPrismaSchemaForTenancy(tenancy);
     const prisma = await getPrismaClientForTenancy(tenancy);
     const metricsPrisma = getTvOperationalMetricsClient(prisma);
-    const [summaryRows, trendRows] = await Promise.all([
+    const [summaryRows, trendRows, sendActivity] = await Promise.all([
       metricsPrisma.$queryRaw<[{
         current_finished: number,
         previous_finished: number,
@@ -1177,6 +1178,7 @@ async function loadEmailScreen(tenancy: Tenancy, now: Date): Promise<TvAdapterRe
         GROUP BY day
         ORDER BY day
       `,
+      includeSendActivity ? loadTvEmailSendActivity(tenancy, now) : undefined,
     ]);
     const summary = summaryRows[0];
     const sent = Number(summary.current_finished);
@@ -1198,7 +1200,8 @@ async function loadEmailScreen(tenancy: Tenancy, now: Date): Promise<TvAdapterRe
         tertiary: Number(row?.in_progress ?? 0),
       };
     });
-    const hasEmailData = sent > 0 || Number(summary.in_progress) > 0;
+    const hasEmailData = sent > 0 || Number(summary.in_progress) > 0
+      || (sendActivity != null && (sendActivity.sent > 0 || sendActivity.failed > 0));
     const screen: TvEmailHealthScreen = {
       ...emptyScreen,
       sourceStatus: !hasEmailData ? "empty" : qualifies ? "ready" : "insufficient-data",
@@ -1214,6 +1217,7 @@ async function loadEmailScreen(tenancy: Tenancy, now: Date): Promise<TvAdapterRe
         bounceRatePercent,
         volumeChangePercent,
         statusTrend,
+        ...(sendActivity == null ? {} : { sendActivity }),
       } : null,
       insight: hasEmailData && isTvEmailInsightEligible(deliveryRatePercent, volumeChangePercent) ? {
         kind: "delivery-healthy-volume-up",
@@ -1391,6 +1395,7 @@ export async function buildLiveTvSnapshot(options: {
   resolvedProfile?: TvProfileResource,
   now?: Date,
   includeScreenDurations?: boolean,
+  includeEmailSendActivity?: boolean,
   forceFinancialRedaction?: boolean,
 }): Promise<TvSnapshot | null> {
   const now = options.now ?? new Date();
@@ -1404,7 +1409,7 @@ export async function buildLiveTvSnapshot(options: {
   const [activity, revenue, email] = await Promise.all([
     loadActivityScreens(options.tenancy, now),
     loadRevenueScreen(options.tenancy, now, profile.configuration.financialVisibility),
-    loadEmailScreen(options.tenancy, now),
+    loadEmailScreen(options.tenancy, now, options.includeEmailSendActivity),
   ]);
   const audience = await loadAnalyticsIntoAudience(options.tenancy, now, activity.audience);
   const livePulse = addTvSourceHealth(activity.livePulse.screen, {

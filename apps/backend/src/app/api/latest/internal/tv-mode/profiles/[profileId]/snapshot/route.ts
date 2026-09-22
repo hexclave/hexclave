@@ -32,7 +32,8 @@ export const GET = createSmartRouteHandler({
     const snapshot = await buildLiveTvSnapshot({
       tenancy,
       profileId,
-      includeScreenDurations: snapshotContract === "2",
+      includeScreenDurations: snapshotContract === "2" || snapshotContract === "3",
+      includeEmailSendActivity: snapshotContract === "3",
     });
     if (snapshot == null) {
       throw new StatusError(StatusError.NotFound, "No TV presentation profile found with the given ID.");

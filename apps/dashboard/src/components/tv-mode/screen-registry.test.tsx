@@ -1,3 +1,4 @@
+/** @vitest-environment jsdom */
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { getTvFixtureSnapshot } from "@/lib/tv-mode/fixtures";
@@ -25,16 +26,60 @@ describe("TV layout content", () => {
     expect(getTvAxisLabelIndices(24)).toEqual([0, 4, 8, 12, 15, 19, 23]);
   });
 
-  it("uses status typography for insufficient email outcomes and retains submetrics", () => {
+  it("keeps send volume visible while using status typography for insufficient outcomes", () => {
     const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse", "insufficient-data");
     const email = snapshot?.screens.find((screen) => screen.id === "email-health");
     if (email?.data == null) throw new Error("Email fixture missing");
     expect(TvEmailHealthScreenSchema.isValidSync(email, { strict: true })).toBe(true);
     const html = renderToStaticMarkup(renderTvScreen(email));
-    expect(html).toContain('data-hero="true" data-text-value="true"');
+    expect(html).toContain('data-hero="true" data-text-value="false"');
+    expect(html).toContain('data-hero="false" data-text-value="true"');
     expect(html).toContain("Insufficient data");
     expect(html).not.toContain("Delivery remained above 99%");
     for (const label of ["Delivered", "Bounced", "Errors", "In progress"]) expect(html).toContain(label);
+  });
+
+  it.each(["email-no-receipts", "insufficient-data", "default"] as const)("shows completed attempts independently of delivery evidence (%s)", (variant) => {
+    const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse", variant);
+    const email = snapshot?.screens.find((screen) => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Email fixture missing");
+    const doc = new DOMParser().parseFromString(renderToStaticMarkup(renderTvScreen(email)), "text/html");
+    const metrics = new Map(Array.from(doc.querySelectorAll("[data-hero]"), metric => [
+      metric.querySelector("p")?.textContent,
+      metric.querySelector("p:nth-child(2)")?.textContent,
+    ]));
+    expect(metrics.get(variant === "email-no-receipts" ? "Emails sent · 7d" : "Completed send attempts · 7d")).toBe(email.data.sent.toLocaleString());
+    expect(metrics.get("Delivery rate · 7d")).toBe(email.data.deliveryRatePercent == null
+      ? variant === "email-no-receipts" ? "No delivery data" : "Insufficient data"
+      : `${email.data.deliveryRatePercent}%`);
+    expect(doc.body.textContent).toContain(variant === "email-no-receipts" ? "Accepted by mail server" : "Includes successful sends and failed attempts");
+    expect(doc.body.textContent).toContain(variant === "email-no-receipts" ? "Sent and failed by send date" : "excludes unconfirmed sends");
+    if (variant === "email-no-receipts") {
+      expect(Object.fromEntries(metrics)).toEqual({
+        "Bounced": "0",
+        "Emails sent · 7d": "250",
+        "Delivered": "0",
+        "Delivery rate · 7d": "No delivery data",
+        "Errors": "0",
+        "In progress": "0",
+      });
+      const chart = doc.querySelector('[aria-label="Sent, Error, In progress by day"]');
+      expect(chart).not.toBeNull();
+      expect(Array.from(chart?.querySelectorAll("span[style]") ?? []).some(segment =>
+        segment.getAttribute("style")?.includes("height:100%")
+      )).toBe(true);
+      expect(doc.body.textContent).toContain("Send activity recorded; delivery receipts unavailable");
+      expect(doc.body.textContent).not.toContain("Delivery remained above 99%");
+    }
+  });
+
+  it("labels monitored sources as categories even when a source has no receipts", () => {
+    const snapshot = getTvFixtureSnapshot("layout-test", "company-pulse", "email-no-receipts");
+    const live = snapshot?.screens.find((screen) => screen.id === "live-pulse");
+    if (live?.data == null) throw new Error("Live Pulse fixture missing");
+    const html = renderToStaticMarkup(renderTvScreen(live));
+    expect(html).toContain("Source categories");
+    expect(html).not.toContain("Reporting now");
   });
 });
 

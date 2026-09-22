@@ -116,6 +116,7 @@ describe("TV profile customization copy", () => {
       "financial-redacted",
       "empty",
       "insufficient-data",
+      "email-no-receipts",
       "unavailable",
       "partial-failure",
       "error",
