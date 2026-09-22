@@ -6,6 +6,13 @@ import { TvEmailHealthScreenSchema } from "@hexclave/shared/dist/interface/admin
 import styles from "./screen-layout.module.css";
 import { formatTvExactUsd, formatTvSignedPercent, getTvAxisLabelIndices, renderTvScreen } from "./screen-registry";
 
+function readTvMetrics(doc: Document): Map<string | null | undefined, string | null | undefined> {
+  return new Map(Array.from(doc.querySelectorAll("[data-hero]"), metric => [
+    metric.querySelector("p")?.textContent,
+    metric.querySelector("p:nth-child(2)")?.textContent,
+  ]));
+}
+
 describe("TV layout content", () => {
   it("uses the shared grid only for data screens, not terminal source states", () => {
     for (const variant of ["default", "empty", "unavailable", "partial-failure"] as const) {
@@ -44,10 +51,7 @@ describe("TV layout content", () => {
     const email = snapshot?.screens.find((screen) => screen.id === "email-health");
     if (email?.data == null) throw new Error("Email fixture missing");
     const doc = new DOMParser().parseFromString(renderToStaticMarkup(renderTvScreen(email)), "text/html");
-    const metrics = new Map(Array.from(doc.querySelectorAll("[data-hero]"), metric => [
-      metric.querySelector("p")?.textContent,
-      metric.querySelector("p:nth-child(2)")?.textContent,
-    ]));
+    const metrics = readTvMetrics(doc);
     expect(metrics.get(variant === "email-no-receipts" ? "Emails sent · 7d" : "Completed send attempts · 7d")).toBe(email.data.sent.toLocaleString());
     expect(metrics.get("Delivery rate · 7d")).toBe(email.data.deliveryRatePercent == null
       ? variant === "email-no-receipts" ? "No delivery data" : "Insufficient data"
@@ -83,10 +87,7 @@ describe("TV layout content", () => {
       trend: [{ label: "Sep 22", primary: 0, secondary: 3, tertiary: 0 }],
     };
     const doc = new DOMParser().parseFromString(renderToStaticMarkup(renderTvScreen(email)), "text/html");
-    const metrics = new Map(Array.from(doc.querySelectorAll("[data-hero]"), metric => [
-      metric.querySelector("p")?.textContent,
-      metric.querySelector("p:nth-child(2)")?.textContent,
-    ]));
+    const metrics = readTvMetrics(doc);
     expect(metrics.get("Emails sent · 7d")).toBe("0");
     expect(metrics.get("Errors")).toBe("3");
     expect(doc.body.textContent).toContain("No successful sends in this window");
