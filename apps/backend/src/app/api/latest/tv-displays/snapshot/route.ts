@@ -32,7 +32,9 @@ export const GET = createSmartRouteHandler({
       tenancy: authorized.tenancy,
       profileId: authorized.display.profileId,
       resolvedProfile: profile,
-      includeScreenDurations: contractVersion >= 2,
+      // Paired TV boxes may run an older app.mjs that sends no contract header;
+      // they still need per-screen timings, so durations stay unconditional.
+      includeScreenDurations: true,
       includeEmailSendActivity: contractVersion >= 3,
       forceFinancialRedaction: !exactFinancialsAcknowledged,
     });
@@ -54,7 +56,7 @@ export const GET = createSmartRouteHandler({
         tenancy: currentAuthorized.tenancy,
         profileId: currentAuthorized.display.profileId,
         resolvedProfile: currentProfile,
-        includeScreenDurations: contractVersion >= 2,
+        includeScreenDurations: true,
         includeEmailSendActivity: contractVersion >= 3,
         forceFinancialRedaction: true,
       });
