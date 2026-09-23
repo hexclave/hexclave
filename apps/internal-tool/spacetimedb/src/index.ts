@@ -10,19 +10,13 @@ import {
   type PageableRow,
   type SliceScanner,
 } from './paging';
+import { aiLogMatches, mcpLogMatches } from './log-filters';
+import { DEMO_SEED_PREFIX } from './demo-seed';
+import { MAX_MCP_ACTOR_FIELD_LENGTH, MAX_MCP_CONTEXT_LENGTH } from './mcp-call-limits';
 
-// Injected at publish time by scripts/spacetime-auth-config.mjs (non-secret).
-// SpacetimeDB validates the JWT signature via OIDC discovery on the token's
-// issuer; these constants pin WHICH issuers/audience this module trusts, so a
-// valid token from any other OIDC provider cannot be replayed here. The
-// trusted issuer is the internal tool itself — it serves the discovery
-// document + JWKS and mints tokens only for signed-in Stack Auth users of the
-// tool's project (see ../../src/lib/server/spacetimedb-token.ts).
 const ALLOWED_ISSUERS: readonly string[] = ['__SPACETIMEDB_ALLOWED_ISSUERS__'];
 const EXPECTED_AUDIENCE = '__SPACETIMEDB_EXPECTED_AUDIENCE__';
 
-// Fallback session lifetime when a JWT carries no `exp` claim. Stack Auth
-// access tokens always carry one (~10min), so this is defensive only.
 const FALLBACK_SESSION_TTL_MICROS = 15n * 60n * 1000n * 1000n;
 const SESSION_GC_INTERVAL_MICROS = 60n * 1000n * 1000n;
 
@@ -36,10 +30,6 @@ type SenderAuthLike = Readonly<{
   }> | null,
 }>;
 
-// Holding a token from the trusted issuer IS the authorization: the internal
-// tool only mints tokens for signed-in members of its Stack Auth project, and
-// that project's sign-up rules restrict membership to the team. Any member
-// may read and write everything here.
 function isProjectMember(senderAuth: SenderAuthLike): boolean {
   if (senderAuth.isInternal) {
     // Scheduled reducers / module-internal calls are already trusted.
@@ -58,12 +48,6 @@ function requireProjectMember(senderAuth: SenderAuthLike): void {
   }
 }
 
-// Attribution for human actions (review/edit/create) is derived from the
-// caller's validated token, never from a reducer argument: the internal tool
-// mints tokens with a server-attested `name` claim only after verifying the
-// Stack Auth session, so a member cannot forge who an action is credited to by
-// passing a different string. Falls back to the stable subject (Stack Auth
-// user id), then a sentinel for service/internal callers.
 function actorName(senderAuth: SenderAuthLike): string {
   const jwt = senderAuth.jwt;
   if (jwt != null) {
@@ -160,14 +144,10 @@ const mcpCallLog = table(
     humanCorrectedAnswer: t.string().optional(),
     publishedToQa: t.bool().index('btree'),
     publishedAt: t.timestamp().optional(),
-    // When the pending QA review was requested: insert time initially,
-    // re-stamped by clear_mcp_qa_review on retry. Trailing + default-annotated
-    // because that's the only column shape SpacetimeDB can auto-migrate (no
-    // prod data wipe). Not optional: the SDK drops falsy default annotations
-    // (`if (meta.defaultValue)` in table.ts), so an option column can't
-    // default to none — readers treat the epoch-0 sentinel (pre-migration
-    // rows) as unknown via max(createdAt, qaReviewRequestedAt).
     qaReviewRequestedAt: t.timestamp().default(Timestamp.UNIX_EPOCH),
+    context: t.string().default('(not provided)'),
+    user: t.string().default('(not provided)'),
+    project: t.string().default('(not provided)'),
   }
 );
 
@@ -426,14 +406,17 @@ function sliceScannerFor<Row extends PageableRow>(
 }
 
 // Stops at the first row rather than materializing the range, so "is there
-// anything older at all?" costs an index seek instead of a scan.
+// anything older within the requested range?" costs an index seek, not a scan.
 function olderRowProbeFor<Row extends PageableRow>(
   index: { filter: (range: readonly [number, Range<Timestamp>]) => Iterable<Row> },
 ): OlderRowProbe {
-  return (hiMicros) => {
+  return (hiMicros, loMicrosInclusive) => {
     const older = index.filter([
       LIVE_SHARD,
-      new Range({ tag: 'unbounded' }, { tag: 'excluded', value: new Timestamp(hiMicros) }),
+      new Range(
+        { tag: 'included', value: new Timestamp(loMicrosInclusive) },
+        { tag: 'excluded', value: new Timestamp(hiMicros) },
+      ),
     ]);
     for (const _row of older) return true;
     return false;
@@ -450,6 +433,7 @@ function requireMemberSession(ctx: {
 }
 
 type PageArgs = { beforeCreatedAtMicros: bigint | undefined, beforeId: bigint | undefined, limit: number };
+const MAX_FILTER_VALUE_LENGTH = 256;
 
 function cursorOf(now: Timestamp, args: PageArgs): PageCursor {
   // No cursor means "newest page": everything ever written is at or before now.
@@ -465,11 +449,50 @@ function requireValidLimit(limit: number): number {
   return clampPageLimit(limit);
 }
 
-const pageParams = {
+function requireValidExactFilter(value: string | undefined, label: string): void {
+  if (value != null && (value === '' || value.length > MAX_FILTER_VALUE_LENGTH)) {
+    throw new SenderError(`${label} must contain between 1 and ${MAX_FILTER_VALUE_LENGTH} characters`);
+  }
+}
+
+function requireAllowedFilter(value: string | undefined, label: string, allowed: readonly string[]): void {
+  if (value != null && !allowed.includes(value)) {
+    throw new SenderError(`${label} must be one of: ${allowed.join(', ')}`);
+  }
+}
+
+function requireMaxLength(value: string | undefined, label: string, maxLength: number): void {
+  if (value != null && value.length > maxLength) {
+    throw new SenderError(`${label} must be at most ${maxLength} characters`);
+  }
+}
+
+const basePageParams = {
   beforeCreatedAtMicros: t.u64().optional(),
   beforeId: t.u64().optional(),
   limit: t.u32(),
 };
+
+const mcpPageParams = {
+  ...basePageParams,
+  createdAtOrAfterMicros: t.u64().optional(),
+  toolName: t.string().optional(),
+  hasError: t.bool().optional(),
+  qaState: t.string().optional(),
+  humanReviewState: t.string().optional(),
+};
+
+const aiQueryPageParams = {
+  ...basePageParams,
+  createdAtOrAfterMicros: t.u64().optional(),
+  systemPromptId: t.string().optional(),
+  modelId: t.string().optional(),
+  mode: t.string().optional(),
+  isAuthenticated: t.bool().optional(),
+  hasError: t.bool().optional(),
+};
+
+const feedbackPageParams = basePageParams;
 
 const mcpCallLogPage = t.object('McpCallLogPage', {
   rows: t.array(mcpCallLog.rowType),
@@ -490,27 +513,52 @@ const feedbackLogPage = t.object('FeedbackLogPage', {
 });
 
 export const page_mcp_call_log = spacetimedb.procedure(
-  pageParams,
+  mcpPageParams,
   mcpCallLogPage,
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
     const limit = requireValidLimit(args.limit);
-    return toPage(pageByCreatedAt(sliceScannerFor(tx.db.mcpCallLog.shardCreatedAt), olderRowProbeFor(tx.db.mcpCallLog.shardCreatedAt), cursorOf(ctx.timestamp, args), limit), limit);
+    requireValidExactFilter(args.toolName, 'toolName');
+    requireAllowedFilter(args.qaState, 'qaState', ['pending', 'review-failed', 'error', 'pass', 'warn', 'fail', 'feature-request']);
+    requireAllowedFilter(args.humanReviewState, 'humanReviewState', ['required', 'reviewed', 'not-reviewed']);
+    const nowMicros = ctx.timestamp.microsSinceUnixEpoch;
+    return toPage(pageByCreatedAt(
+      sliceScannerFor(tx.db.mcpCallLog.shardCreatedAt),
+      olderRowProbeFor(tx.db.mcpCallLog.shardCreatedAt),
+      cursorOf(ctx.timestamp, args),
+      limit,
+      {
+        createdAtOrAfterMicros: args.createdAtOrAfterMicros,
+        matches: row => mcpLogMatches(row, args, nowMicros),
+      },
+    ), limit);
   }),
 );
 
 export const page_ai_query_log = spacetimedb.procedure(
-  pageParams,
+  aiQueryPageParams,
   aiQueryLogPage,
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
     const limit = requireValidLimit(args.limit);
-    return toPage(pageByCreatedAt(sliceScannerFor(tx.db.aiQueryLog.shardCreatedAt), olderRowProbeFor(tx.db.aiQueryLog.shardCreatedAt), cursorOf(ctx.timestamp, args), limit), limit);
+    requireValidExactFilter(args.systemPromptId, 'systemPromptId');
+    requireValidExactFilter(args.modelId, 'modelId');
+    requireAllowedFilter(args.mode, 'mode', ['stream', 'generate']);
+    return toPage(pageByCreatedAt(
+      sliceScannerFor(tx.db.aiQueryLog.shardCreatedAt),
+      olderRowProbeFor(tx.db.aiQueryLog.shardCreatedAt),
+      cursorOf(ctx.timestamp, args),
+      limit,
+      {
+        createdAtOrAfterMicros: args.createdAtOrAfterMicros,
+        matches: row => aiLogMatches(row, args),
+      },
+    ), limit);
   }),
 );
 
 export const page_feedback_log = spacetimedb.procedure(
-  pageParams,
+  feedbackPageParams,
   feedbackLogPage,
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
@@ -533,9 +581,15 @@ export const log_mcp_call = spacetimedb.reducer(
     durationMs: t.u64(),
     modelId: t.string(),
     errorMessage: t.string().optional(),
+    context: t.string().optional(),
+    user: t.string().optional(),
+    project: t.string().optional(),
   },
   (ctx, args) => {
     requireProjectMember(ctx.senderAuth);
+    requireMaxLength(args.context, 'context', MAX_MCP_CONTEXT_LENGTH);
+    requireMaxLength(args.user, 'user', MAX_MCP_ACTOR_FIELD_LENGTH);
+    requireMaxLength(args.project, 'project', MAX_MCP_ACTOR_FIELD_LENGTH);
     ctx.db.mcpCallLog.insert({
       id: 0n,
       shard: 0,
@@ -554,6 +608,9 @@ export const log_mcp_call = spacetimedb.reducer(
       errorMessage: args.errorMessage,
       publishedToQa: false,
       qaReviewRequestedAt: ctx.timestamp,
+      context: args.context ?? '(not provided)',
+      user: args.user ?? '(not provided)',
+      project: args.project ?? '(not provided)',
     } as Parameters<typeof ctx.db.mcpCallLog.insert>[0]);
   }
 );
@@ -967,6 +1024,42 @@ export const delete_ai_query_log = spacetimedb.reducer(
     ctx.db.aiQueryLog.id.delete(row.id);
   }
 );
+
+// Removes everything the demo seeder wrote, across the whole table rather than
+// the capped `my_visible_*` views the seeder can query over HTTP: once enough
+// real traffic has pushed an earlier seed out of those views, the seeder could
+// no longer find its own rows and a re-run would collide on the unique
+// correlation ids. The prefix is fixed in the module so this can only ever
+// touch seeded rows. Ids are collected before deleting so the scan never
+// iterates a table it is mutating.
+export const clear_demo_seed = spacetimedb.reducer({}, (ctx, _args) => {
+  requireProjectMember(ctx.senderAuth);
+  const isSeeded = (value: string | undefined): boolean => value != null && value.startsWith(DEMO_SEED_PREFIX);
+
+  const qaIds: bigint[] = [];
+  for (const row of ctx.db.qaEntries.iter()) {
+    if (isSeeded(row.sourceMcpCorrelationId) || isSeeded(row.requestId)) qaIds.push(row.id);
+  }
+  for (const id of qaIds) ctx.db.qaEntries.id.delete(id);
+
+  const mcpIds: bigint[] = [];
+  for (const row of ctx.db.mcpCallLog.iter()) {
+    if (isSeeded(row.correlationId)) mcpIds.push(row.id);
+  }
+  for (const id of mcpIds) ctx.db.mcpCallLog.id.delete(id);
+
+  const aiIds: bigint[] = [];
+  for (const row of ctx.db.aiQueryLog.iter()) {
+    if (isSeeded(row.correlationId)) aiIds.push(row.id);
+  }
+  for (const id of aiIds) ctx.db.aiQueryLog.id.delete(id);
+
+  const feedbackIds: bigint[] = [];
+  for (const row of ctx.db.feedbackLog.iter()) {
+    if (isSeeded(row.correlationId)) feedbackIds.push(row.id);
+  }
+  for (const id of feedbackIds) ctx.db.feedbackLog.id.delete(id);
+});
 
 export const init = spacetimedb.init(ctx => {
   ensureSessionGcScheduled(ctx);
