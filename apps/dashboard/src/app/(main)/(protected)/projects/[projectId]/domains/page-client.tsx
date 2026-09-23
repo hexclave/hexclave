@@ -233,7 +233,7 @@ function EditDialog(props: {
                 <li><code>api-*.example.com</code> - matches api-v1.example.com, api-prod.example.com, etc.</li>
                 <li><code>*.*.org</code> - matches mail.example.org, but not example.org</li>
               </ul>
-              <p><strong className="text-foreground">Ports:</strong> Append a port to only match that port (e.g. <code>*.example.com:4250</code>).</p>
+              <p><strong className="text-foreground">Ports:</strong> Without a port, only the default port matches (443 for HTTPS, 80 for HTTP). Append a port to match that port (e.g. <code>*.example.com:4250</code>), or <code>:*</code> to match any port (e.g. <code>*.example.com:*</code>).</p>
             </div>
           </DesignAlert>
           <InputField

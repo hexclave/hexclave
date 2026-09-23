@@ -452,8 +452,24 @@ export const urlSchema = yupString().test({
   message: (params) => `${params.path} is not a valid URL`,
   test: (value) => value == null || isValidUrl(value)
 });
+const wildcardUrlPlaceholder = 'wildcard-placeholder';
+const wildcardPortPattern = /^(https?:\/\/[^/?#\\\s]*):\*(?=[/?#]|$)/i;
+
+function parseUrlWithWildcards(value: string): URL {
+  // URL cannot parse :*. Substitute a numeric port only at the end of the authority,
+  // before replacing hostname wildcards, so partial ports and wildcards in paths still fail validation.
+  const hasWildcardPort = wildcardPortPattern.test(value);
+  const url = new URL(value
+    .replace(wildcardPortPattern, '$1:65535')
+    .replace(/\*/g, wildcardUrlPlaceholder));
+  if (hasWildcardPort && (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '')) {
+    throw new TypeError('Any-port wildcard cannot include URL credentials, query, or fragment');
+  }
+  return url;
+}
+
 /**
- * URL schema that supports wildcard patterns in hostnames (e.g., "https://*.example.com", "http://*:8080")
+ * URL schema supporting hostname wildcards and an explicit any-port suffix (e.g., "https://*.example.com:*").
  */
 export const wildcardUrlSchema = yupString().test({
   name: 'no-spaces',
@@ -472,18 +488,15 @@ export const wildcardUrlSchema = yupString().test({
 
     // For wildcard URLs, validate the structure by replacing wildcards with placeholders
     try {
-      const PLACEHOLDER = 'wildcard-placeholder';
-      // Replace wildcards with valid placeholders for URL parsing
-      const normalizedUrl = value.replace(/\*/g, PLACEHOLDER);
-      const url = new URL(normalizedUrl);
+      const url = parseUrlWithWildcards(value);
 
-      // Only allow wildcards in the hostname; reject anywhere else
+      // Only allow hostname wildcards and the whole-port wildcard handled above.
       if (
-        url.username.includes(PLACEHOLDER) ||
-        url.password.includes(PLACEHOLDER) ||
-        url.pathname.includes(PLACEHOLDER) ||
-        url.search.includes(PLACEHOLDER) ||
-        url.hash.includes(PLACEHOLDER)
+        url.username.includes(wildcardUrlPlaceholder) ||
+        url.password.includes(wildcardUrlPlaceholder) ||
+        url.pathname.includes(wildcardUrlPlaceholder) ||
+        url.search.includes(wildcardUrlPlaceholder) ||
+        url.hash.includes(wildcardUrlPlaceholder)
       ) {
         return false;
       }
@@ -494,7 +507,7 @@ export const wildcardUrlSchema = yupString().test({
       }
 
       // Extract original hostname pattern from the input
-      const hostPattern = url.hostname.split(PLACEHOLDER).join('*');
+      const hostPattern = url.hostname.split(wildcardUrlPlaceholder).join('*');
 
       // Validate the wildcard hostname pattern using the existing function
       return isValidHostnameWithWildcards(hostPattern);
@@ -509,15 +522,34 @@ export const wildcardProtocolAndDomainSchema = wildcardUrlSchema.test({
   test: (value) => {
     if (value == null) return true;
     try {
-      const PLACEHOLDER = 'wildcard-placeholder';
-      // Replace wildcards with valid placeholders for URL parsing
-      const normalized = value.replace(/\*/g, PLACEHOLDER);
-      const url = new URL(normalized);
+      const url = parseUrlWithWildcards(value);
       return url.protocol !== '' && url.hostname !== '' && url.pathname === '/' && url.search === '' && url.hash === '';
     } catch (e) {
       return false;
     }
   }
+});
+import.meta.vitest?.test("wildcard URL schemas support whole-port wildcards without accepting unmatchable URL components", ({ expect }) => {
+  for (const pattern of ["https://example.com:*", "https://*.example.com:*", "https://**.example.com:*"]) {
+    expect(wildcardUrlSchema.isValidSync(pattern)).toBe(true);
+    expect(wildcardProtocolAndDomainSchema.isValidSync(pattern)).toBe(true);
+  }
+  for (const pattern of [
+    "https://user:pass@example.com:*",
+    "https://example.com:*?query=value",
+    "https://example.com:*#fragment",
+    "https://example.com:**",
+    "https://example.com:4*",
+    "https://example.com:*5",
+    "https://example.com:*:443",
+    "https://example.com:\t*",
+    "https://example.com:\n*",
+  ]) {
+    expect(wildcardUrlSchema.isValidSync(pattern)).toBe(false);
+    expect(wildcardProtocolAndDomainSchema.isValidSync(pattern)).toBe(false);
+  }
+  expect(wildcardUrlSchema.isValidSync("https://*.example.com:*/handler")).toBe(true);
+  expect(wildcardProtocolAndDomainSchema.isValidSync("https://*.example.com:*/handler")).toBe(false);
 });
 export const jsonSchema = yupMixed().nullable().defined().transform((value) => JSON.parse(JSON.stringify(value)));
 export const jsonStringSchema = yupString().test("json", (params) => `${params.path} is not valid JSON`, (value) => {
