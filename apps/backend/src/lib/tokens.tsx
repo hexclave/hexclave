@@ -1,5 +1,5 @@
 import { usersCrudHandlers } from '@/app/api/latest/users/crud';
-import { withExternalDbSyncUpdate } from '@/lib/external-db-sync';
+import { recordExternalDbSyncDeletion, recordExternalDbSyncRefreshTokenDeletionsForUser, withExternalDbSyncUpdate } from '@/lib/external-db-sync';
 import { getPrismaClientForTenancy, globalPrismaClient } from '@/prisma-client';
 import { KnownErrors } from '@hexclave/shared';
 import type { RestrictedReason } from "@hexclave/shared/dist/schema-fields";
@@ -413,6 +413,8 @@ type CreateRefreshTokenOptions = {
   projectUserId: string,
   expiresAt?: Date,
   isImpersonation?: boolean,
+  // Marks the session as belonging to an AI agent (see ProjectUserRefreshToken.agentName).
+  agentName?: string,
 }
 
 type CreateAuthTokensOptions = CreateRefreshTokenOptions & {
@@ -434,6 +436,7 @@ export async function createRefreshTokenObj(options: CreateRefreshTokenOptions) 
       refreshToken: refreshToken,
       expiresAt: options.expiresAt,
       isImpersonation: options.isImpersonation,
+      agentName: options.agentName,
     },
   });
 
@@ -449,7 +452,47 @@ export async function createAuthTokens(options: CreateAuthTokensOptions) {
     apiUrl: options.apiUrl,
   }) ?? throwErr("Newly generated refresh token is not valid; this should never happen!", { refreshTokenObj });
 
-  return { refreshToken: refreshTokenObj.refreshToken, accessToken };
+  return { refreshToken: refreshTokenObj.refreshToken, refreshTokenId: refreshTokenObj.id, accessToken };
+}
+
+/**
+ * Deletes one session (refresh token row). Refresh tokens are mirrored to
+ * external DBs / ClickHouse and, unlike most tables, deletions are only
+ * picked up if they are recorded in DeletedRow first (there is no DB
+ * trigger) — so every code path that removes a session must go through here
+ * rather than calling deleteMany directly.
+ *
+ * @returns the number of deleted rows (0 if the session was already gone).
+ */
+export async function revokeRefreshTokenSession(options: { tenancyId: string, refreshTokenId: string }): Promise<number> {
+  await recordExternalDbSyncDeletion(globalPrismaClient, {
+    tableName: "ProjectUserRefreshToken",
+    tenancyId: options.tenancyId,
+    refreshTokenId: options.refreshTokenId,
+  });
+  const result = await globalPrismaClient.projectUserRefreshToken.deleteMany({
+    where: { tenancyId: options.tenancyId, id: options.refreshTokenId },
+  });
+  return result.count;
+}
+
+/**
+ * Deletes every session of a user (optionally keeping the caller's own).
+ * See revokeRefreshTokenSession for why deletions must be recorded first.
+ */
+export async function revokeAllRefreshTokenSessionsForUser(options: { tenancyId: string, projectUserId: string, excludeRefreshToken?: string }): Promise<void> {
+  await recordExternalDbSyncRefreshTokenDeletionsForUser(globalPrismaClient, {
+    tenancyId: options.tenancyId,
+    projectUserId: options.projectUserId,
+    excludeRefreshToken: options.excludeRefreshToken,
+  });
+  await globalPrismaClient.projectUserRefreshToken.deleteMany({
+    where: {
+      tenancyId: options.tenancyId,
+      projectUserId: options.projectUserId,
+      ...options.excludeRefreshToken != null ? { NOT: { refreshToken: options.excludeRefreshToken } } : {},
+    },
+  });
 }
 
 export async function createImpersonationAuthTokens(options: {

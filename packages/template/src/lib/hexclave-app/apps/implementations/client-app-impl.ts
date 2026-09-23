@@ -3059,6 +3059,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       userId: crud.user_id,
       createdAt: new Date(crud.created_at),
       isImpersonation: crud.is_impersonation,
+      agentName: crud.agent_name,
       lastUsedAt: crud.last_used_at ? new Date(crud.last_used_at) : undefined,
       isCurrentSession: crud.is_current_session ?? false,
       geoInfo: crud.last_used_at_end_user_ip_info,
@@ -3570,6 +3571,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   async redirectToError(options?: RedirectToOptions) { return await this._redirectToHandler("error", options); }
   async redirectToTeamInvitation(options?: RedirectToOptions) { return await this._redirectToHandler("teamInvitation", options); }
   async redirectToCliAuthConfirm(options?: RedirectToOptions) { return await this._redirectToHandler("cliAuthConfirm", options); }
+  async redirectToAgentAuthConfirm(options?: RedirectToOptions) { return await this._redirectToHandler("agentAuthConfirm", options); }
   async redirectToMfa(options?: RedirectToOptions) { return await this._redirectToHandler("mfa", options); }
 
   async sendForgotPasswordEmail(email: string, options?: { callbackUrl?: string }): Promise<Result<undefined, KnownErrors["UserNotFound"]>> {

@@ -232,6 +232,7 @@ function RootComponent() {
         error: { type: "custom", url: "/handler/error", version: 1 },
         teamInvitation: { type: "custom", url: "/handler/team-invitation", version: 1 },
         cliAuthConfirm: { type: "custom", url: "/handler/cli-auth-confirm", version: 1 },
+        agentAuthConfirm: { type: "custom", url: "/handler/agent-auth-confirm", version: 1 },
         onboarding: { type: "custom", url: "/handler/onboarding", version: 1 },
         afterSignIn: "/",
         afterSignUp: "/",

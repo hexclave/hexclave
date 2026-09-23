@@ -911,6 +911,11 @@ model ProjectUserRefreshToken {
   refreshToken    String    @unique
   expiresAt       DateTime?
   isImpersonation Boolean   @default(false)
+  // Set when this session was minted for an AI agent through the agent-auth
+  // claim flow. Agents are ordinary sessions on the user's account (so RBAC,
+  // teams, and session revocation all apply unchanged); this is what lets us
+  // tell them apart from browser sessions in listings and audit trails.
+  agentName       String?
 
   sequenceId             BigInt?  @unique
   shouldUpdateSequenceId Boolean  @default(true)
@@ -1370,22 +1375,39 @@ enum DraftThemeMode {
   CUSTOM
 }
 
-model CliAuthAttempt {
+// One "sign in on another device" attempt. Used by both the CLI login flow
+// (`/auth/cli/*`) and agent auth (`/agent/*`): a device that has no browser
+// creates the attempt, a human confirms it in a browser, and the device polls
+// `pollingCode` once to receive `refreshToken`. `loginCode` is the code the
+// human sees/types. Agent attempts additionally carry the agent's self-description
+// (`agentName` is non-null exactly for agent attempts) and can be denied.
+//
+// The table keeps its original "CliAuthAttempt" name in the database because
+// renaming a live table would break the previous release, which addresses it
+// by name in raw SQL.
+model DeviceAuthAttempt {
   tenancyId String @db.Uuid
 
-  id           String    @default(uuid()) @db.Uuid
-  pollingCode      String    @unique
-  loginCode        String    @unique
+  id               String    @default(uuid()) @db.Uuid
+  pollingCode      String    @unique(map: "CliAuthAttempt_pollingCode_key")
+  loginCode        String    @unique(map: "CliAuthAttempt_loginCode_key")
   refreshToken     String?
   anonRefreshToken String?
   expiresAt        DateTime
   usedAt           DateTime?
+  deniedAt         DateTime?
+
+  agentName        String?
+  agentDescription String?
+  agentUrl         String?
+  userHint         String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@id([tenancyId, id])
+  @@id([tenancyId, id], map: "CliAuthAttempt_pkey")
   @@index([tenancyId, createdAt(sort: Desc), id(sort: Desc)], name: "CliAuthAttempt_tenancyId_createdAt_id_idx")
+  @@map("CliAuthAttempt")
 }
 
 model UserNotificationPreference {

@@ -15,6 +15,7 @@ import { useStackApp } from "../lib/hooks";
 import { HandlerUrls, StackClientApp, hexclaveAppInternalsSymbol } from "../lib/hexclave-app";
 import { isLocalHandlerUrlTarget, resolveUnknownHandlerPathFallbackUrl } from "../lib/hexclave-app/url-targets";
 import { AccountSettings } from "./account-settings";
+import { AgentAuthConfirmation } from "./agent-auth-confirm";
 import { CliAuthConfirmation } from "./cli-auth-confirm";
 import { EmailVerification } from "./email-verification";
 import { ErrorPage } from "./error-page";
@@ -44,6 +45,7 @@ type Components = {
   ErrorPage: typeof ErrorPage,
   AccountSettings: typeof AccountSettings,
   CliAuthConfirmation: typeof CliAuthConfirmation,
+  AgentAuthConfirmation: typeof AgentAuthConfirmation,
   MFA: typeof MFA,
   Onboarding: typeof Onboarding,
 };
@@ -70,6 +72,7 @@ const availablePaths = {
   teamInvitation: 'team-invitation',
   accountSettings: 'account-settings',
   cliAuthConfirm: 'cli-auth-confirm',
+  agentAuthConfirm: 'agent-auth-confirm',
   mfa: 'mfa',
   error: 'error',
   onboarding: 'onboarding',
@@ -192,6 +195,13 @@ function renderComponent(props: {
       return <CliAuthConfirmation
         fullPage={fullPage}
         {...filterUndefinedINU(componentProps?.CliAuthConfirmation)}
+      />;
+    }
+    case availablePaths.agentAuthConfirm: {
+      if (shouldRedirectToPage?.('agentAuthConfirm')) return { redirectToPage: 'agentAuthConfirm' as const };
+      return <AgentAuthConfirmation
+        fullPage={fullPage}
+        {...filterUndefinedINU(componentProps?.AgentAuthConfirmation)}
       />;
     }
     case availablePaths.mfa: {

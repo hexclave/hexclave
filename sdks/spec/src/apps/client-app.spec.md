@@ -1045,6 +1045,13 @@ Methods:
   redirectToTeamInvitation() - redirect to teamInvitation URL
   redirectToOAuthCallback()  - redirect to oauthCallback URL
   redirectToMagicLinkCallback() - redirect to magicLinkCallback URL
+  redirectToCliAuthConfirm()  - redirect to cliAuthConfirm URL (default /handler/cli-auth-confirm)
+  redirectToAgentAuthConfirm() - redirect to agentAuthConfirm URL (default /handler/agent-auth-confirm)
+
+The agentAuthConfirm page is where a human approves an AI agent's registration. The backend embeds
+the project's resolved agentAuthConfirm URL (with `?code={claim_code}`) in the `confirm_url`
+returned by `POST /agent/register`; the SDK only needs to serve the page (see the
+`useAgentAuthConfirmation` hook / `AgentAuthConfirmation` component in the handler).
 
 Implementation:
 
