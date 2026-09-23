@@ -304,6 +304,7 @@ Arguments:
   options.lastEventAtFromMillis: number? - only replays whose last event is at or after this Unix ms timestamp
   options.lastEventAtToMillis: number? - only replays whose last event is at or before this Unix ms timestamp
   options.clickCountMin: number? - only replays with at least this many click events
+  options.countryCodes: string[]? - only replays whose session was seen from one of these ISO 3166-1 alpha-2 countries
 
 Returns:
   {
@@ -315,7 +316,7 @@ Request:
   GET /api/v1/session-replays [server-only]
   Query params: cursor?, limit?, user_ids? (comma-separated), team_ids? (comma-separated),
                 duration_ms_min?, duration_ms_max?, last_event_at_from_millis?,
-                last_event_at_to_millis?, click_count_min?
+                last_event_at_to_millis?, click_count_min?, country_codes? (comma-separated)
 
 Response:
   {
