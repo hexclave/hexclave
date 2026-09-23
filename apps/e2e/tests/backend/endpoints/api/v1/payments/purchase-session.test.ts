@@ -464,6 +464,108 @@ it("should return client secret for one-time price (no interval)", async ({ expe
   });
 });
 
+it("allows a sub-minimum unit one-time price when quantity brings the total to Stripe's floor", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Payments.setup();
+  await Project.updateConfig({
+    payments: {
+      testMode: false,
+      products: {
+        "ot-cheap": {
+          displayName: "Cheap One Time",
+          customerType: "user",
+          serverOnly: false,
+          stackable: true,
+          prices: {
+            one: { USD: "0.30" },
+          },
+          includedItems: {},
+        },
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+  const urlRes = await niceBackendFetch("/api/latest/payments/purchases/create-purchase-url", {
+    method: "POST",
+    accessType: "client",
+    body: {
+      customer_type: "user",
+      customer_id: userId,
+      product_id: "ot-cheap",
+    },
+  });
+  expect(urlRes.status).toBe(200);
+  const code = (urlRes.body as { url: string }).url.match(/\/purchase\/([a-z0-9-_]+)/)?.[1]!;
+
+  const res = await niceBackendFetch("/api/latest/payments/purchases/purchase-session", {
+    method: "POST",
+    accessType: "client",
+    body: {
+      full_code: code,
+      price_id: "one",
+      quantity: 2,
+    },
+  });
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({
+    client_secret: expect.any(String),
+    stripe_intent_type: "payment",
+  });
+});
+
+it("rejects a one-time purchase whose quantity-adjusted total is below Stripe's floor", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Payments.setup();
+  await Project.updateConfig({
+    payments: {
+      testMode: false,
+      products: {
+        "ot-too-cheap": {
+          displayName: "Too Cheap One Time",
+          customerType: "user",
+          serverOnly: false,
+          stackable: true,
+          prices: {
+            one: { USD: "0.30" },
+          },
+          includedItems: {},
+        },
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+  const urlRes = await niceBackendFetch("/api/latest/payments/purchases/create-purchase-url", {
+    method: "POST",
+    accessType: "client",
+    body: {
+      customer_type: "user",
+      customer_id: userId,
+      product_id: "ot-too-cheap",
+    },
+  });
+  expect(urlRes.status).toBe(200);
+  const code = (urlRes.body as { url: string }).url.match(/\/purchase\/([a-z0-9-_]+)/)?.[1]!;
+
+  const res = await niceBackendFetch("/api/latest/payments/purchases/purchase-session", {
+    method: "POST",
+    accessType: "client",
+    body: {
+      full_code: code,
+      price_id: "one",
+      quantity: 1,
+    },
+  });
+  expect(res).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "One-time purchases must total at least $0.50",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
 it("should error on one-time price quantity > 1 when product is not stackable", async ({ expect }) => {
   await Project.createAndSwitch();
   await Payments.setup();

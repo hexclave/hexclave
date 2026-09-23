@@ -341,9 +341,33 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
         await productsCache.refresh([userIdOrTeamId, null, null]);
       },
-      async createCheckoutUrl(options: { productId: string, returnUrl?: string } | { product: InlineProduct, returnUrl?: string }) {
+      async createCheckoutUrl(options: { productId: string, returnUrl?: string, allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean } | { product: InlineProduct, returnUrl?: string, allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean }) {
         const productIdOrInline = "productId" in options ? options.productId : options.product;
-        return await app._interface.createCheckoutUrl(type, userIdOrTeamId, productIdOrInline, null, options.returnUrl, "server");
+        return await app._interface.createCheckoutUrl(
+          type,
+          userIdOrTeamId,
+          productIdOrInline,
+          null,
+          options.returnUrl,
+          "server",
+          { allowPromoCodes: options.allowPromoCodes, allowStackingPromoCodes: options.allowStackingPromoCodes },
+        );
+      },
+      async validatePromoCodes(options: { productId: string, priceId?: string, quantity?: number, promoCodes: string[] }) {
+        const result = await app._interface.validateCustomerPromoCodes({
+          customer_type: type,
+          customer_id: userIdOrTeamId,
+          product_id: options.productId,
+          price_id: options.priceId,
+          quantity: options.quantity,
+          promo_codes: options.promoCodes,
+        }, null);
+        return {
+          originalAmount: result.original_amount,
+          netAmount: result.net_amount,
+          recurringAmount: result.recurring_amount,
+          appliedCodeNames: result.applied_code_names,
+        };
       },
     };
   }
@@ -1542,12 +1566,40 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
   async createCheckoutUrl(options: (
     ({ userId: string } | { teamId: string } | { customCustomerId: string }) &
     ({ productId: string } | { product: InlineProduct }) &
-    { returnUrl?: string }
+    { returnUrl?: string, allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean }
   )): Promise<string> {
     const { customerType, customerId } = this._resolveCustomer(options);
 
     const productIdOrInline = "productId" in options ? options.productId : options.product;
-    return await this._interface.createCheckoutUrl(customerType, customerId, productIdOrInline, null, options.returnUrl, "server");
+    return await this._interface.createCheckoutUrl(
+      customerType,
+      customerId,
+      productIdOrInline,
+      null,
+      options.returnUrl,
+      "server",
+      { allowPromoCodes: options.allowPromoCodes, allowStackingPromoCodes: options.allowStackingPromoCodes },
+    );
+  }
+
+  async validatePromoCodes(options: {
+    productId: string,
+    priceId?: string,
+    quantity?: number,
+    promoCodes: string[],
+  }): Promise<{ originalAmount: string, netAmount: string, recurringAmount: string, appliedCodeNames: string[] }> {
+    const result = await this._interface.validatePromoCodes({
+      product_id: options.productId,
+      price_id: options.priceId,
+      quantity: options.quantity,
+      promo_codes: options.promoCodes,
+    });
+    return {
+      originalAmount: result.original_amount,
+      netAmount: result.net_amount,
+      recurringAmount: result.recurring_amount,
+      appliedCodeNames: result.applied_code_names,
+    };
   }
 
   async createTeam(data: ServerTeamCreateOptions): Promise<ServerTeam> {

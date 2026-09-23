@@ -28,6 +28,8 @@ import { Section } from "../section";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { ActionDialog } from "@/components/ui/action-dialog";
 import { CreditCard, Receipt, CaretRight, WarningCircle } from "@phosphor-icons/react";
+import { PromoCodeApplyField, promoCodeErrorMessage } from "@/components/payments/promo-code-apply";
+import { DesignAlert } from "@/components/design-components";
 
 type CustomerInvoiceStatus = "draft" | "open" | "paid" | "uncollectible" | "void" | null;
 type CustomerInvoicesListOptions = { limit?: number; startingAfter?: string };
@@ -109,7 +111,8 @@ type CustomerLike = {
   useInvoices: (options?: CustomerInvoicesListOptions) => CustomerInvoicesList,
   createPaymentMethodSetupIntent: () => Promise<CustomerPaymentMethodSetupIntent>,
   setDefaultPaymentMethodFromSetupIntent: (setupIntentId: string) => Promise<PaymentMethodSummary>,
-  switchSubscription: (options: { fromProductId: string, toProductId: string, priceId?: string, quantity?: number }) => Promise<void>,
+  switchSubscription: (options: { fromProductId: string, toProductId: string, priceId?: string, quantity?: number, promoCodes?: string[] }) => Promise<void>,
+  validatePromoCodes: (options: { productId: string, priceId?: string, quantity?: number, promoCodes: string[] }) => Promise<{ originalAmount: string, netAmount: string, recurringAmount: string, appliedCodeNames: string[] }>,
 };
 
 function SetDefaultPaymentMethodForm(props: {
@@ -249,6 +252,11 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
   const [cancelTarget, setCancelTarget] = useState<{ productId: string, subscriptionId?: string } | null>(null);
   const [switchFromProductId, setSwitchFromProductId] = useState<string | null>(null);
   const [switchToProductId, setSwitchToProductId] = useState<string | null>(null);
+  const [appliedPromoCodeNames, setAppliedPromoCodeNames] = useState<string[]>([]);
+  const [promoError, setPromoError] = useState<string | null>(null);
+  const project = stackApp.useProject();
+  const allowPromoCodes = project.config.allowPromoCodes === true;
+  const allowStackingPromoCodes = allowPromoCodes && project.config.allowStackingPromoCodes === true;
 
   const stripePromise = useMemo(() => {
     if (!setupIntentStripeAccountId) return null;
@@ -288,6 +296,8 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
   const closeSwitchDialog = () => {
     setSwitchFromProductId(null);
     setSwitchToProductId(null);
+    setAppliedPromoCodeNames([]);
+    setPromoError(null);
   };
 
   const switchSourceProduct = switchFromProductId
@@ -450,6 +460,7 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
                   fromProductId,
                   toProductId,
                   priceId: selectedPriceId,
+                  promoCodes: appliedPromoCodeNames,
                 }));
                 if (result.status === "error") {
                   handleAsyncError(result.error);
@@ -472,7 +483,11 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
                   <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Choose a plan</label>
                   <Select
                     value={switchToProductId ?? undefined}
-                    onValueChange={(value) => setSwitchToProductId(value || null)}
+                    onValueChange={(value) => {
+                      setSwitchToProductId(value || null);
+                      setAppliedPromoCodeNames([]);
+                      setPromoError(null);
+                    }}
                   >
                     <SelectTrigger className="w-full bg-white dark:bg-zinc-900 border-black/[0.08] dark:border-white/[0.08] rounded-xl px-3 py-2 shadow-sm focus-visible:ring-black/[0.06] dark:focus-visible:ring-white/[0.06]">
                       <SelectValue placeholder="Choose a plan" />
@@ -486,6 +501,33 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
                     </SelectContent>
                   </Select>
                 </div>
+              )}
+              {allowPromoCodes && switchToProductId != null && selectedPriceId != null && (
+                <PromoCodeApplyField
+                  appliedCodeNames={appliedPromoCodeNames}
+                  allowStacking={allowStackingPromoCodes}
+                  onApply={async (codeName) => {
+                    setPromoError(null);
+                    const requestedProductId = switchToProductId;
+                    const requestedPriceId = selectedPriceId;
+                    const result = await props.customer.validatePromoCodes({
+                      productId: requestedProductId,
+                      priceId: requestedPriceId,
+                      promoCodes: [...appliedPromoCodeNames, codeName],
+                    });
+                    if (switchToProductId !== requestedProductId || selectedPriceId !== requestedPriceId) {
+                      return;
+                    }
+                    setAppliedPromoCodeNames(result.appliedCodeNames);
+                  }}
+                  onRemove={async (codeName) => {
+                    setPromoError(null);
+                    setAppliedPromoCodeNames((current) => current.filter((name) => name !== codeName));
+                  }}
+                />
+              )}
+              {promoError != null && (
+                <DesignAlert variant="error" description={promoError} />
               )}
             </div>
           </ActionDialog>

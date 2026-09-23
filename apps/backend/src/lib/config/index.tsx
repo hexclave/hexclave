@@ -1584,5 +1584,7 @@ export const renderedOrganizationConfigToProjectCrud = (renderedConfig: Complete
 
     allow_user_api_keys: renderedConfig.apiKeys.enabled.user,
     allow_team_api_keys: renderedConfig.apiKeys.enabled.team,
+    allow_promo_codes: renderedConfig.payments.allowPromoCodes === true,
+    allow_stacking_promo_codes: renderedConfig.payments.allowPromoCodes === true && renderedConfig.payments.allowStackingPromoCodes === true,
   };
 };
