@@ -1,5 +1,6 @@
 "use client";
 import { CopyableText } from "@/components/copyable-text";
+import { DeleteProjectDialog } from "@/components/delete-project-dialog";
 import { SmartFormDialog } from "@/components/form-dialog";
 import { Link, StyledLink } from "@/components/link";
 import { LogoUpload } from "@/components/logo-upload";
@@ -176,11 +177,9 @@ export default function PageClient() {
     description: project.description || undefined,
   }), [project.displayName, project.description]);
 
-  // Memoize project delete callback
-  const handleProjectDelete = useCallback(async () => {
-    await project.delete();
+  const handleProjectDeleted = useCallback(async () => {
     await hexclaveAdminApp.redirectToHome();
-  }, [project, hexclaveAdminApp]);
+  }, [hexclaveAdminApp]);
 
   const productionModeItems: DesignEditableGridItem[] = [
     {
@@ -590,35 +589,15 @@ export default function PageClient() {
             <p className="mb-2 text-sm text-muted-foreground">
               Once you delete a project, there is no going back. All data will be permanently removed.
             </p>
-            <ActionDialog
+            <DeleteProjectDialog
+              project={project}
+              onDeleted={handleProjectDeleted}
               trigger={
                 <DesignButton variant="destructive" size="sm">
                   Delete Project
                 </DesignButton>
               }
-              title="Delete Project"
-              danger
-              okButton={{
-                label: "Delete Project",
-                onClick: handleProjectDelete
-              }}
-              cancelButton
-              confirmText="I understand this action is IRREVERSIBLE and will delete ALL associated data."
-            >
-              <p className="text-sm text-foreground">
-                {`Are you sure that you want to delete the project with name "${project.displayName}" and ID "${project.id}"?`}
-              </p>
-              <p className="mt-2 text-sm text-foreground">
-                This action is <strong>irreversible</strong> and will permanently delete:
-              </p>
-              <ul className="mt-2 list-disc pl-5">
-                <li>All users and their data</li>
-                <li>All teams and team memberships</li>
-                <li>All API keys</li>
-                <li>All project configurations</li>
-                <li>All OAuth provider settings</li>
-              </ul>
-            </ActionDialog>
+            />
           </div>
         </div>
       </DesignCard>
