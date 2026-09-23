@@ -2351,6 +2351,7 @@ Accessible via `hexclaveServerApp.getUser()` on the server. `ServerUser` inherit
   & Omit<CurrentUser, "getAuthJson" | "signOut">; //$stack-link-to:#currentuser
   & {
     lastActiveAt: Date; //$stack-link-to:#serveruserlastactiveat
+    selectedTeam: ServerTeam | null; //$stack-link-to:#serveruserselectedteam
     serverMetadata: Json; //$stack-link-to:#serveruserservermetadata
     restrictedByAdmin: boolean; //$stack-link-to:#serveruserrestrictedbyadmin
     restrictedByAdminReason: string | null; //$stack-link-to:#serveruserrestrictedbyadminreason
@@ -2383,6 +2384,23 @@ Accessible via `hexclaveServerApp.getUser()` on the server. `ServerUser` inherit
     <MethodContent>Last user activity timestamp.</MethodContent>
     <MethodAside title="Type Definition">
       ```typescript declare const lastActiveAt: Date; ```
+    </MethodAside>
+  </MethodLayout>
+</ServerUserSection>
+
+<ServerUserSection
+  type="serverUser"
+  property="selectedTeam"
+  defaultOpen={false}
+>
+  <MethodLayout>
+    <MethodContent>
+      The currently selected team as a `ServerTeam`, or `null` if no team is selected. Server-only functionality,
+      such as `addUser()` or the full member details returned by `listUsers()`, is available on it directly,
+      without fetching the team again with `hexclaveServerApp.getTeam()`.
+    </MethodContent>
+    <MethodAside title="Type Definition">
+      ```typescript declare const selectedTeam: ServerTeam | null; ```
     </MethodAside>
   </MethodLayout>
 </ServerUserSection>
