@@ -49,6 +49,9 @@ export async function runClickhouseMigrations() {
 
   await client.command({ query: CLICKMAP_EVENTS_ADD_DEAD_COLUMN_SQL });
 
+  // Alter users table (must come before the view that references the new columns)
+  await client.command({ query: USERS_ADD_SIGNUP_RISK_COLUMNS_SQL });
+
   // Alter events table (must come before views that reference new columns)
   await client.command({ query: EVENTS_ADD_REPLAY_COLUMNS_SQL });
 
@@ -206,6 +209,8 @@ CREATE TABLE IF NOT EXISTS analytics_internal.users (
     client_read_only_metadata String,
     server_metadata String,
     is_anonymous UInt8,
+    sign_up_risk_score_bot Int32,
+    sign_up_risk_score_free_trial_abuse Int32,
     restricted_by_admin UInt8,
     restricted_by_admin_reason Nullable(String),
     restricted_by_admin_private_details Nullable(String),
@@ -235,6 +240,8 @@ SELECT
   client_read_only_metadata,
   server_metadata,
   is_anonymous,
+  sign_up_risk_score_bot,
+  sign_up_risk_score_free_trial_abuse,
   restricted_by_admin,
   restricted_by_admin_reason,
   restricted_by_admin_private_details
@@ -259,6 +266,12 @@ ALTER TABLE analytics_internal.events
   ADD COLUMN IF NOT EXISTS refresh_token_id Nullable(String) AFTER team_id,
   ADD COLUMN IF NOT EXISTS session_replay_id Nullable(String) AFTER refresh_token_id,
   ADD COLUMN IF NOT EXISTS session_replay_segment_id Nullable(String) AFTER session_replay_id;
+`;
+
+const USERS_ADD_SIGNUP_RISK_COLUMNS_SQL = `
+ALTER TABLE analytics_internal.users
+  ADD COLUMN IF NOT EXISTS sign_up_risk_score_bot Int32 AFTER is_anonymous,
+  ADD COLUMN IF NOT EXISTS sign_up_risk_score_free_trial_abuse Int32 AFTER sign_up_risk_score_bot;
 `;
 
 // Backfill refresh_token_id from data.refresh_token_id for existing $token-refresh rows
@@ -706,6 +719,8 @@ const COLUMN_COMMENT_STATEMENTS: string[] = [
   `ALTER TABLE default.users COMMENT COLUMN client_read_only_metadata 'Application-defined JSON metadata readable from client SDKs but only writable from server'`,
   `ALTER TABLE default.users COMMENT COLUMN server_metadata 'Application-defined JSON metadata only accessible from server SDKs'`,
   `ALTER TABLE default.users COMMENT COLUMN is_anonymous '1 if this is an anonymous/guest user, 0 for authenticated users'`,
+  `ALTER TABLE default.users COMMENT COLUMN sign_up_risk_score_bot 'Sign-up bot risk score from 0 to 100'`,
+  `ALTER TABLE default.users COMMENT COLUMN sign_up_risk_score_free_trial_abuse 'Sign-up free-trial-abuse risk score from 0 to 100'`,
   `ALTER TABLE default.users COMMENT COLUMN restricted_by_admin '1 if an admin has restricted this user access'`,
   `ALTER TABLE default.users COMMENT COLUMN restricted_by_admin_reason 'Admin-provided reason for restricting the user, shown to the user'`,
   `ALTER TABLE default.users COMMENT COLUMN restricted_by_admin_private_details 'Private admin notes about the restriction, not shown to the user'`,
