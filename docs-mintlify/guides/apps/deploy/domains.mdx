@@ -1,0 +1,36 @@
+---
+title: "Custom domains"
+description: "Point your own domain at a deployed service by creating the DNS records Hexclave shows you"
+sidebarTitle: "Custom domains"
+---
+
+A public HTTP service already has a Hexclave URL. A custom domain is a hostname you own, such as `app.example.com`, used in place of that URL. It is also how a private HTTP service is reached from the internet. A service with only TCP ports cannot take a domain.
+
+## Add the hostname
+
+1. Open [Deploy](https://app.hexclave.com/projects/-selector-/deployments).
+2. Open a deployment, then the service you want to expose.
+3. Open **Domains**.
+4. Enter the hostname and click **Add**.
+
+## Create the DNS records
+
+Expand **DNS** on that domain. Hexclave shows a table with three columns: **Type**, **Name**, and **Value**.
+
+Create those records at the DNS provider for the domain (wherever you bought it, or wherever its nameservers point: Cloudflare, your registrar, and so on). Copy each row as-is.
+
+Hexclave checks on its own. The domain moves through three states:
+
+- **Pending verification** — the records are not in place yet, or DNS has not caught up.
+- **Issuing** — the records were found, and the certificate is being created. This usually takes under a minute.
+- **Verified** — the hostname is live.
+
+You can also click **Check now**. Verification usually completes within a few minutes of creating the records.
+
+You can add the records before the service's first deploy. They start working once that deploy finishes.
+
+## Cloudflare
+
+If the domain is on Cloudflare, either create the records as **DNS only** (proxy off), or set the zone's SSL/TLS mode to **Full (strict)**.
+
+A proxied record with SSL/TLS set to **Flexible** fails with Cloudflare 520 errors.
