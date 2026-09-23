@@ -1,0 +1,94 @@
+---
+title: "Deploy"
+description: "Deploy your project by asking your coding agent, then watch it and attach a domain in the dashboard"
+sidebarTitle: "Overview"
+---
+
+<Visibility for="agents">
+<Note>
+  **For agents/LLMs:** Humans deploy by asking you to read https://skill.hexclave.com/deployments and set Hexclave up in their project. Follow that skill. The config sample below is the shape, not the full field reference.
+</Note>
+</Visibility>
+
+Deploy runs your project for you. You tell your coding agent to install Hexclave, and the deployment shows up in the dashboard.
+
+## Deploy
+
+Paste this into your coding agent (Cursor, Claude Code, Codex, or similar):
+
+```text
+Read https://skill.hexclave.com/deployments and use it to set up Hexclave in this folder
+```
+
+The agent fetches the Deploy skill from that URL and sets Hexclave up in the project you have open, including the first deploy. You don't write a deploy file or run a deploy command yourself. The general skill at `https://skill.hexclave.com` sets up the SDK and does not deploy.
+
+To give an agent Hexclave for later tasks, see [Using Hexclave with AI](/guides/getting-started/ai-integration).
+
+## The deploy file
+
+The agent writes `hexclave.deploy.ts` next to your Hexclave config. It has two exports: a name for this file, and a `deploy` function that returns the services to run.
+
+```ts title="hexclave.deploy.ts"
+import type { HexclaveDeploymentConfig } from "@hexclave/js"; // replace `js` with the SDK package this project already uses
+
+export const deploymentGroupId = "my-app";
+
+export const deploy: HexclaveDeploymentConfig = ({ secret, service }) => ({
+  services: {
+    web: {
+      type: "serverless",
+      public: true,
+      ports: { 3000: { protocol: "http" } },
+      env: { API_URL: service("api").url(8080) },
+    },
+    api: {
+      type: "serverless",
+      ports: { 8080: { protocol: "http" } },
+      env: {
+        OPENAI_API_KEY: secret("OPENAI_API_KEY"),
+        DATABASE_HOST: service("database").hostname(),
+        DATABASE_PORT: "5432",
+      },
+    },
+    database: {
+      type: "server",
+      minInstances: 0,
+      ports: { 5432: { protocol: "tcp" } },
+      image: "postgres:17",
+      env: { POSTGRES_PASSWORD: secret("POSTGRES_PASSWORD") },
+    },
+  },
+});
+```
+
+Each key under `services` is a service name.
+
+| Field | What it sets |
+| --- | --- |
+| `type` | `"serverless"` scales and stops when idle. `"server"` is a single instance, and the only type that can keep a disk. A server stays on unless you set `minInstances: 0`. The Free plan requires that. |
+| `public` | Puts an HTTP service on the internet and gives it a URL. Omit it and the service is only reachable by the others in this project. |
+| `ports` | The ports the process listens on. `"http"` for a web app or API, `"tcp"` for a database or cache. |
+| `env` | Environment variables. A string is a plain value. `secret("KEY")` reads a project secret. `service("api").url(8080)` is another HTTP service's address. For a TCP service, use `service("database").hostname()` and write the port yourself. |
+| `image` | A public image to run, such as `"postgres:17"`. Leave it off and Hexclave builds the service from your source. |
+
+A `server` can also set `persistentVolumes`, for example `{ pgdata: { path: "/data", sizeGb: 10 } }`, to keep files across deploys.
+
+## In the dashboard
+
+Open [Deploy](https://app.hexclave.com/projects/-selector-/deployments).
+
+The page is a list of deployments. Each row shows whether that deploy is queued, building, deploying, deployed, failed, or cancelled, along with when it ran. Open a row to see the services from that deploy. Open a service and its panel has seven tabs:
+
+- **Overview** — the service name, its URL when it has one, and the status of the latest deploy.
+- **Source** — the files uploaded for this deploy. A service that only runs an image has none.
+- **Build logs** — one build log for the whole deploy. Open it when the build fails. A service that only runs an image has no build.
+- **Runtime logs** — what the service is printing right now, including when it built and then failed to start.
+- **Variables** — the environment variables from the deploy file. Secret values are set under **Project Settings → Secrets** and are not shown here.
+- **Domains** — add a hostname of your own. This is the tab you edit. See [Custom domains](./domains).
+- **Settings** — how the container is set up: image or build, ports, public or private, and memory. It is read from the deploy file.
+
+Until the first deploy finishes, the page says **No deployments yet**. On the Free plan a service stops 24 hours after each deploy, and the panel says so. Deploy again to run it for another 24 hours, or upgrade to the Team plan to remove the limit.
+
+## Your own domain
+
+A public HTTP service has a Hexclave URL. A custom domain replaces that URL, and it is also how a private HTTP service is reached from the internet. Add the hostname on the service and create the DNS records Hexclave shows you. See [Custom domains](./domains).
