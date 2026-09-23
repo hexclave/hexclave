@@ -49,6 +49,10 @@ Hexclave uses the industry-standard TOTP (Time-based One-Time Password) algorith
 
 2. **Code Generation**: The authenticator app generates a 6-digit code that changes every 30 seconds, based on the shared secret and the current time.
 
+3. **Sign-in**: After the first factor succeeds, Hexclave asks for the current TOTP code and then issues the session. TOTP is part of sign-in, not a separate check you can run later on an already signed-in user.
+
+Read `user.isMultiFactorRequired` on the server or client to see whether the user has 2FA enabled. Users enroll and disable 2FA in `<AccountSettings />`.
+
 ## Recommended Authenticator Apps
 
 The following authenticator apps are compatible with Hexclave 2FA:

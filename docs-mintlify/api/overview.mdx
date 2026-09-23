@@ -111,6 +111,10 @@ curl https://api.hexclave.com/api/v1/ \
 
   </Accordion>
 
+  <Accordion title="How do I sign in with Google from iOS?">
+    Use the [Swift SDK](https://github.com/hexclave/swift-sdk-prerelease) `signInWithOAuth(provider: "google")` when you can. The REST authorize and token steps are on the [Google provider page](/guides/apps/authentication/auth-providers/google#native-apps).
+  </Accordion>
+
   <Accordion title="Are there rate limits?">
     Yes, Hexclave implements rate limiting to ensure fair usage and system stability. Rate limits vary by endpoint and access type. When you exceed the rate limit, you'll receive a `429 Too Many Requests` response with headers indicating when you can retry.
   </Accordion>
