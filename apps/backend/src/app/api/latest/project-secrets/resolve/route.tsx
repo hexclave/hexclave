@@ -9,7 +9,7 @@ import { adaptSchema, adminAuthTypeSchema, yupArray, yupNumber, yupObject, yupRe
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Resolve project secrets for local development",
-    description: "Decrypts the requested secret keys for the `dev` environment (falling back to `all`). Keys with neither are omitted from `values`. Admin session only — not secret-server-key. Used by `hexclave dev`; the dashboard never displays these values.",
+    description: "Decrypts the requested secret keys for the `dev` environment (falling back to `all`). Keys with neither are omitted from `values`. Admin only — not secret-server-key. Used by `hexclave dev`; the dashboard never displays these values.",
     tags: ["Secrets"],
     hidden: true,
   },
