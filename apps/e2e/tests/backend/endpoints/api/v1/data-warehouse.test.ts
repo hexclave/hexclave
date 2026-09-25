@@ -264,17 +264,18 @@ it("caps both per-query and aggregate resource usage for direct connections", as
 
   // The plan's timeout is the ceiling, not just the default: a team-plan user must
   // not be able to raise it to a higher plan's timeout on a direct connection.
-  // The exact value is the team's `analytics_timeout_seconds` quantity, which
-  // stacks with the free plan's grant depending on timing, so assert on the
-  // property rather than on one plan's constant: whatever the user got, it is
-  // below the highest plan's timeout and cannot be raised.
+  // The exact value is the team's `analytics_timeout_seconds` quantity. That is 60
+  // once the free plan's replacement has been processed, but free's end is queued
+  // for the timefold worker (~1s), so provisioning right after the upgrade can
+  // briefly see free + team stacked (70). Hence a range: at least the team plan's
+  // timeout, below the highest plan's, and not raisable.
   const configuredExecutionTime = await clickhouse({
     ...credentials,
     query: "SELECT getSetting('max_execution_time')",
   });
   expect(configuredExecutionTime.status).toBe(200);
   const executionTimeCeiling = Number(configuredExecutionTime.text);
-  expect(executionTimeCeiling).toBeGreaterThan(0);
+  expect(executionTimeCeiling).toBeGreaterThanOrEqual(PLAN_LIMITS.team.analyticsTimeoutSeconds);
   expect(executionTimeCeiling).toBeLessThan(PLAN_LIMITS.growth.analyticsTimeoutSeconds);
 
   const raiseExecutionTime = await clickhouse({
