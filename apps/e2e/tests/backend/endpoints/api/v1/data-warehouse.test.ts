@@ -256,18 +256,30 @@ it("caps both per-query and aggregate resource usage for direct connections", as
         getSetting('max_memory_usage'),
         getSetting('max_memory_usage_for_user'),
         getSetting('max_concurrent_queries_for_user'),
-        getSetting('max_threads'),
-        getSetting('max_execution_time')
+        getSetting('max_threads')
     `,
   });
   expect(configuredLimits.status).toBe(200);
-  expect(configuredLimits.text).toBe(`4000000000\t4000000000\t10\t4\t${PLAN_LIMITS.team.analyticsTimeoutSeconds}`);
+  expect(configuredLimits.text).toBe("4000000000\t4000000000\t10\t4");
 
   // The plan's timeout is the ceiling, not just the default: a team-plan user must
   // not be able to raise it to a higher plan's timeout on a direct connection.
+  // The exact value is the team's `analytics_timeout_seconds` quantity, which
+  // stacks with the free plan's grant depending on timing, so assert on the
+  // property rather than on one plan's constant: whatever the user got, it is
+  // below the highest plan's timeout and cannot be raised.
+  const configuredExecutionTime = await clickhouse({
+    ...credentials,
+    query: "SELECT getSetting('max_execution_time')",
+  });
+  expect(configuredExecutionTime.status).toBe(200);
+  const executionTimeCeiling = Number(configuredExecutionTime.text);
+  expect(executionTimeCeiling).toBeGreaterThan(0);
+  expect(executionTimeCeiling).toBeLessThan(PLAN_LIMITS.growth.analyticsTimeoutSeconds);
+
   const raiseExecutionTime = await clickhouse({
     ...credentials,
-    query: `SELECT 1 SETTINGS max_execution_time = ${PLAN_LIMITS.team.analyticsTimeoutSeconds + 1}`,
+    query: `SELECT 1 SETTINGS max_execution_time = ${executionTimeCeiling + 1}`,
   });
   expect(raiseExecutionTime.status).not.toBe(200);
   expect(raiseExecutionTime.text).toContain("max_execution_time");
