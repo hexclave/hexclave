@@ -421,9 +421,12 @@ export function yupRecord<K extends yup.StringSchema, T extends yup.AnySchema>(
           // prototype instead of storing the entry.
           Object.defineProperty(value, key, { value: validatedValue, writable: true, enumerable: true, configurable: true });
         } catch (e: any) {
+          // With more than one failure, a ValidationError's `message` is just
+          // yup's "N errors occurred" — the actual reasons are only in `errors`.
+          const message = e instanceof yup.ValidationError && e.errors.length > 1 ? e.errors.join("; ") : e.message;
           return createError({
             path: path ? `${path}.${key}` : key,
-            message: e.message,
+            message,
           });
         }
       }
