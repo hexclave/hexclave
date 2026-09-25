@@ -5,7 +5,7 @@ import { assertDeploymentsEnabled } from "@/lib/deployments/platform-config";
 import { runtimeFromStored } from "@/lib/deployments/runtime";
 import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { DEPLOYMENT_SOURCE_ID_REGEX, MAX_DEPLOYMENT_SOURCE_ID_LENGTH, deploymentCiEnvSchema, deploymentMemoryFromMb, deploymentSecretDefaultsSchema, deploymentServiceIsBuilt, parseSourceManifest, type DeploymentServiceDefinition } from "@hexclave/shared/dist/deployments";
+import { DEPLOYMENT_SOURCE_ID_REGEX, MAX_DEPLOYMENT_SOURCE_ID_LENGTH, deploymentCiEnvSchema, deploymentMemoryFromMb, deploymentServiceIsBuilt, parseSourceManifest, type DeploymentServiceDefinition } from "@hexclave/shared/dist/deployments";
 import type { MarshalEnvValue } from "@/lib/deployments/marshal-client";
 import { adaptSchema, serverOrHigherAuthTypeSchema, userSpecifiedIdSchema, yupArray, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
@@ -86,7 +86,7 @@ export const GET = createSmartRouteHandler({
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Deploy a deployment source",
-    description: "Deploys one deployment source from a previously uploaded source tree: every service the deploy file declares is built by ONE builder machine and then rolled out in dependency order. The services' STORED definitions (as last synced via PUT /deployments/services) are authoritative — connections are resolved server-side and secret env vars are filled from the project's stored secret values (Project Settings > Secrets), falling back to any `secret_defaults` sent with this request. Defaults are request-scoped and never stored, as are the `ci_env` variables (CI_COMMIT_SHA and friends), which are injected into every deployed service's env. A secret with neither fails the deploy with the full list of keys that need a value. Returns as soon as the runtime has accepted the deployment; the build continues remotely, so poll the deployment endpoint for its status.",
+    description: "Deploys one deployment source from a previously uploaded source tree: every service the deploy file declares is built by ONE builder machine and then rolled out in dependency order. The services' STORED definitions (as last synced via PUT /deployments/services) are authoritative — connections are resolved server-side and secret env vars are filled from the project's stored secret values (Project Settings > Secrets, `prod` else `all`). A secret with no stored value fails the deploy with the full list of keys that need a value. The `ci_env` variables (CI_COMMIT_SHA and friends) are injected into every deployed service's env. Returns as soon as the runtime has accepted the deployment; the build continues remotely, so poll the deployment endpoint for its status.",
     tags: ["Deploy"],
     hidden: true,
   },
@@ -112,9 +112,8 @@ export const POST = createSmartRouteHandler({
       // previous one has converged. A flat list would lose the ordering that
       // makes a `url` reference resolvable.
       levels: yupArray(yupArray(userSpecifiedIdSchema("serviceId").defined()).defined()).defined(),
-      // The `secret(key, default)` defaults from the deploy file, keyed by
-      // service id and then by env var key. Request-scoped: used only to fill
-      // secrets that have no stored value, and never written to the database.
+      // Legacy `secret(key, default)` defaults, keyed by service id and then
+      // by env var key. Only accepted EMPTY (see assertNoSecretDefaults).
       secret_defaults: yupMixed().optional(),
       // The GitLab-style CI variables the deploy was invoked with (CI_COMMIT_SHA
       // and friends), injected into every deployed service's env. Request-scoped
@@ -239,7 +238,7 @@ export const POST = createSmartRouteHandler({
     // Resolve every service's env BEFORE consuming the upload: a missing secret
     // or a dangling connection must not spend it. One redaction snapshot covers
     // the whole deploy, because one build log does.
-    const secretDefaults = await parseSecretDefaults(body.secret_defaults);
+    assertNoSecretDefaults(body.secret_defaults, definitionsByServiceId);
     const ciEnv = await parseCiEnv(body.ci_env);
     const resolvedEnvByServiceId = new Map<string, Record<string, MarshalEnvValue>>();
     const redactionSecrets = new Set<string>();
@@ -249,7 +248,6 @@ export const POST = createSmartRouteHandler({
         prisma,
         serviceId,
         definition,
-        secretDefaults: secretDefaults[serviceId] ?? {},
         ciEnv,
       });
       resolvedEnvByServiceId.set(serviceId, resolved.resolvedEnv);
@@ -362,43 +360,53 @@ export const POST = createSmartRouteHandler({
 });
 
 /**
- * `secret_defaults` is keyed by service id and then by env var key. Validated
- * here rather than in the request schema because yupRecord's key schema cannot
- * express "any service id" and a nested record at once without duplicating the
- * env-var-key rules; the inner shape is the same one the deploy file writes.
+ * `secret_defaults` carried the `secret(key, default)` defaults of CLIs from
+ * before per-environment secrets, keyed by service id and then by env var key.
+ * Defaults are gone: a secret's value comes only from Project Settings →
+ * Secrets, where `all` is the "applies everywhere" slot a default used to fill.
+ *
+ * The field is still accepted when every per-service record is EMPTY, because
+ * CLIs send `{ [serviceId]: {} }` on every deploy, including ones whose deploy
+ * file has no defaults — those must keep deploying. Any actual default is
+ * refused with the rewrite rather than ignored: ignoring it would turn a
+ * deploy that used to work into a confusing "missing secret" error.
  */
-async function parseSecretDefaults(raw: unknown): Promise<Record<string, Record<string, string>>> {
-  if (raw === undefined || raw === null) return {};
-  if (typeof raw !== "object" || Array.isArray(raw)) {
+function assertNoSecretDefaults(raw: unknown, definitionsByServiceId: ReadonlyMap<string, DeploymentServiceDefinition>): void {
+  if (raw === undefined || raw === null) return;
+  if (!isPlainRecord(raw)) {
     throw new StatusError(400, "secret_defaults must be an object keyed by service id.");
   }
-  const parsed: Record<string, Record<string, string>> = {};
-  for (const [serviceId, defaults] of Object.entries(raw as Record<string, unknown>)) {
-    // AWAITED, not validateSync: yupRecord validates its entries in an async test, and Yup
-    // throws outright ("returned a Promise during a synchronous validate") rather than
-    // failing validation — which would 500 every deploy, since the CLI always sends this
-    // object with one entry per deployed service.
-    let validated: unknown;
-    try {
-      validated = await deploymentSecretDefaultsSchema.validate(defaults, { strict: true });
-    } catch (error) {
-      // ONLY a validation failure becomes a 400: anything else thrown out of validate() is
-      // our bug, and dressing it up as the caller's mistake would hide it behind a message
-      // saying their input was malformed.
-      if (!(error instanceof yup.ValidationError)) throw error;
-      throw new StatusError(400, `secret_defaults for service ${JSON.stringify(serviceId)} is not a record of string values: ${error.message}`);
+  const offending: string[] = [];
+  for (const [serviceId, defaults] of Object.entries(raw)) {
+    if (!isPlainRecord(defaults)) {
+      throw new StatusError(400, `secret_defaults for service ${JSON.stringify(serviceId)} must be an object.`);
     }
-    parsed[serviceId] = validated as Record<string, string>;
+    const env = definitionsByServiceId.get(serviceId)?.env ?? {};
+    for (const envVarKey of Object.keys(defaults)) {
+      const envVar = Object.hasOwn(env, envVarKey) ? env[envVarKey] : undefined;
+      const secretKey = envVar?.type === "secret" ? envVar.key : undefined;
+      offending.push(`  - ${serviceId}: ${envVarKey}${secretKey === undefined ? "" : ` (secret(${JSON.stringify(secretKey)}, ...))`}`);
+    }
   }
-  return parsed;
+  if (offending.length === 0) return;
+  throw new StatusError(400, [
+    "Secret default values are no longer supported. This deploy sent a default for:",
+    ...offending,
+    "",
+    "Update the Hexclave CLI, write secret(\"KEY\") without a default in hexclave.deploy.ts, and set the value in the dashboard under Project Settings → Secrets with the `all` environment (or `prod`, which deploys use before `all`).",
+  ].join("\n"));
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
  * `ci_env` is a flat record of CI variable names to values — it describes the
  * deploy, not any one service, so unlike `secret_defaults` it is not keyed by
- * service id. Validated here rather than in the request schema for the same
- * reason as the secret defaults: yupRecord validates its entries in an ASYNC
- * test, which the request schema's synchronous path cannot run.
+ * service id. Validated here rather than in the request schema because
+ * yupRecord validates its entries in an ASYNC test, which the request schema's
+ * synchronous path cannot run.
  */
 async function parseCiEnv(raw: unknown): Promise<Record<string, string>> {
   if (raw === undefined || raw === null) return {};

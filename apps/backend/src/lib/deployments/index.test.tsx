@@ -1,3 +1,4 @@
+import type { Prisma } from "@/generated/prisma/client";
 import { describe, expect, it } from "vitest";
 import type { MarshalDeployment } from "./marshal-client";
 import { assertAlwaysOnMemoryCapacity, autoInjectedEnvVars, definitionFromServiceRow, deploymentToApiShape, effectiveMinInstances, marshalSpecForDefinition, normalizeHostnameOrThrow } from "./index";
@@ -11,6 +12,10 @@ describe("deployment domain names", () => {
     expect(normalizeHostnameOrThrow("deploy-example.customer.com")).toBe("deploy-example.customer.com");
   });
 });
+
+// The column default, which every row synced before per-environment maps
+// existed reads as.
+const EMPTY_ENV_PER_ENVIRONMENT: Prisma.JsonValue = {};
 
 const baseRow = {
   serviceId: "api",
@@ -29,6 +34,7 @@ const baseRow = {
   // column reads as.
   memoryMb: null as number | null,
   env: [] as [string, { value: string }][],
+  envPerEnvironment: EMPTY_ENV_PER_ENVIRONMENT,
 };
 
 describe("stored deployment environment", () => {
@@ -50,6 +56,34 @@ describe("stored deployment environment", () => {
     // it is the service's, and comes off its own column.
     expect(definition.ports).toEqual({ "3000": { protocol: "http" } });
     expect(definition.public).toBe(true);
+  });
+
+  it("reads the per-environment map, including prototype-named keys", () => {
+    const definition = definitionFromServiceRow({
+      ...baseRow,
+      envPerEnvironment: [
+        ["MODE", { all: { value: "all-mode" }, dev: { value: "dev-mode" }, prod: { type: "omit" } }],
+        ["__proto__", { all: { type: "secret", key: "K" } }],
+      ],
+    });
+    expect(definition.env_per_environment?.MODE).toEqual({
+      all: { type: undefined, value: "all-mode", key: undefined },
+      prod: { type: "omit", value: undefined, key: undefined },
+      dev: { type: undefined, value: "dev-mode", key: undefined },
+    });
+    expect(Object.getOwnPropertyDescriptor(definition.env_per_environment, "__proto__")?.value).toEqual({
+      all: { type: "secret", value: undefined, key: "K" },
+    });
+    expect(definitionFromServiceRow(baseRow).env_per_environment).toEqual({});
+  });
+
+  it("fails loud on a corrupt per-environment map instead of displaying it as something else", () => {
+    const read = (envPerEnvironment: Prisma.JsonValue) => () => definitionFromServiceRow({ ...baseRow, envPerEnvironment });
+    expect(read([["A", "not-an-object"]])).toThrow(/is not an object/);
+    expect(read([["A", { dev: "x" }]])).toThrow(/is not an object/);
+    expect(read([["A", { all: { type: "weird", value: "x" } }]])).toThrow(/unknown type/);
+    expect(read([["A", { all: { value: 1 } }]])).toThrow(/non-string/);
+    expect(read("nope")).toThrow(/neither an entry array nor a record/);
   });
 });
 

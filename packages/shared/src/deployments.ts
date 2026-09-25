@@ -347,9 +347,8 @@ export type ServiceOutputKey = typeof SERVICE_OUTPUT_KEYS[number];
 // - "secret": only the secret's name (`key`) is in the definition; the actual
 //   value lives in the project's secret store (see ./project-secrets), set in
 //   the dashboard under Project Settings → Secrets and read server-side at
-//   deploy time. A secret with no stored value fails the deploy
-//   unless the deploy request supplies a default for it (see
-//   deploymentSecretDefaultsSchema).
+//   deploy time. A secret with no stored value (for `prod`, else `all`) fails
+//   the deploy.
 // - "connection": `value` names another service's output (see the regex
 //   comment above); resolved server-side at deploy time.
 export type DeploymentEnvVarDefinition = {
@@ -1231,15 +1230,10 @@ export const deploymentPerEnvironmentEnvVarSchema = yupObject({
     const hasNonSecret = values.some((value) => value.type !== "secret" && value.type !== "omit");
     return secretKeys.size <= 1 && !(secretKeys.size > 0 && hasNonSecret);
   },
-);
-
-// Legacy request-scoped fallbacks for a service's `secret()` env vars, sent
-// with a DEPLOY request and never stored. New CLIs send empty objects: values
-// live in Project Settings → Secrets. Still accepted so older CLI versions
-// can deploy. Keyed by ENV VAR key (not secret key).
-export const deploymentSecretDefaultsSchema = yupRecord(
-  yupString().matches(DEPLOYMENT_ENV_VAR_KEY_REGEX, "deployment secret default keys must be env var keys"),
-  yupString().defined(),
+).test(
+  "at-least-one-environment",
+  "a per-environment env var must set at least one of all / prod / preview / dev",
+  (envVar) => [envVar.all, envVar.prod, envVar.preview, envVar.dev].some((value) => value != null),
 );
 
 // The GitLab-style CI variables describing the commit a deploy ships (see
@@ -1624,6 +1618,7 @@ import.meta.vitest?.test("deploymentPerEnvironmentEnvVarSchema rejects malformed
   await rejects({ all: { value: "x", key: "K" } });
   await rejects({ prod: { type: "secret", key: "K" }, dev: { value: "local" } });
   await rejects({ prod: { type: "secret", key: "A" }, dev: { type: "secret", key: "B" } });
+  await rejects({});
   await expect(deploymentPerEnvironmentEnvVarSchema.validate({ prod: { type: "secret", key: "K" }, dev: { type: "omit" } })).resolves.toBeDefined();
 });
 
@@ -2145,18 +2140,6 @@ import.meta.vitest?.test("a secret's default value is not part of its definition
     ports: { "3000": { protocol: "http" } },
     env: { PLAIN: { value: "x", default_value: "y" } },
   }, { abortEarly: false })).rejects.toThrow(/must not carry a default_value/);
-});
-
-import.meta.vitest?.test("deploymentSecretDefaultsSchema accepts env-var-keyed defaults", async ({ expect }) => {
-  await expect(deploymentSecretDefaultsSchema.validate({
-    OPENAI_API_KEY: "sk-dev",
-    // An empty default is meaningful — it means "deploy with this var empty",
-    // which is different from having no default at all.
-    OPTIONAL_FLAG: "",
-  }, { abortEarly: false })).resolves.toEqual({ OPENAI_API_KEY: "sk-dev", OPTIONAL_FLAG: "" });
-  await expect(deploymentSecretDefaultsSchema.validate({
-    "1BAD": "x",
-  }, { abortEarly: false })).rejects.toThrow(/env var keys/);
 });
 
 import.meta.vitest?.test("deploymentCiEnvSchema only accepts CI variable names", async ({ expect }) => {
