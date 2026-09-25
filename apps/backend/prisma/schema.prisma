@@ -1864,13 +1864,16 @@ model ProjectSecret {
   updatedAt DateTime @updatedAt
 
   key String
+  // Which environment this value applies to. `all` fills any environment that
+  // does not have a more specific row.
+  environment String @default("all")
   // { edkBase64, ciphertextBase64 } from encryptWithKms()
   encrypted Json
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@id([projectId, id])
-  @@unique([projectId, key])
+  @@unique([projectId, key, environment])
 }
 
 // ================== Deployments ==================
@@ -2083,11 +2086,15 @@ model DeploymentService {
   // @hexclave/shared/dist/deployments). An entry array, rather than a JSON object, preserves
   // special keys such as `__proto__` through Prisma's JSON serializer:
   // { value } for plain vars,
-  // { type: "secret", key } for secrets (never their values, and never their
-  // `secret(key, default)` fallbacks — those travel with the deploy request
-  // and are rejected by deploymentEnvVarSchema on every write path),
+  // { type: "secret", key } for secrets (never their values — those live in
+  // ProjectSecret and are resolved at deploy / `hexclave dev` time),
   // { type: "connection", value } for service-output references.
   env Json @default("{}")
+  // The deploy file's per-environment env map (all/prod/preview/dev), stored
+  // so the dashboard can show partitions. The `env` column stays the
+  // prod-resolved flat map used at deploy time. Default `{}` for rows synced
+  // before this column existed.
+  envPerEnvironment Json @default("{}")
 
   tenancy Tenancy           @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
   source DeploymentSource @relation(fields: [tenancyId, sourceRowId], references: [tenancyId, id], onDelete: Cascade)
