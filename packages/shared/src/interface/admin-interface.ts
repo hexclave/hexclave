@@ -2,6 +2,7 @@ import * as yup from "yup";
 import type { EnvironmentConfigOverrideOverride } from "../config/schema";
 import type { DeploymentMemorySize, DeploymentSourceManifest } from "../deployments";
 import { KnownErrors } from "../known-errors";
+import type { ProjectSecretEnvironment } from "../project-secrets";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type RestrictedReason } from "../schema-fields";
 import { AccessToken, InternalSession, RefreshToken } from "../sessions";
 import type { MoneyAmount } from "../utils/currency-constants";
@@ -70,19 +71,34 @@ export type AdminDeploymentServiceOutcomeJson = {
   error: string | null,
 };
 
+// One environment's entry of a deploy file env var. "omit" is an explicit
+// `null` in the file: the var is left out of that environment.
+export type AdminDeploymentEnvVarPerEnvironmentValueJson = {
+  type: "plain" | "secret" | "connection" | "omit",
+  value: string | null,
+  secret_key: string | null,
+};
+
 // One env var of a deployment service, normalized from the definition (as
 // synced from the deploy file's `services` export): "plain" vars carry their
 // literal `value`, "connection" vars carry the "serviceId.outputKey" reference
 // they resolve to at deploy time, and "secret" vars carry only the
-// `secret_key` naming a per-project secret (values are write-only). Any
-// `secret(key, default)` fallback from the deploy file is deliberately absent:
-// defaults never leave the deploy request, so nothing server-side or in the
-// dashboard can report on them.
+// `secret_key` naming a per-project secret (values are write-only). These
+// top-level fields are the `production` slice, which is what deploys use (a var the
+// file omits in production is still listed, with a `null` value); `per_environment`
+// is the file's full map, for display only, and `null` for services synced
+// before per-environment maps existed.
 export type AdminDeploymentEnvVarJson = {
   key: string,
   type: "plain" | "secret" | "connection",
   value: string | null,
   secret_key: string | null,
+  per_environment: {
+    default?: AdminDeploymentEnvVarPerEnvironmentValueJson,
+    production?: AdminDeploymentEnvVarPerEnvironmentValueJson,
+    preview?: AdminDeploymentEnvVarPerEnvironmentValueJson,
+    development?: AdminDeploymentEnvVarPerEnvironmentValueJson,
+  } | null,
 };
 
 // One `hexclave deploy`: one deployment source, one source upload, one build,
@@ -194,6 +210,7 @@ export type AdminDeploymentServiceJson = {
 
 export type AdminProjectSecretJson = {
   key: string,
+  environment: ProjectSecretEnvironment,
   created_at_millis: number,
   updated_at_millis: number,
 };
@@ -1470,7 +1487,7 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
     return (await response.json()).items;
   }
 
-  async setProjectSecret(key: string, value: string): Promise<void> {
+  async setProjectSecret(key: string, value: string, environment: AdminProjectSecretJson["environment"] | readonly AdminProjectSecretJson["environment"][] = "default"): Promise<void> {
     await this.sendAdminRequest(
       "/project-secrets",
       {
@@ -1478,15 +1495,17 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({ key, value }),
+        // A single environment is still sent as `environment`, which every
+        // backend version understands; only a real multi-write needs the list.
+        body: JSON.stringify(typeof environment === "string" ? { key, value, environment } : { key, value, environments: environment }),
       },
       null,
     );
   }
 
-  async deleteProjectSecret(key: string): Promise<void> {
+  async deleteProjectSecret(key: string, environment?: AdminProjectSecretJson["environment"]): Promise<void> {
     await this.sendAdminRequest(
-      urlString`/project-secrets/${key}`,
+      environment === undefined ? urlString`/project-secrets/${key}` : urlString`/project-secrets/${key}?environment=${environment}`,
       { method: "DELETE" },
       null,
     );

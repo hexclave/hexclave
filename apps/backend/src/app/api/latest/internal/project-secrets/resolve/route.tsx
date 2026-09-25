@@ -2,14 +2,19 @@ import { MAX_PROJECT_SECRET_KEY_LENGTH, MAX_SECRETS_PER_PROJECT, PROJECT_SECRET_
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, adminAuthTypeSchema, yupArray, yupNumber, yupObject, yupRecord, yupString } from "@hexclave/shared/dist/schema-fields";
 // Admin-only resolve that `hexclave dev` calls directly with the developer's
-// login. Returns decrypted values for the requested keys for the `dev`
-// environment (else `all`). Not used by the dashboard list, and not available
-// to secret-server-key-only CI — that would dump plaintext secrets into CI logs.
+// login. Returns decrypted values for the requested keys for the `development`
+// environment (else `default`). Not used by the dashboard list, and not
+// available to secret-server-key-only CI — that would dump plaintext secrets
+// into CI logs.
+//
+// Lives under /internal rather than at /project-secrets/resolve: a static
+// segment there would win over /project-secrets/[key], so a secret whose key is
+// literally "resolve" could never be deleted.
 
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Resolve project secrets for local development",
-    description: "Decrypts the requested secret keys for the `dev` environment (falling back to `all`). Keys with neither are omitted from `values`. Admin session only — not secret-server-key. Used by `hexclave dev`; the dashboard never displays these values.",
+    description: "Decrypts the requested secret keys for the `development` environment (falling back to `default`). Keys with neither are omitted from `values`. Admin only — not secret-server-key. Used by `hexclave dev`; the dashboard never displays these values.",
     tags: ["Secrets"],
     hidden: true,
   },
@@ -19,7 +24,7 @@ export const POST = createSmartRouteHandler({
       tenancy: adaptSchema.defined(),
     }).defined(),
     body: yupObject({
-      environment: yupString().oneOf(["dev"]).defined(),
+      environment: yupString().oneOf(["development"]).defined(),
       // A project can't hold more distinct keys than this, so a longer list can
       // only be a mistake (or an attempt to make the request expensive).
       keys: yupArray(yupString().defined().max(MAX_PROJECT_SECRET_KEY_LENGTH).matches(PROJECT_SECRET_KEY_REGEX)).max(MAX_SECRETS_PER_PROJECT).defined(),
@@ -34,10 +39,10 @@ export const POST = createSmartRouteHandler({
     }).defined(),
   }),
   handler: async ({ auth, body }) => {
-    // Keys without a `dev` or `all` value are left out rather than failing the
-    // request: the caller (`hexclave dev`) owns the user-facing "missing
+    // Keys without a `development` or `default` value are left out rather than failing
+    // the request: the caller (`hexclave dev`) owns the user-facing "missing
     // secrets" error, which can say which env vars need them and how to fix it.
-    const values = await readProjectSecretValues(auth.tenancy.project.id, body.keys, "dev");
+    const values = await readProjectSecretValues(auth.tenancy.project.id, body.keys, "development");
     return {
       statusCode: 200,
       bodyType: "json",
