@@ -1,6 +1,6 @@
 import type { JSX } from "react";
 import { Link } from "@/components/link";
-import { ChartLineIcon, ChatCircleDotsIcon, ClipboardTextIcon, CodeIcon, CreditCardIcon, CursorClickIcon, EnvelopeSimpleIcon, FingerprintSimpleIcon, GraphIcon, KeyIcon, MailboxIcon, MonitorPlayIcon, RocketIcon, ShieldCheckIcon, ShieldWarningIcon, SparkleIcon, TelevisionSimpleIcon, TerminalWindowIcon, TreeStructureIcon, TriangleIcon, UserGearIcon, UsersIcon, VaultIcon, WebhooksLogoIcon } from "@phosphor-icons/react";
+import { ChartLineIcon, ChatCircleDotsIcon, ClipboardTextIcon, CodeIcon, CreditCardIcon, CursorClickIcon, EnvelopeSimpleIcon, FingerprintSimpleIcon, GraphIcon, HardDrivesIcon, KeyIcon, MailboxIcon, MonitorPlayIcon, RocketIcon, ShieldCheckIcon, ShieldWarningIcon, SparkleIcon, TelevisionSimpleIcon, TerminalWindowIcon, TreeStructureIcon, TriangleIcon, UserGearIcon, UsersIcon, VaultIcon, WebhooksLogoIcon } from "@phosphor-icons/react";
 import { StackAdminApp } from "@hexclave/next";
 import type { AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { getRelativePart, isChildUrl } from "@hexclave/shared/dist/utils/urls";
@@ -520,6 +520,23 @@ export const ALL_APPS_FRONTEND = {
         <p>Workflows lets you write durable background automations in TypeScript and run them on Hexclave&apos;s infrastructure.</p>
         <p>Trigger them from platform events like <code>user.created</code>, from your own custom events, or on a cron schedule, and let the engine handle retries, sleeps, and versioning for you.</p>
         <p>Every run is inspectable in the dashboard down to the individual step, so you can see exactly where an automation is and replay it when something goes wrong.</p>
+      </>
+    ),
+  },
+  "data-warehouse-alpha": {
+    icon: HardDrivesIcon,
+    // As with Deployments and Workflows, only the app id carries the `-alpha`
+    // suffix; the route stays /projects/<id>/data-warehouse.
+    href: "data-warehouse",
+    navigationItems: [
+      { displayName: "Data Warehouse", href: "." },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Data Warehouse gives your project its own private database.</p>
+        <p>Load your own tables into it, then query them alongside your analytics events in one place.</p>
+        <p>Each project gets its own database and credentials, so nothing outside your own data is reachable.</p>
       </>
     ),
   },

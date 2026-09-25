@@ -1,0 +1,8 @@
+<clickhouse>
+  <access_control_improvements>
+    <!-- TABLE ENGINE grants are ignored by default for backwards compatibility.
+         Warehouse users can create tables, so enforce the engine deny-list that
+         provisioning applies before exposing credentials to them. -->
+    <table_engines_require_grant>true</table_engines_require_grant>
+  </access_control_improvements>
+</clickhouse>

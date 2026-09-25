@@ -1,6 +1,6 @@
 import { KnownErrors, HexclaveAdminInterface } from "@hexclave/shared";
 import { getProductionModeErrors } from "@hexclave/shared/dist/helpers/production-mode";
-import { InternalApiKeyCreateCrudResponse } from "@hexclave/shared/dist/interface/admin-interface";
+import { DataWarehouseCredentialsJson, DataWarehouseJson, InternalApiKeyCreateCrudResponse } from "@hexclave/shared/dist/interface/admin-interface";
 import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse, MetricsResponse, MetricsUserCounts, UserActivityResponse } from "@hexclave/shared/dist/interface/admin-metrics";
 import { EmailTemplateCrud } from "@hexclave/shared/dist/interface/crud/email-templates";
 import { InternalApiKeysCrud } from "@hexclave/shared/dist/interface/crud/internal-api-keys";
@@ -69,6 +69,25 @@ function apiToPushedConfigSource(source: BranchConfigSourceApi): PushedConfigSou
   return source;
 }
 
+function getDataWarehousePasswordUpdatedAtMillis(credentials: unknown): number {
+  // SDK responses are not runtime-validated, and this timestamp is what lets the
+  // mutation response replace the cache. Fail loudly rather than cache a made-up
+  // value if an older backend omits it.
+  if (typeof credentials !== "object" || credentials == null) {
+    throw new HexclaveAssertionError("The Data Warehouse credentials response was not an object");
+  }
+  const value = Reflect.get(credentials, "password_updated_at_millis");
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new HexclaveAssertionError("The Data Warehouse credentials response omitted password_updated_at_millis");
+  }
+  return value;
+}
+
+import.meta.vitest?.test("Data Warehouse credential responses require the cache timestamp", ({ expect }) => {
+  expect(getDataWarehousePasswordUpdatedAtMillis({ password_updated_at_millis: 123 })).toBe(123);
+  expect(() => getDataWarehousePasswordUpdatedAtMillis({})).toThrow("omitted password_updated_at_millis");
+});
+
 export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, ProjectId extends string> extends _HexclaveServerAppImplIncomplete<HasTokenStore, ProjectId> implements StackAdminApp<HasTokenStore, ProjectId> {
   declare protected _interface: HexclaveAdminInterface;
 
@@ -96,6 +115,9 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
   });
   private readonly _adminWorkflowsCache = createCache(async () => {
     return await this._interface.listWorkflows();
+  });
+  private readonly _adminDataWarehouseCache = createCache(async () => {
+    return await this._interface.getDataWarehouse();
   });
   private readonly _adminTeamPermissionDefinitionsCache = createCache(async () => {
     return await this._interface.listTeamPermissionDefinitions();
@@ -534,6 +556,9 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
     const crud = useAsyncCache(this._adminWorkflowsCache, [], "adminApp.useWorkflows()");
     return useMemo(() => crud.map(adminWorkflowFromCrud), [crud]);
   }
+  useDataWarehouse(): DataWarehouseJson {
+    return useAsyncCache(this._adminDataWarehouseCache, [], "adminApp.useDataWarehouse()");
+  }
   // END_PLATFORM
   async listEmailThemes(): Promise<{ id: string, displayName: string }[]> {
     const crud = Result.orThrow(await this._adminEmailThemesCache.getOrWait([], "write-only"));
@@ -551,6 +576,47 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
       themeId: template.theme_id,
       tsxSource: template.tsx_source,
     }));
+  }
+
+  // ─── Data Warehouse ─────────────────────────────────────────────────────
+
+  async getDataWarehouse(): Promise<DataWarehouseJson> {
+    return Result.orThrow(await this._adminDataWarehouseCache.getOrWait([], "write-only"));
+  }
+
+  /**
+   * Provisions the project's ClickHouse database and user. The returned
+   * password is shown once — it is stored encrypted for the backend's own use
+   * and is never returned by `getDataWarehouse`.
+   */
+  async provisionDataWarehouse(): Promise<DataWarehouseCredentialsJson> {
+    const result = await this._interface.provisionDataWarehouse();
+    // The POST response contains the complete new read state. Updating the
+    // cache synchronously avoids a second request that could fail after the
+    // server has already issued the only copy of this password.
+    this._adminDataWarehouseCache.forceSetCachedValue([], Result.ok({
+      status: "ready",
+      database_name: result.database_name,
+      username: result.username,
+      error: null,
+      password_updated_at_millis: getDataWarehousePasswordUpdatedAtMillis(result),
+      connection: result.connection,
+    }));
+    return result;
+  }
+
+  /** Issues a new password, invalidating the previous one. Also shown once. */
+  async rotateDataWarehousePassword(): Promise<DataWarehouseCredentialsJson> {
+    const result = await this._interface.rotateDataWarehousePassword();
+    this._adminDataWarehouseCache.forceSetCachedValue([], Result.ok({
+      status: "ready",
+      database_name: result.database_name,
+      username: result.username,
+      error: null,
+      password_updated_at_millis: getDataWarehousePasswordUpdatedAtMillis(result),
+      connection: result.connection,
+    }));
+    return result;
   }
 
   // ─── Workflows (internal-project gated; see the Workflows v1 spec) ───────
