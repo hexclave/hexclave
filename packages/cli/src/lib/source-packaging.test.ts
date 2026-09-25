@@ -144,4 +144,24 @@ describe("packageSourceDirectory", () => {
     write(root, "node_modules/pkg/index.js", "");
     expect(() => packageSourceDirectory(root)).toThrow("No files to deploy");
   });
+
+  it("reports each packaged file's size, which is what the deploy's manifest is built from", () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, "small.txt"), "hi");
+    fs.writeFileSync(path.join(dir, "big.bin"), Buffer.alloc(4096));
+    fs.writeFileSync(path.join(dir, ".gitignore"), "ignored.txt\n");
+    fs.writeFileSync(path.join(dir, "ignored.txt"), Buffer.alloc(9999));
+
+    const packaged = packageSourceDirectory(dir);
+    const sizes = new Map(packaged.files.map((file) => [file.path, file.bytes]));
+    expect(sizes.get("small.txt")).toBe(2);
+    expect(sizes.get("big.bin")).toBe(4096);
+    // Sizes describe what was PACKAGED, so an ignored file contributes nothing —
+    // which is exactly what makes the manifest able to prove an ignore rule
+    // worked.
+    expect(sizes.has("ignored.txt")).toBe(false);
+    expect(packaged.files).toHaveLength(packaged.paths.length);
+    expect(packaged.totalBytes).toBe(packaged.files.reduce((total, file) => total + file.bytes, 0));
+  });
+
 });

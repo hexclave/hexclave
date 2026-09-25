@@ -43,6 +43,7 @@ jobs:
       HEXCLAVE_DATABASE_CONNECTION_STRING: "postgres://postgres:PASSWORD-PLACEHOLDER--uqfEC1hmmv@localhost:8128/stackframe"
       HEXCLAVE_EXTERNAL_DB_SYNC_MAX_DURATION_MS: "20000"
       HEXCLAVE_EXTERNAL_DB_SYNC_DIRECT: "false"
+      HEXCLAVE_REQUIRE_SPACETIMEDB: "1"
 
     strategy:
       matrix:
@@ -58,6 +59,12 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Install SpacetimeDB CLI
+        run: |
+          curl -sSf https://install.spacetimedb.com | sh -s -- --yes
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/spacetime" --version
 
       # Even just starting the Docker Compose as a daemon is slow because we have to download and build the images
       # so, we run it in the background
@@ -125,13 +132,22 @@ jobs:
       - name: Wait on ClickHouse
         run: pnpm exec wait-on http://localhost:8136/ping
 
-      # The deployments e2e tests hit s3mock and fly-mock directly; marshal's /health does
-      # not touch either, so wait on them explicitly (fly-mock is a build:-from-context image).
+      # The deployments e2e tests hit s3mock, fly-mock and gcp-mock directly; marshal's /health
+      # does not touch any of them, so wait on them explicitly (both mocks are build:-from-context images).
       - name: Wait on s3mock
         run: pnpm exec wait-on http://localhost:8121/
 
       - name: Wait on fly-mock
         run: pnpm exec wait-on http://localhost:8148/health
+
+      - name: Wait on SpacetimeDB
+        run: pnpm exec wait-on tcp:localhost:8139
+
+      - name: Publish SpacetimeDB module
+        run: pnpm -C apps/internal-tool run spacetime:publish:local
+
+      - name: Wait on gcp-mock
+        run: pnpm exec wait-on http://localhost:8149/health
 
       - name: Initialize database
         run: pnpm run db:init
@@ -161,12 +177,19 @@ jobs:
       - name: Backfill Bulldozer from Postgres
         run: pnpm run db:backfill-bulldozer-from-prisma
 
-      # Marshal (the deployments runtime) talks to the fly-mock + s3mock
+      # Marshal (the deployments runtime) talks to the fly-mock, gcp-mock + s3mock
       # containers; the deployments e2e tests drive it through the backend.
       - name: Start marshal in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
         with:
-          run: NODE_ENV=test pnpm run start:marshal &
+          run: |
+            marshal_log="$RUNNER_TEMP/hexclave-marshal.untracked.log"
+            (
+              set +e
+              # Keep service output correlatable with the surrounding GitHub Actions logs.
+              NODE_ENV=test pnpm run start:marshal 2>&1 | TZ=UTC awk '{ print strftime("%Y-%m-%dT%H:%M:%SZ"), $0; fflush() }' >"$marshal_log"
+              echo "${PIPESTATUS[0]}" > "$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt"
+            ) &
           wait-on: |
             http://localhost:8147/health
           tail: true
@@ -231,6 +254,16 @@ jobs:
           wait-for: 30s
           log-output-if: true
 
+      - name: Start internal-tool in background
+        uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
+        with:
+          run: pnpm run start:internal-tool --log-order=stream &
+          wait-on: |
+            http://localhost:8141/.well-known/openid-configuration
+          tail: true
+          wait-for: 30s
+          log-output-if: true
+
       - name: Wait 10 seconds
         run: sleep 10
 
@@ -247,10 +280,20 @@ jobs:
         timeout-minutes: 60
         run: |
           set -o pipefail
+          .github/scripts/process-attribution.sh sample \
+            > "$RUNNER_TEMP/process-attribution-samples-pass1.untracked.tsv" &
+          attribution_sampler_pid=$!
+          stop_attribution_sampler() {
+            kill "$attribution_sampler_pid" 2>/dev/null || true
+            wait "$attribution_sampler_pid" 2>/dev/null || true
+          }
+          trap stop_attribution_sampler EXIT
           pnpm test run --reporter=default --reporter=json \
             --outputFile="$RUNNER_TEMP/e2e-test-results-pass1.untracked.json" 2>&1 |
             tee "$RUNNER_TEMP/e2e-test-output-pass1.untracked.log"
           pipeline_status=("${PIPESTATUS[@]}")
+          stop_attribution_sampler
+          trap - EXIT
           if [[ "${pipeline_status[1]}" -ne 0 ]]; then
             echo "::warning::tee failed while capturing pass 1 output; the test result is still used for the step status"
           fi
@@ -265,7 +308,8 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          .github/scripts/process-attribution.sh snapshot || true
+          .github/scripts/process-attribution.sh snapshot |
+            tee "$RUNNER_TEMP/process-attribution-pass1.untracked.log" || true
           pnpm -C apps/backend run with-env:test bash -c \
             '
               mock_port="${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}22"
@@ -296,10 +340,20 @@ jobs:
         timeout-minutes: 75
         run: |
           set -o pipefail
+          .github/scripts/process-attribution.sh sample \
+            > "$RUNNER_TEMP/process-attribution-samples-pass2.untracked.tsv" &
+          attribution_sampler_pid=$!
+          stop_attribution_sampler() {
+            kill "$attribution_sampler_pid" 2>/dev/null || true
+            wait "$attribution_sampler_pid" 2>/dev/null || true
+          }
+          trap stop_attribution_sampler EXIT
           pnpm test run --reporter=default --reporter=json \
             --outputFile="$RUNNER_TEMP/e2e-test-results-pass2.untracked.json" 2>&1 |
             tee "$RUNNER_TEMP/e2e-test-output-pass2.untracked.log"
           pipeline_status=("${PIPESTATUS[@]}")
+          stop_attribution_sampler
+          trap - EXIT
           if [[ "${pipeline_status[1]}" -ne 0 ]]; then
             echo "::warning::tee failed while capturing pass 2 output; the test result is still used for the step status"
           fi
@@ -314,7 +368,8 @@ jobs:
         if: always() && steps.run_tests_pass2.outcome != 'skipped'
         continue-on-error: true
         run: |
-          .github/scripts/process-attribution.sh snapshot || true
+          .github/scripts/process-attribution.sh snapshot |
+            tee "$RUNNER_TEMP/process-attribution-pass2.untracked.log" || true
           pnpm -C apps/backend run with-env:test bash -c \
             '
               mock_port="${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}22"
@@ -345,10 +400,20 @@ jobs:
         timeout-minutes: 105
         run: |
           set -o pipefail
+          .github/scripts/process-attribution.sh sample \
+            > "$RUNNER_TEMP/process-attribution-samples-pass3.untracked.tsv" &
+          attribution_sampler_pid=$!
+          stop_attribution_sampler() {
+            kill "$attribution_sampler_pid" 2>/dev/null || true
+            wait "$attribution_sampler_pid" 2>/dev/null || true
+          }
+          trap stop_attribution_sampler EXIT
           pnpm test run --reporter=default --reporter=json \
             --outputFile="$RUNNER_TEMP/e2e-test-results-pass3.untracked.json" 2>&1 |
             tee "$RUNNER_TEMP/e2e-test-output-pass3.untracked.log"
           pipeline_status=("${PIPESTATUS[@]}")
+          stop_attribution_sampler
+          trap - EXIT
           if [[ "${pipeline_status[1]}" -ne 0 ]]; then
             echo "::warning::tee failed while capturing pass 3 output; the test result is still used for the step status"
           fi
@@ -363,7 +428,8 @@ jobs:
         if: always() && steps.run_tests_pass3.outcome != 'skipped'
         continue-on-error: true
         run: |
-          .github/scripts/process-attribution.sh snapshot || true
+          .github/scripts/process-attribution.sh snapshot |
+            tee "$RUNNER_TEMP/process-attribution-pass3.untracked.log" || true
           pnpm -C apps/backend run with-env:test bash -c \
             '
               mock_port="${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}22"
@@ -390,12 +456,30 @@ jobs:
           fi
           tail -n 2000 "$RUNNER_TEMP/hexclave-bulldozer.untracked.log"
 
+      - name: Print marshal diagnostics
+        if: ${{ failure() }}
+        run: |
+          if [[ -f "$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt" ]]; then
+            echo "Marshal command exited with code $(<"$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt")"
+          else
+            echo "Marshal command is still running; a child process may have exited"
+          fi
+          tail -n 2000 "$RUNNER_TEMP/hexclave-marshal.untracked.log"
+
       - name: Upload bulldozer-js logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-api-bulldozer
           path: ${{ runner.temp }}/hexclave-bulldozer.untracked.log
+          if-no-files-found: warn
+
+      - name: Upload marshal logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-api-marshal
+          path: ${{ runner.temp }}/hexclave-marshal.untracked.log
           if-no-files-found: warn
 
       - name: Capture bulldozer-js diagnostics
@@ -428,6 +512,8 @@ jobs:
             ${{ runner.temp }}/e2e-test-results-pass*.untracked.json
             ${{ runner.temp }}/e2e-test-output-pass*.untracked.log
             ${{ runner.temp }}/freestyle-mock-diagnostics-pass*.untracked.json
+            ${{ runner.temp }}/process-attribution-pass*.untracked.log
+            ${{ runner.temp }}/process-attribution-samples-pass*.untracked.tsv
           if-no-files-found: warn
 
       - name: Print Docker Compose logs

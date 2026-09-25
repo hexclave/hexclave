@@ -128,7 +128,7 @@ To check whether a user has a specific permission within a team, use `hasPermiss
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CheckUserPermission() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const team = await hexclaveServerApp.getTeam('some-team-id');
       const permission = await user.getPermission(team, 'read');
 
@@ -149,7 +149,7 @@ For authorization logic, prefer a boolean server-side check:
 import { hexclaveServerApp } from "@/hexclave/server";
 
 export async function POST() {
-  const user = await hexclaveServerApp.getUser({ or: "redirect" });
+  const user = await hexclaveServerApp.getUser({ or: "throw" });
   const team = await hexclaveServerApp.getTeam("some-team-id");
 
   if (!team || !(await user.hasPermission(team, "team:settings:update"))) {
@@ -191,7 +191,7 @@ To get a list of all permissions a user has in a team, use the `listPermissions`
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function DisplayUserPermissions() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const team = await hexclaveServerApp.getTeam('some-team-id');
       const permissions = team ? await user.listPermissions(team) : [];
 
@@ -264,7 +264,7 @@ To check whether a user has a specific project permission, use `hasPermission`, 
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CheckGlobalPermission() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const permission = await user.getPermission('access_admin_dashboard');
 
       return (
@@ -283,7 +283,7 @@ For authorization logic, prefer a server-side boolean check:
 import { hexclaveServerApp } from "@/hexclave/server";
 
 export default async function AdminPage() {
-  const user = await hexclaveServerApp.getUser({ or: "redirect" });
+  const user = await hexclaveServerApp.getUser({ or: "throw" });
   const canAccessAdmin = await user.hasPermission("access_admin_dashboard");
 
   if (!canAccessAdmin) {
@@ -323,7 +323,7 @@ To get a list of all global permissions a user has, use the `listPermissions` me
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function DisplayGlobalPermissions() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const permissions = await user.listPermissions();
 
       return (

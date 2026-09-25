@@ -159,6 +159,46 @@ it("updates onboarding status and state together without modifying config", asyn
   expect(afterResponse.body.config).toEqual(beforeResponse.body.config);
 });
 
+it("persists versioned cloud onboarding progress without modifying config", async ({ expect }) => {
+  await Project.createAndSwitch();
+  const beforeResponse = await niceBackendFetch("/api/v1/internal/projects/current", {
+    accessType: "admin",
+  });
+  expect(beforeResponse.status).toBe(200);
+
+  const onboardingState = {
+    version: 1 as const,
+    step: "setup-github-workflow" as const,
+    journey: "add" as const,
+    primary_app_id: "authentication" as const,
+    additional_app_ids: [] as const,
+    selected_apps: ["authentication", "analytics"] as const,
+    selected_sign_in_methods: ["credential", "github"] as const,
+    selected_email_theme_id: "a0172b5d-cff0-463b-83bb-85124697373a",
+    project_location: "github" as const,
+  };
+
+  const patchResponse = await niceBackendFetch("/api/v1/internal/projects/current", {
+    accessType: "admin",
+    method: "PATCH",
+    body: {
+      onboarding_status: "config_choice",
+      onboarding_state: onboardingState,
+    },
+  });
+  expect(patchResponse.status).toBe(200);
+  expect(patchResponse.body.onboarding_status).toBe("config_choice");
+  expect(patchResponse.body.onboarding_state).toEqual(onboardingState);
+  expect(patchResponse.body.config).toEqual(beforeResponse.body.config);
+
+  const afterResponse = await niceBackendFetch("/api/v1/internal/projects/current", {
+    accessType: "admin",
+  });
+  expect(afterResponse.status).toBe(200);
+  expect(afterResponse.body.onboarding_state).toEqual(onboardingState);
+  expect(afterResponse.body.config).toEqual(beforeResponse.body.config);
+});
+
 it("creates a new project with different configurations", async ({ expect }) => {
   backendContext.set({ projectKeys: InternalProjectKeys });
   await Auth.fastSignUp();

@@ -16,9 +16,6 @@ import { createWorkflow, listRuns, pollWithTicks, randomSlug, retireWorkflow, se
 // Dynamic ids/emails make inline snapshots impractical here, so these tests
 // use toMatchObject assertions instead (deliberate deviation from the
 // usual snapshot preference).
-//
-// The engine drivers (tickWorkflowEngine, pollWithTicks) and workflow CRUD helpers live in
-// workflows-helpers.ts so the growth e2e suites can share them.
 
 /**
  * Creates a project with the Workflows app installed and switches the backend
@@ -34,6 +31,26 @@ async function createWorkflowsProject() {
 async function inFreshWorkflowsProject<T>(fn: () => Promise<T>): Promise<T> {
   await createWorkflowsProject();
   return await fn();
+}
+
+async function setWorkflowPaused(expect: any, workflowId: string, isPaused: boolean) {
+  const response = await niceBackendFetch(`/api/v1/internal/workflows/${workflowId}`, {
+    method: "PATCH",
+    accessType: "admin",
+    body: { is_paused: isPaused },
+  });
+  expect(response).toMatchObject({ status: 200, body: { workflow_id: workflowId, is_paused: isPaused } });
+  return response.body as { is_paused: boolean, paused_at_millis: number | null };
+}
+
+async function createUser(expect: any, email: string) {
+  const response = await niceBackendFetch("/api/v1/users", {
+    method: "POST",
+    accessType: "server",
+    body: { primary_email: email },
+  });
+  expect(response.status).toBe(201);
+  return response.body.id as string;
 }
 
 describe("multi-tenancy", () => {
@@ -143,7 +160,7 @@ export default workflow("${workflowId}", {
   onConflict: "skip",
 }, async (event, step) => {
   const doubled = await step.run("double", () => event.data.amount * 2);
-  await step.sleep("short-nap", "1s");
+  await step.sleep("nap", event.data.nap);
   console.log("processed order", event.data.orderId);
 });
 `;
@@ -173,35 +190,57 @@ export default workflow("${workflowId}", {
         id: workflowId,
         latest_version: 1,
         triggers: [{ type: "event", event_type: `custom.${eventName}` }],
+        stats: { total_runs: 0, active_runs: 0, sleeping_runs: 0 },
       });
 
       // Duplicate delivery: two events mapping to the same runKey while the
       // first run is active -> onConflict "skip" collapses them to one run.
-      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21 });
-      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21 });
+      // The engine also ticks in the background (run-cron-jobs), so the two
+      // events are not guaranteed to land in the same event batch, and the
+      // collapse only holds while the first run is still active when the
+      // second event is dispatched. A one-hour nap keeps that run active for
+      // the whole test, which makes the collapse independent of tick timing.
+      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21, nap: "1h" });
+      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21, nap: "1h" });
+      await pollWithTicks(expect, async () => {
+        const { runs } = await listRuns(workflowId);
+        return runs.find((run) => run.run_key === "order:o1" && run.state === "sleeping") ?? null;
+      }, { timeoutMs: 120_000 });
 
+      // A distinct key runs to completion through the same steps. The outbox
+      // dispatches in event order, so once this run exists the duplicate
+      // above has already been dispatched (and skipped).
+      await sendCustomEvent(expect, eventName, { orderId: "o2", amount: 21, nap: "1s" });
       const completedRun = await pollWithTicks(expect, async () => {
         const { runs } = await listRuns(workflowId);
-        return runs.find((run) => run.run_key === "order:o1" && run.state === "completed") ?? null;
+        return runs.find((run) => run.run_key === "order:o2" && run.state === "completed") ?? null;
       }, { timeoutMs: 120_000 });
 
       const { runs: allRunsForKey } = await listRuns(workflowId, { run_key: "order:o1" });
       expect(allRunsForKey).toHaveLength(1);
+      expect(allRunsForKey[0]).toMatchObject({ state: "sleeping", current_step_id: "nap" });
+
+      // The summary's total matches the historical runs grid; the completed
+      // run drops out of the active/sleeping fields, which only count the
+      // run still napping (sleeping, not queued/running).
+      const afterRunListResponse = await niceBackendFetch("/api/v1/internal/workflows", { method: "GET", accessType: "admin" });
+      const afterRunSummary = afterRunListResponse.body.workflows.find((workflow: { id: string }) => workflow.id === workflowId);
+      expect(afterRunSummary).toMatchObject({ stats: { total_runs: 2, active_runs: 0, sleeping_runs: 1 } });
 
       // The Admin SDK's includeState option is backed by this wire query.
       // It must return full details for every listed run rather than only
       // widening the TypeScript type.
       const { runs: runsWithState } = await listRuns(workflowId, {
-        run_key: "order:o1",
+        run_key: "order:o2",
         include_state: "true",
       });
       expect(runsWithState).toHaveLength(1);
       expect(runsWithState[0]).toMatchObject({
         id: completedRun.id,
-        trigger_payload: { orderId: "o1", amount: 21 },
+        trigger_payload: { orderId: "o2", amount: 21, nap: "1s" },
         steps: expect.arrayContaining([
           expect.objectContaining({ step_key: "double", result: 42 }),
-          expect.objectContaining({ step_key: "short-nap", kind: "sleep" }),
+          expect.objectContaining({ step_key: "nap", kind: "sleep" }),
         ]),
         step_attempts: expect.any(Array),
       });
@@ -215,19 +254,19 @@ export default workflow("${workflowId}", {
       expect(details).toMatchObject({
         id: completedRun.id,
         workflow_id: workflowId,
-        run_key: "order:o1",
+        run_key: "order:o2",
         state: "completed",
         version: 1,
         trigger_type: `custom.${eventName}`,
         steps_recorded: 2,
         error_summary: null,
       });
-      expect(details.trigger_payload).toEqual({ orderId: "o1", amount: 21 });
+      expect(details.trigger_payload).toEqual({ orderId: "o2", amount: 21, nap: "1s" });
       const stepsByKey = new Map<string, any>(details.steps.map((step: any) => [step.step_key, step]));
       expect(stepsByKey.get("double")).toMatchObject({ kind: "run", result: 42, executed_at_version: 1 });
-      expect(stepsByKey.get("short-nap")).toMatchObject({ kind: "sleep" });
+      expect(stepsByKey.get("nap")).toMatchObject({ kind: "sleep" });
       const logs = details.step_attempts.map((attempt: any) => attempt.logs ?? "").join("\n");
-      expect(logs).toContain("processed order o1");
+      expect(logs).toContain("processed order o2");
 
       const invalidRunFilters: Record<string, string>[] = [{ version: "not-a-number" }, { limit: "1.5" }, { limit: "0" }];
       for (const query of invalidRunFilters) {
@@ -644,6 +683,98 @@ export default workflow("${invalidTriggerId}", { on: [customEvent("contains whit
       });
       expect(invalidTriggerResponse.status).toBe(400);
       expect(JSON.stringify(invalidTriggerResponse.body)).toContain("must not contain whitespace");
+    });
+  });
+});
+
+describe("pausing", () => {
+  it("creates no runs while paused, and does not replay dropped events after resuming", { timeout: 240_000 }, async ({ expect }) => {
+    await inFreshWorkflowsProject(async () => {
+      const workflowId = randomSlug("e2e-pause");
+      // A second, never-paused workflow on the same trigger. The outbox is
+      // global and drained oldest-first, so "no run appeared after N ticks" on
+      // its own can just mean the engine never got to the event. Waiting for
+      // the control to run proves the engine DID process it — while the target
+      // was paused — which is the thing under test.
+      const controlWorkflowId = randomSlug("e2e-pause-control");
+      const userCreatedSource = (id: string) => `import { workflow } from "@hexclave/workflows";
+export default workflow("${id}", {
+  on: ["user.created"],
+  runKey: (event) => "user:" + event.data.id,
+}, async (event, step) => {
+  await step.run("snapshot-email", () => event.data.primary_email);
+});
+`;
+      await createWorkflow(expect, workflowId, userCreatedSource(workflowId));
+      await createWorkflow(expect, controlWorkflowId, userCreatedSource(controlWorkflowId));
+
+      const pauseResult = await setWorkflowPaused(expect, workflowId, true);
+      expect(pauseResult.paused_at_millis).toEqual(expect.any(Number));
+      const pausedListResponse = await niceBackendFetch("/api/v1/internal/workflows", { method: "GET", accessType: "admin" });
+      expect(pausedListResponse.body.workflows.find((workflow: any) => workflow.id === workflowId)).toMatchObject({ is_paused: true });
+      expect(pausedListResponse.body.workflows.find((workflow: any) => workflow.id === controlWorkflowId)).toMatchObject({ is_paused: false });
+
+      // A user created while the workflow is paused creates no run for it.
+      const pausedEmail = `${randomSlug("wf-paused")}@example.com`;
+      await createUser(expect, pausedEmail);
+      await pollWithTicks(expect, async () => {
+        const { runs } = await listRuns(controlWorkflowId);
+        return runs.find((r) => r.trigger_summary === pausedEmail) ?? null;
+      }, { timeoutMs: 120_000 });
+      expect((await listRuns(workflowId)).runs).toEqual([]);
+
+      await setWorkflowPaused(expect, workflowId, false);
+      const resumedListResponse = await niceBackendFetch("/api/v1/internal/workflows", { method: "GET", accessType: "admin" });
+      expect(resumedListResponse.body.workflows.find((workflow: any) => workflow.id === workflowId)).toMatchObject({ is_paused: false, paused_at_millis: null });
+
+      // Events enqueued after the resume dispatch normally.
+      const resumedEmail = `${randomSlug("wf-resumed")}@example.com`;
+      const resumedUserId = await createUser(expect, resumedEmail);
+      const run = await pollWithTicks(expect, async () => {
+        const { runs } = await listRuns(workflowId);
+        return runs.find((r) => r.trigger_summary === resumedEmail && r.state === "completed") ?? null;
+      }, { timeoutMs: 120_000 });
+      expect(run).toMatchObject({ trigger_type: "user.created", run_key: `user:${resumedUserId}` });
+
+      // The event dropped during the pause is gone for good: the resumed run
+      // is the only one that ever existed for this workflow.
+      const { runs } = await listRuns(workflowId);
+      expect(runs.map((run) => run.trigger_summary)).toEqual([resumedEmail]);
+
+      await retireWorkflow(expect, workflowId);
+      await retireWorkflow(expect, controlWorkflowId);
+    });
+  });
+
+  // TODO(workflows-pause): two behaviours still uncovered here, both needing a
+  // slow test — (1) a schedule-triggered workflow paused across several cron
+  // ticks must resume without materializing the interval it slept through
+  // (the cursor fast-forward in setWorkflowPaused), and (2) a run already
+  // in flight must keep executing to completion after a pause.
+  it("is idempotent and 404s for unknown workflows", { timeout: 180_000 }, async ({ expect }) => {
+    await inFreshWorkflowsProject(async () => {
+      const workflowId = randomSlug("e2e-pause-idem");
+      await createWorkflow(expect, workflowId, `import { workflow, customEvent } from "@hexclave/workflows";
+export default workflow("${workflowId}", { on: [customEvent("ping")] }, async () => {});
+`);
+
+      // Re-pausing keeps the original pausedAt so "paused 3 days ago" does not
+      // reset itself on every repeated call.
+      const first = await setWorkflowPaused(expect, workflowId, true);
+      const second = await setWorkflowPaused(expect, workflowId, true);
+      expect(second.paused_at_millis).toBe(first.paused_at_millis);
+
+      await setWorkflowPaused(expect, workflowId, false);
+      await setWorkflowPaused(expect, workflowId, false);
+
+      const missingResponse = await niceBackendFetch(`/api/v1/internal/workflows/${randomSlug("e2e-nonexistent")}`, {
+        method: "PATCH",
+        accessType: "admin",
+        body: { is_paused: true },
+      });
+      expect(missingResponse.status).toBe(404);
+
+      await retireWorkflow(expect, workflowId);
     });
   });
 });

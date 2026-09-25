@@ -10,6 +10,8 @@
 .env.*
 **/.env
 **/.env.*
+# Prune no longer honors .gitignore; keep local private keys out of the build context.
+**/*.pem
 **/.next
 
 **/dist

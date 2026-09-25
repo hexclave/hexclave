@@ -56,7 +56,7 @@ it("internal MCP endpoint should expose the Hexclave docs assistant tool", async
                   "type": "string",
                 },
                 "project": {
-                  "description": "The project the user is working on: its name and, when known, details such as its language, framework, purpose, and project type. Omit when unknown.",
+                  "description": "A plaintext description of the project the user is working on, including its name and, when known, details such as its language, framework, purpose, and project type. It may be somewhat lengthy when more context is useful and is not limited to a short identifier. This helps Hexclave return the correct documentation and answers. Omit when unknown.",
                   "minLength": 1,
                   "type": "string",
                 },
@@ -70,7 +70,7 @@ it("internal MCP endpoint should expose the Hexclave docs assistant tool", async
                   "type": "string",
                 },
                 "user": {
-                  "description": "Who is asking the question, such as the user's name and any other non-sensitive information that could help the Hexclave team identify and assist them. Omit when unknown.",
+                  "description": "A plaintext description of who is asking the question, such as the user's name, company, and any other information that could help the Hexclave team identify and assist them. It may be somewhat lengthy when more context is useful and is not limited to a short identifier. Omit when unknown.",
                   "minLength": 1,
                   "type": "string",
                 },
@@ -88,6 +88,42 @@ it("internal MCP endpoint should expose the Hexclave docs assistant tool", async
               "type": "object",
             },
             "name": "ask_hexclave",
+          },
+          {
+            "description": "Report a concrete problem or observation about Hexclave back to the Hexclave team. Call this when you hit something specific and actionable: documentation that was wrong, missing, or out of date; an API or SDK that behaved differently than documented; a confusing or unhelpful error message; a setup step that did not work as written; or an \`ask_hexclave\` answer that turned out to be incorrect. Also call it when the user explicitly says they want to tell the Hexclave team something — pass their wording. Do NOT call this for general chit-chat, for questions (use \`ask_hexclave\` instead), or to acknowledge that something worked normally. Send at most one call per distinct issue per conversation: a second call about the same problem is noise, not signal. Include the specifics — what you expected, what happened, and the exact page, endpoint, or symbol involved — because the team reads these directly and cannot ask you follow-up questions.",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "additionalProperties": false,
+              "properties": {
+                "category": {
+                  "description": "bug = something is broken or behaves incorrectly; docs-gap = documentation is wrong, missing, or out of date; suggestion = a concrete improvement idea; praise = something worked notably well; other = anything that fits none of these.",
+                  "enum": [
+                    "bug",
+                    "docs-gap",
+                    "suggestion",
+                    "praise",
+                    "other",
+                  ],
+                  "type": "string",
+                },
+                "conversationId": {
+                  "description": "If this feedback is about a previous ask_hexclave answer, pass that response's conversationId so the team can see the exchange it refers to. Omit otherwise.",
+                  "type": "string",
+                },
+                "feedback": {
+                  "description": "The feedback itself. Be specific and self-contained: what you expected, what actually happened, and the exact documentation page, API endpoint, or SDK symbol involved. Don't include any sensitive information.",
+                  "maxLength": 10000,
+                  "minLength": 1,
+                  "type": "string",
+                },
+              },
+              "required": [
+                "feedback",
+                "category",
+              ],
+              "type": "object",
+            },
+            "name": "give_feedback",
           },
         ],
       },
@@ -108,6 +144,9 @@ it("public MCP endpoint should expose the Hexclave docs assistant tool", async (
       tools: [
         {
           name: "ask_hexclave",
+        },
+        {
+          name: "give_feedback",
         },
       ],
     },

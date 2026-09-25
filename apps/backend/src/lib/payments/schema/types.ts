@@ -112,6 +112,11 @@ export type SubscriptionInvoiceRow = {
   status: string | null,
   amountTotal: number | null,
   hostedInvoiceUrl: string | null,
+  paidAtMillis?: number | null,
+  markedUncollectibleAtMillis?: number | null,
+  voidedAtMillis?: number | null,
+  currency?: string | null,
+  amountPaid?: number | null,
   createdAtMillis: number,
 };
 
@@ -125,6 +130,9 @@ export type OneTimePurchaseRow = {
   product: ProductSnapshot,
   quantity: number,
   stripePaymentIntentId: string | null,
+  amountReceived?: number | null,
+  currency?: string | null,
+  paidAtMillis?: number | null,
   revokedAtMillis: number | null,
   refundedAtMillis: number | null,
   creationSource: PurchaseCreationSource,
@@ -288,6 +296,11 @@ export type TransactionRow = {
   customerId: string,
   paymentProvider: PaymentProvider | null,
   createdAtMillis: number,
+  // Set only on subscription-renewal rows so list/refund UIs can target the
+  // parent sub without a Prisma invoice lookup. Explicit null on other new
+  // writes. Optional because pre-field LMDB rows omit the key entirely
+  // (`undefined` at read time) — readers must use `?? null` / `== null`.
+  renewalTargetSubscriptionId?: string | null,
 };
 
 /**

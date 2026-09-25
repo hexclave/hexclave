@@ -6,6 +6,7 @@ import { Textarea } from "@/components/ui";
 import type { AdminWorkflow, AdminWorkflowRun, AdminWorkflowRunDetails, AdminWorkflowTrigger, AdminWorkflowUpgradeResult } from "@hexclave/next";
 import { WORKFLOW_ID_REGEX } from "@hexclave/shared/dist/interface/workflows";
 import { fromNow } from "@hexclave/shared/dist/utils/dates";
+import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { ArrowLeftIcon, BroadcastIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useState } from "react";
@@ -15,8 +16,10 @@ import { ALL_RUN_STATES, getRunStateBadgeColor, getRunStateLabel, getTriggerKind
 import {
   EditableCodePanel,
   NewWorkflowCodePanel,
+  PausedWorkflowAlert,
   useAsyncLoad,
   WorkflowKpiRow,
+  WorkflowPauseButton,
   WorkflowRunsGrid,
   WorkflowsTable,
   WorkflowTitleRow,
@@ -50,10 +53,23 @@ function WorkflowsIndex({ onOpen, onCreateDraft }: { onOpen: (workflowId: string
   const [createError, setCreateError] = useState<string | null>(null);
   const [deletingWorkflow, setDeletingWorkflow] = useState<AdminWorkflow | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pauseError, setPauseError] = useState<string | null>(null);
   const requestDelete = useCallback((workflow: AdminWorkflow) => {
     setDeleteError(null);
     setDeletingWorkflow(workflow);
   }, []);
+  const togglePause = useCallback((workflow: AdminWorkflow) => {
+    setPauseError(null);
+    runAsynchronously(async () => {
+      try {
+        await adminApp.setWorkflowPaused(workflow.id, !workflow.isPaused);
+      } catch (error) {
+        // Names the workflow: the row menu can act on any row, and the banner
+        // that reports the failure sits at the top of the page.
+        setPauseError(`${workflow.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  }, [adminApp]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -67,6 +83,10 @@ function WorkflowsIndex({ onOpen, onCreateDraft }: { onOpen: (workflowId: string
         </DesignButton>
       </div>
 
+      {pauseError != null && (
+        <DesignAlert variant="error" title="Could not change pause state" description={pauseError} />
+      )}
+
       {workflows.length === 0 ? (
         <DesignAlert
           variant="default"
@@ -78,6 +98,7 @@ function WorkflowsIndex({ onOpen, onCreateDraft }: { onOpen: (workflowId: string
           workflows={workflows}
           onOpen={onOpen}
           onRequestDelete={requestDelete}
+          onTogglePause={togglePause}
         />
       )}
 
@@ -177,7 +198,10 @@ function WorkflowDetailInner({ workflowId, onClose }: { workflowId: string, onCl
   if (workflow == null) {
     return <MissingWorkflow workflowId={workflowId} onClose={onClose} />;
   }
-  return <PersistedWorkflowDetail workflow={workflow} onClose={onClose} />;
+  // Keyed by id so navigating between two workflows (back/forward, a pasted
+  // deep link) remounts rather than carrying the previous one's local state —
+  // a pending toggle or a stale error — onto a different workflow.
+  return <PersistedWorkflowDetail key={workflow.id} workflow={workflow} onClose={onClose} />;
 }
 
 function BackToWorkflows({ onClick }: { onClick: () => void }) {
@@ -256,15 +280,23 @@ function PersistedWorkflowDetail({ workflow, onClose }: { workflow: AdminWorkflo
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <WorkflowTitleRow workflow={workflow} />
-        {workflow.triggers.some((trigger) => getTriggerKind(trigger) === "custom") && (
-          <SendCustomEventDialog triggers={workflow.triggers} onSent={() => setRunsReloadKey((key) => key + 1)} />
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {workflow.triggers.some((trigger) => getTriggerKind(trigger) === "custom") && (
+            <SendCustomEventDialog
+              triggers={workflow.triggers}
+              isPaused={workflow.isPaused}
+              onSent={() => setRunsReloadKey((key) => key + 1)}
+            />
+          )}
+          <WorkflowPauseButton workflow={workflow} />
+        </div>
       </div>
+      <PausedWorkflowAlert workflow={workflow} />
       <WorkflowKpiRow workflow={workflow} />
 
       <DesignCategoryTabs
         categories={[
-          { id: "runs", label: "Runs", count: workflow.stats.activeRuns + workflow.stats.sleepingRuns },
+          { id: "runs", label: "Runs", count: workflow.stats.totalRuns },
           { id: "code", label: "Code", count: versionsLoad.data?.length ?? 0 },
         ]}
         selectedCategory={tab}
@@ -385,7 +417,7 @@ function getCustomEventName(trigger: AdminWorkflowTrigger): string | null {
   return trigger.eventType.slice("custom.".length);
 }
 
-function SendCustomEventDialog({ triggers, onSent }: { triggers: AdminWorkflowTrigger[], onSent: () => void }) {
+function SendCustomEventDialog({ triggers, isPaused, onSent }: { triggers: AdminWorkflowTrigger[], isPaused: boolean, onSent: () => void }) {
   const adminApp = useAdminApp();
   const customEventNames = [...new Set(triggers.map(getCustomEventName).filter((name): name is string => name != null))];
   const [open, setOpen] = useState(false);
@@ -432,6 +464,17 @@ function SendCustomEventDialog({ triggers, onSent }: { triggers: AdminWorkflowTr
       }
     >
       <div className="flex flex-col gap-3">
+        {/* Sending is still allowed while paused — the event is project-wide
+            and other workflows may consume it — but without this the operator
+            gets a green "Event queued" and then waits for a run that the
+            engine already decided to drop. */}
+        {isPaused && (
+          <DesignAlert
+            variant="default"
+            title="This workflow is paused"
+            description="The event will be delivered to other workflows that subscribe to it, but this one will drop it — resuming later does not run it. Resume first if you want to test this workflow."
+          />
+        )}
         <div className="flex flex-col gap-1.5">
           <label htmlFor="workflow-custom-event-name" className="text-xs font-medium">Event</label>
           <DesignSelectorDropdown
@@ -452,7 +495,13 @@ function SendCustomEventDialog({ triggers, onSent }: { triggers: AdminWorkflowTr
           spellCheck={false}
         />
         {error != null && <DesignAlert variant="error" title="Could not send event" description={error} />}
-        {result != null && <DesignAlert variant="success" title="Event queued" description={`Event id: ${result.eventId}`} />}
+        {result != null && (
+          <DesignAlert
+            variant="success"
+            title="Event queued"
+            description={`Event id: ${result.eventId}${isPaused ? " — this workflow is paused, so it dropped the event instead of starting a run." : ""}`}
+          />
+        )}
       </div>
     </DesignDialog>
   );

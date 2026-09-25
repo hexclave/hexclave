@@ -594,6 +594,14 @@ export function nicify(
         if (value.cause) {
           stack += `\n${lineIndent}Cause:\n${lineIndent}${lineIndent}${nestedNicify(value.cause, path, null, { currentIndent: currentIndent + lineIndent + lineIndent })}`;
         }
+        // AggregateError.errors is a non-enumerable own property, so it is not picked up by
+        // the "Extra properties" branch above. It usually carries the only actionable
+        // information (e.g. the per-address `connect ECONNREFUSED ...` errors behind a
+        // `fetch failed` -> `AggregateError: ""`), so print it like the cause. Subclasses that
+        // redeclare `errors` as an enumerable field (e.g. RetryError) are already covered above.
+        if (value instanceof AggregateError && !Object.keys(value).includes("errors")) {
+          stack += `\n${lineIndent}Errors:\n${lineIndent}${lineIndent}${nestedNicify(value.errors, path, null, { currentIndent: currentIndent + lineIndent + lineIndent })}`;
+        }
         stack = stack.replaceAll("\n", `\n${currentIndent}`);
         return stack;
       }
@@ -634,6 +642,19 @@ export function nicify(
     }
   }
 }
+
+import.meta.vitest?.test("nicify includes the inner errors of an AggregateError", ({ expect }) => {
+  // Mirrors what Node's fetch throws when every resolved address fails to connect.
+  const inner = [
+    new Error("connect ENETUNREACH 2001:db8::1:443 - Local (:::0)"),
+    new Error("connect ECONNREFUSED 192.0.2.1:443"),
+  ];
+  const fetchFailed = new TypeError("fetch failed", { cause: new AggregateError(inner, "") });
+  const nicified = nicify(fetchFailed);
+  expect(nicified).toContain("Errors:");
+  expect(nicified).toContain("connect ENETUNREACH 2001:db8::1:443");
+  expect(nicified).toContain("connect ECONNREFUSED 192.0.2.1:443");
+});
 
 export function replaceAll(input: string, searchValue: string, replaceValue: string): string {
   if (searchValue === "") throw new HexclaveAssertionError("replaceAll: searchValue is empty");

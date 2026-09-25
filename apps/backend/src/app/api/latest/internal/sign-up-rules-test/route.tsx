@@ -82,6 +82,8 @@ export const POST = createSmartRouteHandler({
       oauthProvider: req.body.oauth_provider,
       ipAddress: endUserRequestContext.ipAddress,
       ipTrusted: endUserRequestContext.ipTrusted,
+      countryCode: req.body.country_code ?? derivedCountryCode,
+      oauthAccountCreatedAtMillis: null,
       turnstileAssessment: {
         status: normalizedTurnstileResult,
       },

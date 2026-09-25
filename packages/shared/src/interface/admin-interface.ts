@@ -1,5 +1,6 @@
 import * as yup from "yup";
 import type { EnvironmentConfigOverrideOverride } from "../config/schema";
+import type { DeploymentMemorySize, DeploymentSourceManifest } from "../deployments";
 import { KnownErrors } from "../known-errors";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type RestrictedReason } from "../schema-fields";
 import { AccessToken, InternalSession, RefreshToken } from "../sessions";
@@ -12,15 +13,6 @@ import { InternalEmailsCrud } from "./crud/emails";
 import { InternalApiKeysCrud } from "./crud/internal-api-keys";
 import { ProjectPermissionDefinitionsCrud } from "./crud/project-permissions";
 import { ProjectsCrud } from "./crud/projects";
-import type {
-  AdminGetSessionReplayAllEventsResponse,
-  AdminGetSessionReplayChunkEventsResponse,
-  AdminGetSessionReplayResponse,
-  AdminListSessionReplayChunksOptions,
-  AdminListSessionReplayChunksResponse,
-  AdminListSessionReplaysOptions,
-  AdminListSessionReplaysResponse
-} from "./crud/session-replays";
 import { SvixTokenCrud } from "./crud/svix-token";
 import { TeamPermissionDefinitionsCrud } from "./crud/team-permissions";
 import type { Transaction, TransactionType } from "./crud/transactions";
@@ -72,6 +64,20 @@ export type DataWarehouseCredentialsJson = {
   connection: DataWarehouseConnectionJson,
 };
 
+// One line of a service's RUNTIME output — what the container printed while
+// running, as opposed to what its build printed. `stream` is "system" for the
+// runtime's own lifecycle events (machine started, health check failed) and
+// "stdout"/"stderr" for the service's own output; `instance` names the machine
+// that printed it, so a multi-instance service can be filtered down to one.
+//
+// NOT redacted: a runtime process can print anything, including env values.
+export type AdminDeploymentServiceLogLineJson = {
+  at_millis: number,
+  stream: "stdout" | "stderr" | "system",
+  instance: string | null,
+  text: string,
+};
+
 // What ONE service did in one deployment. There is no separate run entity: a
 // deploy builds every service of its deployment source in a single builder
 // machine, so the build belongs to the deployment and this is only the outcome
@@ -83,6 +89,10 @@ export type AdminDeploymentServiceOutcomeJson = {
   status: "pending" | "building" | "deploying" | "deployed" | "failed" | "skipped",
   url: string | null,
   revision: string | null,
+  // The digest-pinned image this deploy actually ran for the service — what its
+  // build pushed, or what its `image` reference resolved to. Null until the
+  // apply has happened, and on deployments from before this was recorded.
+  image: string | null,
   error: string | null,
 };
 
@@ -109,10 +119,12 @@ export type AdminDeploymentJson = {
   id: string,
   // The user-facing "#47", monotonic per project.
   number: number,
-  // WHICH deploy file this came from: the `id` export of the hexclave.deploy.ts
-  // that ran, or "hexclave.config.ts" for deployments declared there. A project
-  // deployed from several repositories has one source per repository, and this
-  // is what tells their deployments apart in a single list.
+  // WHICH deploy file this came from: the `deploymentGroupId` export of the
+  // hexclave.deploy.ts that ran. (A project deployed before services moved out
+  // of hexclave.config.ts may still show a source named after that file; nothing
+  // writes one any more.) A project deployed from several repositories has one
+  // source per repository, and this is what tells their deployments apart in a
+  // single list.
   deployment_source_id: string,
   status: "queued" | "building" | "deploying" | "deployed" | "failed" | "canceled",
   triggered_by: string,
@@ -122,6 +134,15 @@ export type AdminDeploymentJson = {
   error: string | null,
   // Whether the build produced a log to read (see getDeploymentBuildLogs).
   has_build_logs: boolean,
+  // What this deploy PACKAGED: paths and sizes, never contents. One manifest per
+  // deployment, because a deploy uploads one tree and every source-built service
+  // is built from it — a service's slice is the subtree under its
+  // `root_directory`. Null when nothing was packaged (every service ran an
+  // already-built image) and on deployments from before this was recorded.
+  //
+  // Also null on the deployments LIST, which omits it: it is per-deployment and
+  // the list is polled. Read one deployment to get its manifest.
+  source_manifest: DeploymentSourceManifest | null,
   // Every service the deploy intended to ship, in the order it applied them.
   services: AdminDeploymentServiceOutcomeJson[],
 };
@@ -145,9 +166,33 @@ export type AdminDeploymentServiceJson = {
   // Scaling bounds; null on unsynced rows.
   min_instances: number | null,
   max_instances: number | null,
+  // The memory the service RUNS with. Never null, unlike the bounds above: a
+  // service that names no size runs its type's default, and resolving that
+  // needs the type-to-default mapping, which is not something a reader of this
+  // shape should have to carry.
+  memory: DeploymentMemorySize,
+  // The CPU that comes with that memory. Derived rather than declared — the two
+  // runtimes accept only certain machine shapes and cpu/memory pairs, so memory
+  // is the only dial — and reported because `shared` is a genuine surprise
+  // otherwise: on the smaller server sizes the vCPU is a burstable fraction of
+  // a core rather than a whole one.
+  cpu: { count: number, shared: boolean },
   root_directory: string | null,
   // Null = built with Railpack auto-detection rather than a Dockerfile.
   dockerfile_path: string | null,
+  // The image this service runs, canonical and fully qualified
+  // ("docker.io/library/postgres:16"), as the deploy file named it. With no
+  // `build_command` it is the whole story and the service is not built at all;
+  // with one it is the BASE the service is built on. Null = no image was named,
+  // so the fields above say what the build starts from instead. Mutually
+  // exclusive with dockerfile_path.
+  image: string | null,
+  // A single command line run while the image is built (null = none). Its base
+  // is `image`, or `dockerfile_path`'s Dockerfile, or the Hexclave base image.
+  build_command: string | null,
+  // A single command line run as the container's process instead of the image's
+  // own (null = the image decides). Applied at run time, so it never builds.
+  start_command: string | null,
   // Null = no persistent disk (an ephemeral container filesystem). Otherwise a
   // single-entry record keyed by volume id, which names a disk owned by the
   // deployment source — it outlives the service that mounts it. Mirrors
@@ -155,6 +200,15 @@ export type AdminDeploymentServiceJson = {
   // hand-maintained duplicates, so they must be edited together.
   persistent_volumes: Record<string, { path: string, size_gb: number }> | null,
   provisioned: boolean,
+  // Set while the service is PARKED: stopped by the platform, with an
+  // explanation served in its place on every hostname it holds. Separate from
+  // `status`, which goes on describing how the last DEPLOY ended — a parked
+  // service was deployed successfully, and stopped afterwards.
+  //
+  // `parked_reason` decides the wording shown to the project's team;
+  // "free_plan_24h" (the Free plan's deployment window) is the only value today.
+  parked_at: string | null,
+  parked_reason: string | null,
   status: "not_deployed" | "queued" | "building" | "deploying" | "deployed" | "failed" | "canceled",
   has_successful_deploy: boolean,
   url: string | null,
@@ -174,6 +228,12 @@ export type AdminDeploymentDomainJson = {
   hostname: string,
   is_primary: boolean,
   verified: boolean,
+  /**
+   * Finer-grained than `verified`. "issuing" means the deployment runtime has accepted the
+   * DNS and is waiting on the certificate authority; without it that window looks exactly
+   * like the user having created no records at all.
+   */
+  status: "awaiting_dns" | "issuing" | "verified",
   pending_first_deploy: boolean,
   dns_records: { type: string, name: string, value: string }[],
 };
@@ -371,6 +431,19 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source }),
+      },
+      null,
+    );
+    return await response.json();
+  }
+
+  async setWorkflowPaused(workflowId: string, isPaused: boolean): Promise<{ is_paused: boolean, paused_at_millis: number | null }> {
+    const response = await this.sendAdminRequest(
+      urlString`/internal/workflows/${workflowId}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ is_paused: isPaused }),
       },
       null,
     );
@@ -1320,67 +1393,6 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
     return { transactions: json.transactions, nextCursor: json.next_cursor };
   }
 
-  async listSessionReplays(params?: AdminListSessionReplaysOptions): Promise<AdminListSessionReplaysResponse> {
-    const qs = new URLSearchParams();
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    if (typeof params?.limit === "number") qs.set("limit", String(params.limit));
-    if (params?.user_ids && params.user_ids.length > 0) qs.set("user_ids", params.user_ids.join(","));
-    if (params?.team_ids && params.team_ids.length > 0) qs.set("team_ids", params.team_ids.join(","));
-    if (typeof params?.duration_ms_min === "number") qs.set("duration_ms_min", String(params.duration_ms_min));
-    if (typeof params?.duration_ms_max === "number") qs.set("duration_ms_max", String(params.duration_ms_max));
-    if (typeof params?.last_event_at_from_millis === "number") qs.set("last_event_at_from_millis", String(params.last_event_at_from_millis));
-    if (typeof params?.last_event_at_to_millis === "number") qs.set("last_event_at_to_millis", String(params.last_event_at_to_millis));
-    if (typeof params?.click_count_min === "number") qs.set("click_count_min", String(params.click_count_min));
-    const response = await this.sendAdminRequest(
-      `/internal/session-replays${qs.size ? `?${qs.toString()}` : ""}`,
-      { method: "GET" },
-      null,
-    );
-    return await response.json();
-  }
-
-  async getSessionReplay(sessionReplayId: string): Promise<AdminGetSessionReplayResponse> {
-    const response = await this.sendAdminRequest(
-      `/internal/session-replays/${encodeURIComponent(sessionReplayId)}`,
-      { method: "GET" },
-      null,
-    );
-    return await response.json();
-  }
-
-  async listSessionReplayChunks(sessionReplayId: string, params?: AdminListSessionReplayChunksOptions): Promise<AdminListSessionReplayChunksResponse> {
-    const qs = new URLSearchParams();
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    if (typeof params?.limit === "number") qs.set("limit", String(params.limit));
-    const response = await this.sendAdminRequest(
-      `/internal/session-replays/${encodeURIComponent(sessionReplayId)}/chunks${qs.size ? `?${qs.toString()}` : ""}`,
-      { method: "GET" },
-      null,
-    );
-    return await response.json();
-  }
-
-  async getSessionReplayChunkEvents(sessionReplayId: string, chunkId: string): Promise<AdminGetSessionReplayChunkEventsResponse> {
-    const response = await this.sendAdminRequest(
-      `/internal/session-replays/${encodeURIComponent(sessionReplayId)}/chunks/${encodeURIComponent(chunkId)}/events`,
-      { method: "GET" },
-      null,
-    );
-    return await response.json();
-  }
-
-  async getSessionReplayEvents(sessionReplayId: string, options?: { offset?: number, limit?: number }): Promise<AdminGetSessionReplayAllEventsResponse> {
-    const qs = new URLSearchParams();
-    if (typeof options?.offset === "number") qs.set("offset", String(options.offset));
-    if (typeof options?.limit === "number") qs.set("limit", String(options.limit));
-    const response = await this.sendAdminRequest(
-      `/internal/session-replays/${encodeURIComponent(sessionReplayId)}/events${qs.size ? `?${qs.toString()}` : ""}`,
-      { method: "GET" },
-      null,
-    );
-    return await response.json();
-  }
-
   async refundTransaction(options: {
     type: "subscription" | "one-time-purchase",
     id: string,
@@ -1554,6 +1566,84 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       null,
     );
     return await response.text();
+  }
+
+  /**
+   * Follows a service's runtime logs, calling `onLine` for each line as it arrives.
+   *
+   * The endpoint streams NDJSON and follows for a few minutes before closing, so
+   * this resolves when the server stops following rather than when the service
+   * stops running — there is no end to a runtime log. Resume by calling again
+   * with the largest `at_millis` seen; omit it to start at the tail.
+   *
+   * Rejects if the stream ends in an error, AFTER delivering everything that
+   * arrived before it: the lines already handed to `onLine` are real output and
+   * the caller should keep them.
+   */
+  async getDeploymentServiceLogs(serviceId: string, options: {
+    sinceMillis?: number,
+    /** False returns what is available right now instead of following. */
+    follow?: boolean,
+    signal?: AbortSignal,
+    onLine: (line: AdminDeploymentServiceLogLineJson) => void,
+  }): Promise<void> {
+    const params = new URLSearchParams();
+    if (options.sinceMillis !== undefined) params.set("since_millis", String(options.sinceMillis));
+    if (options.follow === false) params.set("follow", "false");
+    const query = params.toString();
+    const response = await this.sendAdminRequest(
+      `${urlString`/deployments/services/${serviceId}/logs`}${query === "" ? "" : `?${query}`}`,
+      { method: "GET", signal: options.signal },
+      null,
+    );
+    if (response.body === null) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    // Held on an object rather than a plain `let`: it is written from inside
+    // handleLine, and TypeScript keeps narrowing a plain local to its
+    // initializer across a closure it cannot see run (the check at the bottom
+    // would then be "always false").
+    const stream = { error: null as string | null };
+    const handleLine = (raw: string) => {
+      if (raw === "") return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // A truncated line must not take down a tail that is otherwise fine.
+        return;
+      }
+      if (parsed === null || typeof parsed !== "object") return;
+      // The server's one control line. Real log lines always carry `at_millis`,
+      // which is what tells the two apart without a discriminator on every line.
+      const errorMessage = (parsed as { _error?: unknown })._error;
+      if (typeof errorMessage === "string") {
+        stream.error = errorMessage;
+        return;
+      }
+      if (typeof (parsed as { at_millis?: unknown }).at_millis !== "number") return;
+      options.onLine(parsed as AdminDeploymentServiceLogLineJson);
+    };
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Split on every complete line; a chunk can end mid-line.
+        while (true) {
+          const newlineIndex = buffer.indexOf("\n");
+          if (newlineIndex < 0) break;
+          handleLine(buffer.slice(0, newlineIndex));
+          buffer = buffer.slice(newlineIndex + 1);
+        }
+      }
+      buffer += decoder.decode();
+      handleLine(buffer);
+    } finally {
+      reader.releaseLock();
+    }
+    if (stream.error !== null) throw new Error(stream.error);
   }
 
   async addDeploymentServiceDomain(serviceId: string, hostname: string, options?: { isPrimary?: boolean }): Promise<void> {

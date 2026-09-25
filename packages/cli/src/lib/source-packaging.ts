@@ -68,6 +68,11 @@ export type PackagedSource = {
   // The packaged file paths (posix, relative to the root), so callers can assert on the
   // ACTUAL contents (e.g. Dockerfile presence) after the ignore rules.
   paths: string[],
+  // The same entries with their uncompressed sizes, which is what the deploy
+  // reports as the source manifest. Sizes are already in hand here (the packager
+  // holds every file it wrote); recomputing them later would mean re-reading the
+  // tree after the ignore rules had been applied.
+  files: { path: string, bytes: number }[],
 };
 
 function readIgnoreScopes(directory: string): IgnoreScope[] {
@@ -182,5 +187,6 @@ export function packageSourceDirectory(rootDirectory: string, ignoreRootDirector
     fileCount: entries.length,
     totalBytes,
     paths: entries.map((entry) => entry.path),
+    files: entries.map((entry) => ({ path: entry.path, bytes: entry.data.length })),
   };
 }

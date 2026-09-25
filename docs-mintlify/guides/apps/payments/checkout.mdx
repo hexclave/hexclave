@@ -35,7 +35,7 @@ The `createCheckoutUrl` method is available on both user and team objects.
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function PurchasePage() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
 
       const checkoutUrl = await user.createCheckoutUrl({
         productId: "prod_premium_monthly",

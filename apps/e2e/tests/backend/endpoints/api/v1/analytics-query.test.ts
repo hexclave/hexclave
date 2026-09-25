@@ -574,8 +574,6 @@ it("has limited grants", async ({ expect }) => {
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.contact_channels TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.email_outboxes TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.events TO limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.growth_daily_ad_metrics TO limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.growth_daily_metrics TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.notification_preferences TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.project_permissions TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.refresh_tokens TO limited_user" },
@@ -639,14 +637,6 @@ it("can see only some tables", async ({ expect }) => {
           },
           {
             "database": "default",
-            "name": "growth_daily_ad_metrics",
-          },
-          {
-            "database": "default",
-            "name": "growth_daily_metrics",
-          },
-          {
-            "database": "default",
             "name": "notification_preferences",
           },
           {
@@ -698,8 +688,6 @@ it("SHOW TABLES should have the correct tables", async ({ expect }) => {
           { "name": "contact_channels" },
           { "name": "email_outboxes" },
           { "name": "events" },
-          { "name": "growth_daily_ad_metrics" },
-          { "name": "growth_daily_metrics" },
           { "name": "notification_preferences" },
           { "name": "project_permissions" },
           { "name": "refresh_tokens" },

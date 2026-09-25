@@ -57,6 +57,16 @@ export type {
 } from "./workflows";
 
 export type {
+  AdminSessionReplay,
+  AdminSessionReplayChunk,
+  ListSessionReplayChunksOptions,
+  ListSessionReplayChunksResult,
+  ListSessionReplaysOptions,
+  ListSessionReplaysResult,
+  SessionReplayAllEventsResult
+} from "./session-replays";
+
+export type {
   ProjectConfig
 } from "./project-configs";
 
@@ -124,6 +134,7 @@ export type {
   AdminDeploymentDomainJson,
   AdminDeploymentEnvVarJson,
   AdminDeploymentJson,
+  AdminDeploymentServiceLogLineJson,
   AdminDeploymentServiceOutcomeJson,
   AdminProjectSecretJson,
   AdminDeploymentServiceJson,

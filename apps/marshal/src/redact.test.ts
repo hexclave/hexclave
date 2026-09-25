@@ -8,7 +8,7 @@ import { redactSecrets } from "./redact.js";
 // ship green (the previous e2e redaction assertion was vacuous).
 
 // Re-implement the composition here rather than importing from services.ts, which pulls in
-// the S3/Fly clients at module load. redactBuildLogText's body is small and stable.
+// the S3/GCP clients at module load. redactBuildLogText's body is small and stable.
 function redactBuildLogText(text: string, values: string[]): string {
   return redactSecrets(text, values)
     .replace(/X-Amz-Signature=[A-Za-z0-9%]+/gi, "X-Amz-Signature=<redacted>")
@@ -26,31 +26,43 @@ describe("redactSecrets", () => {
 
   it("redacts a value whose prefix is also a secret, in either order", () => {
     // Redacting the shorter value first used to destroy the longer match and
-    // leave its tail exposed: "abcdef" became "<redacted>def". The Fly token and
-    // its scheme-stripped form (see redactBuildLogText) are exactly this shape.
+    // leave its tail exposed: "abcdef" became "<redacted>def". Provider tokens and
+    // its scheme-stripped form are exactly this shape.
     expect(redactSecrets("token=abcdef", ["abc", "abcdef"])).toBe("token=<redacted>");
     expect(redactSecrets("token=abcdef", ["abcdef", "abc"])).toBe("token=<redacted>");
     expect(redactSecrets("a=abc b=abcdef", ["abc", "abcdef"])).toBe("a=<redacted> b=<redacted>");
   });
+
+  it("does not rescan replacement text or amplify hostile short secrets without bound", () => {
+    const text = "x".repeat(1024 * 1024);
+    const redacted = redactSecrets(text, ["x", "<", "r", "e", "d", "a", "c", "t", ">"]);
+
+    expect(redacted.length).toBeLessThanOrEqual(text.length);
+    expect(redacted).toBe("<redacted>");
+  });
+
+  it("merges overlapping matches without exposing either secret", () => {
+    expect(redactSecrets("zabcabcz", ["abc", "bcab"])).toBe("z<redacted>z");
+  });
 });
 
 describe("redactBuildLogText", () => {
-  it("scrubs the Fly org token, its scheme-stripped form, the registry auth blob, and the webhook token", () => {
-    const flyToken = "FlyV1 fm2_verysecrettoken";
-    const flyTokenNoScheme = "fm2_verysecrettoken";
+  it("scrubs overlapping provider credentials, the registry auth blob, and the webhook token", () => {
+    const providerToken = "Bearer ya29.verysecrettoken";
+    const providerTokenWithoutScheme = "ya29.verysecrettoken";
     const registryAuth = "eDpGbHlWMSBmbTJf";
     const webhookToken = "9f8e7d6c5b4a";
-    const values = [flyToken, registryAuth, webhookToken, flyTokenNoScheme];
+    const values = [providerToken, registryAuth, webhookToken, providerTokenWithoutScheme];
 
     const log = [
       `pushing to registry with auth ${registryAuth}`,
-      `token header FlyV1 fm2_verysecrettoken`,
-      `bare token fm2_verysecrettoken`,
+      `token header Bearer ya29.verysecrettoken`,
+      `bare token ya29.verysecrettoken`,
       `POST webhook Authorization: Bearer ${webhookToken}`,
     ].join("\n");
 
     const redacted = redactBuildLogText(log, values);
-    expect(redacted).not.toContain("fm2_verysecrettoken");
+    expect(redacted).not.toContain("ya29.verysecrettoken");
     expect(redacted).not.toContain(registryAuth);
     expect(redacted).not.toContain(webhookToken);
     expect(redacted).toContain("<redacted>");

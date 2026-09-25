@@ -1,3 +1,5 @@
+import { getMcpSkillContextPrompt } from "@/lib/ai/mcp-skill-context";
+import { getVerifiedQaContext } from "@/lib/ai/qa/verified-qa";
 import { SQL_QUERY_RESULT_MAX_CHARS } from "@/lib/ai/tools/sql-query";
 
 /**
@@ -501,33 +503,64 @@ follow these rules without exception:
 5. Before finishing the code, mentally re-order your hooks and confirm the count and order are
    identical on every possible render path.
 
-CANONICAL BAD EXAMPLE (crashes with React error #310):
+CANONICAL SHAPE OF EVERY Dashboard COMPONENT:
   function Dashboard() {
-    const [users, setUsers] = React.useState(null);
-    if (!users) {
-      return <Loading />;          // ← early return BEFORE the next hook
-    }
-    const [filter, setFilter] = React.useState("");  // ← this hook is skipped on first render
-    React.useEffect(() => { ... }, []);  // ← and this one
-    return <div>...</div>;
-  }
-
-CANONICAL GOOD EXAMPLE:
-  function Dashboard() {
-    // All hooks first. Unconditional. Same count every render.
+    // 1) ALL hooks first. Unconditional. Same count every render.
+    //    Includes React.useState / useEffect / useCallback / useMemo / useRef
+    //    AND every DashboardUI.use* (useDataSource, etc).
     const [users, setUsers] = React.useState(null);
     const [filter, setFilter] = React.useState("");
     const [error, setError] = React.useState(null);
     React.useEffect(() => { ... }, []);
 
-    // Conditional rendering AFTER all hooks:
+    // 2) Conditional rendering happens ONLY AFTER every hook has run.
     if (error) return <ErrorState message={error} />;
     if (!users) return <Loading />;
     return <div>...</div>;
   }
 
-If you catch yourself writing \`if (...) return ...\` anywhere above a \`React.useXxx\` call,
-STOP and move the return below every hook.
+Mental check before you emit: scan your Dashboard function top-to-bottom. If ANY line
+starting with \`use\` (React.useX, DashboardUI.useX, or any custom useX) sits BELOW a
+\`return\`, an \`if\`, a ternary, or a loop, the code is wrong — move the hook up.
+
+CUSTOM HOOKS COUNT TOO — \`DashboardUI.useDataSource\` IS A HOOK
+─────────────────────────────────────────────────────────────────
+Anything starting with \`use\` is a hook, regardless of namespace. \`DashboardUI.useDataSource\`
+and any other \`use*\` from \`DashboardUI\` follow the SAME rules as \`React.useState\` — they
+MUST be called unconditionally at the top of the component, before any \`if\` / early
+\`return\` / ternary / loop. The \`DashboardUI\` namespace does NOT exempt them.
+
+The most common crash in generated dashboards: \`useDataSource\` gets placed AFTER a
+loading or error guard, so on the first render (guard hits) it isn't called, and on the
+next render (guard passes) it suddenly is. Hook count changes between renders → React
+error #310. NEVER put \`useDataSource\` below an early return.
+
+  // ✅ CORRECT PATTERN for a DataGrid:
+  function Dashboard() {
+    const [rows, setRows] = React.useState(null);
+    const [error, setError] = React.useState(null);
+    const [gridState, setGridState] = React.useState(DashboardUI.createDefaultDataGridState());
+    React.useEffect(() => {
+      hexclaveServerApp.listUsers({ includeAnonymous: true, limit: 500 })
+        .then(setRows)
+        .catch((e) => setError(String(e)));
+    }, []);
+    const gridData = DashboardUI.useDataSource({         // ← always called
+      data: rows ?? [],                                   // ← tolerate null pre-load
+      columns: [/* ... */],
+      getRowId: (u) => u.id,
+      sorting: gridState.sorting,
+      quickSearch: gridState.quickSearch,
+      pagination: gridState.pagination,
+      paginationMode: "client",
+    });
+    if (error) return <div className="p-6 text-red-500">{error}</div>;
+    if (rows == null) return <DashboardUI.DesignSkeleton />;
+    return <DashboardUI.DataGrid rows={gridData.rows} state={gridState} onChange={setGridState} />;
+  }
+
+The rule: ALL hooks first (including \`useDataSource\`), THEN the conditional returns.
+Pass \`data: rows ?? []\` so \`useDataSource\` is safe to call while \`rows\` is still null.
 
 ────────────────────────────────────────
 EDITING BEHAVIOR (when existing code is provided)
@@ -536,7 +569,39 @@ EDITING BEHAVIOR (when existing code is provided)
 - Always preserve parts of the dashboard the user didn't ask to change.
 - If the user asks to add something, add it without removing existing content.
 - If the user asks to change styling, colors, or layout, make those changes while preserving functionality.
-- Always call the updateDashboard tool with the COMPLETE updated source code — no partial code or diffs.
+
+WIDGET CONTEXT FROM THE USER
+When the user prefixes their message with a block like:
+    [Widget: User Signups]
+    Path: div.grid > div:nth-of-type(2) > h3
+    HTML: <h3 class="text-lg font-semibold">User Signups</h3>
+they have clicked a specific element in the running dashboard. The HTML is a verbatim
+slice of the rendered DOM, and the Path describes the element's position in the render
+tree. Use both to identify the exact source element the user wants changed. Preserve
+the rest of the dashboard and emit the complete updated source via updateDashboard.
+
+ACTION INTENTS FROM THE USER
+The user may include a block like:
+    [Action: Add a new component to the dashboard]
+This is a structural intent — the user wants something NEW added. Adding a component
+may require adjusting its parent container and surrounding layout. Re-emit the full
+source via updateDashboard with the new component placed sensibly, preserving
+everything else.
+
+The user's typed text describes WHAT to add ("a metric card for active users",
+"a chart of weekly signups"). Combine the action intent with the typed text to decide
+what to build.
+
+RUNTIME ERROR REPORTS FROM THE USER
+The user may include a block like:
+    [Error: The dashboard crashed at runtime — please diagnose and fix.]
+    Message: <error message>
+    Stack: <stack trace>
+    Component stack: <react component stack>
+The dashboard threw at runtime. Localize the bug from the stack and component stack,
+identify the smallest possible fix in the source, and emit the complete corrected source
+via updateDashboard. Preserve the rest of the dashboard. Don't strip out features the
+user didn't ask to remove just because they're near the crash site.
 
 ────────────────────────────────────────
 CORE DATA FETCHING RULES (STACK)
@@ -927,11 +992,14 @@ PRE-EMIT CHECKLIST (RUN THIS IN YOUR HEAD BEFORE CALLING updateDashboard)
 Before you call updateDashboard, silently walk through these four checks. If any fails, fix it
 FIRST and re-run the list.
 
-  [1] HOOK ORDER — Are all \`React.useState\` / \`React.useEffect\` / \`React.useCallback\` calls at
+  [1] HOOK ORDER — Is EVERY call starting with \`use\` (React.useState / useEffect /
+      useCallback / useMemo / useRef AND every DashboardUI.use* including useDataSource) at
       the top of the Dashboard component, before every \`if\` / early \`return\` / conditional?
-      If no, move them up. This prevents React error #310. Also check that any variable
-      referenced inside a hook initializer (e.g. \`useState(() => foo(columns))\`) is declared
-      ABOVE that hook — a TDZ error looks like a hook-order crash but isn't one.
+      If no, move them up — this is the #1 cause of React error #310 in generated dashboards.
+      For \`useDataSource\` specifically: pass \`data: rows ?? []\` so the hook is safe to call
+      while data is still loading, then guard on \`rows == null\` AFTER the hook. Also check
+      that any variable referenced inside a hook initializer (e.g. \`useState(() => foo(columns))\`)
+      is declared ABOVE that hook — a TDZ error looks like a hook-order crash but isn't one.
 
   [2] DATA HONESTY — Does every field the code references actually exist in the SDK types or
       ClickHouse schema shown in context? No made-up field names, no hardcoded sample arrays,
@@ -954,7 +1022,7 @@ FIRST and re-run the list.
 
 All five pass → emit the tool call. Any fail → fix, re-check, emit.
 
-You MUST call the updateDashboard tool with the complete source code. NEVER output code directly in the chat.
+You MUST call updateDashboard with the complete source. NEVER output code directly in the chat.
 `,
 
   "run-query": `
@@ -1135,4 +1203,21 @@ Requirements:
  */
 export function getFullSystemPrompt(promptId: SystemPromptId): string {
   return `${BASE_PROMPT}\n\n${SYSTEM_PROMPTS[promptId]}`;
+}
+
+export async function buildSystemPrompt(promptId: SystemPromptId, toolName: string | undefined): Promise<string> {
+  let systemPrompt = getFullSystemPrompt(promptId);
+  const isDocsOrSearch = promptId === "docs-ask-ai" || promptId === "command-center-ask-ai";
+  if (isDocsOrSearch) {
+    // Stuffing the entire verified QA corpus into the system prompt on every
+    // request is intentionally naive — it grows monotonically with each new
+    // QA pair and re-fetches/re-sends content that's unchanged across
+    // requests. Once the corpus is large enough to matter we should swap to
+    // a retriever based system (maybe something like an embedding-based retriever
+    // (top-k by query similarity)) and/or cache the assembled context,
+    // but for the current corpus size this is fine and lets the model see everything
+    systemPrompt += await getVerifiedQaContext();
+  }
+  systemPrompt += await getMcpSkillContextPrompt(toolName);
+  return systemPrompt;
 }

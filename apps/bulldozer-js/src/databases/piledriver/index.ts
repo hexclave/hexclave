@@ -1,15 +1,30 @@
+import { isBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { Database, DatabaseSeq } from "../index.js";
 import type { LowLevelDatabaseDebugSnapshot } from "../low-level/index.js";
 import type { PiledriverGarbageCollectionResult } from "./gc.js";
 
 export const isPiledriverHeapObjectSymbol = Symbol.for("hexclave-piledriver-heap-object-symbol");
+export type PiledriverHeapObjectLocalValue =
+  | { status: "locally-created", value: PiledriverObject }
+  | { status: "database-reference" };
 export type PiledriverHeapObject = {
   get(): Promise<PiledriverObject>,
+  getValueIfLocallyCreated(): PiledriverHeapObjectLocalValue,
   [isPiledriverHeapObjectSymbol]: true,
 };
 
+export class InvalidPiledriverSerializedObjectError extends Error {
+  constructor() {
+    super("Invalid serialized Piledriver object");
+  }
+}
+
 const heapObjectsMapNullSentinel = { __heapObjectsMapNullSentinel: true };
 export const heapObjectsByObject = new WeakMap<PiledriverObject & object, PiledriverHeapObject>();
+
+// TODO: Make heap-object creation database-scoped and brand both locally created and loaded
+// references with their owning Piledriver database. Passing a heap object between databases should
+// fail at the API boundary instead of implicitly loading and copying a foreign database reference.
 /**
  * Creates a new heap object, which will be stored as a reference by Piledriver.
  *
@@ -23,9 +38,13 @@ export function asHeapObject(obj: PiledriverObject): PiledriverHeapObject {
   const existing = heapObjectsByObject.get(obj ?? heapObjectsMapNullSentinel);
   if (existing) return existing;
 
+  const localValue: PiledriverHeapObjectLocalValue = { status: "locally-created", value: obj };
   const res: PiledriverHeapObject = {
     async get() {
       return obj;
+    },
+    getValueIfLocallyCreated() {
+      return localValue;
     },
     [isPiledriverHeapObjectSymbol]: true,
   };
@@ -49,8 +68,25 @@ export function piledriverObjectEquals(a: PiledriverObject, b: PiledriverObject)
   return false;
 }
 
+export type PiledriverSerializedFormAccess = {
+  getSerializedRootObject(key: ArrayBuffer): Promise<{ buffer: ArrayBuffer, seq: DatabaseSeq }>,
+  deserializeSerializedObject(buffer: ArrayBuffer, seq?: DatabaseSeq): Promise<{ object: PiledriverObject, seq: DatabaseSeq }>,
+  getSerializedHeapObject(key: ArrayBuffer): Promise<{ buffer: ArrayBuffer | null, seq: DatabaseSeq }>,
+  listHeapEntries(options: { startAfter?: ArrayBuffer, limit?: number }): Promise<{
+    entries: Array<{ key: ArrayBuffer, value: ArrayBuffer }>,
+    hasMore: boolean,
+  }>,
+};
+
 export type PiledriverDatabase = Database & {
   getRootObject(key: ArrayBuffer): Promise<{ object: PiledriverObject, seq: DatabaseSeq }>,
+  /**
+   * Optional because the integrity verifier inspects objects in their stored form. A backend that
+   * never serializes (in-memory) or uses a different codec (breezy's binary codec) cannot answer
+   * these calls; callers report the check as skipped, and breezy must implement this before it can
+   * become a production backend.
+   */
+  getSerializedFormAccess?(): PiledriverSerializedFormAccess,
   setRootObject(key: ArrayBuffer, value: PiledriverObject): Promise<{ seq: DatabaseSeq }>,
   deleteRootObject(key: ArrayBuffer): Promise<{ seq: DatabaseSeq }>,
   getGarbageCollectionProcessStartedAtMillis(): number,
@@ -63,3 +99,21 @@ export type PiledriverDatabaseDebugSnapshot = {
   roots: Array<{ keyBase64: string, keyUtf8: string | null, keyHex: string, serializedJson: unknown, valueByteLength: number }>,
   heap: Array<{ keyBase64: string, keyUtf8: string | null, keyHex: string, serializedJson: unknown, valueByteLength: number }>,
 };
+
+export function collectSerializedHeapReferences(jsonableObject: unknown, references: string[] = []): string[] {
+  if (Array.isArray(jsonableObject)) {
+    const tag = jsonableObject[0];
+    if (tag === "heap-reference") {
+      if (jsonableObject.length !== 2 || typeof jsonableObject[1] !== "string" || !isBase64(jsonableObject[1])) throw new InvalidPiledriverSerializedObjectError();
+      references.push(jsonableObject[1]);
+    } else if (tag === "array") {
+      if (jsonableObject.length !== 2 || !Array.isArray(jsonableObject[1])) throw new InvalidPiledriverSerializedObjectError();
+      for (const item of jsonableObject[1]) collectSerializedHeapReferences(item, references);
+    } else if (tag !== "NaN" && tag !== "Infinity" && tag !== "-Infinity" && tag !== "-0") {
+      throw new InvalidPiledriverSerializedObjectError();
+    }
+  } else if (jsonableObject !== null && typeof jsonableObject === "object") {
+    for (const item of Object.values(jsonableObject)) collectSerializedHeapReferences(item, references);
+  }
+  return references;
+}

@@ -192,19 +192,27 @@ async function countInFlightRunsOnOlderVersions(tenancyId: string, workflowId: s
 
 // ─── Listing workflows with stats ──────────────────────────────────────────
 
-type StatsRow = { workflowId: string, active: number, sleeping: number, failed7d: number };
+type StatsRow = { workflowId: string, total: number, active: number, sleeping: number, failed7d: number };
 type VolumeRow = { workflowId: string, day: Date, count: number };
 
 export async function listWorkflowsWithStats(tenancy: Tenancy): Promise<WorkflowSummaryJson[]> {
-  const definitions = await globalPrismaClient.$replica().$queryRaw<{
+  // Primary, unlike the aggregates below: the dashboard re-reads this list
+  // immediately after every mutation (pause/resume, deploy, delete) to refresh
+  // its cache, and replication waiting defaults to "none". Off the replica, a
+  // pause can come back reporting the state it had a moment ago and stick
+  // there until something else invalidates the cache. This row set is one
+  // indexed join per project — the expensive run aggregates stay on the
+  // replica, where staleness only costs a slightly old count.
+  const definitions = await globalPrismaClient.$queryRaw<{
     workflowId: string,
     displayName: string,
     latestVersion: number,
     createdAt: Date,
+    pausedAt: Date | null,
     manifest: WorkflowManifestJson,
     lastDeployedAt: Date,
   }[]>(Prisma.sql`
-    SELECT d."workflowId", d."displayName", d."latestVersion", d."createdAt", v."manifest", v."createdAt" AS "lastDeployedAt"
+    SELECT d."workflowId", d."displayName", d."latestVersion", d."createdAt", d."pausedAt", v."manifest", v."createdAt" AS "lastDeployedAt"
     FROM "WorkflowDefinition" d
     JOIN "WorkflowVersion" v
       ON v."tenancyId" = d."tenancyId" AND v."workflowId" = d."workflowId" AND v."version" = d."latestVersion"
@@ -215,6 +223,9 @@ export async function listWorkflowsWithStats(tenancy: Tenancy): Promise<Workflow
 
   const stats = await globalPrismaClient.$replica().$queryRaw<StatsRow[]>(Prisma.sql`
     SELECT "workflowId",
+      -- The dashboard's Runs tab shows the full retained history, not only
+      -- the operationally active subset counted by the fields below.
+      COUNT(*)::int AS "total",
       COUNT(*) FILTER (WHERE "state" IN ('QUEUED', 'RUNNING'))::int AS "active",
       COUNT(*) FILTER (WHERE "state" = 'SLEEPING')::int AS "sleeping",
       COUNT(*) FILTER (WHERE "state" = 'FAILED' AND "completedAt" > NOW() - interval '7 days')::int AS "failed7d"
@@ -251,7 +262,10 @@ export async function listWorkflowsWithStats(tenancy: Tenancy): Promise<Workflow
       display_name: definition.displayName,
       latest_version: definition.latestVersion,
       triggers: definition.manifest.triggers,
+      is_paused: definition.pausedAt != null,
+      paused_at_millis: definition.pausedAt?.getTime() ?? null,
       stats: {
+        total_runs: stat?.total ?? 0,
         active_runs: stat?.active ?? 0,
         sleeping_runs: stat?.sleeping ?? 0,
         failed_7d: stat?.failed7d ?? 0,
@@ -291,6 +305,85 @@ export async function deleteWorkflow(tenancy: Tenancy, workflowId: string): Prom
     await tx.workflowRun.deleteMany({ where: { tenancyId: tenancy.id, workflowId } });
     await tx.workflowVersion.deleteMany({ where: { tenancyId: tenancy.id, workflowId } });
   });
+}
+
+/**
+ * Pauses or resumes a workflow's intake. Pausing stops NEW runs from being
+ * created; runs already in flight keep executing to completion (there is no
+ * paused run state — see the note on WorkflowRunStateJson).
+ *
+ * Resuming also fast-forwards every schedule cursor to the resume instant, in
+ * the same transaction as the state change so no concurrent tick can observe
+ * a resumed workflow with a stale cursor. Without it, the engine would treat
+ * the whole paused interval as a catch-up backlog and materialize every cron
+ * occurrence that fell inside it — a month-long pause would resume into
+ * tens of thousands of runs. Two limits of that fast-forward, both accepted:
+ * it also discards occurrences the engine already owed BEFORE the pause, and
+ * it does not retract schedule events already sitting in the outbox — a
+ * catch-up flood that was materialized before the pause still dispatches if
+ * the operator resumes before the engine finishes draining it.
+ */
+export async function setWorkflowPaused(tenancy: Tenancy, workflowId: string, isPaused: boolean): Promise<{ isPaused: boolean, pausedAtMillis: number | null }> {
+  validateWorkflowId(workflowId);
+
+  const now = new Date();
+  const result = await retryTransaction(globalPrismaClient, async (tx) => {
+    // One conditional UPDATE rather than read-then-write: this runs at READ
+    // COMMITTED, so a check outside the write would let two concurrent
+    // toggles both pass it and the loser would report a state it did not
+    // commit — for an emergency stop, "reported paused, actually running" is
+    // the one outcome worth ruling out structurally. Zero rows updated means
+    // the workflow was already in the requested state.
+    const updated = await tx.$queryRaw<{ pausedAt: Date | null }[]>(Prisma.sql`
+      UPDATE "WorkflowDefinition"
+      SET "pausedAt" = ${isPaused ? now : null}, "updatedAt" = NOW()
+      WHERE "tenancyId" = ${tenancy.id}::uuid
+        AND "workflowId" = ${workflowId}
+        AND "pausedAt" IS ${isPaused ? Prisma.sql`NULL` : Prisma.sql`NOT NULL`}
+      RETURNING "pausedAt"
+    `);
+
+    if (updated.length === 0) {
+      // Either the workflow does not exist, or it is already in the requested
+      // state — re-pausing keeps the original pausedAt so "paused 3 days ago"
+      // stays true, and re-resuming leaves the schedule cursors alone rather
+      // than skipping occurrences it never paused through.
+      const existing = await tx.workflowDefinition.findUnique({
+        where: { tenancyId_workflowId: { tenancyId: tenancy.id, workflowId } },
+        select: { pausedAt: true },
+      });
+      if (existing == null) return null;
+      return { isPaused: existing.pausedAt != null, pausedAtMillis: existing.pausedAt?.getTime() ?? null };
+    }
+
+    if (!isPaused) {
+      // updateMany alone would miss a schedule whose cursor row does not exist
+      // yet, and the engine's self-healing path would then seed that cursor
+      // back at the version's deployment time — reopening the catch-up window
+      // this fast-forward exists to close. Seed the missing rows here instead.
+      const latestVersion = await tx.workflowVersion.findFirst({
+        where: { tenancyId: tenancy.id, workflowId },
+        orderBy: { version: "desc" },
+        select: { manifest: true },
+      });
+      const scheduleKeys = latestVersion == null ? [] : getStoredScheduleKeys(latestVersion.manifest);
+      if (scheduleKeys.length > 0) {
+        await tx.workflowScheduleCursor.createMany({
+          data: scheduleKeys.map((scheduleKey) => ({ tenancyId: tenancy.id, workflowId, scheduleKey, lastMaterializedAt: now })),
+          skipDuplicates: true,
+        });
+      }
+      await tx.workflowScheduleCursor.updateMany({
+        where: { tenancyId: tenancy.id, workflowId },
+        data: { lastMaterializedAt: now },
+      });
+    }
+
+    return { isPaused, pausedAtMillis: isPaused ? now.getTime() : null };
+  });
+
+  if (result == null) throw new StatusError(404, `Workflow "${workflowId}" not found`);
+  return result;
 }
 
 export async function listWorkflowVersions(tenancy: Tenancy, workflowId: string): Promise<WorkflowVersionJson[]> {

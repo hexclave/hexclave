@@ -580,17 +580,38 @@ export const USER_SPECIFIED_ID_PATTERN = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/;
 export const USER_SPECIFIED_ID_MAX_LENGTH = 63;
 
 /**
+ * Ids that cannot be used as an object KEY, which is what these ids are for.
+ *
+ * `__proto__` is the one that actually breaks: `obj["__proto__"] = value` on a
+ * plain object invokes the prototype setter instead of creating an own
+ * property, so the value silently disappears — and Prisma's JSON serializer
+ * strips the key even when the object is built prototype-less, so a record
+ * keyed by one cannot be stored at all. Refusing it at the door turns a
+ * confusing mid-flight failure ("no image was built for __proto__", a service
+ * stuck at "pending" whatever the runtime reports) into a message that names
+ * the problem.
+ *
+ * `constructor` and `prototype` assign cleanly and are listed for the same
+ * reason a reserved-word list exists at all: they are a trap for the next
+ * consumer that reaches for `in` or a prototype-bearing lookup.
+ */
+export const RESERVED_USER_SPECIFIED_IDS = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
  * Checks if the given string is a valid user-specified ID.
  */
 export function isValidUserSpecifiedId(id: string): boolean {
-  return id.length > 0 && id.length <= USER_SPECIFIED_ID_MAX_LENGTH && USER_SPECIFIED_ID_PATTERN.test(id);
+  return id.length > 0
+    && id.length <= USER_SPECIFIED_ID_MAX_LENGTH
+    && USER_SPECIFIED_ID_PATTERN.test(id)
+    && !RESERVED_USER_SPECIFIED_IDS.has(id);
 }
 
 /**
  * Gets the error message for an invalid user-specified ID.
  */
 export function getUserSpecifiedIdErrorMessage(idName: `${string}Id`): string {
-  return `${idName} must contain only letters, numbers, underscores, and hyphens, and not start with a hyphen`;
+  return `${idName} must contain only letters, numbers, underscores, and hyphens, and not start with a hyphen, and must not be one of ${[...RESERVED_USER_SPECIFIED_IDS].join(", ")}`;
 }
 
 /**
@@ -608,7 +629,10 @@ export function sanitizeUserSpecifiedId(input: string): string {
   return sanitized.replace(/^-+/, '');
 }
 
-export const userSpecifiedIdSchema = (idName: `${string}Id`) => yupString().max(USER_SPECIFIED_ID_MAX_LENGTH).matches(USER_SPECIFIED_ID_PATTERN, getUserSpecifiedIdErrorMessage(idName));
+export const userSpecifiedIdSchema = (idName: `${string}Id`) => yupString()
+  .max(USER_SPECIFIED_ID_MAX_LENGTH)
+  .matches(USER_SPECIFIED_ID_PATTERN, getUserSpecifiedIdErrorMessage(idName))
+  .test("not-reserved", `${idName} must not be a reserved name (${[...RESERVED_USER_SPECIFIED_IDS].join(", ")})`, (value) => value == null || !RESERVED_USER_SPECIFIED_IDS.has(value));
 
 /**
  * Validates that a value is a decimal string like `"9.99"` or `"1000"` (see `MoneyAmount`).

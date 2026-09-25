@@ -62,11 +62,16 @@ type Interaction =
  * what it shipped, not a copy of the graph — so a service reconfigured since will draw with
  * today's ports and env.
  */
-export function BoardCanvas({ deployment, deployments }: {
+export function BoardCanvas({ deployment, deployments, linkedServiceId, linkedPanel }: {
   deployment: AdminDeploymentJson,
   // Every deployment the list has loaded, of every source. What the other
   // sources had running at `deployment`'s moment is read from these.
   deployments: AdminDeploymentJson[],
+  // The service and panel a `hexclave deploy` link named, or null. Props rather
+  // than read from the URL here: page-client strips the params as soon as it has
+  // them, and this component mounts after that.
+  linkedServiceId: string | null,
+  linkedPanel: string | null,
 }) {
   const variant = BLUEPRINT_VARIANT;
   const adminApp = useAdminApp();
@@ -99,6 +104,17 @@ export function BoardCanvas({ deployment, deployments }: {
   }, [refresh]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The service a `hexclave deploy` link names, opened once the board knows its
+  // services. Applied once: after that the board is the user's to navigate.
+  const appliedLink = useRef(false);
+  // The linked panel, held until the user navigates away from the linked node.
+  // Cleared rather than re-derived, so that closing the pane and reopening the
+  // same service is a fresh look at it — not a replay of the link.
+  const [pendingPanel, setPendingPanel] = useState<string | null>(linkedPanel);
+  const selectService = useCallback((id: string | null) => {
+    setSelectedId(id);
+    setPendingPanel(null);
+  }, []);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, zoom: 1 });
   // In-session drag positions, keyed by service id, on top of the
@@ -131,6 +147,16 @@ export function BoardCanvas({ deployment, deployments }: {
         return override != null ? { ...service, x: override.x, y: override.y } : service;
       });
   }, [apiServices, hexclaveApiHost, positionOverrides, scope]);
+
+  useEffect(() => {
+    if (appliedLink.current || linkedServiceId === null || services === null) return;
+    const match = services.find((service) => service.id === linkedServiceId);
+    appliedLink.current = true;
+    // A link to a service this deployment does not have leaves the map open,
+    // which is the right place to be when the named one is gone.
+    if (match !== undefined) setSelectedId(match.id);
+    else setPendingPanel(null);
+  }, [linkedServiceId, services]);
 
   const selected = services?.find((s) => s.id === selectedId) ?? null;
   const connections = useMemo(() => deriveConnections(services ?? []), [services]);
@@ -285,7 +311,7 @@ export function BoardCanvas({ deployment, deployments }: {
       if (it && !it.moved) {
         // A click without meaningful movement: select a node, or deselect on
         // empty canvas.
-        setSelectedId(it.mode === "node" ? it.id : null);
+        selectService(it.mode === "node" ? it.id : null);
       }
       interactionRef.current = null;
       setDraggingId(null);
@@ -296,15 +322,16 @@ export function BoardCanvas({ deployment, deployments }: {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
     };
-  }, []);
+    // `selectService` is useCallback([]), so listing it re-subscribes nothing.
+  }, [selectService]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSelectedId(null);
+      if (e.key === "Escape") selectService(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [selectService]);
 
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden rounded-2xl ring-1 ring-black/[0.06] dark:ring-white/[0.06]">
@@ -380,7 +407,7 @@ export function BoardCanvas({ deployment, deployments }: {
         <div className="flex items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-xs text-muted-foreground ring-1 ring-black/[0.08] backdrop-blur-md dark:bg-background/70 dark:ring-white/[0.08]">
           <FileTsIcon className="h-4 w-4 shrink-0" />
           <span>
-            Everything running when deployment #{deployment.number} finished. Services are defined by the <span className="font-mono">services</span> member of the <span className="font-mono">deployment</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced by <span className="font-mono">hexclave deploy</span>.
+            Everything running when deployment #{deployment.number} finished. Services are defined by the <span className="font-mono">services</span> member of the <span className="font-mono">deploy</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced by <span className="font-mono">hexclave deploy</span>.
           </span>
         </div>
         {/* Legend. Only earns its space once a second source is on the map —
@@ -440,8 +467,13 @@ export function BoardCanvas({ deployment, deployments }: {
             // service), and the outcome is what that deploy did with this one.
             // `?? null` covers the managed hexclave node, which is in no deploy.
             deploymentId={deployment.id}
+            // False when no builder ever started, because every service of the
+            // deploy ran an already-built image. Distinct from "not deployed
+            // yet", so the Build logs tab can say which it is.
+            hasBuildLogs={deployment.has_build_logs}
+            initialTab={selected.id === linkedServiceId ? pendingPanel : null}
             outcome={outcomeByServiceId.get(selected.id) ?? null}
-            onClose={() => setSelectedId(null)}
+            onClose={() => selectService(null)}
             refresh={refresh}
           />
         )}

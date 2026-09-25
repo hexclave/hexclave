@@ -32,8 +32,7 @@ import { hexclaveClientApp } from "../src/stack/client";
 
 // Like most `getXyz()` or `listXyz()` functions, Hexclave provides a `useUser()` hook equivalent to `getUser()`.
 // It behaves the same, but returns the user directly instead of a Promise, and updates when the user object changes.
-// Note: In Server Components, you can still use `await hexclaveServerApp.getUser()`.
-export default async function MyReactComponent() {
+export default function MyReactComponent() {
   const user = hexclaveClientApp.useUser();
   if (user) {
     return <div>Hello, {user.displayName ?? user.primaryEmail ?? "anon"}</div>;
@@ -46,20 +45,13 @@ export default async function MyReactComponent() {
 
 ### Protecting a page & requiring a signed-in user
 
-Sometimes, you want to retrieve the user only if they're signed in, and redirect to the sign-in page otherwise. In this case, simply pass `{ or: "redirect" }`, and the function will never return `null`.
+Sometimes, you want to retrieve the user only if they're signed in, and redirect to the sign-in
+page otherwise. In a Client Component, pass `{ or: "redirect" }` to `useUser`; the hook will never
+return `null`.
 
 You can also use `{ or: "throw" }` to throw an error instead — useful in API routes and server actions where a redirect doesn't make sense.
 
 In both cases, the return type is non-nullable, so you don't need to handle `null`.
-
-<CodeGroup dropdown>
-```ts my-app.ts
-import { hexclaveClientApp } from "../src/stack/client";
-
-const user = await hexclaveClientApp.getUser({ or: "redirect" });
-// user is guaranteed to be non-null here
-console.log("Signed in: " + (user.displayName ?? user.primaryEmail ?? "<Unnamed>"));
-```
 
 ```tsx my-react-component.tsx
 "use client";
@@ -71,7 +63,6 @@ export default function MyReactComponent() {
   return <div>{`Hello, ${user.displayName ?? user.primaryEmail ?? "anon"}`}</div>;
 }
 ```
-</CodeGroup>
 
 ## User data
 

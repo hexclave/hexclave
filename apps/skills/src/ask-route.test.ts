@@ -77,6 +77,16 @@ describe("skill-site ask route", () => {
               "content": "How do I add Hexclave?",
               "role": "user",
             },
+            {
+              "content": "Supporting information for the preceding question:
+
+        Context:
+        Installing Hexclave in a static HTML app
+
+        Project:
+        Analytics dashboard, TypeScript and Next.js",
+              "role": "user",
+            },
           ],
           "quality": "smart",
           "speed": "fast",

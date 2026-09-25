@@ -343,6 +343,19 @@ Implementation:
    - If user.isRestricted and not includeRestricted:
      - "redirect": redirect to onboarding URL (not sign-in!)
      - otherwise: handle as step 3
+8. [JS SDK only] The `getUser({ or: "redirect" })` overload is deprecated on both client and
+   server app objects. App type controls permissions, not whether the call runs in a browser, so an
+   async read must not be the recommended place to choose a navigation strategy. React code should
+   use `useUser({ or: "redirect" })`; other browser code should call `getUser()` and explicitly
+   invoke `redirectToSignIn()` when it returns null.
+9. If a deprecated redirect call runs during server rendering and its sign-in or onboarding target
+   is hosted or otherwise cross-origin, throw the server cross-origin redirect setup error instead
+   of navigating. Server-rendered code cannot capture the browser URL or set the PKCE verifier
+   cookie required for that handoff.
+
+The React `useUser({ or: "redirect" })` API remains supported. When its target is hosted or
+otherwise cross-origin, server rendering must bail the subtree out to its Suspense fallback without
+starting navigation; hydration retries the subtree and starts the redirect in the browser.
 
 Errors (only when or="throw"):
   UserNotSignedIn
@@ -1011,8 +1024,8 @@ Options:
   replace: bool? - if true, replace current history entry instead of pushing
   noRedirectBack: bool? - if true, don't return to the initiating page after auth. Same-domain
     flows use their configured default destination. Cross-domain flows must still complete the
-    normal handoff back to the source app, with the source app's configured home URL as the final
-    after-callback destination.
+    normal handoff back to the source app, with the source app's configured afterSignIn URL as the
+    final after-callback destination.
 
 Methods:
   redirectToSignIn()         - redirect to signIn URL
@@ -1039,7 +1052,7 @@ Implementation:
 2. For signIn/signUp/onboarding:
    - If noRedirectBack=true and the target is cross-domain, perform the normal cross-domain
      callback/authorize handoff, but set its final after-callback destination to the source app's
-     configured home URL instead of the initiating page. The hosted URL may carry an internal
+     configured afterSignIn URL instead of the initiating page. The hosted URL may carry an internal
      after_auth_return_to callback URL as part of that handoff, but it must not return to the
      initiating deep link.
    - If noRedirectBack=true and the target is same-domain, don't add redirect-back state; let the
@@ -1056,10 +1069,14 @@ Implementation:
 4. Perform redirect based on redirectMethod config:
    - "browser": window.location.assign() or .replace()
    - "nextjs": Next.js redirect() function [JS-ONLY]
+   - "tanstack-start": throw a TanStack Start redirect during server rendering for same-origin
+     targets
    - "none": don't redirect (for headless/API use)
    - Custom navigate function: call it with the URL
 
-Do not error, except when the redirect loop breaker triggers (see below).
+When no browser is available, hosted targets and custom cross-origin targets must throw a setup
+error before navigation. They require browser URL and cookie APIs for redirect-back and PKCE.
+Otherwise, do not error except when the redirect loop breaker triggers (see below).
 
 ### Redirect-back state mirror  [BROWSER-ONLY]
 

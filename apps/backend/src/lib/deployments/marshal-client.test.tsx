@@ -98,4 +98,40 @@ describe("MarshalClient", () => {
       endpoint: "GET /v1/namespaces/test-namespace/services/test-service",
     });
   });
+
+  it("gives starting a deployment far longer than the default request tier", async () => {
+    // REGRESSION. This ran on the 60s default and 504'd on a 30 MB source while
+    // the runtime carried on — creating a deployment, a Fly app and a builder
+    // machine that the caller had no id for. It validates the archive out of the
+    // bucket, calls ensureApp once per target in sequence, and starts the
+    // builder before it answers, so it belongs with the apply tier, not the
+    // default one. Asserted through the AbortSignal the request actually
+    // carries, since that is what enforces it.
+    const timeouts: number[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      timeouts.push(ms);
+      return new AbortController().signal;
+    });
+    // A fresh Response per call: a body can only be read once.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+    const client = new MarshalClient({ apiKey: "test-key", baseUrl: "https://marshal.example.com" });
+
+    await client.startSourceDeployment("test-namespace", "test-source", { targets: [], order: [], runtime: "gcp" });
+    await client.startSourceDeployment("test-namespace", "test-source", { targets: [], order: [], runtime: "fly" });
+    await client.getService("test-namespace", "test-service");
+
+    const [deployStartMs, flyDeployStartMs, defaultMs] = timeouts;
+    expect(deployStartMs).toBeGreaterThan(defaultMs);
+    expect(flyDeployStartMs).toBeGreaterThan(defaultMs);
+    // A first GCP deploy into a namespace may provision a tenant project synchronously when
+    // the pool is empty; a Fly deploy has nothing of the kind and keeps the shorter budget.
+    expect(deployStartMs).toBe(13 * 60 * 1000);
+    expect(flyDeployStartMs).toBe(5 * 60 * 1000);
+    // And under the 800s maxDuration both services declare to Vercel, so this
+    // timeout fires first and the caller gets a 504 with a body rather than a
+    // platform-killed invocation. Sized for the first deploy into a namespace when
+    // Marshal's project pool is empty: project creation + billing propagation + API
+    // enablement can exceed five minutes before the runtime even sees the archive.
+    expect(deployStartMs).toBeLessThan(800 * 1000);
+  });
 });

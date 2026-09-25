@@ -72,8 +72,8 @@ export type EnvVar = {
 };
 
 export type BoardService = {
-  // The service id — the key of the record returned by the config file's
-  // `services` export, or "hexclave" for the managed service.
+  // The service id — the key of the `services` record returned by the deploy
+  // file's `deploy` export, or "hexclave" for the managed service.
   id: string,
   name: string,
   type: ServiceType,
@@ -148,7 +148,7 @@ export const SERVICE_TYPE_META = new Map<ServiceType, ServiceTypeMeta>([
     label: "Container",
     icon: CubeIcon,
     accent: "cyan",
-    hint: "A container built from your source (Railpack auto-detected, or your Dockerfile), deployed with `hexclave deploy`.",
+    hint: "A container built from your source (Railpack auto-detected, or your Dockerfile) or pulled from a public image registry, deployed with `hexclave deploy`.",
   }],
 ]);
 

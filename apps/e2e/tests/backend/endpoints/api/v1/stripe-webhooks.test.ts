@@ -215,6 +215,7 @@ it("deduplicates one-time purchase on payment_intent.succeeded retry", async ({ 
   const payloadObj = {
     id: uniqueEventId("retry"),
     type: "payment_intent.succeeded",
+    created: Math.floor(new Date().getTime() / 1000),
     account: accountId,
     data: {
       object: {
@@ -311,6 +312,7 @@ it("sends a payment receipt email for one-time purchases", async ({ expect }) =>
   const payloadObj = {
     id: uniqueEventId("receipt"),
     type: "payment_intent.succeeded",
+    created: Math.floor(new Date().getTime() / 1000),
     account: accountId,
     data: {
       object: {
@@ -416,6 +418,7 @@ it("sends exactly one receipt when Stripe redelivers the same event", async ({ e
   const payloadObj = {
     id: eventId,
     type: "payment_intent.succeeded",
+    created: Math.floor(new Date().getTime() / 1000),
     account: accountId,
     data: {
       object: {

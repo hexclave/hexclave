@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { MarshalDeployment } from "./marshal-client";
-import { autoInjectedEnvVars, definitionFromServiceRow, deploymentToApiShape, effectiveMinInstances, marshalSpecForDefinition } from "./index";
+import { assertAlwaysOnMemoryCapacity, autoInjectedEnvVars, definitionFromServiceRow, deploymentToApiShape, effectiveMinInstances, marshalSpecForDefinition, normalizeHostnameOrThrow } from "./index";
+
+describe("deployment domain names", () => {
+  it("reserves platform-generated names while preserving customer and hosted-component names", () => {
+    expect(() => normalizeHostnameOrThrow("Example.deploy.built-with-hexclave.com")).toThrow("managed automatically");
+    expect(() => normalizeHostnameOrThrow("deploy.built-with-hexclave.com")).toThrow("managed automatically");
+    expect(() => normalizeHostnameOrThrow("nested.example.deploy.built-with-hexclave.com")).toThrow("managed automatically");
+    expect(normalizeHostnameOrThrow("project-id.built-with-hexclave.com")).toBe("project-id.built-with-hexclave.com");
+    expect(normalizeHostnameOrThrow("deploy-example.customer.com")).toBe("deploy-example.customer.com");
+  });
+});
 
 const baseRow = {
   serviceId: "api",
@@ -10,6 +20,14 @@ const baseRow = {
   maxInstances: 1,
   rootDirectory: null,
   dockerfilePath: null,
+  // Null = built from source, which is what every row here is.
+  image: null as string | null,
+  // Null = the base decides the build, and the image decides what starts.
+  buildCommand: null as string | null,
+  startCommand: null as string | null,
+  // Null = the type's default size, which is what every row predating the
+  // column reads as.
+  memoryMb: null as number | null,
   env: [] as [string, { value: string }][],
 };
 
@@ -127,10 +145,43 @@ describe("deploymentToApiShape", () => {
     finishedAt: null,
     error: null,
     marshalBuildId: "build-1",
+    // A source build, which is what every row here is unless it says otherwise.
+    hasBuildLogs: true,
     plannedServiceIds: ["web", "api"],
     services: { web: { status: "deployed", url: "https://web.example.com" } },
+    sourceManifest: null,
     source: { sourceId: "backend" },
     ...overrides,
+  });
+
+  it("returns the source manifest on a full read and omits it on a summary", () => {
+    // The manifest is per-deployment and the LIST endpoint is polled every few
+    // seconds while a deploy is in flight; shipping every manifest in every page
+    // of that poll costs far more than the listing itself, for a tab the reader
+    // may never open.
+    const manifest = { file_count: 1, total_bytes: 10, compressed_bytes: 4, entries: [{ path: "a.txt", bytes: 10 }] };
+    expect(deploymentRow({ sourceManifest: manifest }).source_manifest).toEqual(manifest);
+    expect(deploymentToApiShape({
+      id: "dep-1", number: 7, status: "BUILDING", triggeredBy: "cli", createdAt: new Date(1000),
+      finishedAt: null, error: null, marshalBuildId: "build-1", hasBuildLogs: true,
+      plannedServiceIds: ["web"], services: {}, sourceManifest: manifest, source: { sourceId: "backend" },
+    }, "summary").source_manifest).toBeNull();
+  });
+
+  it("reports no manifest for a row that never recorded one", () => {
+    expect(deploymentRow().source_manifest).toBeNull();
+    // A shape this server does not recognise loses the listing, not the deploy.
+    expect(deploymentRow({ sourceManifest: { file_count: "many" } }).source_manifest).toBeNull();
+  });
+
+  it("offers build logs only when a build actually ran", () => {
+    // A deployment whose every service ran an already-built image starts no
+    // builder machine, so there is no log — and an affordance for an empty one
+    // is worse than none.
+    expect(deploymentRow().has_build_logs).toBe(true);
+    expect(deploymentRow({ hasBuildLogs: false }).has_build_logs).toBe(false);
+    // ...and neither is there one before the runtime has accepted the deployment.
+    expect(deploymentRow({ marshalBuildId: null }).has_build_logs).toBe(false);
   });
 
   it("reports the deployment source and every planned service, outcome or not", () => {
@@ -140,8 +191,8 @@ describe("deploymentToApiShape", () => {
     // `api` has no outcome yet: it is still pending rather than missing from
     // the list, which is what lets the dashboard show what a deploy will ship.
     expect(shape.services).toEqual([
-      { service_id: "web", status: "deployed", url: "https://web.example.com", revision: null, error: null },
-      { service_id: "api", status: "pending", url: null, revision: null, error: null },
+      { service_id: "web", status: "deployed", url: "https://web.example.com", revision: null, image: null, error: null },
+      { service_id: "api", status: "pending", url: null, revision: null, image: null, error: null },
     ]);
   });
 
@@ -153,12 +204,12 @@ describe("deploymentToApiShape", () => {
   it("keeps an outcome whose service is missing from the plan", () => {
     // A hand-edited row: showing the outcome beats silently dropping it.
     const shape = deploymentRow({ plannedServiceIds: [], services: { ghost: { status: "failed", error: "boom" } } });
-    expect(shape.services).toEqual([{ service_id: "ghost", status: "failed", url: null, revision: null, error: "boom" }]);
+    expect(shape.services).toEqual([{ service_id: "ghost", status: "failed", url: null, revision: null, image: null, error: "boom" }]);
   });
 
   it("survives a plannedServiceIds value that is not a string array", () => {
     expect(deploymentRow({ plannedServiceIds: { nonsense: true } }).services).toEqual([
-      { service_id: "web", status: "deployed", url: "https://web.example.com", revision: null, error: null },
+      { service_id: "web", status: "deployed", url: "https://web.example.com", revision: null, image: null, error: null },
     ]);
   });
 });
@@ -176,8 +227,34 @@ describe("marshal deployment shape", () => {
       error: null,
       started_at_millis: 1,
       finished_at_millis: null,
-      services: [{ service_key: "web", status: "deployed", revision: "rev1", url: null, error: null }],
+      services: [{ service_key: "web", status: "deployed", revision: "rev1", url: null, image: "registry.fly.io/web@sha256:abc", error: null }],
     };
     expect(deployment.services[0].service_key).toBe("web");
+  });
+});
+
+
+describe("project always-on memory", () => {
+  const service = (id: number, runtime: "fly" | "gcp", type: "server" | "serverless", min: number) => ({
+    serviceId: `service-${id}`,
+    runtime,
+    definition: { ...definitionFromServiceRow({ ...baseRow, type, minInstances: min, memoryMb: 8192 }), max_instances: type === "server" ? 1 : 10 },
+  });
+
+  it("counts every minimum instance, rather than one allocation per service", () => {
+    expect(() => assertAlwaysOnMemoryCapacity([service(1, "fly", "serverless", 4)])).not.toThrow();
+    expect(() => assertAlwaysOnMemoryCapacity([service(1, "fly", "serverless", 10)])).toThrow(/80GB/);
+  });
+
+  it("allows exactly the project limit and rejects an additional allocation", () => {
+    const services = Array.from({ length: 4 }, (_, i) => service(i, "fly", "serverless", 1));
+    expect(() => assertAlwaysOnMemoryCapacity(services)).not.toThrow();
+    expect(() => assertAlwaysOnMemoryCapacity([...services, service(5, "fly", "serverless", 1)])).toThrow(/40GB/);
+  });
+
+  it("counts GCP servers even with a zero minimum, while Fly servers can suspend", () => {
+    expect(() => assertAlwaysOnMemoryCapacity(Array.from({ length: 5 }, (_, i) => service(i, "gcp", "server", 0)))).toThrow(/40GB/);
+    expect(() => assertAlwaysOnMemoryCapacity(Array.from({ length: 5 }, (_, i) => service(i, "fly", "server", 0)))).not.toThrow();
+    expect(() => assertAlwaysOnMemoryCapacity([service(1, "gcp", "serverless", 0)])).not.toThrow();
   });
 });

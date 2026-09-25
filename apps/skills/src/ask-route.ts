@@ -65,7 +65,7 @@ function getStringQueryParam(searchParams: URLSearchParams, name: string): strin
 function getAskQuestion(searchParams: URLSearchParams): string {
   const question = getStringQueryParam(searchParams, "question") ?? getStringQueryParam(searchParams, "query");
   if (question == null) {
-    throw new QueryArgumentError("Missing query parameter \"question\".");
+    throw new QueryArgumentError("Missing query parameters. The format for the ask endpoint is: /ask?question=...&context=...&user=...&project=...\n\n" + remindersPrompt);
   }
   return question;
 }

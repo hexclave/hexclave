@@ -6872,6 +6872,575 @@
         }
       }
     },
+    "/session-replays": {
+      "get": {
+        "summary": "List session replays",
+        "description": "Lists session replays for the project, most recently active first. Supports filtering by user, team, duration, last-event time, and click count, and cursor-based pagination.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "user_ids",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "team_ids",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "duration_ms_min",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "duration_ms_max",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "last_event_at_from_millis",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "last_event_at_to_millis",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "click_count_min",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Session Replays"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/session-replays",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "refresh_token_id": {
+                            "type": "string"
+                          },
+                          "project_user": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "display_name": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  null
+                                ]
+                              },
+                              "primary_email": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  null
+                                ]
+                              }
+                            },
+                            "required": [
+                              "id"
+                            ]
+                          },
+                          "started_at_millis": {
+                            "type": "number"
+                          },
+                          "last_event_at_millis": {
+                            "type": "number"
+                          },
+                          "chunk_count": {
+                            "type": "number"
+                          },
+                          "event_count": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "refresh_token_id",
+                          "project_user",
+                          "started_at_millis",
+                          "last_event_at_millis",
+                          "chunk_count",
+                          "event_count"
+                        ]
+                      }
+                    },
+                    "pagination": {
+                      "type": "object",
+                      "properties": {
+                        "next_cursor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            null
+                          ]
+                        }
+                      },
+                      "required": []
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "pagination"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session-replays/{session_replay_id}": {
+      "get": {
+        "summary": "Get session replay",
+        "description": "Returns metadata for a single session replay, including the user it belongs to, its start and last-event timestamps, and its chunk and event counts.",
+        "parameters": [
+          {
+            "name": "session_replay_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Session Replays"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/session-replays/{session_replay_id}",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "refresh_token_id": {
+                      "type": "string"
+                    },
+                    "project_user": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "display_name": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            null
+                          ]
+                        },
+                        "primary_email": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            null
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id"
+                      ]
+                    },
+                    "started_at_millis": {
+                      "type": "number"
+                    },
+                    "last_event_at_millis": {
+                      "type": "number"
+                    },
+                    "chunk_count": {
+                      "type": "number"
+                    },
+                    "event_count": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "refresh_token_id",
+                    "project_user",
+                    "started_at_millis",
+                    "last_event_at_millis",
+                    "chunk_count",
+                    "event_count"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session-replays/{session_replay_id}/chunks": {
+      "get": {
+        "summary": "List session replay chunks",
+        "description": "Lists the chunks of a session replay in recording order, with cursor-based pagination. Each chunk describes a batch of recorded events without including the events themselves.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "session_replay_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Session Replays"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/session-replays/{session_replay_id}/chunks",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "batch_id": {
+                            "type": "string"
+                          },
+                          "session_replay_segment_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              null
+                            ]
+                          },
+                          "browser_session_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              null
+                            ]
+                          },
+                          "event_count": {
+                            "type": "number"
+                          },
+                          "byte_length": {
+                            "type": "number"
+                          },
+                          "first_event_at_millis": {
+                            "type": "number"
+                          },
+                          "last_event_at_millis": {
+                            "type": "number"
+                          },
+                          "created_at_millis": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "batch_id",
+                          "event_count",
+                          "byte_length",
+                          "first_event_at_millis",
+                          "last_event_at_millis",
+                          "created_at_millis"
+                        ]
+                      }
+                    },
+                    "pagination": {
+                      "type": "object",
+                      "properties": {
+                        "next_cursor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            null
+                          ]
+                        }
+                      },
+                      "required": []
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "pagination"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session-replays/{session_replay_id}/chunks/{chunk_id}/events": {
+      "get": {
+        "summary": "Get session replay chunk events",
+        "description": "Returns the raw rrweb events for a single chunk of a session replay. These are the events a replay player consumes.",
+        "parameters": [
+          {
+            "name": "session_replay_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "chunk_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Session Replays"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/session-replays/{session_replay_id}/chunks/{chunk_id}/events",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  },
+                  "required": [
+                    "events"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session-replays/{session_replay_id}/events": {
+      "get": {
+        "summary": "Get session replay events",
+        "description": "Returns chunks of a session replay together with their raw rrweb events, in a single request. Use the offset and limit parameters to page through a long recording.",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "session_replay_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Session Replays"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/session-replays/{session_replay_id}/events",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "chunks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "batch_id": {
+                            "type": "string"
+                          },
+                          "session_replay_segment_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              null
+                            ]
+                          },
+                          "event_count": {
+                            "type": "number"
+                          },
+                          "byte_length": {
+                            "type": "number"
+                          },
+                          "first_event_at_millis": {
+                            "type": "number"
+                          },
+                          "last_event_at_millis": {
+                            "type": "number"
+                          },
+                          "created_at_millis": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "batch_id",
+                          "event_count",
+                          "byte_length",
+                          "first_event_at_millis",
+                          "last_event_at_millis",
+                          "created_at_millis"
+                        ]
+                      }
+                    },
+                    "chunk_events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "chunk_id": {
+                            "type": "string"
+                          },
+                          "events": {
+                            "type": "array",
+                            "items": {
+                              "type": "object"
+                            }
+                          }
+                        },
+                        "required": [
+                          "chunk_id",
+                          "events"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "chunks",
+                    "chunk_events"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/sessions": {
       "get": {
         "summary": "List sessions",

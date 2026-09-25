@@ -1,6 +1,5 @@
 import type { DataWarehouseCredentialsJson, DataWarehouseJson } from "@hexclave/shared/dist/interface/admin-interface";
 import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse } from "@hexclave/shared/dist/interface/admin-metrics";
-import type { AdminGetSessionReplayChunkEventsResponse, AdminGetSessionReplayAllEventsResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
 import type { Transaction, TransactionType } from "@hexclave/shared/dist/interface/crud/transactions";
 import { InternalSession } from "@hexclave/shared/dist/sessions";
 import type { MoneyAmount } from "@hexclave/shared/dist/utils/currency-constants";
@@ -56,8 +55,6 @@ export type ManagedEmailProviderListItem = {
   nameServerRecords: string[],
 };
 
-import type { AdminSessionReplay, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, SessionReplayAllEventsResult } from "../../session-replays";
-export type { AdminSessionReplay, AdminSessionReplayChunk, ListSessionReplaysOptions, ListSessionReplaysResult, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, SessionReplayAllEventsResult } from "../../session-replays";
 export type { AdminWorkflow, AdminWorkflowDivergenceDiagnostic, AdminWorkflowRun, AdminWorkflowRunDetails, AdminWorkflowRunsFilter, AdminWorkflowRunState, AdminWorkflowStep, AdminWorkflowStepAttempt, AdminWorkflowSyncResult, AdminWorkflowTrigger, AdminWorkflowUpgradeResult, AdminWorkflowVersion } from "../../workflows";
 
 
@@ -147,6 +144,8 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
     createWorkflow(options: { id: string, displayName?: string, source: string }): Promise<AdminWorkflowSyncResult>,
     updateWorkflowSource(workflowId: string, source: string): Promise<AdminWorkflowSyncResult>,
     deleteWorkflow(workflowId: string): Promise<void>,
+    /** Pauses/resumes run creation. In-flight runs are unaffected. */
+    setWorkflowPaused(workflowId: string, isPaused: boolean): Promise<void>,
     listWorkflowVersions(workflowId: string): Promise<AdminWorkflowVersion[]>,
     listWorkflowRuns: {
       (workflowId: string, filter: AdminWorkflowRunsFilter & { includeState: true }): Promise<{ runs: AdminWorkflowRunDetails[], nextCursor: string | null }>,
@@ -185,12 +184,6 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
     }): Promise<{ refundTransactionId: string }>,
     getAnalyticsClickmap(options: AnalyticsClickmapOptions): Promise<AnalyticsClickmapResponse>,
     createAnalyticsClickmapToken(options: { origin: string }): Promise<AnalyticsClickmapTokenResponse>,
-
-    listSessionReplays(options?: ListSessionReplaysOptions): Promise<ListSessionReplaysResult>,
-    getSessionReplay(sessionReplayId: string): Promise<AdminSessionReplay>,
-    listSessionReplayChunks(sessionReplayId: string, options?: ListSessionReplayChunksOptions): Promise<ListSessionReplayChunksResult>,
-    getSessionReplayChunkEvents(sessionReplayId: string, chunkId: string): Promise<AdminGetSessionReplayChunkEventsResponse>,
-    getSessionReplayEvents(sessionReplayId: string, options?: { offset?: number, limit?: number }): Promise<SessionReplayAllEventsResult>,
 
     // Email Outbox methods
     listOutboxEmails(options?: EmailOutboxListOptions): Promise<EmailOutboxListResult>,

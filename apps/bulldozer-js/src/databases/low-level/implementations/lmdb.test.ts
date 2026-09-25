@@ -193,9 +193,29 @@ describe("LMDB low-level database", () => {
 
       const succeeded = await store.compareAndSetAll([{ key: buffer("key"), compare: buffer("old"), value: buffer("new") }], { requiresSeq: first.seq });
       expect(succeeded.results).toEqual([{ wasSet: true, seq: succeeded.seq }]);
-      await db.waitUntilReplicated(succeeded.seq);
+      await db.waitUntilConsistent(succeeded.seq);
       expect(text((await store.get(buffer("key"))).buffer)).toBe("new");
     } finally {
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically compares against a missing key across database instances", async () => {
+    const path = await tempLmdbPath();
+    const first = declareLmdbLowLevelDatabase({ path, dbId: "cas-missing" });
+    const second = declareLmdbLowLevelDatabase({ path, dbId: "cas-missing" });
+    try {
+      const firstStore = first.declareKvStore("store");
+      const secondStore = second.declareKvStore("store");
+      const [firstResult, secondResult] = await Promise.all([
+        firstStore.compareAndSetAll([{ key: buffer("key"), compare: null, value: buffer("first") }]),
+        secondStore.compareAndSetAll([{ key: buffer("key"), compare: null, value: buffer("second") }]),
+      ]);
+
+      expect([firstResult.results[0].wasSet, secondResult.results[0].wasSet].filter(Boolean)).toHaveLength(1);
+      expect(["first", "second"]).toContain(text((await firstStore.get(buffer("key"))).buffer));
+    } finally {
+      await Promise.all([first.close(), second.close()]);
       await rm(path, { recursive: true, force: true });
     }
   });
@@ -322,11 +342,14 @@ describe("LMDB low-level database", () => {
       expect(text((await store.get(buffer("a"))).buffer)).toBe(null);
       expect(text((await store.get(buffer("b"))).buffer)).toBe(null);
 
-      const inserted = await dump.insertAll([buffer("first"), buffer("second")]);
+      const reservedKeys = dump.reserveKeys(2);
+      const inserted = await dump.insertAll([buffer("first"), buffer("second")], { keys: reservedKeys });
       await db.waitUntilAvailable(inserted.seq);
-      expect(inserted.keys).toHaveLength(2);
+      expect(inserted.keys).toEqual(reservedKeys);
       expect(text((await dump.get(inserted.keys[0])).buffer)).toBe("first");
       expect(text((await dump.get(inserted.keys[1])).buffer)).toBe("second");
+      await expect(dump.insertAll([buffer("missing-key")], { keys: [] })).rejects.toThrow("exactly one key per value");
+      expect(() => dump.reserveKeys(-1)).toThrow("non-negative safe integer");
     } finally {
       await rm(path, { recursive: true, force: true });
     }

@@ -1,5 +1,7 @@
 import { HexclaveServerInterface, KnownErrors } from "@hexclave/shared";
 import type { AnalyticsQueryOptions, AnalyticsQueryResponse } from "@hexclave/shared/dist/interface/crud/analytics";
+import type { AdminGetSessionReplayChunkEventsResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
+import type { AdminSessionReplay, AdminSessionReplayChunk, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, SessionReplayAllEventsResult } from "../../session-replays";
 import { ContactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
 import { ItemCrud } from "@hexclave/shared/dist/interface/crud/items";
 import { NotificationPreferenceCrud } from "@hexclave/shared/dist/interface/crud/notification-preferences";
@@ -1675,6 +1677,104 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
 
   async queryAnalytics(options: AnalyticsQueryOptions): Promise<AnalyticsQueryResponse> {
     return await this._interface.queryAnalytics(options);
+  }
+
+  async listSessionReplays(options?: ListSessionReplaysOptions): Promise<ListSessionReplaysResult> {
+    const response = await this._interface.listSessionReplays({
+      cursor: options?.cursor,
+      limit: options?.limit,
+      user_ids: options?.userIds,
+      team_ids: options?.teamIds,
+      duration_ms_min: options?.durationMsMin,
+      duration_ms_max: options?.durationMsMax,
+      last_event_at_from_millis: options?.lastEventAtFromMillis,
+      last_event_at_to_millis: options?.lastEventAtToMillis,
+      click_count_min: options?.clickCountMin,
+    });
+
+    const items: AdminSessionReplay[] = response.items.map((r) => ({
+      id: r.id,
+      refreshTokenId: r.refresh_token_id,
+      projectUser: {
+        id: r.project_user.id,
+        displayName: r.project_user.display_name,
+        primaryEmail: r.project_user.primary_email,
+      },
+      startedAt: new Date(r.started_at_millis),
+      lastEventAt: new Date(r.last_event_at_millis),
+      chunkCount: r.chunk_count,
+      eventCount: r.event_count,
+    }));
+
+    return {
+      items,
+      nextCursor: response.pagination.next_cursor,
+    };
+  }
+
+  async getSessionReplay(sessionReplayId: string): Promise<AdminSessionReplay> {
+    const response = await this._interface.getSessionReplay(sessionReplayId);
+    return {
+      id: response.id,
+      refreshTokenId: response.refresh_token_id,
+      projectUser: {
+        id: response.project_user.id,
+        displayName: response.project_user.display_name,
+        primaryEmail: response.project_user.primary_email,
+      },
+      startedAt: new Date(response.started_at_millis),
+      lastEventAt: new Date(response.last_event_at_millis),
+      chunkCount: response.chunk_count,
+      eventCount: response.event_count,
+    };
+  }
+
+  async listSessionReplayChunks(sessionReplayId: string, options?: ListSessionReplayChunksOptions): Promise<ListSessionReplayChunksResult> {
+    const response = await this._interface.listSessionReplayChunks(sessionReplayId, {
+      cursor: options?.cursor,
+      limit: options?.limit,
+    });
+
+    const items: AdminSessionReplayChunk[] = response.items.map((c) => ({
+      id: c.id,
+      batchId: c.batch_id,
+      sessionReplaySegmentId: c.session_replay_segment_id,
+      browserSessionId: c.browser_session_id,
+      eventCount: c.event_count,
+      byteLength: c.byte_length,
+      firstEventAt: new Date(c.first_event_at_millis),
+      lastEventAt: new Date(c.last_event_at_millis),
+      createdAt: new Date(c.created_at_millis),
+    }));
+
+    return {
+      items,
+      nextCursor: response.pagination.next_cursor,
+    };
+  }
+
+  async getSessionReplayChunkEvents(sessionReplayId: string, chunkId: string): Promise<AdminGetSessionReplayChunkEventsResponse> {
+    return await this._interface.getSessionReplayChunkEvents(sessionReplayId, chunkId);
+  }
+
+  async getSessionReplayEvents(sessionReplayId: string, options?: { offset?: number, limit?: number }): Promise<SessionReplayAllEventsResult> {
+    const response = await this._interface.getSessionReplayEvents(sessionReplayId, options);
+    return {
+      chunks: response.chunks.map((c) => ({
+        id: c.id,
+        batchId: c.batch_id,
+        sessionReplaySegmentId: c.session_replay_segment_id,
+        eventCount: c.event_count,
+        byteLength: c.byte_length,
+        firstEventAt: new Date(c.first_event_at_millis),
+        lastEventAt: new Date(c.last_event_at_millis),
+        createdAt: new Date(c.created_at_millis),
+      })),
+      chunkEvents: response.chunk_events.map((ce) => ({
+        chunkId: ce.chunk_id,
+        events: ce.events,
+      })),
+    };
   }
 
   protected override async _refreshSession(session: InternalSession) {
