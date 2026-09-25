@@ -16,7 +16,7 @@ const ASK_ROUTE_HEADERS = {
 const ASK_ROUTE_REASON = "skill-site ask endpoint";
 const MAX_DIAGNOSTIC_BODY_LENGTH = 4_000;
 
-class QueryArgumentError extends Error {
+export class QueryArgumentError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "QueryArgumentError";
@@ -27,7 +27,7 @@ function isLocalHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1" || hostname.endsWith(".localhost");
 }
 
-function getBackendApiBaseUrl(req: Request): string {
+export function getBackendApiBaseUrl(req: Request): string {
   const configured =
     process.env.NEXT_PUBLIC_SERVER_HEXCLAVE_API_URL ??
     process.env.NEXT_PUBLIC_SERVER_STACK_API_URL ??

@@ -1,18 +1,9 @@
 import type { AskHexclaveRequestMetadata } from "@/lib/ai/ask-hexclave-history";
-import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
-import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { getDiscordWebhookUrlFromEnv, postDiscordWebhook, truncateForDiscord as truncate, type DiscordWebhookPayload } from "@/lib/discord-webhooks";
 
-const DISCORD_WEBHOOK_HOSTS = new Set(["discord.com", "discordapp.com"]);
 const MAX_CONTENT_LENGTH = 2_000;
 const MAX_FIELD_LENGTH = 1_000;
 const MAX_QUESTION_CONTENT_LENGTH = 500;
-
-function truncate(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
-}
 
 function formatTransport(transport: AskHexclaveRequestMetadata["transport"]): string {
   return transport === "skill-ask" ? "Skill /ask" : "MCP ask_hexclave";
@@ -22,36 +13,6 @@ function formatMessageBody(question: string, response: string): string {
   const formattedQuestion = `**${truncate(question, MAX_QUESTION_CONTENT_LENGTH)}**`;
   const responseMaxLength = MAX_CONTENT_LENGTH - formattedQuestion.length - 2;
   return `${formattedQuestion}\n\n${truncate(response, responseMaxLength)}`;
-}
-
-function getDiscordWebhookUrl(): string | null {
-  const webhookUrl = getEnvVariable("HEXCLAVE_ASK_HEXCLAVE_DISCORD_WEBHOOK_URL", "").trim();
-  if (webhookUrl === "") {
-    return null;
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(webhookUrl);
-  } catch (error) {
-    captureError("ask-hexclave-discord-webhook-url", new HexclaveAssertionError(
-      "HEXCLAVE_ASK_HEXCLAVE_DISCORD_WEBHOOK_URL is not a valid URL",
-      { cause: error },
-    ));
-    return null;
-  }
-
-  // Discord webhooks are public HTTPS endpoints. Reject anything else so a bad
-  // env value cannot turn this notifier into an SSRF footgun.
-  if (parsed.protocol !== "https:" || !DISCORD_WEBHOOK_HOSTS.has(parsed.hostname) || !parsed.pathname.startsWith("/api/webhooks/")) {
-    captureError("ask-hexclave-discord-webhook-url", new HexclaveAssertionError(
-      "HEXCLAVE_ASK_HEXCLAVE_DISCORD_WEBHOOK_URL must be an https://discord.com/api/webhooks/... URL",
-      { hostname: parsed.hostname },
-    ));
-    return null;
-  }
-
-  return webhookUrl;
 }
 
 export function buildAskHexclaveDiscordPayload(options: {
@@ -67,15 +28,7 @@ export function buildAskHexclaveDiscordPayload(options: {
   modelId: string,
   stepCount: number,
   durationMs: number,
-}): {
-  content: string,
-  allowed_mentions: { parse: [] },
-  embeds: Array<{
-    title: string,
-    color: number,
-    fields: Array<{ name: string, value: string, inline?: boolean }>,
-  }>,
-} {
+}): DiscordWebhookPayload & { content: string } {
   const transportLabel = formatTransport(options.requestMetadata.transport);
   const ipValue = options.requestMetadata.requestIp == null
     ? "—"
@@ -129,24 +82,10 @@ export async function sendAskHexclaveDiscordNotification(options: {
   stepCount: number,
   durationMs: number,
 }): Promise<void> {
-  const webhookUrl = getDiscordWebhookUrl();
+  const webhookUrl = getDiscordWebhookUrlFromEnv("HEXCLAVE_ASK_HEXCLAVE_DISCORD_WEBHOOK_URL", "ask-hexclave-discord-webhook-url");
   if (webhookUrl == null) {
     return;
   }
 
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(buildAskHexclaveDiscordPayload(options)),
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new HexclaveAssertionError("Failed to send Ask Hexclave Discord notification.", {
-      status: response.status,
-      body: body.slice(0, 2_000),
-    });
-  }
+  await postDiscordWebhook(webhookUrl, buildAskHexclaveDiscordPayload(options), "Failed to send Ask Hexclave Discord notification.");
 }
