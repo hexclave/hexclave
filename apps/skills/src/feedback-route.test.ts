@@ -83,6 +83,18 @@ describe("skill-site feedback route", () => {
     expect(getForwardedBody(fetchMock)).toMatchObject({ message: "The CLI crashed when running init", category: "bug" });
   });
 
+  it("does not parse explicit plain-text bodies starting with a brace as JSON", async () => {
+    const fetchMock = mockBackend();
+    const response = await handleFeedbackRoute(new Request("https://skill.hexclave.com/feedback", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "{oauth failed} while signing in",
+    }));
+
+    expect(response.status).toBe(200);
+    expect(getForwardedBody(fetchMock)).toMatchObject({ message: "{oauth failed} while signing in" });
+  });
+
   it("returns usage instructions when the message is missing", async () => {
     const fetchMock = mockBackend();
     const response = await handleFeedbackRoute(new Request("https://skill.hexclave.com/feedback"));

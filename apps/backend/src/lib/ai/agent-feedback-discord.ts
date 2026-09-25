@@ -1,8 +1,12 @@
-import { getDiscordWebhookUrlFromEnv, postDiscordWebhook, truncateForDiscord as truncate, type DiscordWebhookPayload } from "@/lib/discord-webhooks";
+import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { getDiscordWebhookUrlFromEnv, postDiscordWebhook, truncateForDiscord as truncate, type DiscordEmbedField, type DiscordWebhookPayload } from "@/lib/discord-webhooks";
 import type { AgentFeedbackCategory, AgentFeedbackSource } from "@hexclave/shared/dist/ai/agent-feedback";
 
 const MAX_DESCRIPTION_LENGTH = 4_000;
 const MAX_FIELD_LENGTH = 1_000;
+// Discord rejects embeds whose title, description, and field names/values total more than 6,000 characters.
+const MAX_EMBED_TOTAL_LENGTH = 6_000;
+const MIN_DESCRIPTION_RESERVE = 2_000;
 
 export type AgentFeedbackNotification = {
   message: string,
@@ -51,27 +55,38 @@ export function buildAgentFeedbackDiscordPayload(feedback: AgentFeedbackNotifica
     ["User", feedback.user],
     ["Project", feedback.project],
     ["Conversation", feedback.conversationId],
-    ["Request IP", feedback.requestIp],
-    ["Host", feedback.requestHost],
-    ["User agent", feedback.userAgent],
+    ["Reported IP (unverified)", feedback.requestIp],
+    ["Reported host (unverified)", feedback.requestHost],
+    ["Reported user agent (unverified)", feedback.userAgent],
   ] as const;
+
+  const title = `Agent feedback · ${CATEGORY_LABELS[feedback.category]}`;
+  const fields: DiscordEmbedField[] = [
+    { name: "Category", value: feedback.category, inline: true },
+    { name: "Reported source (unverified)", value: SOURCE_LABELS[feedback.source], inline: true },
+  ];
+  const embedLength = () => title.length + fields.reduce((total, field) => total + field.name.length + field.value.length, 0);
+  const descriptionReserve = Math.min(feedback.message.length, MIN_DESCRIPTION_RESERVE);
+  for (const [name, value] of optionalFields) {
+    if (value == null || value.trim() === "") continue;
+    const remaining = MAX_EMBED_TOTAL_LENGTH - descriptionReserve - embedLength() - name.length;
+    if (remaining <= 1) break;
+    fields.push({
+      name,
+      value: truncate(value, Math.min(MAX_FIELD_LENGTH, remaining)),
+      inline: name === "Reported IP (unverified)" || name === "Reported host (unverified)" || name === "Conversation",
+    });
+  }
+  const descriptionLength = Math.min(MAX_DESCRIPTION_LENGTH, MAX_EMBED_TOTAL_LENGTH - embedLength());
 
   return {
     // Feedback is untrusted agent-controlled content; never let it ping users or roles.
     allowed_mentions: { parse: [] },
     embeds: [{
-      title: `Agent feedback · ${CATEGORY_LABELS[feedback.category]}`,
-      description: truncate(feedback.message, MAX_DESCRIPTION_LENGTH),
+      title,
+      description: truncate(feedback.message, descriptionLength),
       color: CATEGORY_COLORS[feedback.category],
-      fields: [
-        { name: "Category", value: feedback.category, inline: true },
-        { name: "Source", value: SOURCE_LABELS[feedback.source], inline: true },
-        ...optionalFields.flatMap(([name, value]) => value == null || value.trim() === "" ? [] : [{
-          name,
-          value: truncate(value, MAX_FIELD_LENGTH),
-          inline: name === "Request IP" || name === "Host" || name === "Conversation",
-        }]),
-      ],
+      fields,
     }],
   };
 }
@@ -82,6 +97,11 @@ export function buildAgentFeedbackDiscordPayload(feedback: AgentFeedbackNotifica
 export async function sendAgentFeedbackDiscordNotification(feedback: AgentFeedbackNotification): Promise<boolean> {
   const webhookUrl = getDiscordWebhookUrlFromEnv("HEXCLAVE_AGENT_FEEDBACK_DISCORD_WEBHOOK_URL", "agent-feedback-discord-webhook-url");
   if (webhookUrl == null) {
+    // Keep the report in Sentry so it isn't lost when the feedback channel isn't configured.
+    captureError("agent-feedback-discord-disabled", new HexclaveAssertionError(
+      "Agent feedback received but HEXCLAVE_AGENT_FEEDBACK_DISCORD_WEBHOOK_URL is not configured; the report is attached here.",
+      { feedback },
+    ));
     return false;
   }
   await postDiscordWebhook(webhookUrl, buildAgentFeedbackDiscordPayload(feedback), "Failed to send agent feedback Discord notification.");

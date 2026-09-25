@@ -9,6 +9,7 @@ import { FEEDBACK_CATEGORIES, FEEDBACK_MESSAGE_MAX_LENGTH, sendHexclaveFeedback 
 import { remindersPrompt } from "@hexclave/shared/dist/ai/unified-prompts/reminders";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { createMcpHandler } from "@vercel/mcp-adapter";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
@@ -251,32 +252,37 @@ export function createHexclaveMcpHandler(config: { streamableHttpEndpoint: strin
           });
 
           const requestMetadata = getCurrentRequestMetadata();
-          // The Discord mirror is best-effort: its failures are reported via its diagnostic logger, and the
-          // tool result reflects only the internal-tool write, which is the system of record.
-          const [result] = await Promise.all([
-            sendHexclaveFeedback({
-              internalToolBaseUrl: getInternalToolBaseUrl(),
-              ingestSecret: getFeedbackIngestSecret(),
-              category,
-              message: feedback,
-              conversationId,
-              requestMetadata,
-              onDiagnostic: logFeedbackDiagnostic,
-            }),
-            sendAgentFeedback({
-              backendApiBaseUrl: getBackendApiBaseUrl(),
-              body: {
-                message: feedback,
-                category,
-                conversation_id: conversationId ?? null,
-                source: "mcp",
-                request_ip: requestMetadata.requestIp,
-                user_agent: requestMetadata.userAgent,
-                request_host: requestMetadata.requestHost,
-              },
-              onDiagnostic: logFeedbackDiscordDiagnostic,
-            }),
-          ]);
+          // The Discord mirror is best-effort and fire-and-forget: its failures (including setup errors) are
+          // reported to Sentry, and the tool result reflects only the internal-tool write.
+          runAsynchronously(async () => {
+            try {
+              await sendAgentFeedback({
+                backendApiBaseUrl: getBackendApiBaseUrl(),
+                body: {
+                  message: feedback,
+                  category,
+                  conversation_id: conversationId ?? null,
+                  source: "mcp",
+                  request_ip: requestMetadata.requestIp,
+                  user_agent: requestMetadata.userAgent,
+                  request_host: requestMetadata.requestHost,
+                },
+                onDiagnostic: logFeedbackDiscordDiagnostic,
+              });
+            } catch (error) {
+              captureError("mcp-give-feedback-discord", new HexclaveAssertionError("give_feedback Discord mirror failed", { cause: error }));
+            }
+          });
+
+          const result = await sendHexclaveFeedback({
+            internalToolBaseUrl: getInternalToolBaseUrl(),
+            ingestSecret: getFeedbackIngestSecret(),
+            category,
+            message: feedback,
+            conversationId,
+            requestMetadata,
+            onDiagnostic: logFeedbackDiagnostic,
+          });
 
           if (result.status === "error") {
             return {

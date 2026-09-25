@@ -64,7 +64,8 @@ function parseFeedbackFields(get: (name: string) => unknown): Omit<AgentFeedback
 async function parsePostBody(req: Request): Promise<(name: string) => unknown> {
   const text = await req.text();
   const contentType = req.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json") || text.trimStart().startsWith("{")) {
+  const isPlainText = contentType.includes("text/plain");
+  if (contentType.includes("application/json") || (!isPlainText && text.trimStart().startsWith("{"))) {
     let json: unknown;
     try {
       json = JSON.parse(text);

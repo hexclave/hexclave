@@ -41,7 +41,7 @@ describe("agent feedback Discord notifications", () => {
               },
               {
                 "inline": true,
-                "name": "Source",
+                "name": "Reported source (unverified)",
                 "value": "Skill GET /feedback",
               },
               {
@@ -56,17 +56,17 @@ describe("agent feedback Discord notifications", () => {
               },
               {
                 "inline": true,
-                "name": "Request IP",
+                "name": "Reported IP (unverified)",
                 "value": "203.0.113.1",
               },
               {
                 "inline": true,
-                "name": "Host",
+                "name": "Reported host (unverified)",
                 "value": "skill.hexclave.com",
               },
               {
                 "inline": false,
-                "name": "User agent",
+                "name": "Reported user agent (unverified)",
                 "value": "curl/8.0",
               },
             ],
@@ -80,6 +80,25 @@ describe("agent feedback Discord notifications", () => {
   it("truncates long messages to fit in a Discord embed", () => {
     const payload = buildAgentFeedbackDiscordPayload({ ...baseFeedback, message: "a".repeat(10_000) });
     expect(payload.embeds[0]?.description?.length).toBe(4_000);
+  });
+
+  it("keeps the whole embed within Discord's 6,000 character limit", () => {
+    const long = "b".repeat(5_000);
+    const payload = buildAgentFeedbackDiscordPayload({
+      ...baseFeedback,
+      message: "a".repeat(10_000),
+      context: long,
+      agent: long,
+      user: long,
+      project: long,
+      conversationId: long,
+      requestIp: long,
+      userAgent: long,
+      requestHost: long,
+    });
+    const embed = payload.embeds[0] ?? throwErr("expected an embed");
+    const total = embed.title.length + (embed.description?.length ?? 0) + embed.fields.reduce((sum, field) => sum + field.name.length + field.value.length, 0);
+    expect(total).toBeLessThanOrEqual(6_000);
   });
 
   it("does nothing when the webhook URL env var is unset", async () => {
