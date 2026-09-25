@@ -1,4 +1,4 @@
-import { ITEM_IDS } from "@hexclave/shared/dist/plans";
+import { ITEM_IDS, PLAN_LIMITS } from "@hexclave/shared/dist/plans";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { Client } from "pg";
@@ -8,45 +8,81 @@ import { waitForItemQuantityToReach } from "../../../payment-quota-helpers";
 
 const DATA_WAREHOUSE_OPERATION_LOCK_CLASS = 247_911;
 
-async function whileWarehouseOperationLocked<T>(projectId: string, operation: () => Promise<T>): Promise<T> {
+/**
+ * A direct Postgres connection, for the states the API cannot produce on demand
+ * (a held operation lock, a row left behind by a failed provision).
+ */
+async function withDatabaseClient<T>(operation: (client: Client) => Promise<T>): Promise<T> {
   const connectionString = getEnvVariable(
     "HEXCLAVE_DATABASE_CONNECTION_STRING",
     getEnvVariable("STACK_DATABASE_CONNECTION_STRING", ""),
   );
   if (connectionString === "") {
-    throw new HexclaveAssertionError("Data Warehouse concurrency tests require a database connection string");
+    throw new HexclaveAssertionError("Data Warehouse database-state tests require a database connection string");
   }
   const client = new Client({ connectionString, connectionTimeoutMillis: 10_000, query_timeout: 30_000 });
   await client.connect();
-  let lockedTenancyId: string | null = null;
   try {
-    const tenancyResult = await client.query<{ id: string }>(
-      `SELECT "id" FROM "Tenancy" WHERE "projectId" = $1 ORDER BY "createdAt" LIMIT 1`,
-      [projectId],
-    );
-    if (tenancyResult.rows.length !== 1) {
-      throw new HexclaveAssertionError("Expected exactly one Data Warehouse test tenancy", {
-        projectId,
-        resultCount: tenancyResult.rows.length,
-      });
-    }
-    const [tenancyRow] = tenancyResult.rows;
-    const tenancyId = tenancyRow.id;
+    return await operation(client);
+  } finally {
+    await client.end();
+  }
+}
+
+async function getTestTenancyId(client: Client, projectId: string): Promise<string> {
+  const tenancyResult = await client.query<{ id: string }>(
+    `SELECT "id" FROM "Tenancy" WHERE "projectId" = $1 ORDER BY "createdAt" LIMIT 1`,
+    [projectId],
+  );
+  if (tenancyResult.rows.length !== 1) {
+    throw new HexclaveAssertionError("Expected exactly one Data Warehouse test tenancy", {
+      projectId,
+      resultCount: tenancyResult.rows.length,
+    });
+  }
+  return tenancyResult.rows[0].id;
+}
+
+async function whileWarehouseOperationLocked<T>(projectId: string, operation: () => Promise<T>): Promise<T> {
+  return await withDatabaseClient(async (client) => {
+    const tenancyId = await getTestTenancyId(client, projectId);
     await client.query(
       "SELECT pg_advisory_lock($1::int, hashtext($2::text))",
       [DATA_WAREHOUSE_OPERATION_LOCK_CLASS, tenancyId],
     );
-    lockedTenancyId = tenancyId;
-    return await operation();
-  } finally {
-    if (lockedTenancyId != null) {
+    try {
+      return await operation();
+    } finally {
       await client.query(
         "SELECT pg_advisory_unlock($1::int, hashtext($2::text))",
-        [DATA_WAREHOUSE_OPERATION_LOCK_CLASS, lockedTenancyId],
+        [DATA_WAREHOUSE_OPERATION_LOCK_CLASS, tenancyId],
       );
     }
-    await client.end();
-  }
+  });
+}
+
+/** Marks the project's warehouse FAILED, optionally dropping its stored password. */
+async function forceWarehouseFailed(projectId: string, options: { dropStoredPassword: boolean }) {
+  await withDatabaseClient(async (client) => {
+    const tenancyId = await getTestTenancyId(client, projectId);
+    const result = await client.query(
+      options.dropStoredPassword
+        ? `UPDATE "DataWarehouse" SET "status" = 'FAILED', "encryptedPassword" = NULL, "passwordUpdatedAt" = NULL WHERE "tenancyId" = $1`
+        : `UPDATE "DataWarehouse" SET "status" = 'FAILED' WHERE "tenancyId" = $1`,
+      [tenancyId],
+    );
+    if (result.rowCount !== 1) {
+      throw new HexclaveAssertionError("Expected exactly one Data Warehouse row to mark FAILED", { projectId, rowCount: result.rowCount });
+    }
+  });
+}
+
+async function rotatePassword() {
+  return await niceBackendFetch("/api/v1/data-warehouse/rotate-password", {
+    method: "POST",
+    accessType: "admin",
+    body: {},
+  });
 }
 
 /** A project on the team plan, which is what entitles it to a Data Warehouse. */
@@ -220,11 +256,27 @@ it("caps both per-query and aggregate resource usage for direct connections", as
         getSetting('max_memory_usage'),
         getSetting('max_memory_usage_for_user'),
         getSetting('max_concurrent_queries_for_user'),
-        getSetting('max_threads')
+        getSetting('max_threads'),
+        getSetting('max_execution_time')
     `,
   });
   expect(configuredLimits.status).toBe(200);
-  expect(configuredLimits.text).toBe("4000000000\t4000000000\t10\t4");
+  expect(configuredLimits.text).toBe(`4000000000\t4000000000\t10\t4\t${PLAN_LIMITS.team.analyticsTimeoutSeconds}`);
+
+  // The plan's timeout is the ceiling, not just the default: a team-plan user must
+  // not be able to raise it to a higher plan's timeout on a direct connection.
+  const raiseExecutionTime = await clickhouse({
+    ...credentials,
+    query: `SELECT 1 SETTINGS max_execution_time = ${PLAN_LIMITS.team.analyticsTimeoutSeconds + 1}`,
+  });
+  expect(raiseExecutionTime.status).not.toBe(200);
+  expect(raiseExecutionTime.text).toContain("max_execution_time");
+
+  const lowerExecutionTime = await clickhouse({
+    ...credentials,
+    query: "SELECT getSetting('max_execution_time') SETTINGS max_execution_time = 5",
+  });
+  expect(lowerExecutionTime).toEqual({ status: 200, text: "5" });
 
   const raiseAggregateMemoryLimit = await clickhouse({
     ...credentials,
@@ -291,14 +343,28 @@ it("denies the table engines and table functions that reach outside the instance
   expect(httpDictionary.status).not.toBe(200);
   expect(httpDictionary.text).toContain("CREATE DICTIONARY");
 
-  // Kafka has no entry in FORBIDDEN_SOURCES, so this only fails if the TABLE ENGINE
-  // revoke is really enforced — unlike URL, which is revoked as a source too.
+  // Source-backed engines are gated by `REVOKE SOURCES`, including sources that
+  // were never named individually (Kafka was not in the old per-source list).
   const kafkaEngine = await clickhouse({
     ...credentials,
     query: `CREATE TABLE "${projectId}".kafka_exfil (a String) ENGINE = Kafka('localhost:9092', 'topic', 'group', 'JSONEachRow')`,
   });
   expect(kafkaEngine.status).not.toBe(200);
   expect(kafkaEngine.text).toContain("TABLE ENGINE");
+
+  // GCS is S3 underneath but was missing from ClickHouse's own source-engine list
+  // before 26.5. Where engine grants are enforced (as here), it must still be
+  // denied, since it is not on the allow-list.
+  const gcsEngine = await clickhouse({
+    ...credentials,
+    query: `CREATE TABLE "${projectId}".gcs_exfil (a String) ENGINE = GCS('http://127.0.0.1:1/bucket-name/key.csv', CSV)`,
+  });
+  expect(gcsEngine.status).not.toBe(200);
+  expect(gcsEngine.text).toContain("TABLE ENGINE ON GCS");
+
+  const grants = await clickhouse({ ...credentials, query: "SHOW GRANTS" });
+  expect(grants.status).toBe(200);
+  expect(grants.text).not.toMatch(/\b(SOURCES|URL|S3|REMOTE|KAFKA)\b/);
 });
 
 it("does not let one project read another project's warehouse", async ({ expect }) => {
@@ -409,6 +475,34 @@ it("cannot be rotated before it has been provisioned", async ({ expect }) => {
   });
   expect(response.status).toBe(400);
   expect(String(response.body)).toContain("does not have a data warehouse");
+});
+
+it("rejects rotation after a first provision failed, pointing to provisioning instead", async ({ expect }) => {
+  const { projectId } = await createEntitledProject();
+  expect((await provision()).status).toBe(200);
+  // A failed first provision leaves a FAILED row with no stored password.
+  await forceWarehouseFailed(projectId, { dropStoredPassword: true });
+
+  const rotation = await rotatePassword();
+  expect(rotation.status).toBe(400);
+  expect(String(rotation.body)).toContain("Provision it instead");
+
+  const retry = await provision();
+  expect(retry.status).toBe(200);
+  expect((await clickhouse({ ...retry.body, query: "SELECT 1" })).status).toBe(200);
+});
+
+it("still rotates a FAILED warehouse that has a stored password, as a repair path", async ({ expect }) => {
+  const { projectId } = await createEntitledProject();
+  const { body: original } = await provision();
+  // What a rotation that could not restore the previous password leaves behind.
+  await forceWarehouseFailed(projectId, { dropStoredPassword: false });
+
+  const rotation = await rotatePassword();
+  expect(rotation.status).toBe(200);
+  expect(rotation.body.password).not.toBe(original.password);
+  expect((await clickhouse({ ...rotation.body, query: "SELECT 1" })).status).toBe(200);
+  expect((await getWarehouse()).body.status).toBe("ready");
 });
 
 it("is not reachable with server auth — provisioning is an admin action", async ({ expect }) => {
