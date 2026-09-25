@@ -30,6 +30,17 @@ export function buildSkillSitePrompt(docsIndexPromptValue = docsIndexPrompt) {
 
     The MCP server lives at https://mcp.hexclave.com. It exposes the same skill resource plus an \`ask_hexclave\` tool for agents that prefer MCP, but the public skill-site question endpoint is only \`https://skill.hexclave.com/ask\`.
 
+    ## Reporting feedback
+
+    If you hit an issue with Hexclave, find something confusing or undocumented, or have feedback on the agent experience or a suggestion, report it to the Hexclave team — the reports go straight to the team's feedback channel.
+
+    - Quick reports (GET): \`curl -sSG "https://skill.hexclave.com/feedback" --data-urlencode "message=<what happened, what you expected, and where>" --data-urlencode "category=<bug|docs-gap|agent-ux|suggestion|praise|other>"\`. Optional parameters: \`context\` (the task you were working on), \`agent\` (your agent/tool name), \`user\`, \`project\`, and \`conversationId\` (if it's about an \`/ask\` answer).
+    - Longer reports (POST): send the same fields as a JSON body, e.g. \`curl -sS -X POST https://skill.hexclave.com/feedback -H "Content-Type: application/json" -d '{"message":"...","category":"bug","context":"..."}'\`.
+    - CLI: \`npx @hexclave/cli@latest feedback "<message>" --category <category> [--context <...>] [--agent <...>]\`.
+    - MCP: the \`give_feedback\` tool.
+
+    Send one report per distinct issue, be specific, and never include secrets or personal data you weren't asked to share.
+
     ## Using the Hexclave CLI
 
     The CLI is the fastest path for anything project-level. It is installed on demand via \`npx\` — no global install required. Every command below can be invoked as \`npx @hexclave/cli@latest <command>\`.

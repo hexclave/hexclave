@@ -18,6 +18,7 @@ import { registerFixCommand } from "./commands/fix.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerWhoamiCommand } from "./commands/whoami.js";
 import { registerTeamCommand } from "./commands/team.js";
+import { registerFeedbackCommand } from "./commands/feedback.js";
 
 const program = new Command();
 
@@ -39,6 +40,7 @@ registerWhoamiCommand(program);
 registerTeamCommand(program);
 registerFixCommand(program);
 registerDoctorCommand(program);
+registerFeedbackCommand(program);
 
 async function main() {
   try {

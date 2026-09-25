@@ -4,6 +4,7 @@ import {
   type HexclaveAskDiagnostic,
   type HexclaveAskRequestMetadata,
 } from "../../../packages/shared/src/ai/hexclave-ask";
+import { sendAgentFeedback } from "../../../packages/shared/src/ai/agent-feedback";
 import { FEEDBACK_CATEGORIES, FEEDBACK_MESSAGE_MAX_LENGTH, sendHexclaveFeedback } from "@/feedback-client";
 import { remindersPrompt } from "@hexclave/shared/dist/ai/unified-prompts/reminders";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
@@ -98,6 +99,7 @@ function makeDiagnosticLogger(scope: string, toolName: string) {
 
 const logAskDiagnostic = makeDiagnosticLogger("mcp-ask-hexclave", "ask_hexclave");
 const logFeedbackDiagnostic = makeDiagnosticLogger("mcp-give-feedback", "give_feedback");
+const logFeedbackDiscordDiagnostic = makeDiagnosticLogger("mcp-give-feedback-discord", "give_feedback Discord mirror");
 
 export function createHexclaveMcpHandler(config: { streamableHttpEndpoint: string }) {
   const handler = createMcpHandler(
@@ -248,15 +250,33 @@ export function createHexclaveMcpHandler(config: { streamableHttpEndpoint: strin
             });
           });
 
-          const result = await sendHexclaveFeedback({
-            internalToolBaseUrl: getInternalToolBaseUrl(),
-            ingestSecret: getFeedbackIngestSecret(),
-            category,
-            message: feedback,
-            conversationId,
-            requestMetadata: getCurrentRequestMetadata(),
-            onDiagnostic: logFeedbackDiagnostic,
-          });
+          const requestMetadata = getCurrentRequestMetadata();
+          // The Discord mirror is best-effort: its failures are reported via its diagnostic logger, and the
+          // tool result reflects only the internal-tool write, which is the system of record.
+          const [result] = await Promise.all([
+            sendHexclaveFeedback({
+              internalToolBaseUrl: getInternalToolBaseUrl(),
+              ingestSecret: getFeedbackIngestSecret(),
+              category,
+              message: feedback,
+              conversationId,
+              requestMetadata,
+              onDiagnostic: logFeedbackDiagnostic,
+            }),
+            sendAgentFeedback({
+              backendApiBaseUrl: getBackendApiBaseUrl(),
+              body: {
+                message: feedback,
+                category,
+                conversation_id: conversationId ?? null,
+                source: "mcp",
+                request_ip: requestMetadata.requestIp,
+                user_agent: requestMetadata.userAgent,
+                request_host: requestMetadata.requestHost,
+              },
+              onDiagnostic: logFeedbackDiscordDiagnostic,
+            }),
+          ]);
 
           if (result.status === "error") {
             return {
