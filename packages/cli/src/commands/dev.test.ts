@@ -3,7 +3,28 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordLocalDashboardProcess } from "../lib/dev-env-state.js";
-import { composeDevChildEnv, configErrorLogPrefix, dashboardEnvWithStatePath, devDashboardCommandFromEnv, isHeartbeatResponse, isVersionNewer, killLocalDashboard, logConfigSyncEvents, processExists, runChildProcess, shellChildCommand, shouldRestartDashboard, validateDevCommandSelection } from "./dev.js";
+import { composeDevChildEnv, configErrorLogPrefix, dashboardEnvWithStatePath, devDashboardCommandFromEnv, formatMissingDevSecretsMessage, isHeartbeatResponse, isVersionNewer, killLocalDashboard, logConfigSyncEvents, processExists, runChildProcess, shellChildCommand, shouldRestartDashboard, validateDevCommandSelection } from "./dev.js";
+
+describe("formatMissingDevSecretsMessage", () => {
+  it("uses singular wording for one missing secret", () => {
+    expect(formatMissingDevSecretsMessage(["OPENAI_API_KEY"])).toMatchInlineSnapshot(`
+      "Missing a value for this secret in the \`development\` environment (or \`default\`):
+        - OPENAI_API_KEY
+
+      Set it in the dashboard under Project Settings > Secrets, or set \`development: null\` on the env var to omit it locally."
+    `);
+  });
+
+  it("uses plural wording for several missing secrets", () => {
+    expect(formatMissingDevSecretsMessage(["A", "B"])).toMatchInlineSnapshot(`
+      "Missing values for these 2 secrets in the \`development\` environment (or \`default\`):
+        - A
+        - B
+
+      Set them in the dashboard under Project Settings > Secrets, or set \`development: null\` on those env vars to omit them locally."
+    `);
+  });
+});
 
 describe("validateDevCommandSelection", () => {
   it("rejects combining --service-id with a positional command", () => {
@@ -43,7 +64,7 @@ describe("composeDevChildEnv", () => {
     // config file must not shadow the dev session's live credentials.
     expect(composeDevChildEnv(
       { FROM_PROCESS: "process", SHADOWED_BY_SERVICE: "process", HEXCLAVE_PROJECT_ID: "process" },
-      { SHADOWED_BY_SERVICE: "service", HEXCLAVE_PROJECT_ID: "stale-config-value", FROM_SERVICE: "service" },
+      new Map([["SHADOWED_BY_SERVICE", "service"], ["HEXCLAVE_PROJECT_ID", "stale-config-value"], ["FROM_SERVICE", "service"]]),
       { HEXCLAVE_PROJECT_ID: "session" },
     )).toEqual({
       FROM_PROCESS: "process",

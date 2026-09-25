@@ -358,6 +358,25 @@ export type DeploymentEnvVarDefinition = {
   key?: string | undefined,
 };
 
+export const DEPLOYMENT_ENVIRONMENTS = ["all", "prod", "preview", "dev"] as const;
+export type DeploymentEnvironmentName = typeof DEPLOYMENT_ENVIRONMENTS[number];
+
+// The value of one environment (`all` / `prod` / `preview` / `dev`) in the
+// map the dashboard shows, before a run slices to prod or dev. `omit` is an
+// explicit `null` in that environment. Values of secrets never appear here.
+export type DeploymentPerEnvironmentEnvValue = {
+  type?: "secret" | "connection" | "omit" | undefined,
+  value?: string | undefined,
+  key?: string | undefined,
+};
+
+export type DeploymentPerEnvironmentEnvVar = {
+  all?: DeploymentPerEnvironmentEnvValue | undefined,
+  prod?: DeploymentPerEnvironmentEnvValue | undefined,
+  preview?: DeploymentPerEnvironmentEnvValue | undefined,
+  dev?: DeploymentPerEnvironmentEnvValue | undefined,
+};
+
 /**
  * The builder machine for one deployment source.
  *
@@ -523,6 +542,10 @@ export type DeploymentServiceDefinition = {
   // service without one would deploy and then immediately exit.
   start_command?: string | undefined,
   env: Record<string, DeploymentEnvVarDefinition>,
+  // The file's per-environment env map, stored so the dashboard can show
+  // all/prod/preview/dev without guessing from the prod-resolved `env`. Absent
+  // on rows synced before this field existed.
+  env_per_environment?: Record<string, DeploymentPerEnvironmentEnvVar> | undefined,
 };
 
 // Whether a definition is BUILT from the deployment's uploaded source.
@@ -1151,7 +1174,7 @@ export const deploymentEnvVarSchema = yupObject({
   value: yupString().when("type", ([type], schema) => {
     switch (type) {
       case "secret": {
-        return schema.oneOf([undefined], 'deployment env vars with type "secret" must not have a value — set the value in the dashboard under Project Settings → Secrets, or give the secret a default value');
+        return schema.oneOf([undefined], 'deployment env vars with type "secret" must not have a value — set the value in the dashboard under Project Settings → Secrets');
       }
       case "connection": {
         return schema.defined().matches(DEPLOYMENT_CONNECTION_VALUE_REGEX, 'deployment env vars with type "connection" must reference a service output like "hexclave.projectId"');
@@ -1164,24 +1187,56 @@ export const deploymentEnvVarSchema = yupObject({
   key: yupString().when("type", ([type], schema) => type === "secret"
     ? schema.defined().max(MAX_PROJECT_SECRET_KEY_LENGTH, "project secret keys may be at most ${max} characters long").matches(PROJECT_SECRET_KEY_REGEX, "project secret keys must contain only letters, numbers, underscores, and hyphens")
     : schema.oneOf([undefined], 'deployment env vars may only have a key when their type is "secret"')),
-  // `secret(key, default)` fallbacks are a config-file concept that must never
-  // be persisted: they travel with the deploy request instead (see
-  // deploymentSecretDefaultsSchema). Rejected rather than ignored — this is
-  // the schema every write path validates against, so refusing the field here
-  // is what makes "a stored definition cannot contain a default" a checkable
-  // property instead of a convention. (A `.strip()` here would be the
-  // alternative, but rejecting is the point: the caller should learn that the
-  // field is not storable rather than have it silently disappear.)
-  default_value: yupString().oneOf([undefined], "deployment env var definitions must not carry a default_value — secret defaults belong to the deploy request, not to the stored definition"),
+  // Secret values live in Project Settings → Secrets. A leftover `default_value`
+  // on a stored definition is rejected so the dashboard never sees a "value".
+  // Rejected rather than ignored — this is the schema every write path
+  // validates against. (A `.strip()` here would silently drop the field.)
+  default_value: yupString().oneOf([undefined], "deployment env var definitions must not carry a default_value — secret values belong in Project Settings → Secrets, not on the stored definition"),
 });
 
-// Fallback values for a service's `secret()` env vars, sent with a DEPLOY
-// request and never stored: they are the second argument of `secret(key,
-// default)` in the deploy file's `services` export, which is a purely
-// author-side convenience. Keyed by ENV VAR key (not secret key) because
-// that's where the default is written — the same secret may be referenced by
-// two env vars with different defaults, and the dashboard must never learn
-// that any of this exists.
+// Same shape rules as deploymentEnvVarSchema, plus `omit` (an explicit `null`
+// in that environment), which carries neither a value nor a key.
+export const deploymentPerEnvironmentEnvValueSchema = yupObject({
+  type: yupString().oneOf(["secret", "connection", "omit"]).optional(),
+  value: yupString().when("type", ([type], schema) => {
+    switch (type) {
+      case "secret":
+      case "omit": {
+        return schema.oneOf([undefined], `per-environment env values with type ${JSON.stringify(type)} must not have a value`);
+      }
+      case "connection": {
+        return schema.defined().matches(DEPLOYMENT_CONNECTION_VALUE_REGEX, 'per-environment env values with type "connection" must reference a service output like "hexclave.projectId"');
+      }
+      default: {
+        return schema.defined();
+      }
+    }
+  }),
+  key: yupString().when("type", ([type], schema) => type === "secret"
+    ? schema.defined().max(MAX_PROJECT_SECRET_KEY_LENGTH, "project secret keys may be at most ${max} characters long").matches(PROJECT_SECRET_KEY_REGEX, "project secret keys must contain only letters, numbers, underscores, and hyphens")
+    : schema.oneOf([undefined], 'per-environment env values may only have a key when their type is "secret"')),
+});
+
+export const deploymentPerEnvironmentEnvVarSchema = yupObject({
+  all: deploymentPerEnvironmentEnvValueSchema.optional(),
+  prod: deploymentPerEnvironmentEnvValueSchema.optional(),
+  preview: deploymentPerEnvironmentEnvValueSchema.optional(),
+  dev: deploymentPerEnvironmentEnvValueSchema.optional(),
+}).test(
+  "secret-in-every-environment-or-none",
+  "a per-environment env var must be secret in every environment or in none, and name a single secret key",
+  (envVar) => {
+    const values = [envVar.all, envVar.prod, envVar.preview, envVar.dev].filter((value) => value != null);
+    const secretKeys = new Set(values.filter((value) => value.type === "secret").map((value) => value.key));
+    const hasNonSecret = values.some((value) => value.type !== "secret" && value.type !== "omit");
+    return secretKeys.size <= 1 && !(secretKeys.size > 0 && hasNonSecret);
+  },
+);
+
+// Legacy request-scoped fallbacks for a service's `secret()` env vars, sent
+// with a DEPLOY request and never stored. New CLIs send empty objects: values
+// live in Project Settings → Secrets. Still accepted so older CLI versions
+// can deploy. Keyed by ENV VAR key (not secret key).
 export const deploymentSecretDefaultsSchema = yupRecord(
   yupString().matches(DEPLOYMENT_ENV_VAR_KEY_REGEX, "deployment secret default keys must be env var keys"),
   yupString().defined(),
@@ -1456,6 +1511,10 @@ export const deploymentServiceDefinitionSchema = yupObject({
     yupString().matches(DEPLOYMENT_ENV_VAR_KEY_REGEX, "deployment env var keys must start with a letter or underscore and contain only letters, digits, and underscores"),
     deploymentEnvVarSchema.defined(),
   ).defined(),
+  env_per_environment: yupRecord(
+    yupString().matches(DEPLOYMENT_ENV_VAR_KEY_REGEX, "deployment env var keys must start with a letter or underscore and contain only letters, digits, and underscores"),
+    deploymentPerEnvironmentEnvVarSchema.defined(),
+  ).optional(),
 });
 
 /**
@@ -1546,7 +1605,26 @@ import.meta.vitest?.test("deploymentServiceDefinitionSchema accepts all env var 
       NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
       API_INTERNAL_URL: { type: "connection", value: "api.url:8080" },
     },
+    env_per_environment: {
+      MY_ENV_VAR: { all: { value: "true" }, dev: { value: "debug" } },
+      OPENAI_API_KEY: { all: { type: "secret", key: "OPENAI" } },
+      SKIP_LOCALLY: { prod: { type: "secret", key: "SKIP" }, dev: { type: "omit" } },
+    },
   }, { abortEarly: false })).resolves.toBeDefined();
+});
+
+import.meta.vitest?.test("deploymentPerEnvironmentEnvVarSchema rejects malformed or mixed values", async ({ expect }) => {
+  const rejects = (envVar: unknown) => expect(deploymentPerEnvironmentEnvVarSchema.validate(envVar)).rejects.toThrow();
+  await rejects({ all: { type: "secret" } });
+  await rejects({ all: { type: "secret", key: "bad key!" } });
+  await rejects({ all: { type: "secret", key: "K", value: "leaked" } });
+  await rejects({ all: { type: "omit", value: "x" } });
+  await rejects({ all: { type: "connection", value: "not a reference" } });
+  await rejects({ all: {} });
+  await rejects({ all: { value: "x", key: "K" } });
+  await rejects({ prod: { type: "secret", key: "K" }, dev: { value: "local" } });
+  await rejects({ prod: { type: "secret", key: "A" }, dev: { type: "secret", key: "B" } });
+  await expect(deploymentPerEnvironmentEnvVarSchema.validate({ prod: { type: "secret", key: "K" }, dev: { type: "omit" } })).resolves.toBeDefined();
 });
 
 import.meta.vitest?.test("parseDeploymentImageRef fully qualifies every accepted spelling", ({ expect }) => {
