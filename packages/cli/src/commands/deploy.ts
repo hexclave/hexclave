@@ -2,14 +2,14 @@ import { buildSourceManifest, connectionRequiresTargetDeployed, deploymentPortEn
 import { Command } from "commander";
 import fs from "node:fs";
 import path from "node:path";
-import { getInternalUser } from "../lib/app.js";
 import { createUrlIfValid } from "@hexclave/shared/dist/utils/urls";
-import { isProjectAuthWithSecretServerKey, resolveAuth, resolveProjectId, type ProjectAuth } from "../lib/auth.js";
-import { AuthError, CliError, errorMessage } from "../lib/errors.js";
+import { resolveAuth, resolveProjectId, type ProjectAuth } from "../lib/auth.js";
+import { buildProjectAuthHeadersFactory, projectApiFetch } from "../lib/project-api.js";
+import { CliError, errorMessage } from "../lib/errors.js";
 import { followBuildLogs, type FollowBuildLogsOptions } from "../lib/build-logs.js";
 import { packageSourceDirectory } from "../lib/source-packaging.js";
 import { formatDuration, uploadSource, uploadSourceMultipart, type MultipartUploadSlot } from "../lib/source-upload.js";
-import { collectSecretDefaults, computeDeploymentLevels, evaluateDeploymentConfig, importDeployModule, resolveDeployFilePath, type EvaluatedService } from "../lib/deployment-config.js";
+import { collectSecretKeysByEnvVar, computeDeploymentLevels, evaluateDeploymentConfig, importDeployModule, resolveDeployFilePath, type EvaluatedService } from "../lib/deployment-config.js";
 
 const RUN_POLL_INTERVAL_MS = 3_000;
 // Generous cap so a wedged remote build doesn't hang CI forever; the remote
@@ -31,84 +31,24 @@ export type DeployOptions = {
 };
 
 /**
- * The secret keys that MUST have a stored value for these services to deploy:
- * every secret referenced without a default value. Exported for unit tests.
+ * The secret keys that MUST have a stored `prod` or `all` value for these
+ * services to deploy. Exported for unit tests.
  */
 export function collectRequiredSecretKeys(services: EvaluatedService[]): string[] {
   const requiredKeys = new Set<string>();
   for (const service of services) {
-    for (const value of Object.values(service.env)) {
-      if (value.kind === "secret" && value.defaultValue === undefined) {
-        requiredKeys.add(value.secretKey);
-      }
+    for (const secretKey of collectSecretKeysByEnvVar(service).values()) {
+      requiredKeys.add(secretKey);
     }
   }
   return [...requiredKeys].sort();
 }
 
-// Returns a FACTORY rather than a fixed header object: the deploy flow can
-// span minutes (large uploads, remote builds), and the refresh-token path's
-// access token may expire mid-flow. getTokens() transparently refreshes when
-// needed, so calling the factory per request always yields a valid token; the
-// secret-server-key path is static.
-async function buildAuthHeadersFactory(auth: ProjectAuth): Promise<() => Promise<Record<string, string>>> {
-  if (isProjectAuthWithSecretServerKey(auth)) {
-    const headers = {
-      "x-stack-access-type": "server",
-      "x-stack-project-id": auth.projectId,
-      "x-stack-secret-server-key": auth.secretServerKey,
-    };
-    return () => Promise.resolve(headers);
-  }
-  // Refresh-token auth: the admin access token for a project is simply the
-  // internal-project access token of a user who owns it.
-  const user = await getInternalUser(auth);
-  return async () => {
-    const { accessToken } = await user.currentSession.getTokens();
-    if (accessToken == null) {
-      throw new AuthError("Could not obtain an access token. Run `hexclave login` again.");
-    }
-    return {
-      "x-stack-access-type": "admin",
-      "x-stack-project-id": auth.projectId,
-      "x-stack-admin-access-token": accessToken,
-    };
-  };
-}
-
-// Returns `any` on purpose: this is a thin JSON transport; each call site
-// immediately validates the specific fields it needs (and errors cleanly on
-// unexpected shapes), so a structural type here would just duplicate that.
-async function deployApiFetch(auth: ProjectAuth, getAuthHeaders: () => Promise<Record<string, string>>, apiPath: string, init: {
+function deployApiFetch(auth: ProjectAuth, getAuthHeaders: () => Promise<Record<string, string>>, apiPath: string, init: {
   method: string,
   jsonBody?: unknown,
 }): Promise<any> {
-  const url = `${auth.apiUrl.replace(/\/$/, "")}/api/latest${apiPath}`;
-  const response = await fetch(url, {
-    method: init.method,
-    headers: {
-      ...await getAuthHeaders(),
-      ...(init.jsonBody !== undefined ? { "content-type": "application/json" } : {}),
-    },
-    body: init.jsonBody !== undefined ? JSON.stringify(init.jsonBody) : undefined,
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    let message = text;
-    try {
-      const parsed = JSON.parse(text);
-      if (typeof parsed?.error === "string") message = parsed.error;
-      else if (typeof parsed?.error?.message === "string") message = parsed.error.message;
-    } catch {
-      // Response body isn't JSON; use it as-is.
-    }
-    throw new CliError(`Deploy request failed (${response.status} at ${init.method} ${apiPath}): ${message.slice(0, 1000)}`);
-  }
-  try {
-    return text === "" ? undefined : JSON.parse(text);
-  } catch {
-    throw new CliError(`Unexpected non-JSON response from the Hexclave API at ${init.method} ${apiPath}.`);
-  }
+  return projectApiFetch(auth, getAuthHeaders, apiPath, { ...init, failureLabel: "Deploy request failed" });
 }
 
 function wait(ms: number): Promise<void> {
@@ -449,7 +389,7 @@ async function waitForDeployment(options: {
 function collectTransitiveDependents(failedServiceId: string, services: Map<string, EvaluatedService>, runtime: DeploymentRuntime): Set<string> {
   const directDependents = new Map<string, Set<string>>();
   for (const [serviceId, service] of services) {
-    for (const value of Object.values(service.env)) {
+    for (const value of service.env.values()) {
       if (value.kind !== "connection") continue;
       const parsed = parseConnectionValue(value.reference);
       if (parsed === null) continue;
@@ -552,7 +492,7 @@ export function registerDeployCommand(program: Command) {
     .addHelpText("after", "\nAuthentication: uses HEXCLAVE_SECRET_SERVER_KEY if set (recommended for CI), otherwise your `hexclave login` session.\nSecrets: values for secret() env vars are read from the dashboard (Project Settings > Secrets); the deploy fails up front and lists every secret that still needs a value there.")
     .action(async (opts: DeployOptions) => {
       const auth = resolveAuth(resolveProjectId(opts.cloudProjectId));
-      const authHeaders = await buildAuthHeadersFactory(auth);
+      const authHeaders = await buildProjectAuthHeadersFactory(auth);
 
       // Always the deploy file: services live there, never in hexclave.config.ts.
       const deploySource = await resolveDeploySource(opts.deployFile, process.cwd());
@@ -591,9 +531,12 @@ export function registerDeployCommand(program: Command) {
         console.error(`Note: deploy.builder sets memory ${JSON.stringify(builder.memory)}, but ${opts.serviceId != null ? `services.${opts.serviceId} runs` : "every service in this deploy runs"} an already-built image, so no builder machine starts and the size has no effect here.`);
       }
 
-      // Pre-flight: every secret without a default must have a stored value
-      // BEFORE anything is packaged or uploaded. The backend re-checks this
-      // authoritatively per deploy.
+      // Pre-flight: every secret in the resolved prod map must have a stored
+      // `prod` or `all` value BEFORE anything is packaged or uploaded. The
+      // backend re-checks this authoritatively per deploy.
+      // TODO(preview deploys): when a run is preview, preflight `preview` or
+      // `all` the same way. `hexclave deploy` is always prod, so preview cells
+      // are not required here.
       const requiredSecretKeys = collectRequiredSecretKeys(deploySet.map((serviceId) => services.get(serviceId) ?? (() => {
         throw new CliError(`Internal error: deploy set contains unknown service ${JSON.stringify(serviceId)}.`);
       })()));
@@ -601,6 +544,7 @@ export function registerDeployCommand(program: Command) {
         const storedSecrets = await deployApiFetch(auth, authHeaders, "/project-secrets", { method: "GET" });
         const storedKeys = new Set<string>(
           (Array.isArray(storedSecrets?.items) ? storedSecrets.items : [])
+            .filter((item: any) => item?.environment === "prod" || item?.environment === "all" || item?.environment == null)
             .map((item: any) => item?.key)
             .filter((key: unknown): key is string => typeof key === "string"),
         );
@@ -683,16 +627,9 @@ export function registerDeployCommand(program: Command) {
           }),
           definition_sync_id: definitionSyncId,
           levels,
-          // The `secret()` defaults ride along with the deploy instead of being
-          // synced with the definition: they are a deploy-file concept, and
-          // storing them would make the dashboard's secrets page report a value
-          // that isn't actually stored anywhere.
-          secret_defaults: Object.fromEntries(deploySet.map((serviceId) => [
-            serviceId,
-            collectSecretDefaults(services.get(serviceId) ?? (() => {
-              throw new CliError(`Internal error: deploy set contains unknown service ${JSON.stringify(serviceId)}.`);
-            })()),
-          ])),
+          // Empty: secret values live in the dashboard, not in the deploy file.
+          // The field stays so an older API that still reads it keeps working.
+          secret_defaults: Object.fromEntries(deploySet.map((serviceId) => [serviceId, {}])),
           // The GitLab-style CI variables this deploy was invoked with. Request-
           // scoped like the secret defaults: they describe THIS deploy, so
           // storing them on the definition would leave a stale commit sha on

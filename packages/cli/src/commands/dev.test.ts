@@ -43,7 +43,7 @@ describe("composeDevChildEnv", () => {
     // config file must not shadow the dev session's live credentials.
     expect(composeDevChildEnv(
       { FROM_PROCESS: "process", SHADOWED_BY_SERVICE: "process", HEXCLAVE_PROJECT_ID: "process" },
-      { SHADOWED_BY_SERVICE: "service", HEXCLAVE_PROJECT_ID: "stale-config-value", FROM_SERVICE: "service" },
+      new Map([["SHADOWED_BY_SERVICE", "service"], ["HEXCLAVE_PROJECT_ID", "stale-config-value"], ["FROM_SERVICE", "service"]]),
       { HEXCLAVE_PROJECT_ID: "session" },
     )).toEqual({
       FROM_PROCESS: "process",

@@ -1,4 +1,5 @@
 import type { BranchConfigNormalizedOverride } from "./config/schema";
+import type { DeploymentEnvironmentName } from "./deployments";
 
 type StackConfigObject = BranchConfigNormalizedOverride;
 export const showOnboardingHexclaveConfigValue = "show-onboarding";
@@ -47,8 +48,25 @@ export function defineHexclaveConfig(config: StrictStackConfig<HexclaveConfig>):
 // editor — the CLI still re-validates everything at runtime, because the deploy
 // file is arbitrary user TypeScript that may not be typechecked at all.
 
-/** The value of one env var: a literal, `null` to omit it, or a reference from the context object. */
-export type HexclaveEnvVarValue = string | null | undefined | HexclaveDeploymentReference;
+/** The value for one of `all` / `prod` / `preview` / `dev`: a literal, `null` to skip that environment, or `secret()` / `service()` / `hexclave.*`. */
+export type HexclaveEnvVarEnvironmentValue = string | null | HexclaveDeploymentReference;
+
+/**
+ * Per-environment values for one env var. `all` fills any environment that
+ * does not set its own key. A var is secret in every environment or in none
+ * (`null` still omits it in one). At least one environment must be set — the
+ * CLI rejects `{}` (and all-`undefined` objects) at evaluation time, so the
+ * type does too.
+ */
+export type HexclaveEnvVarEnvironmentMap = {
+  [Required in DeploymentEnvironmentName]: { [E in Required]: HexclaveEnvVarEnvironmentValue } & { [E in Exclude<DeploymentEnvironmentName, Required>]?: HexclaveEnvVarEnvironmentValue }
+}[DeploymentEnvironmentName];
+
+/**
+ * One env var: a per-environment object, or a single value that is shorthand
+ * for `{ all: value }` (`undefined` leaves the var undeclared).
+ */
+export type HexclaveEnvVarValue = HexclaveEnvVarEnvironmentValue | undefined | HexclaveEnvVarEnvironmentMap;
 
 /**
  * An opaque reference produced by `secret()`, `service(...).<output>`, or
@@ -86,25 +104,17 @@ export type HexclaveServiceOutputs = {
 
 /** The context object passed to the `services` function. */
 export type HexclaveDeploymentContext = {
-  /** True during `hexclave dev`. Guard connection values with it — `service()` returns null there. */
-  isDev: boolean,
   /**
-   * References a project secret by key. Values are set per project under
-   * Project Settings → Secrets and resolved server-side at deploy time.
-   *
-   * The optional default is NOT dev-only. It is never stored server-side, but it
-   * travels with each deploy request and fills the secret whenever the project
-   * has no stored value for that key — on production deploys as well as
-   * `hexclave dev`. A key with a default is also excluded from the preflight
-   * that fails a deploy on missing secrets, since it can always be satisfied.
-   * Treat anything you pass here as a value you are willing to ship: to force a
-   * real secret to be set, omit the default.
+   * References a project secret by key. The var is a secret in every
+   * environment; values are set per environment under Project Settings →
+   * Secrets (`all` / `prod` / `preview` / `dev`) and never belong in this file.
    */
-  secret: (key: string, defaultValue?: string) => HexclaveDeploymentReference,
+  secret: (key: string) => HexclaveDeploymentReference,
   /**
    * References another service of this PROJECT — service ids are unique across
    * every deployment source, so a service deployed from another repository is
-   * referenced exactly like one next door. Returns null during `hexclave dev`.
+   * referenced exactly like one next door. For local `hexclave dev`, put a
+   * localhost string on the env var's `dev` key instead of calling this.
    */
   service: (serviceId: string) => HexclaveServiceOutputs,
   /** The managed Hexclave backend's outputs. */
@@ -208,7 +218,12 @@ type HexclaveServiceBase = {
    * `dockerfilePath`. Unrelated to `devCommand`, which only ever runs locally.
    */
   startCommand?: string,
-  /** Environment variables. Values may be literals, `null` to omit, or references from the context object. */
+  /**
+   * Environment variables: a per-environment object (`{ all, prod, preview,
+   * dev }`) of literals / `secret()` / `service()` / `hexclave.*` / `null`, or
+   * a single such value as shorthand for `{ all: value }`. A var is secret in
+   * every environment or in none.
+   */
   env?: Record<string, HexclaveEnvVarValue>,
 };
 
@@ -346,7 +361,10 @@ export type HexclaveService = HexclaveServerService | HexclaveServerlessService;
  *       memory: "4GB",
  *       ports: { 3000: { protocol: "http" } },
  *       persistentVolumes: { uploads: { path: "/data", sizeGb: 10 } },
- *       env: { DB_URL: service("db").url(5432), PROJECT_ID: hexclave.projectId },
+ *       env: {
+ *         DB_URL: { prod: service("db").url(5432), preview: service("db").url(5432), dev: "postgres://localhost:5432" },
+ *         PROJECT_ID: { all: hexclave.projectId },
+ *       },
  *     },
  *     web: { type: "serverless", public: true, ports: { 3000: { protocol: "http" } }, maxInstances: 3, env: { KEY: secret("API_KEY") } },
  *   },
