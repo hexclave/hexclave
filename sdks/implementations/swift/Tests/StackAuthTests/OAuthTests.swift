@@ -1,5 +1,8 @@
 import Testing
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import StackAuth
 
 @Suite("OAuth Tests")
@@ -180,5 +183,113 @@ struct OAuthTests {
         let result = try await app.getOAuthUrl(provider: "google", redirectUrl: customUrl, errorRedirectUrl: customErrorUrl)
         
         #expect(result.redirectUrl == customUrl)
+    }
+}
+
+@Suite("OAuth Token Exchange Error Parsing Tests")
+struct OAuthTokenExchangeErrorParsingTests {
+    private func makeResponse(status: Int, headers: [String: String] = [:]) -> HTTPURLResponse {
+        HTTPURLResponse(
+            url: URL(string: "http://localhost/api/v1/auth/oauth/token")!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        )!
+    }
+
+    private func makeBody(_ json: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: json)
+    }
+
+    @Test("Should surface MULTI_FACTOR_AUTHENTICATION_REQUIRED with its attempt code")
+    func mfaRequiredKnownError() throws {
+        let response = makeResponse(status: 400, headers: [
+            "x-stack-known-error": "MULTI_FACTOR_AUTHENTICATION_REQUIRED",
+            "x-hexclave-known-error": "MULTI_FACTOR_AUTHENTICATION_REQUIRED",
+        ])
+        let data = try makeBody([
+            "code": "MULTI_FACTOR_AUTHENTICATION_REQUIRED",
+            "error": "Multi-factor authentication is required for this user.",
+            "details": ["attempt_code": "attempt-code-123"],
+        ])
+
+        let error = StackAuthError.fromHTTPErrorResponse(data: data, response: response)
+
+        let mfaError = try #require(error as? MultiFactorAuthenticationRequiredError)
+        #expect(mfaError.attemptCode == "attempt-code-123")
+        #expect(mfaError.code == "MULTI_FACTOR_AUTHENTICATION_REQUIRED")
+    }
+
+    @Test("Should read the known error code from the legacy header alone")
+    func mfaRequiredLegacyHeaderOnly() throws {
+        let response = makeResponse(status: 400, headers: [
+            "x-stack-known-error": "MULTI_FACTOR_AUTHENTICATION_REQUIRED",
+        ])
+        let data = try makeBody([
+            "code": "MULTI_FACTOR_AUTHENTICATION_REQUIRED",
+            "error": "Multi-factor authentication is required for this user.",
+            "details": ["attempt_code": "legacy-attempt"],
+        ])
+
+        let error = StackAuthError.fromHTTPErrorResponse(data: data, response: response)
+
+        let mfaError = try #require(error as? MultiFactorAuthenticationRequiredError)
+        #expect(mfaError.attemptCode == "legacy-attempt")
+    }
+
+    @Test("Should keep the code and message of other known errors")
+    func otherKnownError() throws {
+        let response = makeResponse(status: 400, headers: [
+            "x-stack-known-error": "INVALID_AUTHORIZATION_CODE",
+            "x-hexclave-known-error": "INVALID_AUTHORIZATION_CODE",
+        ])
+        let data = try makeBody([
+            "code": "INVALID_AUTHORIZATION_CODE",
+            "error": "The given authorization code is invalid.",
+        ])
+
+        let error = try #require(StackAuthError.fromHTTPErrorResponse(data: data, response: response))
+
+        #expect(error is StackAuthError)
+        #expect(error.code == "INVALID_AUTHORIZATION_CODE")
+        #expect(error.message == "The given authorization code is invalid.")
+    }
+
+    @Test("Should map known errors with dedicated types")
+    func typedKnownError() throws {
+        let response = makeResponse(status: 400, headers: [
+            "x-stack-known-error": "REDIRECT_URL_NOT_WHITELISTED",
+        ])
+        let data = try makeBody([
+            "code": "REDIRECT_URL_NOT_WHITELISTED",
+            "error": "Redirect URL not whitelisted.",
+        ])
+
+        let error = StackAuthError.fromHTTPErrorResponse(data: data, response: response)
+
+        #expect(error is RedirectUrlNotWhitelistedError)
+    }
+
+    @Test("Should parse a plain OAuth error body as OAuthError")
+    func plainOAuthError() throws {
+        let response = makeResponse(status: 400)
+        let data = try makeBody([
+            "error": "invalid_request",
+            "error_description": "Missing parameter: `code`",
+        ])
+
+        let error = try #require(StackAuthError.fromHTTPErrorResponse(data: data, response: response))
+
+        #expect(error is OAuthError)
+        #expect(error.code == "invalid_request")
+        #expect(error.message == "Missing parameter: `code`")
+    }
+
+    @Test("Should return nil for error responses without error details")
+    func unparseableErrorBody() throws {
+        let response = makeResponse(status: 400)
+        let data = Data("Invalid redirect URI.".utf8)
+
+        #expect(StackAuthError.fromHTTPErrorResponse(data: data, response: response) == nil)
     }
 }
