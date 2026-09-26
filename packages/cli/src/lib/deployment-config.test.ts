@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { collectSecretDefaults, computeDeploymentLevels, evaluateDeploymentConfig, resolveDevEnv, type ServicesFunctionContext } from "./deployment-config.js";
+import { assertDevEnvResolvable, collectSecretKeysByEnvVar, computeDeploymentLevels, evaluateDeploymentConfig, resolveDevEnv, type ServicesFunctionContext } from "./deployment-config.js";
 
 const DEPLOY_FILE_PATH = path.join(path.sep, "repo", "hexclave.deploy.ts");
 
@@ -29,7 +29,7 @@ function evaluateOnGcp(servicesExport: unknown, mode: "deploy" | "dev" = "deploy
 describe("evaluateDeploymentConfig (deploy mode)", () => {
   it("preserves __proto__ as an environment variable instead of mutating the result prototype", () => {
     const { services } = evaluate(() => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { ["__proto__"]: "safe" } },
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { ["__proto__"]: { all: "safe" } } },
     }));
     const definitionEnv = services.get("web")?.definition.env;
     expect(definitionEnv).toBeDefined();
@@ -38,7 +38,7 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
   });
 
   it("serializes a full services export into wire-shape definitions", () => {
-    const { services } = evaluate(({ isDev, secret, service, hexclave }: ServicesFunctionContext) => ({
+    const { services } = evaluate(({ secret, service, hexclave }: ServicesFunctionContext) => ({
       frontend: {
         type: "serverless",
         public: true,
@@ -51,11 +51,11 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
         env: {
           DB_URL: (service("database") as any).url(),
           DB_INTERNAL: (service("database") as any).url(5432),
-          OPENAI: isDev ? null : secret("OPENAI_API_KEY", "some-default"),
+          OPENAI: secret("OPENAI_API_KEY"),
           REQUIRED_SECRET: secret("REQUIRED"),
           PROJECT_ID: (hexclave as any).projectId,
-          PLAIN: "literal",
-          OMITTED: null,
+          PLAIN: { all: "literal" },
+          OMITTED: { prod: null, all: "x" },
         },
       },
       database: { type: "serverless", ports: { 5432: { protocol: "http" } } },
@@ -63,26 +63,28 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
 
     expect([...services.keys()]).toEqual(["frontend", "database"]);
     const frontend = services.get("frontend");
-    expect(frontend?.definition).toEqual({
+    expect(frontend?.definition).toMatchObject({
       type: "serverless",
       public: true,
       ports: { "3000": { protocol: "http" } },
       min_instances: 1,
       max_instances: 3,
       root_directory: "apps/web",
-      // Authored relative to rootDirectory, joined onto it and normalized to a
-      // posix path within the upload.
       dockerfile_path: "apps/web/docker/Dockerfile.web",
       env: {
         DB_URL: { type: "connection", value: "database.url" },
         DB_INTERNAL: { type: "connection", value: "database.url:5432" },
-        // No default_value, even though OPENAI is declared with one: defaults
-        // are never synced into a definition (see collectSecretDefaults).
         OPENAI: { type: "secret", key: "OPENAI_API_KEY" },
         REQUIRED_SECRET: { type: "secret", key: "REQUIRED" },
         PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
         PLAIN: { value: "literal" },
       },
+    });
+    expect(frontend?.definition.env).not.toHaveProperty("OMITTED");
+    expect(frontend?.definition.env_per_environment).toMatchObject({
+      OPENAI: { all: { type: "secret", key: "OPENAI_API_KEY" } },
+      PLAIN: { all: { value: "literal" } },
+      OMITTED: { prod: { type: "omit" }, all: { value: "x" } },
     });
     expect(frontend?.absoluteRootDirectory).toBe(path.join(path.sep, "repo", "apps", "web"));
     // The dev command is read for local use only — `hexclave dev` gets it from
@@ -300,7 +302,7 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
           DATABASE_HOST: (service("database") as any).hostname(),
           // The port is a literal: the author already wrote 5432 on the target,
           // and a bare number needs no reference to be correct.
-          DATABASE_PORT: "5432",
+          DATABASE_PORT: { all: "5432" },
         },
       },
       database: { type: "serverless", ports: { 5432: { protocol: "tcp" } } },
@@ -324,7 +326,7 @@ describe("evaluateDeploymentConfig (deploy mode)", () => {
       db: { type: "serverless", ports: { 3000: { protocol: "http" } } },
     }))).toThrow("cannot be embedded in a string");
     expect(() => evaluate(({ secret }: ServicesFunctionContext) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { AUTH: `Bearer ${secret("KEY", "v")}` } },
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { AUTH: `Bearer ${secret("KEY")}` } },
     }))).toThrow("cannot be embedded in a string");
     expect(() => evaluate(({ hexclave }: ServicesFunctionContext) => ({
       web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { P: `id-${(hexclave as any).projectId}` } },
@@ -674,103 +676,215 @@ describe("the deployment envelope", () => {
   });
 });
 
-describe("collectSecretDefaults", () => {
-  function webServiceWithEnv(servicesExport: unknown) {
-    const { services } = evaluate(servicesExport);
+describe("environment-scoped env vars", () => {
+  function webServiceWithEnv(servicesExport: unknown, mode: "deploy" | "dev" = "deploy") {
+    const { services } = evaluate(servicesExport, mode);
     const web = services.get("web");
     if (web === undefined) throw new Error("the services export under test must define a service named `web`");
     return web;
   }
 
-  it("collects only secrets that declare a default, keyed by env var", () => {
+  it("resolves environment then all, and fails when neither is set", () => {
+    const web = webServiceWithEnv(({ secret }: ServicesFunctionContext) => ({
+      web: {
+        type: "serverless", ports: { 3000: { protocol: "http" } },
+        env: {
+          LOG_LEVEL: { all: "info", dev: "debug" },
+          KEY: secret("OPENAI_API_KEY"),
+        },
+      },
+    }));
+    expect(web.definition.env.LOG_LEVEL).toEqual({ value: "info" });
+    expect(web.definition.env.KEY).toEqual({ type: "secret", key: "OPENAI_API_KEY" });
+    expect(web.definition.env_per_environment?.LOG_LEVEL).toEqual({ all: { value: "info" }, dev: { value: "debug" } });
+    expect(() => evaluate(() => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { ONLY_DEV: { dev: "x" } } },
+    }))).toThrow("has no value for the prod environment");
+  });
+
+  it("treats pre-environment bare values as `all`", () => {
     const web = webServiceWithEnv(({ secret, hexclave }: ServicesFunctionContext) => ({
       web: {
         type: "serverless", ports: { 3000: { protocol: "http" } },
         env: {
-          WITH_DEFAULT: secret("OPENAI_API_KEY", "some-default"),
-          WITHOUT_DEFAULT: secret("REQUIRED"),
-          PLAIN: "literal",
+          LOG_LEVEL: "info",
+          OMITTED: null,
+          UNDECLARED: undefined,
+          KEY: secret("K"),
           PROJECT_ID: (hexclave as any).projectId,
         },
       },
     }));
-    expect(collectSecretDefaults(web)).toEqual({ WITH_DEFAULT: "some-default" });
+    expect(web.definition.env).toEqual({
+      LOG_LEVEL: { value: "info" },
+      KEY: { type: "secret", key: "K" },
+      PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
+    });
+    expect(web.definition.env_per_environment).toEqual({
+      LOG_LEVEL: { all: { value: "info" } },
+      OMITTED: { all: { type: "omit" } },
+      KEY: { all: { type: "secret", key: "K" } },
+      PROJECT_ID: { all: { type: "connection", value: "hexclave.projectId" } },
+    });
   });
 
-  it("keys by env var so one secret can have different defaults per var", () => {
-    // The default belongs to the `secret()` CALL, not to the secret — two env
-    // vars may fill from the same key with different fallbacks, which a
-    // secret-key-keyed map would silently collapse.
+  it("treats an undefined environment as unset, falling back to `all`", () => {
+    const web = webServiceWithEnv(() => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { LOG_LEVEL: { all: "info", prod: undefined } } },
+    }));
+    expect(web.definition.env.LOG_LEVEL).toEqual({ value: "info" });
+    expect(web.definition.env_per_environment?.LOG_LEVEL).toEqual({ all: { value: "info" } });
+  });
+
+  it("rejects non-string literals and arrays", () => {
+    expect(() => evaluate(() => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { PORT: 3000 } },
+    }))).toThrow("must be a string, null");
+    expect(() => evaluate(() => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { LIST: ["a"] } },
+    }))).toThrow("got an array");
+  });
+
+  it("rejects mixing secret() with a plaintext value", () => {
+    expect(() => evaluate(({ secret }: ServicesFunctionContext) => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { KEY: { prod: secret("K"), dev: "local" } } },
+    }))).toThrow("cannot mix secret()");
+  });
+
+  it("rejects secret() defaults, pointing at the `all` environment", () => {
+    // `any`: the typed context no longer accepts a default, and the point here
+    // is what an untyped (or older) deploy file hits at runtime.
+    expect(() => evaluate(({ secret }: any) => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { KEY: secret("K", "default") } },
+    }))).toThrow(/no longer takes a default value\. Write secret\("K"\) .*`all` environment/);
+  });
+
+  it("no longer provides isDev, so old files take their non-dev branch in both modes", () => {
+    const servicesExport = ({ isDev }: any) => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { X: isDev ? "dev-value" : "prod-value" } },
+    });
+    expect(webServiceWithEnv(servicesExport, "deploy").definition.env.X).toEqual({ value: "prod-value" });
+    expect(resolveDevEnv(webServiceWithEnv(servicesExport, "dev"), {})).toEqual(new Map([["X", "prod-value"]]));
+  });
+
+  it("collects secret keys from the resolved env", () => {
     const web = webServiceWithEnv(({ secret }: ServicesFunctionContext) => ({
       web: {
         type: "serverless", ports: { 3000: { protocol: "http" } },
         env: {
-          PRIMARY: secret("SHARED", "primary-default"),
-          SECONDARY: secret("SHARED", "secondary-default"),
+          A: secret("zebra"),
+          B: { prod: secret("alpha"), dev: null },
+          C: { all: "plain" },
         },
       },
     }));
-    expect(collectSecretDefaults(web)).toEqual({ PRIMARY: "primary-default", SECONDARY: "secondary-default" });
-  });
-
-  it("keeps an empty-string default, which is not the same as having none", () => {
-    const web = webServiceWithEnv(({ secret }: ServicesFunctionContext) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { EMPTY: secret("MAYBE", ""), NONE: secret("OTHER") } },
-    }));
-    expect(collectSecretDefaults(web)).toEqual({ EMPTY: "" });
+    expect(collectSecretKeysByEnvVar(web)).toEqual(new Map([["A", "zebra"], ["B", "alpha"]]));
   });
 });
 
 describe("evaluateDeploymentConfig (dev mode)", () => {
-  it("resolves secrets to their default value and omits service() connections", () => {
-    const { services } = evaluate(({ isDev, secret, service }: ServicesFunctionContext) => ({
+  it("slices the dev environment and leaves secrets for the dashboard pull", () => {
+    const { services } = evaluate(({ secret, service }: ServicesFunctionContext) => ({
       web: {
         type: "serverless", ports: { 3000: { protocol: "http" } },
         env: {
-          OPENAI: secret("OPENAI_API_KEY", "dev-default"),
-          DB_URL: isDev ? null : (service("database") as any).url(),
-          PLAIN: "x",
+          OPENAI: secret("OPENAI_API_KEY"),
+          DB_URL: { prod: (service("database") as any).url(), preview: (service("database") as any).url(), dev: "http://localhost:5432" },
+          PLAIN: { all: "x" },
         },
       },
       database: { type: "serverless", ports: { 3000: { protocol: "http" } } },
     }), "dev");
-    expect(resolveDevEnv(services.get("web") ?? (() => {
+    const web = services.get("web") ?? (() => {
       throw new Error("web service missing");
-    })(), {})).toEqual({
-      OPENAI: "dev-default",
-      PLAIN: "x",
-    });
+    })();
+    expect(resolveDevEnv(web, {})).toEqual(new Map([
+      ["DB_URL", "http://localhost:5432"],
+      ["PLAIN", "x"],
+    ]));
+    expect(collectSecretKeysByEnvVar(web)).toEqual(new Map([["OPENAI", "OPENAI_API_KEY"]]));
   });
 
-  it("errors on secrets without a default value only when resolving the selected service", () => {
-    // Evaluation itself succeeds — a default-less secret in an UNRELATED
-    // service must not block `hexclave dev --service-id` for everything else.
+  it("keeps env var names that collide with Object.prototype as ordinary keys", () => {
+    const { services } = evaluate(() => ({
+      web: {
+        type: "serverless", ports: { 3000: { protocol: "http" } },
+        // Computed key: a literal `__proto__:` would set the prototype instead.
+        env: { constructor: "c", ["__proto__"]: "p", toString: { all: "t" } },
+      },
+    }), "dev");
+    const web = services.get("web") ?? (() => {
+      throw new Error("web service missing");
+    })();
+    expect(resolveDevEnv(web, {})).toEqual(new Map([["constructor", "c"], ["__proto__", "p"], ["toString", "t"]]));
+    expect(Object.keys(web.definition.env)).toEqual(["constructor", "__proto__", "toString"]);
+    expect(Object.keys(web.definition.env_per_environment ?? {})).toEqual(["constructor", "__proto__", "toString"]);
+  });
+
+  it("does not fail evaluation for a secret on an unrelated service", () => {
     const { services } = evaluate(({ secret }: ServicesFunctionContext) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { PLAIN: "x" } },
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { PLAIN: { all: "x" } } },
       worker: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { X: secret("NO_DEFAULT") } },
     }), "dev");
     expect(resolveDevEnv(services.get("web") ?? (() => {
       throw new Error("web service missing");
-    })(), {})).toEqual({ PLAIN: "x" });
-    expect(() => resolveDevEnv(services.get("worker") ?? (() => {
+    })(), {})).toEqual(new Map([["PLAIN", "x"]]));
+    expect(collectSecretKeysByEnvVar(services.get("worker") ?? (() => {
       throw new Error("worker service missing");
-    })(), {})).toThrow("has no default value, so it cannot be resolved during `hexclave dev`");
+    })())).toEqual(new Map([["X", "NO_DEFAULT"]]));
   });
 
-  it("validates service() references in dev mode too", () => {
-    // service() returns null in dev (the env var is omitted), but a typo'd id
-    // must still fail — not lie dormant until the next deploy.
-    expect(() => evaluate(({ service }: ServicesFunctionContext) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { X: service("databsae") as never } },
-      database: { type: "serverless", ports: { 3000: { protocol: "http" } } },
-    }), "dev")).not.toThrow();
-  });
-
-  it("explains the isDev guard when service() output access crashes on null", () => {
-    expect(() => evaluate(({ service }: ServicesFunctionContext) => ({
+  it("refuses service() in the resolved dev slice, but only for the service being run", () => {
+    const { services } = evaluate(({ service }: ServicesFunctionContext) => ({
       web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { DB_URL: (service("database") as any).url() } },
       database: { type: "serverless", ports: { 3000: { protocol: "http" } } },
-    }), "dev")).toThrow("service() returns null — guard connection values with isDev");
+    }), "dev");
+    const web = services.get("web") ?? (() => {
+      throw new Error("web service missing");
+    })();
+    const database = services.get("database") ?? (() => {
+      throw new Error("database service missing");
+    })();
+    expect(() => assertDevEnvResolvable(web)).toThrow("uses service() in the `dev` environment");
+    expect(() => resolveDevEnv(web, {})).toThrow("uses service() in the `dev` environment");
+    expect(resolveDevEnv(database, {})).toEqual(new Map());
+  });
+
+  it("does not let a missing dev value on an unrelated service block the selected one", () => {
+    const { services } = evaluate(({ service }: ServicesFunctionContext) => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { PLAIN: { all: "x" } } },
+      worker: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { U: { prod: (service("web") as any).url() } } },
+    }), "dev");
+    const web = services.get("web") ?? (() => {
+      throw new Error("web service missing");
+    })();
+    const worker = services.get("worker") ?? (() => {
+      throw new Error("worker service missing");
+    })();
+    expect(resolveDevEnv(web, {})).toEqual(new Map([["PLAIN", "x"]]));
+    expect(() => assertDevEnvResolvable(worker)).toThrow("has no value for the dev environment");
+  });
+
+  it("still fails deploy mode immediately when an env var has no prod value", () => {
+    expect(() => evaluate(() => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { PLAIN: { all: "x" } } },
+      worker: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { ONLY_DEV: { dev: "x" } } },
+    }))).toThrow("deploy.services.worker.env.ONLY_DEV has no value for the prod environment");
+  });
+
+  it("still records service() references used only in prod", () => {
+    const { services } = evaluate(({ service }: ServicesFunctionContext) => ({
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { X: { prod: (service("database") as any).url(), dev: "http://localhost" } } },
+      database: { type: "serverless", ports: { 3000: { protocol: "http" } } },
+    }), "dev");
+    const web = services.get("web") ?? (() => {
+      throw new Error("web service missing");
+    })();
+    expect(web.definition.env.X).toEqual({ value: "http://localhost" });
+    expect(web.definition.env_per_environment?.X).toEqual({
+      prod: { type: "connection", value: "database.url" },
+      dev: { value: "http://localhost" },
+    });
   });
 
   it("resolves hexclave outputs from the session env", () => {
@@ -794,13 +908,13 @@ describe("evaluateDeploymentConfig (dev mode)", () => {
     };
     expect(resolveDevEnv(services.get("web") ?? (() => {
       throw new Error("web service missing");
-    })(), sessionEnv)).toEqual({
-      PROJECT_ID: "proj_123",
-      API_URL: "https://api.example.com/",
-      JWKS: "https://api.example.com/api/v1/projects/proj_123/.well-known/jwks.json",
-      PCK: "pck_123",
-      SSK: "ssk_123",
-    });
+    })(), sessionEnv)).toEqual(new Map([
+      ["PROJECT_ID", "proj_123"],
+      ["API_URL", "https://api.example.com/"],
+      ["JWKS", "https://api.example.com/api/v1/projects/proj_123/.well-known/jwks.json"],
+      ["PCK", "pck_123"],
+      ["SSK", "ssk_123"],
+    ]));
   });
 
   it("errors when the session env lacks a needed hexclave output", () => {

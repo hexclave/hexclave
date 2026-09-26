@@ -22,7 +22,7 @@ export const deploymentsSkillSection = deindent`
   // Required, and unique across every deploy file deploying into this project.
   export const deploymentGroupId = "my-app";
 
-  export const deploy: HexclaveDeploymentConfig = ({ isDev, secret, service, hexclave }) => ({
+  export const deploy: HexclaveDeploymentConfig = ({ secret, service, hexclave }) => ({
     services: {
       web: {
         type: "serverless",
@@ -30,11 +30,11 @@ export const deploymentsSkillSection = deindent`
         ports: { 3000: { protocol: "http" } },
         devCommand: "pnpm dev",
         env: {
-          MY_ENV_VAR: "true",
-          OPENAI_API_KEY: isDev ? null : secret("OPENAI_API_KEY"),
-          API_URL: isDev ? "http://localhost:3001" : service("api").url(8080),
-          DATABASE_HOST: isDev ? "localhost" : service("database").hostname(),
-          DATABASE_PORT: "5432",
+          LOG_LEVEL: { all: "info", dev: "debug" },
+          OPENAI_API_KEY: secret("OPENAI_API_KEY"),
+          API_URL: { prod: service("api").url(8080), preview: service("api").url(8080), dev: "http://localhost:3001" },
+          DATABASE_HOST: { prod: service("database").hostname(), preview: service("database").hostname(), dev: "localhost" },
+          DATABASE_PORT: { all: "5432" },
         },
       },
       api: { type: "serverless", ports: { 8080: { protocol: "http" } }, rootDirectory: "./api", memory: "1GB" },
@@ -67,7 +67,7 @@ export const deploymentsSkillSection = deindent`
 
   Use the default HTTP protocol for web applications and APIs. \`service("api").url(8080)\` gives that port's URL — the service's PUBLIC url when the target service is public, and its internal address otherwise — and a bare \`url()\` requires exactly one HTTP port so it is unambiguous. \`service("api").hostname()\` is the private hostname without a port, and always works. There is no port output — write the number (e.g. \`DATABASE_PORT: "5432"\`), which you already declared in the target's \`ports\`. Service ids are unique across the whole project, so a service deployed from another repository is referenced exactly the same way. The process must listen on each configured port and bind to \`0.0.0.0\`.
 
-  Use \`protocol: "tcp"\` on a port for a database, cache, queue, SMTP server, or other raw TCP daemon such as PostgreSQL, MySQL, Redis, or RabbitMQ. TCP ports are reachable only from other services in the same project: pass \`service("database").hostname()\` and the port as a literal, as separate env vars. Only a private service may declare TCP ports, and a service with no HTTP port exposes no \`url\` and cannot take custom domains. The daemon must bind to \`0.0.0.0\`, not only localhost. Do not manually change generated Fly infrastructure; Hexclave reconciliation owns it and can replace out-of-band changes.
+  Use \`protocol: "tcp"\` on a port for a database, cache, queue, SMTP server, or other raw TCP daemon such as PostgreSQL, MySQL, Redis, or RabbitMQ. TCP ports are reachable only from other services in the same project: pass \`service("database").hostname()\` and the port as a literal env object (e.g. \`DATABASE_PORT: { all: "5432" }\`), as separate env vars. Only a private service may declare TCP ports, and a service with no HTTP port exposes no \`url\` and cannot take custom domains. The daemon must bind to \`0.0.0.0\`, not only localhost. Do not manually change generated Fly infrastructure; Hexclave reconciliation owns it and can replace out-of-band changes.
 
   A service with \`minInstances: 0\` autostarts when a connection reaches its Flycast host and port. Make clients retry initial DNS/connect/auth failures with a bounded backoff: an HTTP app and its TCP dependency may be cold-starting simultaneously. If startup latency is unacceptable, use \`minInstances: 1\` on a paid plan.
 
@@ -107,7 +107,7 @@ export const deploymentsSkillSection = deindent`
 
   Disks only grow: raising \`sizeGb\` expands them in place, but LOWERING it fails the deploy rather than silently ignoring you. Removing a volume from a service detaches the disk without deleting it — the data stays (re-declaring the same id remounts it) and so does the billing, so a disk you truly want gone has to be deleted deliberately. \`hexclave dev\` ignores \`persistentVolumes\` entirely; locally your app just writes to your own filesystem.
 
-  Env var values may be: a plain string; \`null\` (omit the var — useful with \`isDev\`); \`secret(key, defaultValue?)\` — the value is stored per project in the dashboard (Project Settings > Secrets), never in the config; \`service("<id>").url(8080)\` for an HTTP port — a reference to a PRIVATE service resolves to its internal URL, which is available immediately, while one to a PUBLIC service resolves to the platform URL (or a verified custom domain) and so waits for the target to be up; \`service("<id>").hostname()\` for either protocol, always available (pair it with a literal port for TCP clients); or \`hexclave.projectId\` / \`.apiUrl\` / \`.jwksUrl\` / \`.publishableClientKey\` / \`.secretServerKey\` for the managed Hexclave backend. A target with no HTTP port has no URL, so \`url()\` on it fails with guidance to use hostname and port, as does a bare \`url()\` on a target whose several HTTP ports make it ambiguous. References must be the WHOLE value — string interpolation with them throws. During \`hexclave dev\`, \`secret()\` resolves to its default value (error if it has none and isn't guarded by \`isDev\`) and \`service()\` returns \`null\`.
+  A var is secret or not as a whole (like Vercel sensitive). Non-secrets live in the file as an environment object (\`{ all, prod, preview, dev }\`) of literals / \`service()\` / \`hexclave.*\` / \`null\`; a single value (e.g. \`LOG_LEVEL: "info"\`) is shorthand for \`{ all: value }\`. \`isDev\` and \`secret(key, default)\` no longer exist. Secrets are declared with \`secret("KEY")\` (optionally wrapped as \`{ all: secret("KEY") }\` or \`{ prod: secret("KEY"), dev: null }\`); values never go in git. Resolve picks the active environment, else \`all\`; if neither is set, evaluation fails naming the key and environment. \`hexclave deploy\` is always \`prod\`. \`preview\` is a legal name only — preview URLs and git-push deploys are not implemented yet. Seed / populate scripts for server services are also intentionally unimplemented. \`null\` omits the var in that environment. \`service("<id>").url(8080)\` names one HTTP port — a PRIVATE target resolves to its internal URL immediately, a PUBLIC one to the platform URL (or a verified custom domain) and so waits for the target to be up; \`service("<id>").hostname()\` is always available (pair it with a literal port for TCP). \`hexclave.projectId\` / \`.apiUrl\` / \`.jwksUrl\` / \`.publishableClientKey\` / \`.secretServerKey\` are the managed backend. References must be the whole value of that environment — string interpolation throws. For local \`hexclave dev\`, put localhost strings on \`dev\` — \`service()\` in the \`dev\` slice is a programming error.
 
   ## How services are built
 
@@ -130,10 +130,10 @@ export const deploymentsSkillSection = deindent`
   \`\`\`sh title="Terminal"
   npx @hexclave/cli@latest exec --cloud-project-id <project-id> \\
     "const p = await hexclaveServerApp.getProject(); \\
-     await p.setProjectSecret('OPENAI_API_KEY', process.env.OPENAI_API_KEY);"
+     await p.setProjectSecret('OPENAI_API_KEY', process.env.OPENAI_API_KEY, 'all');"
   \`\`\`
 
-  \`listProjectSecrets()\` returns keys and timestamps only — values can never be read back, and the dashboard lists only keys that have a value. \`defaultValue\` lives purely in the deploy file: it is sent with the deploy and never stored, so it never shows up as a set secret. A deploy fails up front and names every \`secret()\` without a default that has no stored value. Note that \`exec\` requires a \`hexclave login\` session — a server-key-only environment (typical CI) can DEPLOY using stored secrets but cannot SET them; set secrets beforehand from a logged-in machine or the dashboard.
+  \`listProjectSecrets()\` returns keys, environments, and timestamps only — values can never be read back. Set a \`prod\` or \`all\` value before \`hexclave deploy\`; \`hexclave dev\` pulls the \`dev\` value (else \`all\`) from the cloud project you deploy to (\`--cloud-project-id\` or \`HEXCLAVE_PROJECT_ID\`, not the development environment's project), authenticated with your \`hexclave login\` session, and injects it into the child process without printing it or writing a file. A missing value fails closed, naming the key and environment. \`exec\` requires a \`hexclave login\` session — a server-key-only environment (typical CI) can DEPLOY using stored secrets but cannot SET them or pull them for local \`dev\`.
 
   ## Agent workflow (do this — do not drive the dashboard UI)
 
@@ -174,7 +174,7 @@ export const deploymentsSkillSection = deindent`
 
   ## Local development
 
-  \`hexclave dev --config-file hexclave.config.ts --service-id web\` (services come from \`hexclave.deploy.ts\` next to it, or \`--deploy-file <path>\`) runs the service's \`devCommand\` with its env vars injected (plus the development-environment credentials) — services run directly on your machine during development, never in containers. Passing \`-- <command>\` instead (or additionally) overrides the devCommand.
+  \`hexclave dev --config-file hexclave.config.ts --service-id web\` (services come from \`hexclave.deploy.ts\` next to it, or \`--deploy-file <path>\`) runs the service's \`devCommand\` on your laptop (never in a container) with the \`dev\` (else \`all\`) slice of its env injected, plus the development-environment credentials. Secret values are pulled from Project Settings → Secrets of the cloud project you deploy to, which needs \`hexclave login\` and \`--cloud-project-id\` / \`HEXCLAVE_PROJECT_ID\` (only when the service uses \`secret()\`), and are never printed. Passing \`-- <command>\` instead (or additionally) overrides the devCommand.
 
   ## Checking status and debugging failures
 

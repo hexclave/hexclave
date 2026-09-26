@@ -452,7 +452,7 @@ describe("Stack CLI", () => {
         // The `deploymentGroupId` export names this deployment group — which
         // deploy file (and so which repository) these services belong to.
         'export const deploymentGroupId = "cli-e2e";',
-        "export const deploy = ({ isDev, secret, service, hexclave }: any) => ({",
+        "export const deploy = ({ secret, service, hexclave }: any) => ({",
         "  services: {",
         "    web: {",
         '      type: "serverless",',
@@ -463,7 +463,7 @@ describe("Stack CLI", () => {
         "      env: {",
         '        DB_URL: service("db").url(5432),',
         "        PROJECT_ID: hexclave.projectId,",
-        '        OPENAI: isDev ? null : secret("OPENAI_KEY", "sk-default"),',
+        '        OPENAI: secret("OPENAI_KEY"),',
         "      },",
         "    },",
         '    db: { type: "serverless", ports: { 5432: { protocol: "http" } }, rootDirectory: "./db" },',
@@ -484,6 +484,13 @@ describe("Stack CLI", () => {
       // leave alone. Then changed on disk WITHOUT being pushed: the assertion
       // after the deploy is that the deploy did not publish this edit.
       writeConfigFile(true);
+      const setSecretRes = await runCli([
+        "exec", "--cloud-project-id", createdProjectId,
+        "const p = await hexclaveServerApp.getProject(); await p.setProjectSecret('OPENAI_KEY', 'sk-e2e', 'all');",
+      ]);
+      if (setSecretRes.exitCode !== 0) {
+        throw new Error(`set secret exited ${setSecretRes.exitCode}. stderr: ${setSecretRes.stderr}`);
+      }
       const configPushRes = await runCli(
         ["config", "push", "--cloud-project-id", createdProjectId, "--config-file", configFilePath],
       );
@@ -524,14 +531,12 @@ describe("Stack CLI", () => {
       // `devCommand`, which `hexclave dev` runs locally and the CLI therefore
       // never sends (web declares one above, so this also covers that a
       // devCommand doesn't trip the sync route).
-      // OPENAI also proves the secret-default path end to end: nothing set a
-      // value for OPENAI_KEY, so this deploy only succeeded because the CLI
-      // sent `secret("OPENAI_KEY", "sk-default")`'s default with the deploy
-      // request — while the SYNCED definition names the secret and nothing
-      // else, so the default was never persisted.
+      // OPENAI is a secret() declaration: the synced definition names the key
+      // and never a value. The stored `all` value set above is what made the
+      // deploy succeed.
       const execRes = await runCli([
         "exec", "--cloud-project-id", createdProjectId,
-        "const p = await hexclaveServerApp.getProject(); const services = await p.listDeploymentServices(); const svc = services.find(s => s.id === 'web'); const api = services.find(s => s.id === 'api'); return JSON.stringify({ hasDevCommand: 'dev_command' in svc, keys: svc.env.map(e => e.key).sort(), openai: svc.env.find(e => e.key === 'OPENAI'), webDockerfile: svc.dockerfile_path, dbDockerfile: services.find(s => s.id === 'db').dockerfile_path, apiBuild: api.build_command, apiStart: api.start_command, apiRoot: api.root_directory, webStart: svc.start_command });",
+        "const p = await hexclaveServerApp.getProject(); const services = await p.listDeploymentServices(); const svc = services.find(s => s.id === 'web'); const api = services.find(s => s.id === 'api'); const openai = svc.env.find(e => e.key === 'OPENAI'); return JSON.stringify({ hasDevCommand: 'dev_command' in svc, keys: svc.env.map(e => e.key).sort(), openai: { key: openai.key, type: openai.type, value: openai.value, secret_key: openai.secret_key, perEnvironmentAll: openai.per_environment?.all ?? null }, webDockerfile: svc.dockerfile_path, dbDockerfile: services.find(s => s.id === 'db').dockerfile_path, apiBuild: api.build_command, apiStart: api.start_command, apiRoot: api.root_directory, webStart: svc.start_command });",
       ]);
       if (execRes.exitCode !== 0) {
         throw new Error(`exec exited ${execRes.exitCode}. stderr: ${execRes.stderr}`);
@@ -539,7 +544,7 @@ describe("Stack CLI", () => {
       expect(JSON.parse(JSON.parse(execRes.stdout.trim()))).toEqual({
         hasDevCommand: false,
         keys: ["DB_URL", "OPENAI", "PROJECT_ID"],
-        openai: { key: "OPENAI", type: "secret", value: null, secret_key: "OPENAI_KEY" },
+        openai: { key: "OPENAI", type: "secret", value: null, secret_key: "OPENAI_KEY", perEnvironmentAll: { type: "secret", value: null, secret_key: "OPENAI_KEY" } },
         // Authored as a bare "Dockerfile" under rootDirectory "./web" and stored with the
         // root directory joined on — relative to the UPLOAD ROOT, because the build context
         // is the whole upload (that is what lets a monorepo service COPY shared code from

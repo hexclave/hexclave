@@ -2,40 +2,41 @@
 // envelope-encrypted with the data vault's server-side KMS flow
 // (`encryptWithKms`) so plaintext never touches the ProjectSecret table.
 //
-// "Write-only" means exactly that: no API path returns a value. Values are set,
-// overwritten, and deleted through /project-secrets, and decrypted here only by
-// the feature that consumes them. Note that this protects the DASHBOARD surface,
-// not a privilege boundary — a holder of the project's secret server key can
-// already have a secret resolved into a deployment it controls.
+// "Write-only" means the list/GET surfaces never return a value. Values are
+// set, overwritten, and deleted through /project-secrets. They are decrypted
+// here by a deploy (into a container) and by the admin-only resolve endpoint
+// that `hexclave dev` uses (`dev` / `all` rows only) — never by the dashboard
+// list. This protects the DASHBOARD surface, not a privilege boundary: a
+// holder of the project's secret server key can already have a secret resolved
+// into a deployment it controls.
 //
 // Scoped by project, not tenancy: these are infrastructure credentials that
-// branches share by design, and a per-organization copy of an API key would be
-// meaningless. If a consumer ever needs per-branch values, the intended shape is
-// a nullable `branchId` (null = applies to every branch) resolved
-// exact-match-then-project-wide — cheap while this table is small, but it needs
-// a partial unique index for the NULL case, which Prisma can't express.
-//
-// Deployments are the only consumer today (`secret()` env vars in the deploy
-// file's `deploy` export name a key here), but nothing in this module knows
-// that; keep it that way.
+// branches share by design. Values are partitioned by `environment`
+// (`all` / `prod` / `preview` / `dev`): a more specific row wins, otherwise
+// `all`.
 
 import { globalPrismaClient } from "@/prisma-client";
 import type { Prisma } from "@/generated/prisma/client";
 import { decryptWithKms } from "@hexclave/shared/dist/helpers/vault/server-side";
+import { PROJECT_SECRET_ENVIRONMENTS, type ProjectSecretEnvironment } from "@hexclave/shared/dist/project-secrets";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 
-export { MAX_PROJECT_SECRET_KEY_LENGTH, PROJECT_SECRET_KEY_REGEX } from "@hexclave/shared/dist/project-secrets";
+export { MAX_PROJECT_SECRET_KEY_LENGTH, PROJECT_SECRET_ENVIRONMENTS, PROJECT_SECRET_KEY_REGEX } from "@hexclave/shared/dist/project-secrets";
+export type { ProjectSecretEnvironment } from "@hexclave/shared/dist/project-secrets";
 
 // Secret values are meant to be things like API keys, not blobs; the bound
 // exists so a hostile client can't stuff megabytes into a KMS-encrypted row.
 export const MAX_SECRET_VALUE_LENGTH = 32 * 1024;
-// Bounds the per-read KMS decryption work of consumers that decrypt EVERY
-// stored secret at once — today the deployments build-log redaction pass, which
-// does so on each log read.
+// Bounds distinct KEYS, not rows: each key may have up to four environment
+// rows. A 100-row cap would 400 the first extra-env write on a full project.
 export const MAX_SECRETS_PER_PROJECT = 100;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isProjectSecretEnvironment(value: unknown): value is ProjectSecretEnvironment {
+  return typeof value === "string" && (PROJECT_SECRET_ENVIRONMENTS as readonly string[]).includes(value);
 }
 
 /** Decrypts one stored `{ edkBase64, ciphertextBase64 }` payload. */
@@ -47,28 +48,65 @@ export async function decryptProjectSecret(encrypted: Prisma.JsonValue, secretKe
 }
 
 /**
- * Decrypts the stored value of one project secret, or returns null when no
- * value is stored. Only for server-side consumers (a deploy, log redaction) —
- * values are write-only everywhere else.
+ * Decrypts the stored value of one project secret for an environment, or
+ * returns null when neither that environment nor `all` is stored. Only for
+ * server-side consumers (a deploy, admin resolve-for-dev).
  */
-export async function readProjectSecretValue(projectId: string, secretKey: string): Promise<string | null> {
-  const row = await globalPrismaClient.projectSecret.findUnique({
-    where: {
-      projectId_key: {
-        projectId,
-        key: secretKey,
-      },
-    },
-  });
-  if (row == null) return null;
-  return await decryptProjectSecret(row.encrypted, secretKey);
+export async function readProjectSecretValue(projectId: string, secretKey: string, environment: Exclude<ProjectSecretEnvironment, "all">): Promise<string | null> {
+  const values = await readProjectSecretValues(projectId, [secretKey], environment);
+  return values.get(secretKey) ?? null;
 }
 
-/** The project's secret keys and timestamps — never their values. */
-export async function listProjectSecrets(projectId: string): Promise<{ key: string, createdAt: Date, updatedAt: Date }[]> {
-  return await globalPrismaClient.projectSecret.findMany({
-    where: { projectId },
-    select: { key: true, createdAt: true, updatedAt: true },
-    orderBy: { key: "asc" },
+/**
+ * Bulk form of readProjectSecretValue: one query for every key, then the KMS
+ * decryptions in parallel. Keys with neither an `environment` nor an `all` row
+ * are absent from the result.
+ */
+export async function readProjectSecretValues(projectId: string, secretKeys: readonly string[], environment: Exclude<ProjectSecretEnvironment, "all">): Promise<Map<string, string>> {
+  if (secretKeys.length === 0) return new Map();
+  const rows = await globalPrismaClient.projectSecret.findMany({
+    where: {
+      projectId,
+      key: { in: [...new Set(secretKeys)] },
+      environment: { in: [environment, "all"] },
+    },
+    select: { key: true, environment: true, encrypted: true },
   });
+  // The exact environment wins over `all`, whichever order the rows come back in.
+  const winningRowByKey = new Map<string, typeof rows[number]>();
+  for (const row of rows) {
+    const current = winningRowByKey.get(row.key);
+    if (current == null || row.environment === environment) winningRowByKey.set(row.key, row);
+  }
+  const decrypted = await Promise.all([...winningRowByKey].map(async ([key, row]) => [key, await decryptProjectSecret(row.encrypted, key)] as const));
+  return new Map(decrypted);
+}
+
+/** The project's secret keys, environments, and timestamps — never their values. */
+export async function listProjectSecrets(projectId: string): Promise<{ key: string, environment: ProjectSecretEnvironment, createdAt: Date, updatedAt: Date }[]> {
+  const rows = await globalPrismaClient.projectSecret.findMany({
+    where: { projectId },
+    select: { key: true, environment: true, createdAt: true, updatedAt: true },
+    orderBy: [{ key: "asc" }, { environment: "asc" }],
+  });
+  return rows.map((row) => {
+    if (!isProjectSecretEnvironment(row.environment)) {
+      throw new HexclaveAssertionError(`Stored project secret ${JSON.stringify(row.key)} has invalid environment ${JSON.stringify(row.environment)}`);
+    }
+    return {
+      key: row.key,
+      environment: row.environment,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  });
+}
+
+export async function countDistinctProjectSecretKeys(projectId: string): Promise<number> {
+  const rows = await globalPrismaClient.projectSecret.findMany({
+    where: { projectId },
+    select: { key: true },
+    distinct: ["key"],
+  });
+  return rows.length;
 }

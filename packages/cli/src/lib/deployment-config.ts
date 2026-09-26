@@ -17,7 +17,7 @@
 //
 //   export const deploymentGroupId = "my-app";
 //
-//   export const deploy: HexclaveDeploymentConfig = ({ isDev, secret, service, hexclave }) => ({
+//   export const deploy: HexclaveDeploymentConfig = ({ secret, service, hexclave }) => ({
 //     services: {
 //       frontend: {
 //         type: "serverless",
@@ -26,9 +26,9 @@
 //         maxInstances: 3,
 //         devCommand: "pnpm dev",
 //         env: {
-//           DB_URL: service("database").url(5432),
-//           OPENAI: isDev ? null : secret("OPENAI_API_KEY", "some-default"),
-//           PROJECT_ID: hexclave.projectId,
+//           DB_URL: { prod: service("database").url(5432), preview: service("database").url(5432), dev: "http://localhost:5432" },
+//           OPENAI: secret("OPENAI_API_KEY"),
+//           PROJECT_ID: { all: hexclave.projectId },
 //         },
 //       },
 //       database: {
@@ -39,14 +39,15 @@
 //     },
 //   });
 //
-// `secret()`, `service()` and `hexclave.*` return SENTINEL objects (in deploy
-// mode) that this module serializes into the wire-shape definitions the
-// backend stores — the function itself never sees real secret or connection
-// values. In dev mode (`hexclave dev --service-id ...`) the context behaves
-// differently: `secret()` resolves to its default value (secrets are never
-// fetched during dev), `service()` returns null (guard connection values with
-// `isDev`), and `hexclave.*` resolves from the development-environment
-// session's credentials.
+// `secret()`, `service()` and `hexclave.*` return SENTINEL objects that this
+// module serializes into the wire-shape definitions the backend stores — the
+// function itself never sees real secret or connection values. Evaluation
+// then slices the per-environment env map for `prod` (`hexclave deploy`) or `dev`
+// (`hexclave dev`). Secret VALUES are never in this file: `hexclave dev`
+// pulls them from the linked cloud project (`hexclave login` +
+// `--cloud-project-id` / HEXCLAVE_PROJECT_ID), not from the development
+// environment. `service()` always returns sentinels; `service()` on `dev` is a
+// programming error (put a localhost string on `dev` instead).
 //
 // Everything here is validated at runtime with precise errors rather than
 // through a typed wrapper: the deploy file is arbitrary user TypeScript loaded
@@ -82,7 +83,11 @@ import {
   deploymentPortEntries,
   reservedStandardPortConflicts,
   standardPortsHolderPort,
+  type DeploymentPerEnvironmentEnvValue,
+  type DeploymentPerEnvironmentEnvVar,
+  type DeploymentEnvironmentName,
   type DeploymentEnvVarDefinition,
+  DEPLOYMENT_ENVIRONMENTS,
   type DeploymentPorts,
   type DeploymentServiceDefinition,
   type DeploymentServiceType,
@@ -140,7 +145,6 @@ const UNCALLED_OUTPUT_MARKER = Symbol("hexclave-uncalled-output");
 type SecretRef = {
   [SECRET_REF_MARKER]: true,
   secretKey: string,
-  defaultValue: string | undefined,
 };
 
 type ConnectionRef = {
@@ -209,28 +213,22 @@ function createOutputsProxy(subject: string, outputKeys: readonly string[], reso
 }
 
 export type ServicesFunctionContext = {
-  isDev: boolean,
-  secret: (key: string, defaultValue?: string) => unknown,
+  secret: (key: string) => unknown,
   service: (serviceId: string) => unknown,
   hexclave: Record<string, unknown>,
 };
 
-function createServicesContext(mode: "deploy" | "dev"): { context: ServicesFunctionContext, referencedServiceIds: Set<string> } {
+function createServicesContext(): { context: ServicesFunctionContext, referencedServiceIds: Set<string> } {
   const referencedServiceIds = new Set<string>();
 
   const secret = (key: unknown, defaultValue?: unknown): unknown => {
     if (typeof key !== "string" || !PROJECT_SECRET_KEY_REGEX.test(key)) {
       throw new CliError(`secret() must be called with a secret key containing only letters, numbers, underscores, and hyphens (got ${JSON.stringify(key)}).`);
     }
-    if (defaultValue !== undefined && typeof defaultValue !== "string") {
-      throw new CliError(`The default value of secret(${JSON.stringify(key)}) must be a string.`);
+    if (defaultValue !== undefined) {
+      throw new CliError(`secret(${JSON.stringify(key)}, ...) no longer takes a default value. Write secret(${JSON.stringify(key)}) and set the value in the dashboard under Project Settings → Secrets with the \`all\` environment (or \`prod\` for \`hexclave deploy\` and \`dev\` for \`hexclave dev\`, which each take precedence over \`all\`).`);
     }
-    // A ref is returned in BOTH modes. Dev mode resolves it to the default
-    // value in resolveDevEnv — deliberately deferring the missing-default
-    // error to the env of the service actually being run, so a default-less
-    // secret in an UNRELATED service can't block `hexclave dev --service-id`
-    // for everything else.
-    return preventStringCoercion({ [SECRET_REF_MARKER]: true, secretKey: key, defaultValue } satisfies SecretRef, `secret(${JSON.stringify(key)})`);
+    return preventStringCoercion({ [SECRET_REF_MARKER]: true, secretKey: key } satisfies SecretRef, `secret(${JSON.stringify(key)})`);
   };
 
   const service = (serviceId: unknown): unknown => {
@@ -245,14 +243,6 @@ function createServicesContext(mode: "deploy" | "dev"): { context: ServicesFunct
     // so a service deployed from another deployment source is referenced exactly
     // like one declared right here — this file just cannot check that it exists.
     referencedServiceIds.add(serviceId);
-    if (mode === "dev") {
-      // During `hexclave dev` there is nothing meaningful to connect to (the
-      // referenced service's deployed URL may not even exist), so service()
-      // returns null and users are expected to branch on isDev for local
-      // values. Accessing an output on the null return crashes evaluation;
-      // evaluateDeploymentConfig wraps that crash with a hint.
-      return null;
-    }
     const subject = `service(${JSON.stringify(serviceId)})`;
     const connectionRef = (outputKey: string, port: number | null, description: string) => preventStringCoercion({
       [CONNECTION_REF_MARKER]: true,
@@ -292,16 +282,26 @@ function createServicesContext(mode: "deploy" | "dev"): { context: ServicesFunct
     hexclaveOutputKey: outputKey as HexclaveOutputKey,
   } satisfies ConnectionRef, `hexclave.${outputKey}`));
 
+  // `isDev` is deliberately gone and NOT trapped: a file that still reads it
+  // gets `undefined`, i.e. its non-dev branch, in both deploy and dev. That
+  // branch is what deploys already ran, so deploys don't change; per-environment
+  // env objects are how a file says "different in dev" now.
   return {
-    context: { isDev: mode === "dev", secret, service, hexclave },
+    context: { secret, service, hexclave },
     referencedServiceIds,
   };
 }
 
-// One env var as evaluated, before mode-specific serialization.
+// One env var as evaluated, after slicing for the active environment.
 type EvaluatedEnvVarValue =
   | { kind: "plain", value: string }
-  | { kind: "secret", secretKey: string, defaultValue: string | undefined }
+  | { kind: "secret", secretKey: string }
+  | { kind: "connection", reference: string, hexclaveOutputKey: HexclaveOutputKey | undefined };
+
+type EvaluatedEnvValue =
+  | { kind: "plain", value: string }
+  | { kind: "omit" }
+  | { kind: "secret", secretKey: string }
   | { kind: "connection", reference: string, hexclaveOutputKey: HexclaveOutputKey | undefined };
 
 export type EvaluatedService = {
@@ -311,7 +311,17 @@ export type EvaluatedService = {
   // connections into omissions, so this is still well-formed but only the
   // dev-relevant parts are meaningful.
   definition: DeploymentServiceDefinition,
-  env: Record<string, EvaluatedEnvVarValue>,
+  // Keyed by env var name. A Map rather than a record: the keys come from the
+  // user's deploy file, and a record would make names like `constructor` or
+  // `__proto__` collide with Object.prototype. Converted to records only at
+  // the wire boundary (definition.env) and the child-process boundary.
+  env: Map<string, EvaluatedEnvVarValue>,
+  // Dev mode only (always empty in deploy mode, which throws instead): env vars
+  // that cannot be sliced to `dev`, e.g. no `dev`/`all` value or a service()
+  // connection. Kept per service and thrown by resolveDevEnv, so a problem in a
+  // service that isn't being run can't block `hexclave dev --service-id` for
+  // the one that is.
+  devEnvErrors: string[],
   absoluteRootDirectory: string,
   // `dockerfilePath` exactly as the deploy file spells it (relative to the
   // service's root directory). `definition.dockerfile_path` has the root
@@ -592,52 +602,144 @@ function evaluatePersistentVolumes(serviceId: string, volumesRaw: unknown): Reco
   return Object.fromEntries(volumes);
 }
 
-function evaluateEnvRecord(serviceId: string, envRaw: unknown): Record<string, EvaluatedEnvVarValue> {
-  if (envRaw === undefined) return {};
+function evaluateEnvRecord(serviceId: string, envRaw: unknown, resolveEnvironment: "prod" | "dev"): {
+  resolved: Map<string, EvaluatedEnvVarValue>,
+  perEnvironment: Map<string, DeploymentPerEnvironmentEnvVar>,
+  devEnvErrors: string[],
+} {
+  if (envRaw === undefined) return { resolved: new Map(), perEnvironment: new Map(), devEnvErrors: [] };
   if (envRaw === null || typeof envRaw !== "object" || Array.isArray(envRaw)) {
     throw new CliError(`deploy.services.${serviceId}.env must be a record of env var values.`);
   }
-  const env = new Map<string, EvaluatedEnvVarValue>();
+  const resolved = new Map<string, EvaluatedEnvVarValue>();
+  const perEnvironment = new Map<string, DeploymentPerEnvironmentEnvVar>();
+  const devEnvErrors: string[] = [];
+  const sliceError = (message: string) => {
+    if (resolveEnvironment === "dev") {
+      devEnvErrors.push(message);
+    } else {
+      throw new CliError(message);
+    }
+  };
   for (const [envVarKey, value] of Object.entries(envRaw as Record<string, unknown>)) {
     if (!DEPLOYMENT_ENV_VAR_KEY_REGEX.test(envVarKey)) {
       throw new CliError(`deploy.services.${serviceId}.env has an invalid key ${JSON.stringify(envVarKey)}. Env var keys must start with a letter or underscore and contain only letters, digits, and underscores.`);
     }
-    if (value === null || value === undefined) {
-      // null means "omit this env var" — the isDev-branching idiom
-      // (`isDev ? null : secret(...)`) depends on it.
+    // Pre-environment files wrote `KEY: cond ? value : undefined`; undefined
+    // has always meant "not declared at all", unlike `null` (omit it).
+    if (value === undefined) continue;
+    const at = `deploy.services.${serviceId}.env.${envVarKey}`;
+    const valuesByEnvironment = evaluatePerEnvironmentValues(at, value);
+    perEnvironment.set(envVarKey, serializePerEnvironmentValues(valuesByEnvironment));
+    const picked = pickEnvValue(valuesByEnvironment, resolveEnvironment);
+    if (picked === undefined) {
+      sliceError(`${at} has no value for the ${resolveEnvironment} environment (and no \`all\` fallback). Set \`${resolveEnvironment}\` or \`all\`, or set \`${resolveEnvironment}: null\` to omit it there.`);
       continue;
     }
-    if (typeof value === "string") {
-      env.set(envVarKey, { kind: "plain", value });
-    } else if (isSecretRef(value)) {
-      env.set(envVarKey, { kind: "secret", secretKey: value.secretKey, defaultValue: value.defaultValue });
-    } else if (isConnectionRef(value)) {
-      env.set(envVarKey, { kind: "connection", reference: value.reference, hexclaveOutputKey: value.hexclaveOutputKey });
-    } else if (typeof value === "function" && UNCALLED_OUTPUT_MARKER in value) {
-      // `internalUrl` is a call, so the bare property is a function. Say so
-      // rather than reporting an unhelpful "got function".
-      const call = (value as Record<symbol, string>)[UNCALLED_OUTPUT_MARKER];
-      throw new CliError(`deploy.services.${serviceId}.env.${envVarKey} is ${call} without calling it. A URL names one port — write \`${call}()\` when the service has a single HTTP port, or \`${call}(9090)\` to pick one.`);
-    } else if (typeof value === "object" && (SERVICE_OUTPUT_KEYS as readonly string[]).some((outputKey) => outputKey in (value as object))) {
-      // The whole outputs object was assigned instead of one of its outputs.
-      throw new CliError(`deploy.services.${serviceId}.env.${envVarKey} is a service returned by service() — pick one of its outputs instead (e.g. service("...").url).`);
-    } else {
-      throw new CliError(`deploy.services.${serviceId}.env.${envVarKey} must be a string, null, secret(...), service(...).<output>, or hexclave.<output> (got ${typeof value}).`);
+    if (picked.kind === "omit") continue;
+    if (resolveEnvironment === "dev" && picked.kind === "connection" && picked.hexclaveOutputKey === undefined) {
+      sliceError(`${at} uses service() in the \`dev\` environment. Put a localhost string on \`dev\` instead, e.g. \`{ all: service("api").url(8080), dev: "http://localhost:8080" }\`.`);
+      continue;
     }
+    resolved.set(envVarKey, picked);
   }
-  return Object.fromEntries(env);
+  return { resolved, perEnvironment, devEnvErrors };
 }
 
-function serializeEnvForWire(env: Record<string, EvaluatedEnvVarValue>): Record<string, DeploymentEnvVarDefinition> {
-  return Object.fromEntries(Object.entries(env).map(([envVarKey, value]): [string, DeploymentEnvVarDefinition] => {
+function evaluatePerEnvironmentValues(at: string, value: unknown): Map<DeploymentEnvironmentName, EvaluatedEnvValue> {
+  // Anything that isn't an environment object is shorthand for `{ all: value }`.
+  // That is exactly what every pre-environment deploy file means — a bare
+  // literal, `null`, or reference applied everywhere — so those files keep
+  // evaluating to the same prod env without edits.
+  if (value === null || typeof value !== "object" || isSecretRef(value) || isConnectionRef(value) || isServiceOutputsObject(value)) {
+    return new Map<DeploymentEnvironmentName, EvaluatedEnvValue>([["all", evaluateEnvValue(at, value)]]);
+  }
+  if (Array.isArray(value)) {
+    throw new CliError(`${at} must be a string, null, secret(...), service(...).<output>, hexclave.<output>, or an environment object ({ all, prod, preview, dev }) (got an array).`);
+  }
+  const record = value as Record<string, unknown>;
+  for (const field of Object.keys(record)) {
+    if (!(DEPLOYMENT_ENVIRONMENTS as readonly string[]).includes(field)) {
+      throw new CliError(`${at} has an unknown environment ${JSON.stringify(field)}. Known environments: ${DEPLOYMENT_ENVIRONMENTS.join(", ")}.`);
+    }
+  }
+  const valuesByEnvironment = new Map<DeploymentEnvironmentName, EvaluatedEnvValue>();
+  for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+    // An `undefined` environment is "not set" (it falls back to `all`), so
+    // conditional spreads like `{ all: x, dev: local ? y : undefined }` work.
+    // hasOwnProperty.call rather than Object.hasOwn: this package targets ES2021.
+    if (!Object.prototype.hasOwnProperty.call(record, environment) || record[environment] === undefined) continue;
+    valuesByEnvironment.set(environment, evaluateEnvValue(`${at}.${environment}`, record[environment]));
+  }
+  if (valuesByEnvironment.size === 0) {
+    throw new CliError(`${at} is an empty environment object. Set at least one of all, prod, preview, or dev.`);
+  }
+  const secretKeys = [...valuesByEnvironment.values()].filter((envValue): envValue is { kind: "secret", secretKey: string } => envValue.kind === "secret").map((envValue) => envValue.secretKey);
+  const hasNonSecret = [...valuesByEnvironment.values()].some((envValue) => envValue.kind === "plain" || envValue.kind === "connection");
+  if (secretKeys.length > 0 && hasNonSecret) {
+    throw new CliError(`${at} cannot mix secret() with a plaintext or connection value. A var is secret in every environment or in none; use null to omit it in one environment.`);
+  }
+  if (new Set(secretKeys).size > 1) {
+    throw new CliError(`${at} names more than one secret key. A secret var refers to one dashboard key in every environment.`);
+  }
+  return valuesByEnvironment;
+}
+
+function evaluateEnvValue(at: string, value: unknown): EvaluatedEnvValue {
+  if (value === null) return { kind: "omit" };
+  if (typeof value === "string") return { kind: "plain", value };
+  if (isSecretRef(value)) return { kind: "secret", secretKey: value.secretKey };
+  if (isConnectionRef(value)) return { kind: "connection", reference: value.reference, hexclaveOutputKey: value.hexclaveOutputKey };
+  if (typeof value === "function" && UNCALLED_OUTPUT_MARKER in value) {
+    const call = (value as Record<symbol, string>)[UNCALLED_OUTPUT_MARKER];
+    throw new CliError(`${at} is ${call} without calling it. A URL names one port — write \`${call}()\` when the service has a single HTTP port, or \`${call}(9090)\` to pick one.`);
+  }
+  if (isServiceOutputsObject(value)) {
+    throw new CliError(`${at} is a service returned by service() — pick one of its outputs instead (e.g. service("...").url).`);
+  }
+  throw new CliError(`${at} must be a string, null, secret(...), service(...).<output>, or hexclave.<output> (got ${typeof value}).`);
+}
+
+function isServiceOutputsObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (SERVICE_OUTPUT_KEYS as readonly string[]).some((outputKey) => outputKey in (value as object));
+}
+
+function pickEnvValue(valuesByEnvironment: Map<DeploymentEnvironmentName, EvaluatedEnvValue>, environment: "prod" | "dev"): EvaluatedEnvValue | undefined {
+  return valuesByEnvironment.get(environment) ?? valuesByEnvironment.get("all");
+}
+
+function serializePerEnvironmentValues(valuesByEnvironment: Map<DeploymentEnvironmentName, EvaluatedEnvValue>): DeploymentPerEnvironmentEnvVar {
+  const perEnvironment: DeploymentPerEnvironmentEnvVar = {};
+  for (const [environment, envValue] of valuesByEnvironment) {
+    perEnvironment[environment] = serializePerEnvironmentValue(envValue);
+  }
+  return perEnvironment;
+}
+
+function serializePerEnvironmentValue(envValue: EvaluatedEnvValue): DeploymentPerEnvironmentEnvValue {
+  switch (envValue.kind) {
+    case "plain": {
+      return { value: envValue.value };
+    }
+    case "omit": {
+      return { type: "omit" };
+    }
+    case "secret": {
+      return { type: "secret", key: envValue.secretKey };
+    }
+    case "connection": {
+      return { type: "connection", value: envValue.reference };
+    }
+  }
+}
+
+function serializeEnvForWire(env: Map<string, EvaluatedEnvVarValue>): Record<string, DeploymentEnvVarDefinition> {
+  return Object.fromEntries([...env].map(([envVarKey, value]): [string, DeploymentEnvVarDefinition] => {
     switch (value.kind) {
       case "plain": {
         return [envVarKey, { value: value.value }];
       }
       case "secret": {
-        // No default_value: defaults are author-side only and never persisted
-        // server-side. They travel with the deploy request instead — see
-        // collectSecretDefaults.
         return [envVarKey, { type: "secret", key: value.secretKey }];
       }
       case "connection": {
@@ -649,14 +751,14 @@ function serializeEnvForWire(env: Record<string, EvaluatedEnvVarValue>): Record<
 
 const EXAMPLE_DEPLOYMENT_EXPORT = `  export const deploymentGroupId = "my-app";
 
-  export const deploy: HexclaveDeploymentConfig = ({ isDev, secret, service, hexclave }) => ({
+  export const deploy: HexclaveDeploymentConfig = ({ secret, service, hexclave }) => ({
     services: {
       web: {
         type: "serverless",
         public: true,
         ports: { 3000: { protocol: "http" } },
         devCommand: "npm run dev",
-        env: { API_URL: service("api").url(8080) },
+        env: { API_URL: { prod: service("api").url(8080), preview: service("api").url(8080), dev: "http://localhost:8080" } },
       },
     },
   });`;
@@ -728,18 +830,12 @@ export function evaluateDeploymentConfig(options: {
     throw new CliError(`The \`deploy\` export of ${deployFilePath} must be a function of the deployment context, e.g.:\n${EXAMPLE_DEPLOYMENT_EXPORT}`);
   }
 
-  const { context, referencedServiceIds } = createServicesContext(mode);
+  const { context } = createServicesContext();
   let deployRaw: unknown;
   try {
     deployRaw = (deployExport as (ctx: ServicesFunctionContext) => unknown)(context);
   } catch (error) {
     if (error instanceof CliError) throw error;
-    // The most common dev-mode crash: calling `.url()` on service()'s null
-    // return without an isDev guard. Attach the explanation to the TypeError
-    // instead of letting a bare "Cannot read properties of null" surface.
-    if (mode === "dev" && error instanceof TypeError && /null/.test(error.message)) {
-      throw new CliError(`Failed to evaluate the \`deploy\` export of ${deployFilePath}: ${error.message}\nNote: during \`hexclave dev\`, service() returns null — guard connection values with isDev, e.g. \`isDev ? "http://localhost:5432" : service("database").url(5432)\`.`);
-    }
     throw new CliError(`Failed to evaluate the \`deploy\` export of ${deployFilePath}: ${errorMessage(error)}`);
   }
   // An async function's Promise would pass the object check below and then die
@@ -907,7 +1003,7 @@ export function evaluateDeploymentConfig(options: {
       throw new CliError(`deploy.services.${serviceId} has a \`buildCommand\` but no \`image\` or \`dockerfilePath\`, so it is built on the Hexclave base image — which has no command of its own. Add a \`startCommand\` saying how to run it (e.g. startCommand: "npm start").`);
     }
 
-    const env = evaluateEnvRecord(serviceId, record.env);
+    const { resolved: env, perEnvironment: envPerEnvironment, devEnvErrors } = evaluateEnvRecord(serviceId, record.env, mode === "dev" ? "dev" : "prod");
     // Read (and type-checked) but deliberately NOT part of `definition`: the
     // dev command is only ever run locally by `hexclave dev --service-id`, so
     // it stays on this machine — see EvaluatedService.devCommand below.
@@ -955,9 +1051,12 @@ export function evaluateDeploymentConfig(options: {
         start_command: startCommand,
         // Absent = the container filesystem is entirely ephemeral.
         persistent_volumes: persistentVolumes,
+        // The wire format (JSON) is where these become records.
         env: serializeEnvForWire(env),
+        env_per_environment: Object.fromEntries(envPerEnvironment),
       },
       env,
+      devEnvErrors,
       absoluteRootDirectory,
       authoredDockerfilePath: dockerfilePathRaw,
       devCommand,
@@ -999,7 +1098,7 @@ export function evaluateDeploymentConfig(options: {
   // not itself — which is why this is checked here, against the referrer, rather
   // than when the target is parsed.
   for (const [serviceId, service] of services) {
-    for (const [envVarKey, value] of Object.entries(service.env)) {
+    for (const [envVarKey, value] of service.env) {
       if (value.kind !== "connection") continue;
       const parsed = parseConnectionValue(value.reference);
       if (parsed === null) throw new CliError(`Internal error: ${JSON.stringify(value.reference)} is not a valid connection reference.`);
@@ -1055,7 +1154,7 @@ export function evaluateDeploymentConfig(options: {
   // every service output is. Caught here rather than at deploy time, where it surfaced as
   // "blocked on unresolved refs" after the upload — and where no retry could ever clear it.
   for (const [serviceId, service] of services) {
-    for (const [envVarKey, value] of Object.entries(service.env)) {
+    for (const [envVarKey, value] of service.env) {
       if (value.kind !== "connection") continue;
       const parsed = parseConnectionValue(value.reference);
       if (parsed === null || parsed.serviceId !== serviceId) continue;
@@ -1080,7 +1179,7 @@ export function computeDeploymentLevels(services: Map<string, EvaluatedService>,
   const dependencies = new Map<string, Set<string>>();
   for (const [serviceId, service] of services) {
     const serviceDependencies = new Set<string>();
-    for (const value of Object.values(service.env)) {
+    for (const value of service.env.values()) {
       if (value.kind !== "connection") continue;
       const parsed = parseConnectionValue(value.reference);
       if (parsed === null) continue;
@@ -1160,50 +1259,58 @@ function findDependencyCycle(serviceIds: string[], dependencies: Map<string, Set
 }
 
 /**
- * Collects a service's `secret(key, default)` fallbacks, keyed by env var key,
- * for the deploy request. These are NOT part of the synced definition: the
- * backend uses them only to fill secrets that have no stored value, and never
- * persists them — so the dashboard's secrets page can say "set" or "not
- * there" and nothing in between.
+ * Secret keys referenced by the resolved env of these services, keyed by env
+ * var. Used by `hexclave dev` to pull values and by `hexclave deploy` to
+ * preflight stored `prod`/`all` values.
  */
-export function collectSecretDefaults(service: EvaluatedService): Record<string, string> {
-  const defaults = new Map<string, string>();
-  for (const [envVarKey, value] of Object.entries(service.env)) {
-    if (value.kind === "secret" && value.defaultValue !== undefined) {
-      defaults.set(envVarKey, value.defaultValue);
+export function collectSecretKeysByEnvVar(service: EvaluatedService): Map<string, string> {
+  const keys = new Map<string, string>();
+  for (const [envVarKey, value] of service.env) {
+    if (value.kind === "secret") {
+      keys.set(envVarKey, value.secretKey);
     }
   }
-  return Object.fromEntries(defaults);
+  return keys;
+}
+
+/**
+ * Throws the service's deferred dev-slice errors (see
+ * EvaluatedService.devEnvErrors). `hexclave dev` calls this for the selected
+ * service only, before starting anything.
+ */
+export function assertDevEnvResolvable(service: EvaluatedService): void {
+  if (service.devEnvErrors.length === 0) return;
+  throw new CliError([
+    `The env of services.${service.serviceId} cannot be resolved for the \`dev\` environment:`,
+    ...service.devEnvErrors.map((message) => `  - ${message}`),
+  ].join("\n"));
 }
 
 /**
  * Resolves a dev-mode evaluated env record into literal values using the
- * development-environment session's env (which carries the project's
- * credentials). Called by `hexclave dev` after the session exists.
+ * development-environment session's env (which carries that environment's
+ * Hexclave credentials). Secrets are NOT filled here — the caller pulls them
+ * from the linked cloud project and merges them in. Called by `hexclave dev`
+ * after the session exists.
  */
-export function resolveDevEnv(service: EvaluatedService, sessionEnv: Record<string, string>): Record<string, string> {
+export function resolveDevEnv(service: EvaluatedService, sessionEnv: Record<string, string>): Map<string, string> {
+  assertDevEnvResolvable(service);
   const resolved = new Map<string, string>();
-  for (const [envVarKey, value] of Object.entries(service.env)) {
+  for (const [envVarKey, value] of service.env) {
     switch (value.kind) {
       case "plain": {
         resolved.set(envVarKey, value.value);
         break;
       }
       case "secret": {
-        // Secrets are never fetched from the dashboard during dev; the
-        // default is all there is. The error fires here (per selected
-        // service) rather than at evaluation time, so it only triggers for
-        // the service actually being run.
-        if (value.defaultValue === undefined) {
-          throw new CliError(`The secret ${JSON.stringify(value.secretKey)} (env var ${JSON.stringify(envVarKey)}) has no default value, so it cannot be resolved during \`hexclave dev\`. Add a default (secret(${JSON.stringify(value.secretKey)}, "some-dev-value")) or guard it with isDev (e.g. \`isDev ? null : secret(${JSON.stringify(value.secretKey)})\`).`);
-        }
-        resolved.set(envVarKey, value.defaultValue);
+        // Pulled after this returns; leaving them out keeps values off the
+        // evaluation path and out of any snapshot of this function.
         break;
       }
       case "connection": {
         if (value.hexclaveOutputKey === undefined) {
-          // Unreachable: in dev mode, service() returns null, so non-hexclave
-          // connection refs cannot be constructed.
+          // Unreachable: evaluation records service() in `dev` as a devEnvErrors
+          // entry and leaves the var out of `env`, and the assert above throws it.
           throw new CliError(`Internal error: env var ${JSON.stringify(envVarKey)} is an unresolved service connection in dev mode.`);
         }
         resolved.set(envVarKey, resolveHexclaveOutputFromSessionEnv(envVarKey, value.hexclaveOutputKey, sessionEnv));
@@ -1211,7 +1318,7 @@ export function resolveDevEnv(service: EvaluatedService, sessionEnv: Record<stri
       }
     }
   }
-  return Object.fromEntries(resolved);
+  return resolved;
 }
 
 function resolveHexclaveOutputFromSessionEnv(envVarKey: string, outputKey: HexclaveOutputKey, sessionEnv: Record<string, string>): string {

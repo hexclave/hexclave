@@ -52,7 +52,10 @@ import {
   DEPLOYMENT_CONNECTION_VALUE_REGEX,
   DEPLOYMENT_ENV_VAR_KEY_REGEX,
   DeploymentBuilderDefinition,
+  DeploymentPerEnvironmentEnvValue,
+  DeploymentPerEnvironmentEnvVar,
   DeploymentEnvVarDefinition,
+  DEPLOYMENT_ENVIRONMENTS,
   DeploymentPortEntry,
   DeploymentPorts,
   DeploymentMemorySize,
@@ -194,6 +197,99 @@ function parseStoredEnv(env: Prisma.JsonValue, serviceId: string): Record<string
   return Object.fromEntries(result);
 }
 
+function parseStoredEnvPerEnvironment(envPerEnvironment: Prisma.JsonValue, serviceId: string): Record<string, DeploymentPerEnvironmentEnvVar> {
+  if (envPerEnvironment == null || (typeof envPerEnvironment === "object" && !Array.isArray(envPerEnvironment) && Object.keys(envPerEnvironment).length === 0)) {
+    return {};
+  }
+  const entries: [string, Prisma.JsonValue][] = [];
+  if (Array.isArray(envPerEnvironment)) {
+    for (const tuple of envPerEnvironment) {
+      if (!Array.isArray(tuple) || tuple.length !== 2 || typeof tuple[0] !== "string") {
+        throw new HexclaveAssertionError(`Stored env_per_environment entry of deployment service ${JSON.stringify(serviceId)} is not a key-value pair`, { envPerEnvironment });
+      }
+      entries.push([tuple[0], tuple[1]]);
+    }
+  } else if (isRecord(envPerEnvironment)) {
+    for (const [envVarKey, entry] of Object.entries(envPerEnvironment)) {
+      if (entry === undefined) {
+        throw new HexclaveAssertionError(`Stored env_per_environment entry ${JSON.stringify(envVarKey)} of deployment service ${JSON.stringify(serviceId)} is undefined`, { envPerEnvironment });
+      }
+      entries.push([envVarKey, entry]);
+    }
+  } else {
+    throw new HexclaveAssertionError(`Stored env_per_environment of deployment service ${JSON.stringify(serviceId)} is neither an entry array nor a record`, { envPerEnvironment });
+  }
+  // Strict, unlike a best-effort read: these rows are only ever written by
+  // syncSourceServices from a schema-validated definition, so anything that
+  // doesn't parse is corruption and must not be displayed as something else.
+  const result = new Map<string, DeploymentPerEnvironmentEnvVar>();
+  for (const [envVarKey, entry] of entries) {
+    if (!isRecord(entry)) {
+      throw new HexclaveAssertionError(`Stored env_per_environment entry ${JSON.stringify(envVarKey)} of deployment service ${JSON.stringify(serviceId)} is not an object`, { entry });
+    }
+    const perEnvironment: DeploymentPerEnvironmentEnvVar = {};
+    for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+      const raw = entry[environment];
+      if (raw === undefined) continue;
+      if (!isRecord(raw)) {
+        throw new HexclaveAssertionError(`Stored env_per_environment.${environment} of ${JSON.stringify(envVarKey)} (service ${JSON.stringify(serviceId)}) is not an object`, { entry });
+      }
+      if (raw.type !== undefined && raw.type !== "secret" && raw.type !== "connection" && raw.type !== "omit") {
+        throw new HexclaveAssertionError(`Stored env_per_environment.${environment} of ${JSON.stringify(envVarKey)} (service ${JSON.stringify(serviceId)}) has unknown type`, { entry });
+      }
+      if ((raw.value !== undefined && typeof raw.value !== "string") || (raw.key !== undefined && typeof raw.key !== "string")) {
+        throw new HexclaveAssertionError(`Stored env_per_environment.${environment} of ${JSON.stringify(envVarKey)} (service ${JSON.stringify(serviceId)}) has a non-string value or key`, { entry });
+      }
+      const envValue: DeploymentPerEnvironmentEnvValue = {
+        type: raw.type,
+        value: raw.value,
+        key: raw.key,
+      };
+      perEnvironment[environment] = envValue;
+    }
+    result.set(envVarKey, perEnvironment);
+  }
+  return Object.fromEntries(result);
+}
+
+type DeploymentPerEnvironmentEnvApiValue = { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null };
+
+function perEnvironmentValueToApi(envValue: DeploymentPerEnvironmentEnvValue): DeploymentPerEnvironmentEnvApiValue {
+  if (envValue.type === "omit") return { type: "omit", value: null, secret_key: null };
+  if (envValue.type === "secret") return { type: "secret", value: null, secret_key: envValue.key ?? null };
+  if (envValue.type === "connection") return { type: "connection", value: envValue.value ?? null, secret_key: null };
+  return { type: "plain", value: envValue.value ?? null, secret_key: null };
+}
+
+function perEnvironmentEnvToApi(perEnvironment: DeploymentPerEnvironmentEnvVar | undefined): Record<string, DeploymentPerEnvironmentEnvApiValue> | null {
+  if (perEnvironment === undefined) return null;
+  const result: Record<string, DeploymentPerEnvironmentEnvApiValue> = {};
+  for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+    const envValue = perEnvironment[environment];
+    if (envValue === undefined) continue;
+    result[environment] = perEnvironmentValueToApi(envValue);
+  }
+  return Object.keys(result).length === 0 ? null : result;
+}
+
+function perEnvironmentTypeForDisplay(perEnvironment: DeploymentPerEnvironmentEnvVar): "plain" | "secret" | "connection" {
+  for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+    const envValue = perEnvironment[environment];
+    if (envValue == null || envValue.type === "omit") continue;
+    if (envValue.type === "secret") return "secret";
+    if (envValue.type === "connection") return "connection";
+  }
+  return "plain";
+}
+
+function secretKeyFromPerEnvironment(perEnvironment: DeploymentPerEnvironmentEnvVar): string | null {
+  for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+    const envValue = perEnvironment[environment];
+    if (envValue?.type === "secret" && envValue.key != null) return envValue.key;
+  }
+  return null;
+}
+
 /**
  * The definition as stored, plus the volume the service currently mounts (which
  * lives on a row of its own, because the disk outlives the service).
@@ -212,6 +308,7 @@ export function definitionFromServiceRow(row: {
   startCommand: string | null,
   memoryMb: number | null,
   env: Prisma.JsonValue,
+  envPerEnvironment: Prisma.JsonValue,
 }, volume: { volumeId: string, path: string | null, sizeGb: number } | null = null): DeploymentServiceDefinition {
   if (row.type !== "server" && row.type !== "serverless") {
     throw new HexclaveAssertionError(`Deployment service ${JSON.stringify(row.serviceId)} has invalid type ${JSON.stringify(row.type)}.`);
@@ -242,6 +339,7 @@ export function definitionFromServiceRow(row: {
       ? { [volume.volumeId]: { path: volume.path, size_gb: volume.sizeGb } }
       : undefined,
     env: parseStoredEnv(row.env, row.serviceId),
+    env_per_environment: parseStoredEnvPerEnvironment(row.envPerEnvironment, row.serviceId),
   };
 }
 
@@ -923,6 +1021,19 @@ export async function syncSourceServices(
         if (entry.key !== undefined) stored.key = entry.key;
         return [envVarKey, stored];
       }),
+      envPerEnvironment: Object.entries(definition.env_per_environment ?? {}).map(([envVarKey, perEnvironment]): [string, Record<string, Record<string, string>>] => {
+        const stored: Record<string, Record<string, string>> = {};
+        for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+          const envValue = perEnvironment[environment];
+          if (envValue === undefined) continue;
+          const storedValue: Record<string, string> = {};
+          if (envValue.type !== undefined) storedValue.type = envValue.type;
+          if (envValue.value !== undefined) storedValue.value = envValue.value;
+          if (envValue.key !== undefined) storedValue.key = envValue.key;
+          stored[environment] = storedValue;
+        }
+        return [envVarKey, stored];
+      }),
     };
     await prisma.deploymentService.upsert({
       where: { tenancyId_serviceId: { tenancyId: tenancy.id, serviceId } },
@@ -1220,13 +1331,9 @@ const SERVICE_OUTPUT_KEY_TO_MARSHAL = {
  *   on every deploy),
  * - plain vars pass through as literal `{ value }`s,
  * - secret vars are filled from the project's stored secrets (dashboard →
- *   Project Settings → Secrets), falling back to `secretDefaults` — the deploy
- *   request's transient copy of the `secret(key, default)` defaults from the
- *   deploy file. Defaults are deliberately NOT part of the stored definition:
- *   they are an author-side convenience that the dashboard must never surface
- *   (a stored default would make "this secret has a value" ambiguous on the
- *   secrets page). A secret with neither is a 400 that lists every missing key
- *   at once — failing loud beats silently deploying without them,
+ *   Project Settings → Secrets) for `prod` else `all`. A secret with no stored
+ *   value is a 400 that lists every missing key at once — failing loud beats
+ *   silently deploying without them,
  * - `hexclave.*` connections resolve the managed Hexclave service's outputs
  *   server-side (they are backend state, not runtime state),
  * - service outputs become Marshal `{ ref }`s, validated here first against the
@@ -1247,9 +1354,6 @@ export async function resolveEnvVars(options: {
   // bootstrap; its private address is deterministic and fine).
   serviceId: string,
   definition: DeploymentServiceDefinition,
-  // Deploy-request-only fallbacks for `secret()` env vars, keyed by ENV VAR
-  // key (see deploymentSecretDefaultsSchema). Never read from the database.
-  secretDefaults: Record<string, string>,
   // The GitLab-style CI variables this deploy was invoked with (see
   // deploymentCiEnvSchema). Also request-scoped, and the same for every service
   // in the deploy — they describe the commit, not the service. Applied only to
@@ -1259,7 +1363,7 @@ export async function resolveEnvVars(options: {
   resolvedEnv: Record<string, MarshalEnvValue>,
   redactionSecrets: string[],
 }> {
-  const { tenancy, prisma, serviceId, definition, secretDefaults, ciEnv = {} } = options;
+  const { tenancy, prisma, serviceId, definition, ciEnv = {} } = options;
   const env = definition.env;
   const existingServices = await prisma.deploymentService.findMany({
     where: { tenancyId: tenancy.id },
@@ -1325,7 +1429,7 @@ export async function resolveEnvVars(options: {
   const readSecret = (secretKey: string): Promise<string | null> => {
     const cached = secretCache.get(secretKey);
     if (cached != null) return cached;
-    const promise = readProjectSecretValue(tenancy.project.id, secretKey);
+    const promise = readProjectSecretValue(tenancy.project.id, secretKey, "prod");
     secretCache.set(secretKey, promise);
     return promise;
   };
@@ -1342,12 +1446,7 @@ export async function resolveEnvVars(options: {
         break;
       }
       case "secret": {
-        const storedValue = await readSecret(normalized.secretKey);
-        // `Object.hasOwn` rather than a truthiness/`??` check on the lookup:
-        // an empty-string default is a legitimate value, and a plain property
-        // read would also pick up Object.prototype members for env var keys
-        // like "constructor".
-        const secretValue = storedValue ?? (Object.hasOwn(secretDefaults, envVarKey) ? secretDefaults[envVarKey] : undefined);
+        const secretValue = await readSecret(normalized.secretKey);
         if (secretValue == null) {
           missingSecretKeys.push(normalized.secretKey);
           break;
@@ -1400,7 +1499,7 @@ export async function resolveEnvVars(options: {
 
   if (missingSecretKeys.length > 0) {
     const uniqueMissing = [...new Set(missingSecretKeys)].sort(stringCompare);
-    throw new StatusError(400, `Missing values for ${uniqueMissing.length === 1 ? "secret" : "secrets"}: ${uniqueMissing.join(", ")}. All of these must be set in the dashboard under Project Settings > Secrets before this service can deploy.`);
+    throw new StatusError(400, `Missing values for ${uniqueMissing.length === 1 ? "secret" : "secrets"}: ${uniqueMissing.join(", ")}. All of these must be set in the dashboard under Project Settings > Secrets (for the \`prod\` or \`all\` environment) before this service can deploy.`);
   }
 
   return {
@@ -2062,7 +2161,18 @@ export type DeploymentServiceApiShape = {
   // plain vars and the "serviceId.outputKey" reference for connections;
   // `secret_key` names the secret for secret vars (their values are
   // write-only, so there is nothing else to show).
-  env: { key: string, type: "plain" | "secret" | "connection", value: string | null, secret_key: string | null }[],
+  env: {
+    key: string,
+    type: "plain" | "secret" | "connection",
+    value: string | null,
+    secret_key: string | null,
+    per_environment: {
+      all?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
+      prod?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
+      preview?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
+      dev?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
+    } | null,
+  }[],
   domains: { hostname: string, port: number | null, is_primary: boolean, verified: boolean }[],
   latest_deployment_id: string | null,
 };
@@ -2233,6 +2343,18 @@ export async function serviceToApiShape(options: {
       // but invalid, and is what the dashboard renders.
       value: normalized.type === "plain" ? normalized.value : normalized.type === "connection" ? formatConnectionValue(normalized.serviceId, normalized.outputKey, normalized.port) : null,
       secret_key: normalized.type === "secret" ? normalized.secretKey : null,
+      per_environment: perEnvironmentEnvToApi(definition.env_per_environment?.[envVarKey]),
+    });
+  }
+  for (const [envVarKey, perEnvironment] of Object.entries(definition.env_per_environment ?? {})) {
+    if (env.some((entry) => entry.key === envVarKey)) continue;
+    const type = perEnvironmentTypeForDisplay(perEnvironment);
+    env.push({
+      key: envVarKey,
+      type,
+      value: null,
+      secret_key: type === "secret" ? secretKeyFromPerEnvironment(perEnvironment) : null,
+      per_environment: perEnvironmentEnvToApi(perEnvironment),
     });
   }
   env.sort((a, b) => stringCompare(a.key, b.key));

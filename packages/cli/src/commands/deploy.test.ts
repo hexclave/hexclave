@@ -320,8 +320,8 @@ describe("collectRequiredSecretKeys", () => {
           A: secret("zebra"),
           B: secret("alpha"),
           C: secret("zebra"),
-          D: secret("with-default", "fallback"),
-          E: "plain",
+          D: secret("other"),
+          E: { all: "plain" },
         },
       },
       api: {
@@ -329,12 +329,12 @@ describe("collectRequiredSecretKeys", () => {
         env: { F: secret("alpha") },
       },
     }));
-    expect(collectRequiredSecretKeys(services)).toEqual(["alpha", "zebra"]);
+    expect(collectRequiredSecretKeys(services)).toEqual(["alpha", "other", "zebra"]);
   });
 
-  it("returns an empty list when every secret has a default", () => {
+  it("returns an empty list when no secret is in the resolved prod env", () => {
     const services = servicesOf(({ secret }) => ({
-      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { A: secret("k", "v") } },
+      web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { A: { prod: null, all: secret("k") } } },
     }));
     expect(collectRequiredSecretKeys(services)).toEqual([]);
   });

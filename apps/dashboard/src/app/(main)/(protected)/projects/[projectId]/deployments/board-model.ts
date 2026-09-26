@@ -4,7 +4,8 @@
 // node per deployment service from the project config.
 
 import { CubeIcon, HexagonIcon } from "@phosphor-icons/react";
-import type { AdminDeploymentJson, AdminDeploymentServiceJson } from "@hexclave/next";
+import type { AdminDeploymentEnvVarJson, AdminDeploymentJson, AdminDeploymentServiceJson } from "@hexclave/next";
+import { DEPLOYMENT_ENVIRONMENTS, type DeploymentEnvironmentName } from "@hexclave/shared/dist/deployments";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import type { Accent } from "./variants";
 
@@ -64,12 +65,169 @@ export function outcomeStatusToBoardStatus(status: AdminDeploymentJson["services
 // resolve to at deploy time, and "secret" vars carry only the secret key whose
 // value lives in the write-only per-project secret store (Project Settings >
 // Secrets).
+export type EnvVarPerEnvironmentValue = {
+  type: "plain" | "secret" | "connection" | "omit",
+  value: string | null,
+  secretKey: string | null,
+};
+
 export type EnvVar = {
   key: string,
   type: "plain" | "secret" | "connection",
   value: string | null,
   secretKey: string | null,
+  // Display-only view of the deploy file's per-environment map. `null` for
+  // services synced before per-environment maps existed; for those only the
+  // prod-resolved `value` above is known.
+  perEnvironment: Map<DeploymentEnvironmentName, EnvVarPerEnvironmentValue> | null,
 };
+
+function perEnvironmentFromJson(json: NonNullable<AdminDeploymentEnvVarJson["per_environment"]>): Map<DeploymentEnvironmentName, EnvVarPerEnvironmentValue> {
+  const result = new Map<DeploymentEnvironmentName, EnvVarPerEnvironmentValue>();
+  for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+    const entry = json[environment];
+    if (entry == null) continue;
+    result.set(environment, { type: entry.type, value: entry.value, secretKey: entry.secret_key });
+  }
+  return result;
+}
+
+export type EnvironmentBadge = {
+  environment: DeploymentEnvironmentName,
+  state: "set" | "omit" | "missing",
+};
+
+// Which environment badges the Variables panel shows for one env var.
+//
+// Non-secret vars: one badge per environment the deploy file mentions.
+// Secret vars: a "set" badge for a stored `all` value, and for every concrete
+// environment (prod/preview/dev) the file resolves to the secret AND that has
+// its own stored value; plus a "missing" badge for every concrete environment
+// the file makes secret but that has neither its own stored value nor an `all` one —
+// mirroring how the backend and CLI resolve a secret (exact environment, else
+// `all`). A file environment that isn't mentioned inherits the file's `all`
+// entry, which is why "missing" checks `get(environment) ?? get("all")`.
+//
+// `storedSecretEnvironments` is `null` while the secret list is loading or
+// failed to load; secret badges are skipped then rather than guessed, so a
+// secret is never shown as "missing" just because the list isn't there yet.
+export function environmentBadges(
+  envVar: EnvVar,
+  storedSecretEnvironments: ReadonlySet<DeploymentEnvironmentName> | null,
+): EnvironmentBadge[] {
+  const perEnvironment = envVar.perEnvironment;
+  if (perEnvironment == null) {
+    // Synced before per-environment maps existed: only the prod slice is known.
+    if (envVar.type !== "secret") return envVar.value == null ? [] : [{ environment: "prod", state: "set" }];
+    if (storedSecretEnvironments == null) return [];
+    const badges: EnvironmentBadge[] = DEPLOYMENT_ENVIRONMENTS
+      .filter((environment) => storedSecretEnvironments.has(environment))
+      .map((environment) => ({ environment, state: "set" }));
+    if (!storedSecretEnvironments.has("prod") && !storedSecretEnvironments.has("all")) {
+      badges.push({ environment: "prod", state: "missing" });
+    }
+    return badges;
+  }
+
+  const badges: EnvironmentBadge[] = [];
+  for (const environment of DEPLOYMENT_ENVIRONMENTS) {
+    const entry = perEnvironment.get(environment);
+    if (entry?.type === "omit") {
+      badges.push({ environment, state: "omit" });
+    } else if (envVar.type !== "secret") {
+      if (entry != null) badges.push({ environment, state: "set" });
+    } else if (storedSecretEnvironments == null) {
+      continue;
+    } else if (environment === "all") {
+      if (storedSecretEnvironments.has("all")) badges.push({ environment, state: "set" });
+    } else if ((entry ?? perEnvironment.get("all"))?.type !== "secret") {
+      // The file omits the var here (inherited `all: null`, or not mentioned
+      // with no `all`), so a stored value for this environment is never used
+      // and must not read as "set".
+      continue;
+    } else if (storedSecretEnvironments.has(environment)) {
+      badges.push({ environment, state: "set" });
+    } else if (!storedSecretEnvironments.has("all")) {
+      badges.push({ environment, state: "missing" });
+    }
+  }
+  return badges;
+}
+
+import.meta.vitest?.describe("environmentBadges", () => {
+  const { test, expect } = import.meta.vitest!;
+  const plain = (value: string): EnvVarPerEnvironmentValue => ({ type: "plain", value, secretKey: null });
+  const secret: EnvVarPerEnvironmentValue = { type: "secret", value: null, secretKey: "KEY" };
+  const omit: EnvVarPerEnvironmentValue = { type: "omit", value: null, secretKey: null };
+  const envVar = (type: EnvVar["type"], perEnvironment: EnvVar["perEnvironment"], value: string | null = null): EnvVar => ({
+    key: "VAR", type, value, secretKey: type === "secret" ? "KEY" : null, perEnvironment,
+  });
+  const stored = (...environments: DeploymentEnvironmentName[]) => new Set(environments);
+
+  test("non-secret vars badge exactly the environments the file mentions", () => {
+    expect(environmentBadges(envVar("plain", new Map([["all", plain("a")], ["prod", plain("p")], ["dev", omit]])), null)).toEqual([
+      { environment: "all", state: "set" },
+      { environment: "prod", state: "set" },
+      { environment: "dev", state: "omit" },
+    ]);
+  });
+
+  test("secret vars badge stored environments and flag uncovered ones as missing", () => {
+    const allSecret = envVar("secret", new Map([["all", secret]]));
+    // Nothing stored: every concrete environment is missing, `all` itself isn't a target.
+    expect(environmentBadges(allSecret, stored())).toEqual([
+      { environment: "prod", state: "missing" },
+      { environment: "preview", state: "missing" },
+      { environment: "dev", state: "missing" },
+    ]);
+    // An `all` value covers every environment.
+    expect(environmentBadges(allSecret, stored("all"))).toEqual([{ environment: "all", state: "set" }]);
+    // Only prod stored: preview and dev still resolve to nothing.
+    expect(environmentBadges(allSecret, stored("prod"))).toEqual([
+      { environment: "prod", state: "set" },
+      { environment: "preview", state: "missing" },
+      { environment: "dev", state: "missing" },
+    ]);
+  });
+
+  test("omitted environments of a secret var show as omitted, never as missing", () => {
+    const prodOnly = envVar("secret", new Map([["all", omit], ["prod", secret]]));
+    expect(environmentBadges(prodOnly, stored())).toEqual([
+      { environment: "all", state: "omit" },
+      { environment: "prod", state: "missing" },
+    ]);
+  });
+
+  test("a stored value for an environment the file omits the var in is not shown as set", () => {
+    // { all: null, dev: secret("KEY") }: prod inherits the `all: null`.
+    const devOnly = envVar("secret", new Map([["all", omit], ["dev", secret]]));
+    expect(environmentBadges(devOnly, stored("prod", "dev"))).toEqual([
+      { environment: "all", state: "omit" },
+      { environment: "dev", state: "set" },
+    ]);
+    // { dev: secret("KEY") } with no `all`: prod and preview aren't declared at all.
+    const devOnlyNoAll = envVar("secret", new Map([["dev", secret]]));
+    expect(environmentBadges(devOnlyNoAll, stored("prod"))).toEqual([
+      { environment: "dev", state: "missing" },
+    ]);
+  });
+
+  test("secret badges are skipped while the stored list is unknown", () => {
+    expect(environmentBadges(envVar("secret", new Map([["all", secret], ["dev", omit]])), null)).toEqual([
+      { environment: "dev", state: "omit" },
+    ]);
+  });
+
+  test("legacy rows without a per-environment map fall back to the prod slice", () => {
+    expect(environmentBadges(envVar("plain", null, "v"), null)).toEqual([{ environment: "prod", state: "set" }]);
+    expect(environmentBadges(envVar("plain", null, null), null)).toEqual([]);
+    expect(environmentBadges(envVar("secret", null), stored("dev"))).toEqual([
+      { environment: "dev", state: "set" },
+      { environment: "prod", state: "missing" },
+    ]);
+    expect(environmentBadges(envVar("secret", null), stored("all"))).toEqual([{ environment: "all", state: "set" }]);
+  });
+});
 
 export type BoardService = {
   // The service id — the key of the `services` record returned by the deploy
@@ -363,6 +521,7 @@ export function buildBoardServices(
           type: envVar.type,
           value: envVar.value,
           secretKey: envVar.secret_key,
+          perEnvironment: envVar.per_environment == null ? null : perEnvironmentFromJson(envVar.per_environment),
         })),
         api: apiService,
       });
