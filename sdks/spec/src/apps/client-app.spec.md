@@ -160,9 +160,12 @@ Implementation notes:
 Error handling:
   - User cancellation: ASAuthorizationError.canceled → StackAuthError(code: "oauth_cancelled")
   - Other ASAuthorizationError: Map to appropriate StackAuthError
+  - Backend error responses: parsed like callOAuthCallback's token exchange failures — throw the
+    KnownError from the response, otherwise OAuthError("apple_signin_failed", "HTTP <status_code>").
 
-IMPORTANT: If the backend returns INVALID_APPLE_CREDENTIALS, implementations MUST panic/fatal error.
-This indicates misconfigured Bundle ID in the dashboard or token tampering - not recoverable by retry.
+If the backend returns INVALID_APPLE_CREDENTIALS, throw it as a KnownError; do NOT crash the host app.
+It indicates a misconfigured Bundle ID in the dashboard or token tampering, so it is not recoverable
+by retry.
 
 
 ## getOAuthUrl(provider, redirectUrl, errorRedirectUrl, options?)
@@ -259,6 +262,22 @@ Implementation:
 3. Send request
 4. If redirect URL not whitelisted error AND we didn't opt out of verification:
    - Log warning, retry without verification URL
+   Response on failure: parse with the shared HTTP error response handling (see
+   _utilities.spec.md "Error Response Format"):
+   - If the response has an x-hexclave-known-error / x-stack-known-error header, throw the
+     KnownError for that code, built from the body { code, error, details? }. Do NOT wrap
+     it in a generic OAuthError.
+     The most important case is MULTI_FACTOR_AUTHENTICATION_REQUIRED: the backend returns it
+     when the user has TOTP MFA enabled. Throw MultiFactorAuthenticationRequired carrying
+     details.attempt_code; the caller completes sign-in with signInWithMfa(totp, attemptCode).
+     This matches the JS SDK, which catches MultiFactorAuthenticationRequired from the token
+     exchange and continues to the MFA page with the attempt code.
+   - Otherwise, if the body is an OAuth 2.0 error { error, error_description? } (returned by the
+     OAuth server for some malformed requests), throw OAuthError(<error>, <error_description>).
+   - Otherwise throw OAuthError("token_exchange_failed", "HTTP <status_code>").
+   Non-browser SDKs MUST surface these errors to the caller rather than replacing them with a
+   generic "token exchange failed" error, otherwise users with MFA cannot finish OAuth sign-in.
+
 5. Store tokens { access_token, refresh_token }
 6. Redirect to afterSignUp URL (unless noRedirect=true)
 
@@ -871,10 +890,19 @@ Errors:
     message: "Invalid HTTP response"
     When: Token exchange response is not a valid HTTP response
     
+  MultiFactorAuthenticationRequired
+    details: { attempt_code: string }
+    When: The user has MFA enabled. Complete sign-in with signInWithMfa(totp, attempt_code).
+
+  <KnownError from response> (e.g. InvalidAuthorizationCode, RedirectUrlNotWhitelisted)
+    code: value of the x-stack-known-error header
+    message: "error" field of the response body
+    When: Token exchange endpoint returns a KnownError
+
   OAuthError(<error from response>)
-    message: <error_description from response> or "Token exchange failed"
-    When: Token exchange endpoint returns an error
-    
+    message: <error_description from response> or <error from response>
+    When: Token exchange endpoint returns an OAuth 2.0 error body without a known error header
+
   OAuthError(token_exchange_failed)
     message: "HTTP <status_code>"
     When: Token exchange returns non-200 status without error details
