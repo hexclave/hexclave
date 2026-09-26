@@ -160,9 +160,8 @@ Implementation notes:
 Error handling:
   - User cancellation: ASAuthorizationError.canceled → StackAuthError(code: "oauth_cancelled")
   - Other ASAuthorizationError: Map to appropriate StackAuthError
-  - Backend error responses: handled like callOAuthCallback's token exchange failures — throw the
-    KnownError from the response (including MultiFactorAuthenticationRequired with attempt_code),
-    otherwise OAuthError("apple_signin_failed", "HTTP <status_code>").
+  - Backend error responses: parsed like callOAuthCallback's token exchange failures — throw the
+    KnownError from the response, otherwise OAuthError("apple_signin_failed", "HTTP <status_code>").
 
 If the backend returns INVALID_APPLE_CREDENTIALS, throw it as a KnownError; do NOT crash the host app.
 It indicates a misconfigured Bundle ID in the dashboard or token tampering, so it is not recoverable

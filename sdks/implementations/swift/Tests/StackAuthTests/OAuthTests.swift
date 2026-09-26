@@ -184,6 +184,25 @@ struct OAuthTests {
         
         #expect(result.redirectUrl == customUrl)
     }
+
+    // MARK: - Token Exchange Error Tests
+
+    @Test("Should surface the known error from a failed token exchange")
+    func callOAuthCallbackSurfacesKnownError() async throws {
+        let app = TestConfig.createClientApp()
+        let callbackUrl = URL(string: "\(testRedirectUrl)?code=invalid-authorization-code")!
+
+        do {
+            try await app.callOAuthCallback(
+                url: callbackUrl,
+                codeVerifier: String(repeating: "a", count: 43),
+                redirectUrl: testRedirectUrl
+            )
+            Issue.record("Expected INVALID_AUTHORIZATION_CODE error")
+        } catch let error as StackAuthErrorProtocol {
+            #expect(error.code == "INVALID_AUTHORIZATION_CODE")
+        }
+    }
 }
 
 @Suite("OAuth Token Exchange Error Parsing Tests")
