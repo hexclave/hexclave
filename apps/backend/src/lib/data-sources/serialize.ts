@@ -6,6 +6,7 @@ import {
   getRecommendedMode,
   type DataSourceCapabilities,
 } from "@hexclave/shared/dist/data-sources/modes";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import type { DataSourceProbeResult } from "./probe";
 
 const MODE_FROM_PRISMA = {
@@ -55,7 +56,10 @@ export function serializeDataSource(source: DataSource & { streams: DataSourceSt
     database: source.database,
     username: source.username,
     ssl_mode: source.sslMode,
-    status: STATUS_FROM_PRISMA[source.status],
+    // DELETING sources are filtered out of every read, so one reaching here is a bug.
+    status: source.status === "DELETING"
+      ? throwErr(`Data source ${source.id} is being deleted and must not be serialized`)
+      : STATUS_FROM_PRISMA[source.status],
     error: source.error,
     sync_interval_seconds: source.syncIntervalSeconds,
     capabilities: capabilities == null ? null : {

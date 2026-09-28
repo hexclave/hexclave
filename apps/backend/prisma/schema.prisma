@@ -2358,6 +2358,10 @@ enum DataSourceStatus {
   // Set when a sync fails in a way that is about the source as a whole
   // (unreachable, credentials rejected) rather than one stream.
   FAILED
+  // Deleted by the user, but a sync still held the lease. Hidden from every API
+  // read; the scheduler drops the replication slot and the row once the lease is
+  // free, so cleanup never races a sync that is using the slot.
+  DELETING
 }
 
 model DataSource {

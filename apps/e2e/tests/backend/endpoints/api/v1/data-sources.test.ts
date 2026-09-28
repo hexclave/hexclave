@@ -578,6 +578,39 @@ it("rebuilds the destination when a stream changes mode", async ({ expect }) => 
   });
 });
 
+it("rebuilds the destination when the source's primary key changes", async ({ expect }) => {
+  const { projectId, credentials } = await createProjectWithWarehouse();
+  await withSourceDatabase(SIMPLE_SCHEMA, async source => {
+    const { body: { data_source } } = await connectSource(source.database);
+    const streams = [{ schema_name: "public", table_name: "plans", mode: "cursor", cursor_column: "id" }];
+    const configured = await setStreams(data_source.id, streams);
+    await syncSource(data_source.id);
+
+    // A second row with id 1 is only distinct under the new key. Left on the old
+    // ORDER BY (id), ReplacingMergeTree would collapse it into the existing row.
+    await source.query(`
+      ALTER TABLE plans DROP CONSTRAINT plans_pkey;
+      ALTER TABLE plans ADD PRIMARY KEY (id, name);
+      INSERT INTO plans VALUES (1, 'legacy');
+    `);
+    const resaved = await setStreams(data_source.id, streams);
+    expect(resaved.status).toBe(200);
+    expect(resaved.body.data_source.streams[0]).toMatchObject({
+      status: "pending",
+      primary_key_columns: ["id", "name"],
+      rows_synced: 0,
+    });
+
+    const synced = await syncSource(data_source.id);
+    expect(synced.body.data_source.streams[0]).toMatchObject({ status: "active", error: null, rows_synced: 3 });
+    const rows = await queryWarehouse(
+      credentials,
+      `SELECT name FROM \`${projectId}\`.\`${getDestinationTable(configured, "plans")}\` FINAL ORDER BY id, name`,
+    );
+    expect(rows.text).toBe("free\nlegacy\npro");
+  });
+});
+
 it("drops CDC infrastructure when switching or removing the final CDC stream", async ({ expect }) => {
   await createProjectWithWarehouse();
   await withSourceDatabase(SIMPLE_SCHEMA, async source => {
@@ -649,6 +682,52 @@ it("disconnects a source and drops the replication slot it created", async ({ ex
 
     expect((await listSources()).body.data_sources).toEqual([]);
     expect((await getSource(data_source.id)).status).toBe(404);
+  });
+});
+
+it("waits for a running sync to finish before cleaning up a deleted source", async ({ expect }) => {
+  await createProjectWithWarehouse();
+  await withSourceDatabase(SIMPLE_SCHEMA, async source => {
+    const { body: { data_source } } = await connectSource(source.database);
+    // The cursor stream gives the test a table to lock; the CDC stream owns the slot.
+    await setStreams(data_source.id, [
+      { schema_name: "public", table_name: "events", mode: "cursor", cursor_column: "created_at" },
+      { schema_name: "public", table_name: "plans", mode: "cdc" },
+    ]);
+    await syncSource(data_source.id);
+    expect(await getCdcInfrastructureCounts(source.database)).toEqual({ slots: 1, publications: 1 });
+
+    let syncStatus: number | undefined;
+    await onSource(source.database, async lockClient => {
+      await lockClient.query("BEGIN");
+      await lockClient.query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE");
+      const syncing = syncSource(data_source.id);
+      try {
+        await waitForBlockedDataSourceSync(source.database);
+
+        // Delete does not wait for the sync, and the source is gone from every
+        // read right away.
+        expect((await deleteSource(data_source.id)).status).toBe(200);
+        expect((await getSource(data_source.id)).status).toBe(404);
+        expect((await listSources()).body.data_sources).toEqual([]);
+
+        // But the slot the sync is about to read stays until the sync is done,
+        // including across a scheduler pass that finds the lease still held.
+        expect(await getCdcInfrastructureCounts(source.database)).toEqual({ slots: 1, publications: 1 });
+        await runScheduledSyncs();
+        expect(await getCdcInfrastructureCounts(source.database)).toEqual({ slots: 1, publications: 1 });
+      } finally {
+        await lockClient.query("ROLLBACK");
+        syncStatus = (await syncing).status;
+      }
+    });
+    // The sync ran to completion against a source that no longer exists.
+    expect(syncStatus).toBe(404);
+
+    // With the lease released, the next scheduler pass finishes the deletion.
+    await runScheduledSyncs();
+    expect(await getCdcInfrastructureCounts(source.database)).toEqual({ slots: 0, publications: 0 });
+    expect((await deleteSource(data_source.id)).status).toBe(404);
   });
 });
 
