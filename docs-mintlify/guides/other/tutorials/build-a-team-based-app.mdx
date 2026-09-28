@@ -47,7 +47,7 @@ Use the **current user** as the scope: `listTeams` / `useTeams`, and `getTeam` /
     type PageProps = { params: { teamId: string } };
 
     export default async function TeamHomePage({ params }: PageProps) {
-      const user = await hexclaveServerApp.getUser({ or: "redirect" });
+      const user = await hexclaveServerApp.getUser({ or: "throw" });
       const team = await user.getTeam(params.teamId);
 
       if (!team) {
@@ -104,7 +104,7 @@ If your framework types route `params` as a `Promise` (newer Next.js), `await` t
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function TeamsIndexPage() {
-      const user = await hexclaveServerApp.getUser({ or: "redirect" });
+      const user = await hexclaveServerApp.getUser({ or: "throw" });
       const teams = await user.listTeams();
 
       return (
@@ -231,7 +231,7 @@ Replace `export_reports` with a permission you created.
     type PageProps = { params: { teamId: string } };
 
     export default async function ReportsPage({ params }: PageProps) {
-      const user = await hexclaveServerApp.getUser({ or: "redirect" });
+      const user = await hexclaveServerApp.getUser({ or: "throw" });
       const team = await user.getTeam(params.teamId);
       if (!team) {
         return <p>Workspace not found.</p>;

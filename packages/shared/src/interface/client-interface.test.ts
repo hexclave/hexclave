@@ -7,14 +7,12 @@ import { ApiUrlsFailedError, HexclaveClientInterface } from "./client-interface"
 function createClientInterface(options?: {
   baseUrl?: string,
   apiUrls?: string[],
-  probeRate?: number,
 }) {
   const apiUrls = options?.apiUrls ?? [options?.baseUrl ?? "https://api.example.com"];
   return new HexclaveClientInterface({
     clientVersion: "test",
     getBaseUrl: () => apiUrls[0],
     getApiUrls: () => apiUrls,
-    probeRate: options?.probeRate,
     extraRequestHeaders: {},
     projectId: "project-id",
     publishableClientKey: "publishable-client-key",
@@ -401,7 +399,7 @@ describe("_withFallback", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Normal mode — iterating through URLs in order
+  // Ring walk — iterating through URLs in order
   // ---------------------------------------------------------------------------
 
   it("uses primary when it is healthy", async () => {
@@ -441,12 +439,37 @@ describe("_withFallback", () => {
     expect(log.every(u => urlIndex(urls, u) === 0)).toBe(true);
   });
 
-  it("does not retry or fall back on non-KnownError 4xx responses", async () => {
+  it("sticks on the host that returned KnownError after an outage hop", async () => {
+    const urls = urlList(3);
+    const iface = createClientInterface({ apiUrls: urls });
+
+    // url-0 down, url-1 returns KnownError → stick on url-1 even though the call "failed"
+    const log1: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      log1.push(url);
+      if (urlIndex(urls, url) === 0) throw new TypeError("Failed to fetch");
+      return createKnownErrorResponse(new KnownErrors.UserNotFound());
+    }));
+    await expect(sendRequest(iface)).rejects.toThrow();
+    expect(log1.map(u => urlIndex(urls, u))).toEqual([0, 1]);
+
+    // Next request goes straight to url-1
+    const log2 = mockFetch(() => "ok");
+    await sendRequest(iface);
+    expect(log2.length).toBe(1);
+    expect(urlIndex(urls, log2[0])).toBe(1);
+  });
+
+  it("does not fall back on smart-wrapped 4xx responses", async () => {
     const urls = urlList(3);
     const log: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       log.push(input.toString());
-      return createTextResponse("Payments are not set up", { status: 402 });
+      return createTextResponse("Payments are not set up", {
+        status: 402,
+        headers: { "x-hexclave-request-id": "req-123" },
+      });
     }));
 
     const iface = createClientInterface({ apiUrls: urls });
@@ -455,8 +478,33 @@ describe("_withFallback", () => {
     expect(urlIndex(urls, log[0])).toBe(0);
   });
 
+  it("falls back on non-smart 4xx responses (no request-id)", async () => {
+    const urls = urlList(3);
+    const log: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      log.push(url);
+      if (urlIndex(urls, url) === 0) {
+        return createTextResponse("<html>Not Found</html>", {
+          status: 404,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+      return createJsonResponse({ display_name: "test" });
+    }));
+
+    const iface = createClientInterface({ apiUrls: urls });
+    await sendRequest(iface);
+    expect(log.length).toBe(2);
+    expect(urlIndex(urls, log[0])).toBe(0);
+    expect(urlIndex(urls, log[1])).toBe(1);
+  });
+
   it("wraps non-KnownError 4xx responses as normal errors", async () => {
-    const response = createTextResponse("Payments are not set up", { status: 402 });
+    const response = createTextResponse("Payments are not set up", {
+      status: 402,
+      headers: { "x-hexclave-request-id": "req-123" },
+    });
     vi.stubGlobal("fetch", vi.fn(async () => response));
 
     const iface = createClientInterface({ apiUrls: urlList(1) });
@@ -479,14 +527,17 @@ describe("_withFallback", () => {
     expect(attempts).toBe(1);
   });
 
-  it("falls back on non-KnownError 5xx responses", async () => {
+  it("falls back on non-KnownError 5xx responses even with request-id", async () => {
     const urls = urlList(3);
     const log: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = input.toString();
       log.push(url);
       if (urlIndex(urls, url) === 0) {
-        return createTextResponse("Server unavailable", { status: 503 });
+        return createTextResponse("Server unavailable", {
+          status: 503,
+          headers: { "x-hexclave-request-id": "req-123" },
+        });
       }
       return createJsonResponse({ display_name: "test" });
     }));
@@ -498,13 +549,16 @@ describe("_withFallback", () => {
     expect(urlIndex(urls, log[1])).toBe(1);
   });
 
-  it("does not fall back on wrapped non-KnownError 4xx refresh token responses", async () => {
+  it("does not fall back on smart-wrapped 4xx refresh token responses", async () => {
     const urls = urlList(3);
     const log: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = input instanceof Request ? input.url : input.toString();
       log.push(url);
-      return createTextResponse("Payments are not set up", { status: 402 });
+      return createTextResponse("Payments are not set up", {
+        status: 402,
+        headers: { "x-hexclave-request-id": "req-123" },
+      });
     }));
 
     const iface = createClientInterface({ apiUrls: urls });
@@ -593,103 +647,51 @@ describe("_withFallback", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Sticky mode — remembering the working fallback
+  // Current target — stay on the working host until it fails
   // ---------------------------------------------------------------------------
 
-  it("enters sticky mode: subsequent requests skip straight to the working fallback", async () => {
+  it("remembers the working URL: subsequent requests go straight there", async () => {
     const urls = urlList(4);
-    const iface = createClientInterface({ apiUrls: urls, probeRate: 0 });
+    const iface = createClientInterface({ apiUrls: urls });
 
-    // url-0,1,2 down → sticky on url-3
+    // url-0,1,2 down → current target becomes url-3
     mockFetch((u) => urlIndex(urls, u) === 3 ? "ok" : "fail");
     await sendRequest(iface);
 
-    // Next request goes directly to url-3 (probeRate=0 means no probe)
+    // Next request goes directly to url-3 (no primary probe)
     const log = mockFetch(() => "ok");
     await sendRequest(iface);
 
     expect(log.length).toBe(1);
     expect(urlIndex(urls, log[0])).toBe(3);
+    expect(iface.getCurrentTargetApiUrl()).toBe(`${urls[3]}/api/v1`);
   });
 
-  it("probes primary and exits sticky mode when probe succeeds", async () => {
+  it("walks the ring from the current target when it fails", async () => {
     const urls = urlList(3);
-    const iface = createClientInterface({ apiUrls: urls, probeRate: 1 });
+    const iface = createClientInterface({ apiUrls: urls });
 
-    // url-0 down → sticky on url-1
-    mockFetch((u) => urlIndex(urls, u) === 0 ? "fail" : "ok");
+    // Fail over to url-1
+    mockFetch((u) => urlIndex(urls, u) === 1 ? "ok" : "fail");
     await sendRequest(iface);
 
-    // url-0 recovers. probeRate=1 → always probes → probe succeeds → exits sticky
-    const log = mockFetch(() => "ok");
+    // url-1 and url-2 down, url-0 up → circular order is 1, 2, 0 (not restart-from-0)
+    const log = mockFetch((u) => urlIndex(urls, u) === 0 ? "ok" : "fail");
     await sendRequest(iface);
-    expect(urlIndex(urls, log[0])).toBe(0);
 
-    // Next request should go to url-0 directly (no longer sticky)
-    const log2 = mockFetch(() => "ok");
-    await sendRequest(iface);
-    expect(log2.length).toBe(1);
-    expect(urlIndex(urls, log2[0])).toBe(0);
+    expect(log.map(u => urlIndex(urls, u))).toEqual([1, 2, 0]);
+    expect(iface.getCurrentTargetApiUrl()).toBe(`${urls[0]}/api/v1`);
   });
 
-  it("halves probe rate on each failed probe", async () => {
-    const urls = urlList(2);
-    const iface = createClientInterface({ apiUrls: urls, probeRate: 1 });
-
-    // Enter sticky on url-1, url-0 stays permanently down
-    mockFetch((u) => urlIndex(urls, u) === 0 ? "fail" : "ok");
-    await sendRequest(iface);
-
-    // probeRate=1 → probes url-0, fails → rate becomes 0.5
-    mockFetch((u) => urlIndex(urls, u) === 0 ? "fail" : "ok");
-    await sendRequest(iface);
-
-    // probeRate=0.5 → probes (random < 0.5), fails → rate becomes 0.25
-    const randomMock = vi.spyOn(Math, "random").mockReturnValue(0.4);
-    mockFetch((u) => urlIndex(urls, u) === 0 ? "fail" : "ok");
-    await sendRequest(iface);
-
-    // rate=0.25, random=0.3 ≥ 0.25 → should NOT probe primary
-    randomMock.mockReturnValue(0.3);
-    const log = mockFetch(() => "ok");
-    await sendRequest(iface);
-
-    expect(log.length).toBe(1);
-    expect(urlIndex(urls, log[0])).toBe(1);
-
-    randomMock.mockRestore();
-  });
-
-  // ---------------------------------------------------------------------------
-  // Sticky URL goes down — falls through to full iteration
-  // ---------------------------------------------------------------------------
-
-  it("falls through to full iteration when sticky URL also goes down", async () => {
-    const urls = urlList(3);
-    const iface = createClientInterface({ apiUrls: urls, probeRate: 0 });
-
-    // url-0,1 down → sticky on url-2
-    mockFetch((u) => urlIndex(urls, u) === 2 ? "ok" : "fail");
-    await sendRequest(iface);
-
-    // Now url-2 also down, url-1 recovers
-    const log = mockFetch((u) => urlIndex(urls, u) === 1 ? "ok" : "fail");
-    await sendRequest(iface);
-
-    // Should have tried sticky url-2 (failed), then iterated 0→1 (found url-1)
-    expect(log.some(u => urlIndex(urls, u) === 2)).toBe(true);
-    expect(log.some(u => urlIndex(urls, u) === 1)).toBe(true);
-  });
-
-  it("re-enters sticky on the new working URL after fallthrough", async () => {
+  it("re-targets the new working URL after a ring walk", async () => {
     const urls = urlList(4);
-    const iface = createClientInterface({ apiUrls: urls, probeRate: 0 });
+    const iface = createClientInterface({ apiUrls: urls });
 
-    // sticky on url-3
+    // current target → url-3
     mockFetch((u) => urlIndex(urls, u) === 3 ? "ok" : "fail");
     await sendRequest(iface);
 
-    // url-3 dies, url-2 recovers → should re-sticky on url-2
+    // url-3 dies, url-2 recovers → ring from 3: 3, 0, 1, 2
     mockFetch((u) => urlIndex(urls, u) === 2 ? "ok" : "fail");
     await sendRequest(iface);
 
@@ -701,41 +703,132 @@ describe("_withFallback", () => {
     expect(urlIndex(urls, log[0])).toBe(2);
   });
 
-  it("throws when sticky URL fails and all URLs fail in iteration", async () => {
+  it("throws after 2 × N attempts starting from the current target", async () => {
     const urls = urlList(3);
-    const iface = createClientInterface({ apiUrls: urls, probeRate: 0 });
+    const iface = createClientInterface({ apiUrls: urls });
 
-    // sticky on url-1
+    // current target → url-1
     mockFetch((u) => urlIndex(urls, u) === 1 ? "ok" : "fail");
     await sendRequest(iface);
 
-    // Everything is now down
+    // Everything is now down — 2 laps × 3 URLs = 6 (not sticky+iterate = 7)
     const log = mockFetch(() => "fail");
     await expect(sendRequest(iface)).rejects.toThrow();
 
-    // sticky attempt (1) + 2 passes × 3 URLs (6) = 7
-    expect(log.length).toBe(7);
+    expect(log.length).toBe(6);
+    expect(log.map(u => urlIndex(urls, u))).toEqual([1, 2, 0, 1, 2, 0]);
+  });
+});
+
+/**
+ * Live QA against localhost:8102 + :8110.
+ *   LIVE_FALLBACK_QA=1 pnpm test run packages/shared/src/interface/client-interface.test.ts
+ *
+ * Start fallback backend first:
+ *   BACKEND_PORT=8110 STACK_BACKEND_DEV_DISABLE_WATCH=true pnpm -C apps/backend exec dotenv -c development -- tsx src/server/server.ts
+ */
+describe.runIf(process.env.LIVE_FALLBACK_QA === "1")("live circular fallback QA", () => {
+  const PRIMARY = "http://localhost:8102";
+  const FALLBACK = "http://localhost:8110";
+  const DEAD = "http://localhost:8098";
+  const DEAD2 = "http://localhost:8097";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it("does not probe primary when sticky URL fails (probe only before sticky attempt)", async () => {
-    const urls = urlList(3);
-    const iface = createClientInterface({ apiUrls: urls, probeRate: 1 });
+  async function health(url: string) {
+    try {
+      return (await fetch(`${url}/health`)).ok;
+    } catch {
+      return false;
+    }
+  }
 
-    // sticky on url-2, url-0 stays down
-    mockFetch((u) => urlIndex(urls, u) === 2 ? "ok" : "fail");
-    await sendRequest(iface);
+  function origins(log: string[]) {
+    return log.map((u) => new URL(u).origin);
+  }
 
-    // url-0 still down, url-2 also dies, url-1 is the only one up
-    // probeRate=1 → probes url-0 first (fails), then tries sticky url-2 (fails),
-    // then full iteration finds url-1
-    const log = mockFetch((u) => urlIndex(urls, u) === 1 ? "ok" : "fail");
-    await sendRequest(iface);
+  it("requires both backends up", async () => {
+    expect(await health(PRIMARY), "8102 should be up").toBe(true);
+    expect(await health(FALLBACK), "8110 should be up").toBe(true);
+  });
 
-    const hitOrder = log.map(u => urlIndex(urls, u));
-    // probe url-0, sticky url-2, then iteration: 0, 1 (succeeds)
-    expect(hitOrder[0]).toBe(0);  // probe
-    expect(hitOrder[1]).toBe(2);  // sticky attempt
-    expect(hitOrder).toContain(1);  // found during iteration
+  it("fails over from dead primary to live fallback and sticks", async () => {
+    const iface = createClientInterface({ apiUrls: [DEAD, FALLBACK] });
+    const hits: string[] = [];
+    const realFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      hits.push(url);
+      return await realFetch(input, init);
+    });
+
+    const session = iface.createSession({ refreshToken: null, accessToken: null });
+    await iface.sendClientRequest("/users/me", { method: "GET" }, session).catch(() => null);
+    expect(origins(hits)[0]).toBe(DEAD);
+    expect(origins(hits)).toContain(FALLBACK);
+    expect(iface.getCurrentTargetApiUrl()).toContain("8110");
+
+    hits.length = 0;
+    await iface.sendClientRequest("/users/me", { method: "GET" }, session).catch(() => null);
+    expect(origins(hits)).toEqual([FALLBACK]);
+  });
+
+  it("when current fallback dies, rings back to primary", async () => {
+    const iface = createClientInterface({ apiUrls: [PRIMARY, FALLBACK] });
+    const realFetch = globalThis.fetch.bind(globalThis);
+    const hits: string[] = [];
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      hits.push(url);
+      if (url.includes("8102")) throw new TypeError("Failed to fetch (simulated primary outage)");
+      return await realFetch(input, init);
+    });
+    const session = iface.createSession({ refreshToken: null, accessToken: null });
+    await iface.sendClientRequest("/users/me", { method: "GET" }, session).catch(() => null);
+    expect(iface.getCurrentTargetApiUrl()).toContain("8110");
+
+    hits.length = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      hits.push(url);
+      if (url.includes("8110")) throw new TypeError("Failed to fetch (simulated fallback outage)");
+      return await realFetch(input, init);
+    });
+    await iface.sendClientRequest("/users/me", { method: "GET" }, session).catch(() => null);
+
+    expect(origins(hits)[0]).toBe(FALLBACK);
+    expect(origins(hits)).toContain(PRIMARY);
+    expect(iface.getCurrentTargetApiUrl()).toContain("8102");
+  });
+
+  it("both healthy → primary only", async () => {
+    const iface = createClientInterface({ apiUrls: [PRIMARY, FALLBACK] });
+    const hits: string[] = [];
+    const realFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      hits.push(url);
+      return await realFetch(input, init);
+    });
+    const session = iface.createSession({ refreshToken: null, accessToken: null });
+    await iface.sendClientRequest("/users/me", { method: "GET" }, session).catch(() => null);
+    expect(origins(hits)).toEqual([PRIMARY]);
+  });
+
+  it("all down → ApiUrlsFailedError after 2×n attempts", async () => {
+    const iface = createClientInterface({ apiUrls: [DEAD, DEAD2] });
+    const hits: string[] = [];
+    const realFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(String(input));
+      return await realFetch(input, init);
+    });
+    const session = iface.createSession({ refreshToken: null, accessToken: null });
+    await expect(iface.sendClientRequest("/users/me", { method: "GET" }, session)).rejects.toBeInstanceOf(ApiUrlsFailedError);
+    expect(hits).toHaveLength(4);
   });
 });
 

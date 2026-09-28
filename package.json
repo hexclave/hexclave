@@ -64,6 +64,7 @@
     "start:mcp": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/mcp",
     "start:dashboard": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/dashboard",
     "start:mock-oauth-server": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/mock-oauth-server",
+    "start:internal-tool": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/internal-tool",
     "start:bulldozer": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/bulldozer-js",
     "start:marshal": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/marshal",
     "lint": "pnpm pre && turbo run lint --continue -- --max-warnings=0",

@@ -5,7 +5,7 @@
 // OTHERWISE THINGS WILL GO BOOM!!
 
 import * as yup from "yup";
-import { ALL_APPS } from "../apps/apps-config";
+import { ALL_APPS, getParentAppId } from "../apps/apps-config";
 import { DEFAULT_EMAIL_TEMPLATES, DEFAULT_EMAIL_THEMES, DEFAULT_EMAIL_THEME_ID } from "../helpers/emails";
 import * as schemaFields from "../schema-fields";
 import { productSchema, userSpecifiedIdSchema, yupBoolean, yupDate, yupMixed, yupNever, yupNumber, yupObject, yupRecord, yupString, yupTuple, yupUnion } from "../schema-fields";
@@ -92,9 +92,13 @@ const branchApiKeysSchema = yupObject({
 const appIds = Object.keys(ALL_APPS) as (keyof typeof ALL_APPS)[];
 const branchAppsSchema = yupObject({
   installed: yupRecord(
-    // App config is persisted independently of backend releases. Retain app IDs
-    // introduced by newer releases so an older backend can still render the
-    // config; getIncompleteConfigWarnings reports IDs it does not recognize.
+    // Each app is configured independently, including apps with parentAppId.
+    // Some dashboard versions interpret sub-apps through their parent, but the
+    // backend must retain the individual value for clients with richer behavior.
+    //
+    // App config is also persisted independently of backend releases. Retain
+    // app IDs introduced by newer releases so an older backend can still render
+    // the config; getIncompleteConfigWarnings reports IDs it does not recognize.
     yupString(),
     yupObject({
       enabled: yupBoolean(),
@@ -287,7 +291,7 @@ import.meta.vitest?.test("branchPaymentsSchema lets productLineId schema reject 
         prices: {},
       },
     },
-  }, { abortEarly: false })).rejects.toThrowErrorMatchingInlineSnapshot(`[ValidationError: productLineId must contain only letters, numbers, underscores, and hyphens, and not start with a hyphen]`);
+  }, { abortEarly: false })).rejects.toThrowErrorMatchingInlineSnapshot(`[ValidationError: productLineId must contain only letters, numbers, underscores, and hyphens, and not start with a hyphen, and must not be one of __proto__, constructor, prototype]`);
 });
 
 const branchDomain = yupObject({});
@@ -645,6 +649,12 @@ export function migrateConfigOverride(type: "project" | "branch" | "environment"
   }
   // END
 
+  // BEGIN 2026-08-31: the Growth app was removed.
+  if (isBranchOrHigher) {
+    res = removeProperty(res, p => p[0] === "apps" && p[1] === "installed" && p[2] === "gtm");
+  }
+  // END
+
   // return the result
   return res;
 };
@@ -755,6 +765,34 @@ import.meta.vitest?.test("migrateConfigOverride renames deployments-alpha app in
     "apps.installed.deploy.enabled": false,
   })).toEqual({
     "apps.installed.deploy.enabled": false,
+  });
+});
+
+import.meta.vitest?.test("migrateConfigOverride removes Growth app installations", ({ expect }) => {
+  expect(migrateConfigOverride("branch", {
+    apps: {
+      installed: {
+        gtm: { enabled: true },
+        analytics: { enabled: true },
+      },
+    },
+  })).toEqual({
+    apps: {
+      installed: {
+        analytics: { enabled: true },
+      },
+    },
+  });
+  expect(migrateConfigOverride("branch", {
+    "apps.installed.gtm.enabled": true,
+    "apps.installed.analytics.enabled": true,
+  })).toEqual({
+    "apps.installed.analytics.enabled": true,
+  });
+  expect(migrateConfigOverride("project", {
+    "apps.installed.gtm.enabled": true,
+  })).toEqual({
+    "apps.installed.gtm.enabled": true,
   });
 });
 
@@ -1647,6 +1685,28 @@ import.meta.vitest?.test("unknown installed apps render with a config warning", 
   expect(await getIncompleteConfigWarnings(branchConfigSchema, config)).toEqual(Result.error(
     "Unknown installed app ID: \"future-app\". This config can still be rendered, but this version cannot validate or operate those apps.",
   ));
+});
+
+import.meta.vitest?.test("sub-apps can be enabled independently of their parent apps", async ({ expect }) => {
+  const subAppEntries: [keyof typeof ALL_APPS, keyof typeof ALL_APPS][] = [];
+  for (const appId of appIds) {
+    const parentAppId = getParentAppId(appId);
+    if (parentAppId != null) {
+      subAppEntries.push([appId, parentAppId]);
+    }
+  }
+  const config = {
+    apps: {
+      installed: Object.fromEntries(subAppEntries.flatMap(([appId, parentAppId]) => [
+        [parentAppId, { enabled: false }],
+        [appId, { enabled: true }],
+      ])),
+    },
+  };
+
+  expect(subAppEntries.length).toBeGreaterThan(0);
+  expect(await getConfigOverrideErrors(branchConfigSchema, config)).toEqual(Result.ok(null));
+  expect(await getIncompleteConfigWarnings(branchConfigSchema, config)).toEqual(Result.ok(null));
 });
 
 

@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { clsx } from "clsx";
 
 export function AddManualQa({ onClose, onSave }: {
   onClose: () => void;
-  onSave: (question: string, answer: string, publish: boolean) => Promise<void>;
+  onSave: (question: string, answer: string, publish: boolean, requestId: string) => Promise<void>;
 }) {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -11,19 +11,26 @@ export function AddManualQa({ onClose, onSave }: {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const pendingRequestIdRef = useRef<string | null>(null);
+
   const canSave = question.trim().length > 0 && answer.trim().length > 0 && !isSaving;
 
   const handleSave = async (publish: boolean) => {
     if (!canSave) return;
     setIsSaving(true);
     setError(null);
+    if (pendingRequestIdRef.current == null) {
+      pendingRequestIdRef.current = crypto.randomUUID();
+    }
+    const requestId = pendingRequestIdRef.current;
     try {
-      await onSave(question.trim(), answer.trim(), publish);
+      await onSave(question.trim(), answer.trim(), publish, requestId);
+      pendingRequestIdRef.current = null;
+      setQuestion("");
+      setAnswer("");
       setSaved(true);
       setTimeout(() => {
         setSaved(false);
-        setQuestion("");
-        setAnswer("");
         if (publish) {
           onClose();
         }

@@ -1115,6 +1115,8 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
   ];
 
   for (const purchase of oneTimePurchaseSeeds) {
+    // Forward-compatibility seeds current code against the base schema before
+    // this branch's payment columns have been migrated, so avoid selecting them.
     await prisma.oneTimePurchase.upsert({
       where: {
         tenancyId_id: {
@@ -1144,6 +1146,9 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
         creationSource: purchase.creationSource,
         stripePaymentIntentId: purchase.stripePaymentIntentId ?? null,
         createdAt: purchase.createdAt,
+      },
+      select: {
+        id: true,
       },
     });
   }
@@ -1216,6 +1221,8 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
   ];
 
   for (const invoice of invoiceSeeds) {
+    // Keep this seed compatible with the base schema before the new payment
+    // outcome columns are migrated.
     await prisma.subscriptionInvoice.upsert({
       where: {
         tenancyId_id: {
@@ -1236,6 +1243,9 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
         status: invoice.status,
         amountTotal: invoice.amountTotal,
         createdAt: invoice.createdAt,
+      },
+      select: {
+        id: true,
       },
     });
   }
@@ -2694,6 +2704,67 @@ const DUMMY_DEPLOYMENT_SERVICES = [
   },
 ] as const;
 
+// What each source's `hexclave deploy` PACKAGED, per deployment source. A deploy
+// uploads one tree and every source-built service is built from it, so a
+// manifest belongs to the source rather than to any one service — the Source tab
+// slices it by each service's `rootDirectory`.
+//
+// Sized to demonstrate what the tab is FOR: `storefront`'s upload is dominated
+// by one video and one image under `apps/web/public`, which is the shape of
+// every "why is my deploy slow" question, and the answer is visible at a glance.
+// Only files that survive .gitignore/.dockerignore are listed, because that is
+// all a real manifest contains — which is what lets a reader use it to check
+// that an ignore rule worked.
+const DUMMY_DEPLOYMENT_SOURCE_FILES: Record<string, { path: string, bytes: number }[]> = {
+  storefront: [
+    { path: 'apps/web/public/hero.mp4', bytes: 5_412_880 },
+    { path: 'apps/web/public/og-image.png', bytes: 842_190 },
+    { path: 'apps/web/public/logo.svg', bytes: 11_204 },
+    { path: 'apps/web/app/page.tsx', bytes: 6_118 },
+    { path: 'apps/web/app/layout.tsx', bytes: 2_940 },
+    { path: 'apps/web/app/globals.css', bytes: 2_301 },
+    { path: 'apps/web/lib/api-client.ts', bytes: 1_884 },
+    { path: 'apps/web/next.config.mjs', bytes: 612 },
+    { path: 'apps/web/package.json', bytes: 918 },
+    { path: 'hexclave.deploy.ts', bytes: 744 },
+    { path: 'pnpm-workspace.yaml', bytes: 96 },
+    { path: '.gitignore', bytes: 128 },
+  ],
+  platform: [
+    { path: 'apps/api/vendor/geoip-city.mmdb', bytes: 2_180_640 },
+    { path: 'apps/api/src/server.ts', bytes: 14_402 },
+    { path: 'apps/api/src/routes/orders.ts', bytes: 8_770 },
+    { path: 'apps/api/src/routes/catalog.ts', bytes: 6_205 },
+    { path: 'apps/api/src/db/pool.ts', bytes: 1_540 },
+    { path: 'apps/api/Dockerfile', bytes: 486 },
+    { path: 'apps/api/package.json', bytes: 1_102 },
+    { path: 'database/Dockerfile', bytes: 214 },
+    { path: 'database/init/01-schema.sql', bytes: 4_860 },
+    { path: 'database/init/02-seed.sql', bytes: 1_733 },
+    { path: 'hexclave.deploy.ts', bytes: 1_026 },
+    { path: '.dockerignore', bytes: 74 },
+  ],
+};
+
+/**
+ * The manifest a deploy of `sourceId` would have reported.
+ *
+ * Totals are DERIVED from the listing rather than written beside it, so the
+ * fixture cannot drift into claiming a file count or a size its own files
+ * contradict. The compression ratio is a plausible constant: these trees are
+ * mostly already-compressed media, which barely shrinks.
+ */
+function dummySourceManifest(sourceId: string): Prisma.InputJsonValue {
+  const files = DUMMY_DEPLOYMENT_SOURCE_FILES[sourceId] ?? throwErr(`no dummy source files for ${sourceId}`);
+  const totalBytes = files.reduce((total, file) => total + file.bytes, 0);
+  return {
+    file_count: files.length,
+    total_bytes: totalBytes,
+    compressed_bytes: Math.round(totalBytes * 0.82),
+    entries: [...files].sort((a, b) => b.bytes - a.bytes),
+  };
+}
+
 // Deployments, newest last. Each entry is one `hexclave deploy` of ONE source:
 // the services it planned, in dependency order, and the outcome of each. A
 // service marked `skipped` was planned but never reached — that is what a
@@ -2801,6 +2872,10 @@ async function seedDummyDeployments(options: {
       error: deployment.status === 'FAILED' ? 'The build of `api` failed, so nothing was rolled out.' : null,
       marshalBuildId: `bld_${createHash('sha256').update(deploymentId).digest('hex').slice(0, 16)}`,
       plannedServiceIds,
+      // Every seeded deploy builds from source, so every one has a manifest —
+      // an all-prebuilt deploy would have none, which is a state the fixture
+      // does not currently cover.
+      sourceManifest: dummySourceManifest(deployment.sourceId),
       services: Object.fromEntries(plannedServiceIds.map((serviceId) => {
         // The per-entry `services` records have different keys, so the union's
         // index type is narrower than the ids being looked up here.

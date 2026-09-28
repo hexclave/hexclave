@@ -45,7 +45,7 @@ import { SHARED_OAUTH_SIGN_IN_METHODS, SIGN_IN_METHODS, type SignInMethod, type 
 export type OnboardingPageProps = {
   stepKey: string,
   title: string,
-  subtitle?: string,
+  subtitle?: ReactNode,
   steps: TimelineStep[],
   currentStep: TimelineStep["id"],
   progressIndex?: number,
@@ -358,7 +358,7 @@ export function NewProjectEntryPage(props: {
       <div className="space-y-3">
         <OnboardingChoiceCard
           icon={<SparkleIcon className="h-5 w-5" />}
-          title="Add Hexclave to a new project"
+          title="Add Hexclave to a project"
           description="If you haven't installed Hexclave yet, this is the way to get started."
           disabled={props.disabled}
           onClick={() => props.onSelect("setup-new")}
@@ -528,6 +528,7 @@ export function ProductSelectionPage(props: {
    * on the additional-apps multiselect.
    */
   initialPrimaryAppId?: AppId | null,
+  initialSelectedAppIds?: Iterable<AppId>,
   onBack?: () => void,
   onPrimaryAppSelected: (appId: AppId) => void,
   onClearPrimaryApp: () => void,
@@ -535,9 +536,13 @@ export function ProductSelectionPage(props: {
   onContinue: (appIds: Set<AppId>) => void,
 }) {
   const primaryAppId = props.initialPrimaryAppId ?? null;
-  const [selectedApps, setSelectedApps] = useState<Set<AppId>>(() => (
-    primaryAppId == null ? new Set() : new Set([primaryAppId])
-  ));
+  const [selectedApps, setSelectedApps] = useState<Set<AppId>>(() => {
+    const selected = new Set(props.initialSelectedAppIds ?? []);
+    if (primaryAppId != null) {
+      selected.add(primaryAppId);
+    }
+    return selected;
+  });
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const { popularIds: matchingPopularIds, regularIds: matchingRegularIds } = orderedMatchingAppIds(normalizedSearchQuery);
@@ -736,6 +741,7 @@ export function ProductSelectionPage(props: {
 export function ProductConfigurationWizard(props: {
   selectedApps: Set<AppId>,
   onBack: () => void,
+  onDeploy: (source: "local" | "github") => void,
 }) {
   const [signInMethods, setSignInMethods] = useState<Set<SignInMethod>>(
     new Set(["credential", "magicLink", "google", "github"]),
@@ -918,12 +924,103 @@ export function ProductConfigurationWizard(props: {
     emailThemeId: selectedEmailThemeId,
   });
   return (
-    <SetupNewProjectPage
+    <PreProjectSetupFlow
       steps={configurationSteps}
       currentStep="welcome"
       disabled={false}
       onBack={goBack}
       configFile={configFile}
+      onDeploy={props.onDeploy}
+    />
+  );
+}
+
+export function PreProjectSetupFlow(props: {
+  steps: TimelineStep[],
+  currentStep: TimelineStep["id"],
+  disabled: boolean,
+  onBack: () => void,
+  configFile?: string,
+  onDeploy: (source: "local" | "github") => void,
+}) {
+  const [phase, setPhase] = useState<"installation" | "location" | "local-welcome">("installation");
+
+  if (phase === "location") {
+    return (
+      <DeploymentChoicePage
+        stepKey="post-install-deployment-location"
+        steps={props.steps}
+        currentStep={props.currentStep}
+        disabled={props.disabled}
+        onBack={() => setPhase("installation")}
+        onSelect={(source) => {
+          if (source === "local") {
+            setPhase("local-welcome");
+            return;
+          }
+          if (source === "github") {
+            props.onDeploy("github");
+            return;
+          }
+          throw new Error("Plain production is not available after local project setup.");
+        }}
+      />
+    );
+  }
+
+  if (phase === "local-welcome") {
+    return (
+      <OnboardingPage
+        stepKey="local-project-welcome"
+        title="Welcome to Hexclave"
+        steps={props.steps}
+        currentStep={props.currentStep}
+        onBack={() => setPhase("location")}
+        disabled={props.disabled}
+        primaryAction={(
+          <DesignButton
+            className="w-full rounded-full"
+            disabled={props.disabled}
+            onClick={() => props.onDeploy("local")}
+          >
+            Deploy my project to production
+          </DesignButton>
+        )}
+      >
+        <DesignCard
+          glassmorphic
+          className="border-0 bg-white/70 dark:bg-background/60"
+          contentClassName="space-y-4 p-6"
+        >
+          <Typography className="text-sm leading-relaxed">
+            Once the SDK has been installed, you can restart your dev command and access the local dashboard on{" "}
+            <a
+              href="http://localhost:26700"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-blue-600 underline underline-offset-2 transition-colors hover:text-blue-700 hover:transition-none dark:text-blue-400 dark:hover:text-blue-300"
+            >
+              http://localhost:26700
+            </a>
+            .
+          </Typography>
+          <Typography variant="secondary" className="text-sm leading-relaxed">
+            Since you specified your project is locally on your computer, the Hexclave dashboard is running locally on your computer, and no Hexclave Cloud project has been created. When you&apos;re ready to deploy your project to production, you can come back here.
+          </Typography>
+        </DesignCard>
+      </OnboardingPage>
+    );
+  }
+
+  return (
+    <SetupNewProjectPage
+      steps={props.steps}
+      currentStep={props.currentStep}
+      disabled={props.disabled}
+      onBack={props.onBack}
+      configFile={props.configFile}
+      onComplete={() => setPhase("location")}
+      completionLabel="Continue"
     />
   );
 }
@@ -935,6 +1032,9 @@ export function SetupNewProjectPage(props: {
   onBack: () => void,
   configFile?: string,
   onComplete?: () => void | Promise<void>,
+  completionLabel?: string,
+  title?: string,
+  subtitle?: ReactNode,
 }) {
   const [setupTab, setSetupTab] = useState<"ai-prompt" | "manual">("ai-prompt");
   const manualSetupDocsUrl = getManualSetupDocsUrl();
@@ -945,8 +1045,8 @@ export function SetupNewProjectPage(props: {
   return (
     <OnboardingPage
       stepKey="setup-new-project"
-      title="Almost done!"
-      subtitle="To finish the setup, install Hexclave in your local project."
+      title={props.title ?? "Set up the Hexclave SDK"}
+      subtitle={props.subtitle ?? "Install Hexclave in your local project, then continue."}
       steps={props.steps}
       currentStep={props.currentStep}
       onBack={props.onBack}
@@ -964,7 +1064,7 @@ export function SetupNewProjectPage(props: {
           className="w-full rounded-full"
           onClick={props.onComplete}
         >
-          Finish
+          {props.completionLabel ?? "Finish"}
         </DesignButton>
       )}
       secondaryAction={props.onComplete != null ? (

@@ -105,6 +105,8 @@ export const STATUS_META = new Map<string, { label: string, color: "green" | "cy
   ["canceled", { label: "Cancelled", color: "orange" }],
   ["crashed", { label: "Failed", color: "red" }],
   // Planned by the deploy but never reached, because something it depends on
-  // (or the build) failed first.
-  ["skipped", { label: "Skipped", color: "orange" }],
+  // (or the build) failed first. Labelled "Build failed" rather than "Skipped":
+  // one deploy is one build, so the overwhelmingly common way a service ends up
+  // here is a build failure, and naming the cause is what a reader needs.
+  ["skipped", { label: "Build failed", color: "orange" }],
 ]);

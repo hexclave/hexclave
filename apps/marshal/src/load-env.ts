@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 // Load .env files for the marshal process (mirrors apps/bulldozer-js/src/load-env.ts).
 // Ordering = precedence: dotenv never overrides an already-set var, so real shell env always
 // wins and the most-specific file listed first wins. `.env*.local` is gitignored and holds
-// secrets (real Fly/R2 credentials); the committed `.env`/`.env.development` hold only
+// secrets (real GCP/R2 credentials); the committed `.env`/`.env.development` hold only
 // non-secret config. Must stay the first import in index.ts.
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

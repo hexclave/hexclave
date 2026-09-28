@@ -1,9 +1,9 @@
-import { CustomerType } from "@/generated/prisma/client";
+import { CustomerType, Prisma } from "@/generated/prisma/client";
 import { bulldozerWriteSubscription, bulldozerWriteSubscriptionInvoice } from "@/lib/payments/bulldozer-dual-write";
 import { ensureFreePlanForBillingTeam } from "@/lib/payments/ensure-free-plan";
 import { getProductVersion } from "@/lib/product-versions";
 import { getTenancy, Tenancy } from "@/lib/tenancies";
-import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
+import { getPrismaClientForTenancy, globalPrismaClient, type PrismaClientTransaction } from "@/prisma-client";
 import type { productSchema } from "@hexclave/shared/dist/schema-fields";
 import { typedIncludes } from "@hexclave/shared/dist/utils/arrays";
 import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
@@ -348,7 +348,314 @@ export async function syncStripeSubscriptions(stripe: Stripe, stripeAccountId: s
   }
 }
 
-export async function upsertStripeInvoice(stripe: Stripe, stripeAccountId: string, invoice: Stripe.Invoice) {
+type StripeInvoiceTransitionSource = {
+  status?: string | null,
+  status_transitions?: {
+    paid_at?: number | null,
+    marked_uncollectible_at?: number | null,
+    voided_at?: number | null,
+  },
+};
+
+function getStripeInvoiceStatusTransitions(invoice: StripeInvoiceTransitionSource) {
+  return invoice.status_transitions;
+}
+
+function getStripeInvoiceOutcomeTimestamps(
+  invoice: StripeInvoiceTransitionSource,
+  event: Pick<Stripe.Event, "created" | "type">,
+): {
+  paymentOutcomeEventAt: Date | null,
+  paidAt: Date | null,
+  paidAtIsExact: boolean,
+  markedUncollectibleAt: Date | null,
+  markedUncollectibleAtIsExact: boolean,
+  voidedAt: Date | null,
+  voidedAtIsExact: boolean,
+} {
+  const transitionTimestamp = (timestamp: number | null | undefined) => timestamp == null ? null : new Date(timestamp * 1000);
+  const statusTransitions = getStripeInvoiceStatusTransitions(invoice);
+  const eventTimestamp = new Date(event.created * 1000);
+  const exactPaidAt = transitionTimestamp(statusTransitions?.paid_at);
+  const exactMarkedUncollectibleAt = transitionTimestamp(statusTransitions?.marked_uncollectible_at);
+  const exactVoidedAt = transitionTimestamp(statusTransitions?.voided_at);
+  const paidAt = exactPaidAt
+    ?? (
+      event.type === "invoice.paid" || event.type === "invoice.payment_succeeded"
+        ? eventTimestamp
+        : null
+    );
+  const markedUncollectibleAt = exactMarkedUncollectibleAt
+    ?? (event.type === "invoice.marked_uncollectible" ? eventTimestamp : null);
+  const voidedAt = exactVoidedAt
+    ?? (event.type === "invoice.voided" ? eventTimestamp : null);
+  return {
+    // The watermark only records exact outcomes. Inferred outcomes remain
+    // COALESCE-only so a later-delivered exact event can correct them.
+    paymentOutcomeEventAt: exactPaidAt != null
+      || exactMarkedUncollectibleAt != null
+      || exactVoidedAt != null
+      ? eventTimestamp
+      : null,
+    // The transition object is the most precise source. Some webhook payloads
+    // omit it, but an exact outcome event's own Stripe timestamp is still
+    // authoritative evidence of the successful or terminal transition.
+    paidAt,
+    paidAtIsExact: exactPaidAt != null,
+    markedUncollectibleAt,
+    markedUncollectibleAtIsExact: exactMarkedUncollectibleAt != null,
+    voidedAt,
+    voidedAtIsExact: exactVoidedAt != null,
+  };
+}
+
+import.meta.vitest?.describe("getStripeInvoiceOutcomeTimestamps", (test) => {
+  test("uses terminal webhook timestamps without advancing the exact-outcome watermark", ({ expect }) => {
+    const occurredAtSeconds = 1_787_098_400;
+    const occurredAt = new Date(occurredAtSeconds * 1000);
+    expect(getStripeInvoiceOutcomeTimestamps({}, {
+      type: "invoice.paid",
+      created: occurredAtSeconds,
+    })).toEqual({
+      paymentOutcomeEventAt: null,
+      paidAt: occurredAt,
+      paidAtIsExact: false,
+      markedUncollectibleAt: null,
+      markedUncollectibleAtIsExact: false,
+      voidedAt: null,
+      voidedAtIsExact: false,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({}, {
+      type: "invoice.payment_succeeded",
+      created: occurredAtSeconds,
+    })).toEqual({
+      paymentOutcomeEventAt: null,
+      paidAt: occurredAt,
+      paidAtIsExact: false,
+      markedUncollectibleAt: null,
+      markedUncollectibleAtIsExact: false,
+      voidedAt: null,
+      voidedAtIsExact: false,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({}, {
+      type: "invoice.marked_uncollectible",
+      created: occurredAtSeconds,
+    })).toEqual({
+      paymentOutcomeEventAt: null,
+      paidAt: null,
+      paidAtIsExact: false,
+      markedUncollectibleAt: occurredAt,
+      markedUncollectibleAtIsExact: false,
+      voidedAt: null,
+      voidedAtIsExact: false,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({}, {
+      type: "invoice.voided",
+      created: occurredAtSeconds,
+    })).toEqual({
+      paymentOutcomeEventAt: null,
+      paidAt: null,
+      paidAtIsExact: false,
+      markedUncollectibleAt: null,
+      markedUncollectibleAtIsExact: false,
+      voidedAt: occurredAt,
+      voidedAtIsExact: false,
+    });
+  });
+
+  test("prefers Stripe's precise transition timestamp and does not infer from non-terminal events", ({ expect }) => {
+    const paidAtSeconds = 1_787_098_100;
+    expect(getStripeInvoiceOutcomeTimestamps({
+      status_transitions: { paid_at: paidAtSeconds },
+    }, {
+      type: "invoice.updated",
+      created: 1_787_098_400,
+    })).toEqual({
+      paymentOutcomeEventAt: new Date(1_787_098_400 * 1000),
+      paidAt: new Date(paidAtSeconds * 1000),
+      paidAtIsExact: true,
+      markedUncollectibleAt: null,
+      markedUncollectibleAtIsExact: false,
+      voidedAt: null,
+      voidedAtIsExact: false,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({}, {
+      type: "invoice.updated",
+      created: 1_787_098_400,
+    })).toEqual({
+      paymentOutcomeEventAt: null,
+      paidAt: null,
+      paidAtIsExact: false,
+      markedUncollectibleAt: null,
+      markedUncollectibleAtIsExact: false,
+      voidedAt: null,
+      voidedAtIsExact: false,
+    });
+  });
+
+  test("does not infer terminal outcomes from status-only snapshots", ({ expect }) => {
+    const occurredAtSeconds = 1_787_098_400;
+    const occurredAt = new Date(occurredAtSeconds * 1000);
+    expect(getStripeInvoiceOutcomeTimestamps({ status: "uncollectible" }, {
+      type: "invoice.payment_failed",
+      created: occurredAtSeconds,
+    })).toMatchObject({
+      paymentOutcomeEventAt: null,
+      markedUncollectibleAt: null,
+      voidedAt: null,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({ status: "void" }, {
+      type: "invoice.updated",
+      created: occurredAtSeconds,
+    })).toMatchObject({
+      paymentOutcomeEventAt: null,
+      markedUncollectibleAt: null,
+      voidedAt: null,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({ status: "uncollectible" }, {
+      type: "invoice.marked_uncollectible",
+      created: occurredAtSeconds,
+    })).toMatchObject({
+      paymentOutcomeEventAt: null,
+      markedUncollectibleAt: occurredAt,
+      markedUncollectibleAtIsExact: false,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({ status: "void" }, {
+      type: "invoice.voided",
+      created: occurredAtSeconds,
+    })).toMatchObject({
+      paymentOutcomeEventAt: null,
+      voidedAt: occurredAt,
+      voidedAtIsExact: false,
+    });
+  });
+
+  test("prefers exact terminal transitions over event timestamps", ({ expect }) => {
+    const eventAtSeconds = 1_787_098_400;
+    const exactAtSeconds = 1_787_098_100;
+    expect(getStripeInvoiceOutcomeTimestamps({
+      status: "uncollectible",
+      status_transitions: { marked_uncollectible_at: exactAtSeconds },
+    }, {
+      type: "invoice.marked_uncollectible",
+      created: eventAtSeconds,
+    })).toMatchObject({
+      paymentOutcomeEventAt: new Date(eventAtSeconds * 1000),
+      markedUncollectibleAt: new Date(exactAtSeconds * 1000),
+      markedUncollectibleAtIsExact: true,
+    });
+    expect(getStripeInvoiceOutcomeTimestamps({
+      status: "void",
+      status_transitions: { voided_at: exactAtSeconds },
+    }, {
+      type: "invoice.voided",
+      created: eventAtSeconds,
+    })).toMatchObject({
+      paymentOutcomeEventAt: new Date(eventAtSeconds * 1000),
+      voidedAt: new Date(exactAtSeconds * 1000),
+      voidedAtIsExact: true,
+    });
+  });
+
+});
+
+export type StripeInvoiceOutcomeTimestamps = ReturnType<typeof getStripeInvoiceOutcomeTimestamps>;
+
+export async function applyStripeInvoiceOutcome(
+  prisma: PrismaClientTransaction,
+  options: {
+    tenancyId: string,
+    invoiceId: string,
+    currency: string | null,
+    amountPaid: number | null,
+    outcome: StripeInvoiceOutcomeTimestamps,
+  },
+) {
+  const {
+    paidAt,
+    paidAtIsExact,
+    markedUncollectibleAt,
+    markedUncollectibleAtIsExact,
+    voidedAt,
+    voidedAtIsExact,
+    paymentOutcomeEventAt,
+  } = options.outcome;
+  // Stripe does not guarantee webhook ordering, so outcome writes are ordered by
+  // Stripe's event creation time rather than delivery order: an event only applies
+  // when it is at least as new as the last one applied. A field still unset is
+  // always filled, so an out-of-order event never leaves a gap.
+  //
+  // Known limitation: the watermark is a single timestamp and does not record which
+  // fields were exact versus inferred from surrounding data. An exact event created
+  // *before* the watermark therefore cannot overwrite an inferred timestamp that is
+  // already stored — the value stays inferred. Correcting that needs per-field
+  // exactness persisted alongside the timestamps; it affects precision only, not
+  // which outcome an invoice is classified as.
+  // PostgreSQL TIMESTAMP has no timezone; normalize bound instants through
+  // TIMESTAMPTZ so the stored UTC wall-clock value is independent of Node's TZ.
+  const shouldApply = Prisma.sql`
+    (${paymentOutcomeEventAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NOT NULL
+    AND (
+      "paymentOutcomeEventAt" IS NULL
+      OR (${paymentOutcomeEventAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') >= "paymentOutcomeEventAt"
+    )
+  `;
+  await prisma.$executeRaw`
+    UPDATE "SubscriptionInvoice"
+    SET
+      "paymentOutcomeEventAt" = CASE
+        WHEN ${shouldApply} THEN (${paymentOutcomeEventAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
+        ELSE "paymentOutcomeEventAt"
+      END,
+      "paidAt" = CASE
+        WHEN (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NULL THEN "paidAt"
+        WHEN ${paidAtIsExact} AND (${shouldApply} OR "paidAt" IS NULL)
+          THEN (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
+        WHEN NOT ${paidAtIsExact} THEN COALESCE("paidAt", (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC'))
+        ELSE "paidAt"
+      END,
+      "markedUncollectibleAt" = CASE
+        WHEN (${markedUncollectibleAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NULL THEN "markedUncollectibleAt"
+        WHEN ${markedUncollectibleAtIsExact}
+          AND (${shouldApply} OR "markedUncollectibleAt" IS NULL)
+          THEN (${markedUncollectibleAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
+        WHEN NOT ${markedUncollectibleAtIsExact}
+          THEN COALESCE("markedUncollectibleAt", (${markedUncollectibleAt}::TIMESTAMPTZ AT TIME ZONE 'UTC'))
+        ELSE "markedUncollectibleAt"
+      END,
+      "voidedAt" = CASE
+        WHEN (${voidedAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NULL THEN "voidedAt"
+        WHEN ${voidedAtIsExact}
+          AND (${shouldApply} OR "voidedAt" IS NULL)
+          THEN (${voidedAt}::TIMESTAMPTZ AT TIME ZONE 'UTC')
+        WHEN NOT ${voidedAtIsExact} THEN COALESCE("voidedAt", (${voidedAt}::TIMESTAMPTZ AT TIME ZONE 'UTC'))
+        ELSE "voidedAt"
+      END,
+      "currency" = CASE
+        WHEN ${shouldApply} OR "paymentOutcomeEventAt" IS NULL
+          THEN COALESCE(UPPER(${options.currency}), "currency")
+        ELSE "currency"
+      END,
+      "amountPaid" = CASE
+        WHEN (${paidAt}::TIMESTAMPTZ AT TIME ZONE 'UTC') IS NOT NULL
+          AND (
+            (${paidAtIsExact} AND (${shouldApply} OR "paidAt" IS NULL))
+            OR (NOT ${paidAtIsExact} AND "paidAt" IS NULL)
+          )
+          THEN ${options.amountPaid}
+        ELSE "amountPaid"
+      END
+    WHERE "tenancyId" = ${options.tenancyId}::UUID
+      AND "id" = ${options.invoiceId}::UUID
+  `;
+}
+
+export async function upsertStripeInvoice(
+  stripe: Stripe,
+  stripeAccountId: string,
+  invoice: Stripe.Invoice,
+  event: Pick<Stripe.Event, "created" | "type">,
+) {
   const invoiceLines = (invoice as { lines?: { data?: Stripe.InvoiceLineItem[] } }).lines?.data ?? [];
   const invoiceSubscriptionIds = invoiceLines
     .map((line) => line.parent?.subscription_item_details?.subscription)
@@ -367,8 +674,13 @@ export async function upsertStripeInvoice(stripe: Stripe, stripeAccountId: strin
   const isSubscriptionCreationInvoice = invoice.billing_reason === "subscription_create";
   const tenancy = await getTenancyFromStripeAccountIdOrThrow(stripe, stripeAccountId);
   const prisma = await getPrismaClientForTenancy(tenancy);
+  // Stripe's wire payload may omit this expansion even though the installed
+  // SDK types currently mark it required. Keep webhook normalization tolerant
+  // without weakening the rest of the invoice contract.
+  const outcome = getStripeInvoiceOutcomeTimestamps(invoice, event);
 
-  // dual write - prisma and bulldozer
+  // Keep shared Payments status provider-supplied, as before TV Mode. Ordered
+  // outcome facts below support reporting without reinterpreting this status.
   const upsertedInvoice = await prisma.subscriptionInvoice.upsert({
     where: {
       tenancyId_stripeInvoiceId: {
@@ -393,5 +705,40 @@ export async function upsertStripeInvoice(stripe: Stripe, stripeAccountId: strin
       hostedInvoiceUrl: invoice.hosted_invoice_url,
     },
   });
-  await bulldozerWriteSubscriptionInvoice(upsertedInvoice);
+  await applyStripeInvoiceOutcome(prisma, {
+    tenancyId: tenancy.id,
+    invoiceId: upsertedInvoice.id,
+    currency: invoice.currency,
+    amountPaid: invoice.amount_paid,
+    outcome,
+  });
+  const normalizedInvoice = (await prisma.$queryRaw<Array<typeof upsertedInvoice & {
+    paidAt: Date | null,
+    markedUncollectibleAt: Date | null,
+    voidedAt: Date | null,
+    currency: string | null,
+    amountPaid: number | null,
+  }>>`
+    SELECT * FROM "SubscriptionInvoice"
+    WHERE "tenancyId" = ${tenancy.id}::UUID AND "id" = ${upsertedInvoice.id}::UUID
+  `).at(0) ?? throwErr("Normalized subscription invoice disappeared after update");
+  await bulldozerWriteSubscriptionInvoice(normalizedInvoice);
+  const latestInvoice = (await prisma.$queryRaw<Array<typeof normalizedInvoice>>`
+    SELECT * FROM "SubscriptionInvoice"
+    WHERE "tenancyId" = ${tenancy.id}::UUID AND "id" = ${upsertedInvoice.id}::UUID
+  `).at(0) ?? throwErr("Subscription invoice disappeared during Bulldozer convergence");
+  if (
+    latestInvoice.status !== normalizedInvoice.status
+    || latestInvoice.paidAt?.getTime() !== normalizedInvoice.paidAt?.getTime()
+    || latestInvoice.markedUncollectibleAt?.getTime() !== normalizedInvoice.markedUncollectibleAt?.getTime()
+    || latestInvoice.voidedAt?.getTime() !== normalizedInvoice.voidedAt?.getTime()
+    || latestInvoice.amountPaid !== normalizedInvoice.amountPaid
+    || latestInvoice.currency !== normalizedInvoice.currency
+    || latestInvoice.stripeSubscriptionId !== normalizedInvoice.stripeSubscriptionId
+    || latestInvoice.isSubscriptionCreationInvoice !== normalizedInvoice.isSubscriptionCreationInvoice
+    || latestInvoice.amountTotal !== normalizedInvoice.amountTotal
+    || latestInvoice.hostedInvoiceUrl !== normalizedInvoice.hostedInvoiceUrl
+  ) {
+    await bulldozerWriteSubscriptionInvoice(latestInvoice);
+  }
 }

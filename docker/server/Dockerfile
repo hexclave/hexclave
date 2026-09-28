@@ -14,8 +14,10 @@ ENV PATH=$PNPM_HOME:$PNPM_HOME/bin:$PATH
 
 RUN corepack enable
 RUN corepack prepare pnpm@11.5.0 --activate
-RUN pnpm add -g turbo
-RUN pnpm add -g tsx
+# Pinned: unpinned global installs mean an upstream release can change image builds without a commit
+# here (turbo 2.10.11 changed prune's gitignore handling and broke this build).
+RUN pnpm add -g turbo@2.10.11
+RUN pnpm add -g tsx@4.23.12
 
 
 # Prune stage
@@ -26,7 +28,9 @@ COPY . .
 RUN tsx ./scripts/generate-sdks.ts
 
 # https://turbo.build/repo/docs/guides/tools/docker
-RUN turbo prune --scope=@hexclave/backend --scope=@hexclave/dashboard --scope=@hexclave/template --docker
+# The SDK packages generated above (packages/js, packages/next, ...) are gitignored, so prune must not
+# honor .gitignore or their sources would be missing from out/full and the build below would fail.
+RUN turbo prune --scope=@hexclave/backend --scope=@hexclave/dashboard --scope=@hexclave/template --docker --use-gitignore=false
 
 
 

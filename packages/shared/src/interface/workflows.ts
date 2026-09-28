@@ -187,6 +187,8 @@ export type WorkflowRunDetailsJson = WorkflowRunJson & {
 // ─── Workflows / versions ──────────────────────────────────────────────────
 
 export type WorkflowStatsJson = {
+  /** Number of retained runs available in the workflow's run history. */
+  total_runs: number,
   active_runs: number,
   sleeping_runs: number,
   failed_7d: number,
@@ -199,6 +201,9 @@ export type WorkflowSummaryJson = {
   display_name: string,
   latest_version: number,
   triggers: WorkflowTriggerJson[],
+  /** Paused workflows create no new runs; their in-flight runs keep going. */
+  is_paused: boolean,
+  paused_at_millis: number | null,
   stats: WorkflowStatsJson,
   created_at_millis: number,
   last_deployed_at_millis: number,

@@ -52,8 +52,6 @@ Use this when implementing a new dashboard UI quickly:
    - Use `DesignMenu`.
 12. Need a focus-trapping modal/dialog (confirmation, rich modal, tester, form)?
    - Use `DesignDialog`.
-13. Need a multi-step setup/onboarding flow with per-step status (done/current/todo/blocked)?
-   - Use `SetupTimeline`.
 
 ---
 
@@ -742,57 +740,6 @@ Common shapes (for AI agents):
   <TesterForm />
 </DesignDialog>
 ```
-
-### 4.15 `DesignMetricDelta`
-
-File: `apps/dashboard/src/components/design-components/metric-delta.tsx`
-
-Use for:
-
-- compact stat tiles that compare a value against a previous window (before/after comparisons, period-over-period stats)
-- growth action metrics, daily-brief stat rows, overview stat strips
-
-Props:
-
-- `label`: short metric name shown above the value
-- `value`: the primary value (ReactNode, pass pre-formatted strings)
-- `comparisonLabel` (optional): secondary line describing the comparison window
-- `delta` (optional): precomputed relative change — positive renders an emerald trend-up chip, negative a red trend-down chip, `0` a muted "no change" chip, and `null`/`undefined` a muted em-dash ("not computable", e.g. no baseline)
-- `format` (optional): formats the delta magnitude inside the chip (receives the raw signed delta; default renders the absolute value as a percentage)
-- `className`
-
-Rules:
-
-- the component is purely presentational — compute the delta in the caller (see `calculatePeriodDelta` in the overview metrics page / `computeDeltaPercent` in the growth metric comparison for the canonical null semantics) so every surface shares one computation
-- values render with tabular numerals; keep `value` short and pre-formatted (`toLocaleString`, currency, etc.)
-- do not hand-roll colored delta chips/stat tiles when this component fits
-
-### 4.16 `SetupTimeline`
-
-File: `apps/dashboard/src/components/design-components/setup-timeline.tsx`
-
-Use for:
-
-- multi-step setup or connection flows where each step has real, independently-tracked status (for example the Growth app's Meta Ads connection flow: create assets → connect → confirm access)
-- any vertical numbered timeline that needs a "do this next" step, not just a static progress list
-
-Props:
-
-- `steps`: `SetupTimelineStep[]` — `id`, `title`, `state`, optional `description`, `content`, `action`
-- `state`: `"done" | "current" | "todo" | "blocked"`
-  - `done`: finished, shown with a check
-  - `current`: the one thing to do next — normally exactly one step should have this
-  - `todo`: not reached yet, rendered dimmed (not hidden) so the user can see what's coming
-  - `blocked`: reached, but something external must be fixed first (a declined scope, a missing payment method) — renders a warning icon instead of the step number
-- `action`: `{ label, onClick, variant? }` — `onClick` may be async, `DesignButton` manages its own loading state
-- `className`
-
-Rules:
-
-- compute step state in a pure, unit-testable function (see `lib/ad-platforms/meta-ads-steps.ts` for the canonical pattern: derive `done`/`current`/`todo`/`blocked` from a status object, not from component state)
-- every `<li>` must stay `relative` (the component handles this) — the step circle positions against its own row, not the list
-- dim `todo` steps rather than omitting them; do not collapse the list as steps complete
-- do not hand-roll a numbered `<ol>` connector-line timeline when this component fits
 
 ---
 

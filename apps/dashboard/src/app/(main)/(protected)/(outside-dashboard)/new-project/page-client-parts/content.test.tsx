@@ -9,8 +9,8 @@ const mockReplace = vi.hoisted(() => vi.fn());
 const mockOwnedProjects = vi.hoisted(() => ({
   current: [] as Array<{
     id: string,
-    onboardingStatus?: "completed",
-    onboardingState?: null,
+    onboardingStatus?: "config_choice" | "completed",
+    onboardingState?: unknown,
   }>,
 }));
 type MockCreatedProject = {
@@ -18,6 +18,8 @@ type MockCreatedProject = {
   app?: object,
 };
 const mockCreateProject = vi.hoisted(() => vi.fn(async (): Promise<MockCreatedProject> => ({ id: "created-project-id" })));
+const mockSendRequest = vi.hoisted(() => vi.fn(async () => new Response(null, { status: 200 })));
+const mockCloudOnboarding = vi.hoisted(() => vi.fn());
 const mockWindowOpen = vi.hoisted(() => vi.fn());
 const mockSearchParams = vi.hoisted(() => ({ current: new URLSearchParams() }));
 
@@ -108,21 +110,55 @@ vi.mock("./project-onboarding-wizard", () => ({
   ProjectOnboardingWizard: () => <div>Onboarding wizard</div>,
 }));
 
+vi.mock("./cloud-project-onboarding", () => ({
+  createInitialCloudOnboardingState: () => ({
+    version: 1,
+    step: "welcome-to-hexclave",
+    journey: "add",
+    primary_app_id: null,
+    additional_app_ids: [],
+    selected_apps: [],
+    selected_sign_in_methods: ["credential", "magicLink", "google", "github"],
+    selected_email_theme_id: "default",
+    project_location: null,
+  }),
+  CloudProjectOnboarding: (props: unknown) => {
+    mockCloudOnboarding(props);
+    return <div>Cloud onboarding</div>;
+  },
+}));
+
+vi.mock("./shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./shared")>();
+  return {
+    ...actual,
+    getStackAppInternals: () => ({
+      sendRequest: mockSendRequest,
+      refreshOwnedProjects: vi.fn(),
+    }),
+  };
+});
+
 vi.mock("./components", () => ({
   NewProjectEntryPage: ({ onSelect }: { onSelect: (choice: "setup-new" | "deploy") => void }) => (
     <div>
       <h1>Welcome to Hexclave!</h1>
-      <button type="button" onClick={() => onSelect("setup-new")}>Set up Hexclave in a project</button>
+      <button type="button" onClick={() => onSelect("setup-new")}>Add Hexclave to a project</button>
       <button type="button" onClick={() => onSelect("deploy")}>Deploy my Hexclave project to production</button>
       <button type="button" onClick={() => window.open("https://preview.hexclave.com", "_blank", "noopener,noreferrer")}>
         I just want to look around
       </button>
     </div>
   ),
-  SetupNewProjectPage: ({ onBack }: { onBack: () => void }) => (
+  PreProjectSetupFlow: ({ onBack, onDeploy }: {
+    onBack: () => void,
+    onDeploy: (source: "local" | "github") => void,
+  }) => (
     <div>
-      <h1>Almost done!</h1>
+      <h1>Set up the Hexclave SDK</h1>
       <button type="button" onClick={onBack}>Go back</button>
+      <button type="button" onClick={() => onDeploy("local")}>Deploy from local setup</button>
+      <button type="button" onClick={() => onDeploy("github")}>Deploy from GitHub setup</button>
     </div>
   ),
   ProductSelectionPage: ({
@@ -158,8 +194,15 @@ vi.mock("./components", () => ({
   parseOnboardingAppSearchParam: (value: string | null) => (
     value === "authentication" ? "authentication" : null
   ),
-  ProductConfigurationWizard: ({ selectedApps }: { selectedApps: Set<"analytics"> }) => (
-    <div>Configure selected products: {[...selectedApps].join(", ")}</div>
+  ProductConfigurationWizard: ({ selectedApps, onDeploy }: {
+    selectedApps: Set<"analytics">,
+    onDeploy: (source: "local" | "github") => void,
+  }) => (
+    <div>
+      Configure selected products: {[...selectedApps].join(", ")}
+      <button type="button" onClick={() => onDeploy("local")}>Deploy configured project locally</button>
+      <button type="button" onClick={() => onDeploy("github")}>Deploy configured project from GitHub</button>
+    </div>
   ),
 }));
 
@@ -172,14 +215,13 @@ afterEach(() => {
   mockOwnedProjects.current = [];
   mockCreateProject.mockReset();
   mockCreateProject.mockResolvedValue({ id: "created-project-id" });
+  mockSendRequest.mockClear();
+  mockSendRequest.mockResolvedValue(new Response(null, { status: 200 }));
+  mockCloudOnboarding.mockClear();
   mockWindowOpen.mockReset();
   mockSearchParams.current = new URLSearchParams();
   window.open = mockWindowOpen;
 });
-
-function dismissCreateProjectDialog() {
-  fireEvent.click(screen.getAllByText("dismiss dialog")[0]);
-}
 
 function throwMissingInput(): never {
   throw new Error("The project name input was not rendered.");
@@ -190,69 +232,11 @@ function throwMissingForm(): never {
 }
 
 describe("new project page", () => {
-  it("does not create a project before the user chooses what to do", () => {
+  it("starts with the project naming dialog when no project id is provided", () => {
     render(<PageClient />);
 
-    expect(screen.getByText("Welcome to Hexclave!")).not.toBeNull();
-    expect(screen.queryByText("Name your project")).toBeNull();
+    expect(screen.getByText("Name your project")).not.toBeNull();
     expect(mockCreateProject).not.toHaveBeenCalled();
-  });
-
-  it("shows product selection before creating a project", () => {
-    render(<PageClient />);
-
-    fireEvent.click(screen.getByText("Set up Hexclave in a project"));
-
-    expect(mockReplace).toHaveBeenCalledWith("/new-project?mode=setup-products");
-    expect(mockCreateProject).not.toHaveBeenCalled();
-    expect(screen.queryByText("Name your project")).toBeNull();
-  });
-
-  it("renders the product picker from setup-products mode without a project", () => {
-    mockSearchParams.current = new URLSearchParams("mode=setup-products");
-    render(<PageClient />);
-
-    expect(screen.getByText("What will you use Hexclave for?")).not.toBeNull();
-    expect(mockCreateProject).not.toHaveBeenCalled();
-  });
-
-  it("skips the primary-app screen when ?app= is provided", () => {
-    mockSearchParams.current = new URLSearchParams("mode=setup-products&app=authentication");
-    render(<PageClient />);
-
-    expect(screen.getByText("Do you want to install any other apps?")).not.toBeNull();
-    expect(screen.getByText("Primary: authentication")).not.toBeNull();
-    expect(screen.queryByText("What will you use Hexclave for?")).toBeNull();
-    expect(mockCreateProject).not.toHaveBeenCalled();
-  });
-
-  it("renders the setup prompt after choosing AI setup", () => {
-    mockSearchParams.current = new URLSearchParams("mode=setup-new-ai");
-    render(<PageClient />);
-
-    expect(screen.getByText("Almost done!")).not.toBeNull();
-    expect(screen.getByText("Go back")).not.toBeNull();
-    expect(mockCreateProject).not.toHaveBeenCalled();
-  });
-
-  it("keeps configured onboarding local after products are selected", () => {
-    mockSearchParams.current = new URLSearchParams("mode=setup-products&app=authentication");
-    render(<PageClient />);
-
-    fireEvent.click(screen.getByText("Continue with products"));
-
-    expect(screen.getByText("Configure selected products: authentication, analytics")).not.toBeNull();
-    expect(screen.queryByText("Name your project")).toBeNull();
-    expect(mockCreateProject).not.toHaveBeenCalled();
-  });
-
-  it("writes the selected primary app into the app search param", () => {
-    mockSearchParams.current = new URLSearchParams("mode=setup-products");
-    render(<PageClient />);
-
-    fireEvent.click(screen.getByText("Choose Authentication"));
-
-    expect(mockReplace).toHaveBeenCalledWith("/new-project?mode=setup-products&app=authentication");
   });
 
   it.each(["link-existing", "deploy-local", "deploy-github"])(
@@ -275,23 +259,39 @@ describe("new project page", () => {
     },
   );
 
-  it("creates a deploy project only after the name and team form is submitted", async () => {
+  it("creates and initializes the project before entering onboarding", async () => {
     const { container } = render(<PageClient />);
 
-    fireEvent.click(screen.getByText("Deploy my Hexclave project to production"));
-    expect(screen.getByText("Name your project")).not.toBeNull();
-    expect(mockCreateProject).not.toHaveBeenCalled();
-
-    fireEvent.change(container.querySelector("#project-name") ?? throwMissingInput(), { target: { value: "Deploy Project" } });
+    fireEvent.change(container.querySelector("#project-name") ?? throwMissingInput(), { target: { value: "My Project" } });
     fireEvent.submit(container.querySelector("form") ?? throwMissingForm());
 
     await waitFor(() => {
       expect(mockCreateProject).toHaveBeenCalledWith({
-        displayName: "Deploy Project",
+        displayName: "My Project",
         teamId: "team-id",
         onboardingStatus: "config_choice",
       });
-      expect(mockReplace).toHaveBeenCalledWith("/new-project?project_id=created-project-id&mode=deploy");
+      expect(mockSendRequest).toHaveBeenCalledWith(
+        "/internal/projects/current",
+        expect.objectContaining({
+          method: "PATCH",
+          body: expect.stringContaining('"step":"welcome-to-hexclave"'),
+        }),
+        "admin",
+      );
+      expect(mockReplace).toHaveBeenCalledWith("/new-project?project_id=created-project-id");
+    });
+  });
+
+  it("preserves a valid app query when creating the project", async () => {
+    mockSearchParams.current = new URLSearchParams("app=authentication");
+    const { container } = render(<PageClient />);
+
+    fireEvent.change(container.querySelector("#project-name") ?? throwMissingInput(), { target: { value: "My Project" } });
+    fireEvent.submit(container.querySelector("form") ?? throwMissingForm());
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/new-project?project_id=created-project-id&app=authentication");
     });
   });
 
@@ -304,36 +304,31 @@ describe("new project page", () => {
     expect(mockCreateProject).not.toHaveBeenCalled();
   });
 
-  it("opens the preview without creating a project", () => {
+  it("renders cloud onboarding solely from the selected project's persisted state", () => {
+    const persistedState = {
+      version: 1,
+      step: "setup-github-workflow",
+      journey: "deploy-existing",
+      primary_app_id: null,
+      additional_app_ids: [],
+      selected_apps: [],
+      selected_sign_in_methods: [],
+      selected_email_theme_id: "default",
+      project_location: "github",
+    };
+    mockOwnedProjects.current = [{
+      id: "project-id",
+      onboardingStatus: "config_choice",
+      onboardingState: persistedState,
+    }];
+    mockSearchParams.current = new URLSearchParams("project_id=project-id&mode=obsolete");
+
     render(<PageClient />);
 
-    fireEvent.click(screen.getByText("I just want to look around"));
-
-    expect(mockWindowOpen).toHaveBeenCalledWith("https://preview.hexclave.com", "_blank", "noopener,noreferrer");
-    expect(mockCreateProject).not.toHaveBeenCalled();
-    expect(screen.queryByText("Name your project")).toBeNull();
-  });
-
-  it("returns to Welcome when the project dialog is dismissed", () => {
-    render(<PageClient />);
-
-    fireEvent.click(screen.getByText("Deploy my Hexclave project to production"));
-    dismissCreateProjectDialog();
-
-    expect(screen.getByText("Welcome to Hexclave!")).not.toBeNull();
-    expect(screen.queryByText("Name your project")).toBeNull();
-    expect(mockCreateProject).not.toHaveBeenCalled();
-  });
-
-  it("ignores dismissals while a project is being created", () => {
-    mockCreateProject.mockReturnValue(new Promise(() => {}));
-    const { container } = render(<PageClient />);
-
-    fireEvent.click(screen.getByText("Deploy my Hexclave project to production"));
-    fireEvent.change(container.querySelector("#project-name") ?? throwMissingInput(), { target: { value: "My Project" } });
-    fireEvent.submit(container.querySelector("form") ?? throwMissingForm());
-    dismissCreateProjectDialog();
-
-    expect(screen.getByText("Name your project")).not.toBeNull();
+    expect(screen.getByText("Cloud onboarding")).not.toBeNull();
+    expect(mockCloudOnboarding).toHaveBeenCalledWith(expect.objectContaining({
+      onboardingState: persistedState,
+      primaryAppFromQuery: null,
+    }));
   });
 });

@@ -1,6 +1,6 @@
 import type { Transaction } from "@hexclave/shared/dist/interface/crud/transactions";
 import { describe, expect, it } from "vitest";
-import { describeDetail, getTransactionSummary } from "./transaction-table";
+import { describeDetail, getRefundTarget, getTransactionSummary } from "./transaction-table";
 
 function makeTransaction(overrides: Partial<Transaction>): Transaction {
   return {
@@ -10,12 +10,91 @@ function makeTransaction(overrides: Partial<Transaction>): Transaction {
     type: "purchase",
     customer_type: "user",
     customer_id: "user-1",
+    renewal_target_subscription_id: null,
     entries: [],
     adjusted_by: [],
     test_mode: false,
     ...overrides,
   } as Transaction;
 }
+
+describe("getRefundTarget", () => {
+  it("targets subscription renewals with invoiceId when renewal_target_subscription_id is set", () => {
+    const renewal = makeTransaction({
+      id: "inv-renewal-1",
+      type: "subscription-renewal",
+      renewal_target_subscription_id: "sub-42",
+      entries: [
+        {
+          type: "money_transfer",
+          adjusted_transaction_id: null,
+          adjusted_entry_index: null,
+          customer_type: "user",
+          customer_id: "user-1",
+          charged_amount: { USD: "19.00" },
+          net_amount: { USD: "19.00" },
+        },
+      ],
+    });
+    expect(getRefundTarget(renewal)).toEqual({
+      type: "subscription",
+      id: "sub-42",
+      invoiceId: "inv-renewal-1",
+    });
+  });
+
+  it("does not target renewals missing renewal_target_subscription_id (pre-field rows)", () => {
+    const renewal = makeTransaction({
+      id: "inv-renewal-old",
+      type: "subscription-renewal",
+      renewal_target_subscription_id: null,
+      entries: [
+        {
+          type: "money_transfer",
+          adjusted_transaction_id: null,
+          adjusted_entry_index: null,
+          customer_type: "user",
+          customer_id: "user-1",
+          charged_amount: { USD: "19.00" },
+          net_amount: { USD: "19.00" },
+        },
+      ],
+    });
+    expect(getRefundTarget(renewal)).toBeNull();
+  });
+
+  it("targets purchase rows via product_grant.subscription_id without invoiceId", () => {
+    const purchase = makeTransaction({
+      id: "sub-1",
+      type: "purchase",
+      entries: [
+        {
+          type: "product_grant",
+          adjusted_transaction_id: null,
+          adjusted_entry_index: null,
+          customer_type: "user",
+          customer_id: "user-1",
+          product_id: "pro",
+          product: {
+            display_name: "Pro",
+            customer_type: "user",
+            server_only: false,
+            stackable: false,
+            prices: {},
+            included_items: {},
+          },
+          price_id: "monthly",
+          quantity: 1,
+          subscription_id: "sub-1",
+        },
+      ],
+    });
+    expect(getRefundTarget(purchase)).toEqual({
+      type: "subscription",
+      id: "sub-1",
+    });
+  });
+});
 
 describe("getTransactionSummary — refund rows", () => {
   it("populates customer from transaction-level fields on a test-mode end-now refund row", () => {

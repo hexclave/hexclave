@@ -1,0 +1,59 @@
+[Unit]
+Description=Hexclave TV Box kiosk
+Requires=hexclave-tv-box-network.service
+Wants=dbus.socket systemd-logind.service
+After=hexclave-tv-box-network.service systemd-user-sessions.service dbus.socket systemd-logind.service getty@tty1.service
+Before=graphical.target
+ConditionPathExists=/dev/tty0
+Conflicts=getty@tty1.service hexclave-tv-box-setup-display.service
+# Include slow readiness failures, not only immediate crashes. Five complete
+# 60s URL waits + 45s readiness waits + 15s cleanup + 2s restart delays fit here.
+StartLimitIntervalSec=15min
+StartLimitBurst=5
+StartLimitAction=reboot
+
+[Service]
+Type=simple
+User=hexclave-tv
+Group=hexclave-tv
+SupplementaryGroups=video render input hexclave-tv-runtime
+PAMName=hexclave-tv-box-kiosk
+TTYPath=/dev/tty1
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hexclave-tv-box-kiosk
+UtmpIdentifier=tty1
+UtmpMode=user
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+RuntimeDirectory=hexclave-tv-box-wayland hexclave-tv-box-browser-cache
+RuntimeDirectoryMode=0700
+# A shipped TV Box deliberately has no keyboard or mouse. Cage otherwise
+# waits for a libinput device instead of launching its single Cog client.
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+# Do not rely on an implicit PAM environment for the compositor socket. Cage
+# and Cog both require the same private, writable Wayland runtime directory.
+Environment=XDG_RUNTIME_DIR=/run/hexclave-tv-box-wayland
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/lib/hexclave-tv-box/kiosk-launch
+ExecStartPost=+/usr/bin/chvt 1
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+# WPE keeps persistent cookies in its separate network process. Terminate the
+# complete renderer group gracefully so that process can close its SQLite
+# store. PAM can move descendants into a session scope; the child-subreaper
+# supervisor also signals, escalates, and reaps its exact attributable tree.
+KillMode=control-group
+SendSIGKILL=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/run/hexclave-tv-box
+ReadWritePaths=/run/hexclave-tv-box-wayland /run/hexclave-tv-box-browser-cache /var/lib/hexclave-tv-box/browser
+
+[Install]
+WantedBy=multi-user.target

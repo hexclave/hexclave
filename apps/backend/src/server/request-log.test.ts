@@ -32,12 +32,32 @@ describe("createRequestCompletionLog", () => {
       service: "stack-backend",
       method: "POST",
       path: "/api/latest/users/[user_id]",
+      host: "api.example.com",
       status: 201,
       requestId: "request-123",
       environment: "production",
       commit: "abc123",
       region: "iad1",
     });
+    expect(JSON.stringify(result)).not.toContain("user-secret");
+    expect(JSON.stringify(result)).not.toContain("do-not-log");
+  });
+
+  it("logs the inbound failover host from x-forwarded-host without collapsing it to the canonical API host", () => {
+    const result = createRequestCompletionLog({
+      request: new Request("https://api.hexclave.com/api/latest/users/user-secret?secret=do-not-log", {
+        method: "POST",
+        headers: {
+          "x-forwarded-host": "api2.hexclave.com",
+        },
+      }),
+      response: new Response(null, { status: 500 }),
+      fallbackStatus: 500,
+      startedAt: performance.now(),
+      normalizedPath: "/api/latest/users/[user_id]",
+    });
+
+    expect(result.host).toBe("api2.hexclave.com");
     expect(JSON.stringify(result)).not.toContain("user-secret");
     expect(JSON.stringify(result)).not.toContain("do-not-log");
   });

@@ -25,6 +25,7 @@ import { parseManualTransactionsListQuery } from "./manual-transactions-http.js"
 import { instrumentation, traceSpan } from "./otel.js";
 import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf } from "./payments/schema/index.js";
 import type { CustomerType, Json, ManualTransactionRow, SubscriptionRow, TransactionRow } from "./payments/schema/types.js";
+import { handleVerifyDataIntegrityRequest, verifyDataIntegrity } from "./payments/verify-data-integrity.js";
 import { initSentry, resolveBulldozerSentryEnvironment } from "./sentry.js";
 
 const sentryEnabled = initSentry();
@@ -453,8 +454,8 @@ async function setStoredRow(options: { tenancyId: string, tableId: string, rowId
     throw new StatusError(StatusError.BadRequest, `Row tenancyId ${readRowTenancyId(options.rowData)} does not match URL tenancyId ${options.tenancyId}`);
   }
   try {
-    // Replicated, so that a caller reading right after this write doesn't see the pre-write snapshot root.
-    await bulldozerDb.withSnapshotReplicated(async snapshot => await snapshot.setOrDeleteRow({
+    // Consistent, so subsequent readers see the write and it survives a coordinated failure.
+    await bulldozerDb.withSnapshotConsistent(async snapshot => await snapshot.setOrDeleteRow({
       tableId: options.tableId,
       rowIdentifier: options.rowId,
       newRowData: options.rowData as unknown as PiledriverObject,
@@ -517,7 +518,7 @@ async function setStoredRowsFromBodies(options: { tenancyId: string, tableId: st
     return { rowIdentifier: readStringField(rowData, idField), newRowData: rowData as unknown as PiledriverObject };
   });
   try {
-    await bulldozerDb.withSnapshotReplicated(async snapshot => await snapshot.setOrDeleteRows({ tableId: options.tableId, rows }));
+    await bulldozerDb.withSnapshotConsistent(async snapshot => await snapshot.setOrDeleteRows({ tableId: options.tableId, rows }));
   } catch (error) {
     // A batch is one cascade, so a cascade-phase failure can't be pinned to a single row.
     // Attach the table + the batch's row identifiers (no rowData here, to keep batch events small).
@@ -840,6 +841,7 @@ async function listTransactions(options: { tenancyId: string, limit: number, cur
         type: mapLedgerTransactionTypeToApiType(listedRow.type as LedgerTransactionType),
         customer_type: listedRow.customerType,
         customer_id: listedRow.customerId,
+        renewal_target_subscription_id: listedRow.renewalTargetSubscriptionId ?? null,
         entries: listedRow.entries.flatMap(entry => {
           const mapped = mapLedgerEntry(entry);
           return mapped === null ? [] : [mapped];
@@ -990,6 +992,7 @@ const app = new Elysia({ adapter: node() })
     await bulldozerDb.waitUntilCurrentStateDurable();
     return ok();
   }))
+  .post("/internal/payments/verify-data-integrity", ({ body }) => handler("verify-data-integrity", async () => await handleVerifyDataIntegrityRequest(body, request => verifyDataIntegrity(bulldozerDb, request))))
   .post("/internal/piledriver-gc", ({ body }) => handler("piledriver-gc", async () => {
     const request = readObjectBody(body);
     const cutoffTimestampMillis = readNonNegativeSafeIntegerField(request, "cutoffTimestampMillis");
@@ -1004,7 +1007,6 @@ const app = new Elysia({ adapter: node() })
       request.maxObjects === undefined ? undefined : readPositiveSafeIntegerField(request, "maxObjects"),
     );
   }))
-  .post("/internal/payments/verify-data-integrity", () => handler("verify-data-integrity", async () => ok()))
   .get("/v1/:tenancyId/transactions", ({ params, query }) => handler("list-transactions", async () => {
     const parsedLimit = Number.parseInt(typeof query.limit === "string" ? query.limit : "50", 10);
     const result = await listTransactions({
@@ -1190,7 +1192,7 @@ runAsynchronously(async () => {
       const tickStartedAt = performance.now();
       try {
         lastTickMillis = Math.max(Date.now(), lastTickMillis);
-        await bulldozerDb.withSnapshotReplicated(async snapshot => await snapshot.tick(new Date(lastTickMillis)));
+        await bulldozerDb.withSnapshotConsistent(async snapshot => await snapshot.tick(new Date(lastTickMillis)));
       } catch (error) {
         logBulldozerService("tick-loop-error", {
           elapsedMs: performance.now() - tickStartedAt,

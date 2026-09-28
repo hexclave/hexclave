@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { declareInMemoryLowLevelDatabase } from "../low-level/implementations/in-memory.js";
 import { declareInstantAvailabilityLowLevelDatabase } from "../low-level/implementations/instant-availability.js";
 import { declareLmdbLowLevelDatabase } from "../low-level/implementations/lmdb.js";
+import type { DatabaseSeq } from "../index.js";
 import { declareBasePiledriverDatabase } from "../piledriver/implementations/base.js";
 import { declareInMemoryPiledriverDatabase } from "../piledriver/implementations/in-memory.js";
 import type { PiledriverObject } from "../piledriver/index.js";
@@ -527,9 +528,9 @@ describe.each(["base", "in-memory"] as const)("Bulldozer (%s)", backend => {
       }), inputTables: { input: "store" } },
     ]]);
     await db.applyRemainingMigrations();
-    await db.withSnapshotReplicated(async snapshot => await set(snapshot, "store", "a", "A"));
+    await db.withSnapshotConsistent(async snapshot => await set(snapshot, "store", "a", "A"));
 
-    const { snapshot } = await db.withSnapshotReplicated(async snapshot => await snapshot.tick(new Date(trigger)));
+    const { snapshot } = await db.withSnapshotConsistent(async snapshot => await snapshot.tick(new Date(trigger)));
     expect(await rows(snapshot, "time")).toEqual([
       { groupKey: null, rowIdentifier: JSON.stringify(["a", 0]), rowSortKey: null, rowData: "initial" },
       { groupKey: null, rowIdentifier: JSON.stringify(["a", 1]), rowSortKey: null, rowData: "tick" },
@@ -1035,7 +1036,7 @@ describe.each(["base", "in-memory"] as const)("Bulldozer (%s)", backend => {
 
     const dbV1 = declareBulldozerDatabase(piledriver, { migrations: [migration1] });
     await dbV1.applyRemainingMigrations();
-    await dbV1.withSnapshotReplicated(async snapshot => {
+    await dbV1.withSnapshotConsistent(async snapshot => {
       snapshot = await set(snapshot, "store", "a", 1);
       snapshot = await set(snapshot, "store", "b", 2);
       return snapshot;
@@ -1454,7 +1455,7 @@ describe.each(["base", "in-memory"] as const)("Bulldozer (%s)", backend => {
     ]];
     const db1 = declareBulldozerDatabase(declareBasePiledriverDatabase(declareInMemoryLowLevelDatabase(lowLevelId)), { migrations });
     await db1.applyRemainingMigrations();
-    await db1.withSnapshotReplicated(async snapshot => {
+    await db1.withSnapshotConsistent(async snapshot => {
       for (const value of [1, 2, 3]) snapshot = await set(snapshot, "store", `r${value}`, value);
       return snapshot;
     });
@@ -1572,10 +1573,34 @@ describe("Bulldozer (base Piledriver only)", () => {
     }
   });
 
+  it("waits for the current root write to become consistent", async () => {
+    const piledriver = declareInMemoryPiledriverDatabase(crypto.randomUUID());
+    const waitUntilConsistent = piledriver.waitUntilConsistent.bind(piledriver);
+    let waitedSeq: DatabaseSeq | undefined;
+    piledriver.waitUntilConsistent = async (seq) => {
+      waitedSeq = seq;
+      await waitUntilConsistent(seq);
+    };
+    const db = declareBulldozerDatabase(piledriver, {
+      migrations: [[{ type: "initTable", tableId: "store", table: defineStoredTable(), inputTables: {} }]],
+    });
+    try {
+      await db.applyRemainingMigrations();
+      waitedSeq = undefined;
+
+      const write = await db.withSnapshot(async snapshot => await set(snapshot, "store", "a", 1));
+      await db.waitUntilCurrentStateConsistent();
+
+      expect(waitedSeq).toBe(write.seq);
+    } finally {
+      await db.close();
+    }
+  });
+
   it("exposes Piledriver and low-level debug snapshots when available", async () => {
     const db = newDb("base", [[{ type: "initTable", tableId: "store", table: defineStoredTable(), inputTables: {} }]]);
     await db.applyRemainingMigrations();
-    await db.withSnapshotReplicated(async snapshot => await set(snapshot, "store", "a", { value: 1 }));
+    await db.withSnapshotConsistent(async snapshot => await set(snapshot, "store", "a", { value: 1 }));
 
     const piledriver = await db.debugPiledriverSnapshot!();
     expect(piledriver.roots).toHaveLength(1);

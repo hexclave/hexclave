@@ -61,6 +61,7 @@ describe("payments schema", () => {
     const group = customerGroup("customer-sub-stripe-start");
     const txns = (await rowDatas(snapshot, schema.transactions, group)) as unknown as TransactionRow[];
     const startTxn = txns.find(txn => txn.txnId === "sub-start:sub-stripe-start");
+    expect(startTxn?.renewalTargetSubscriptionId).toBeNull();
     expect(startTxn?.entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "product-grant" }),
       expect.objectContaining({ type: "money-transfer", chargedAmount: { USD: "10.00" } }),
@@ -109,6 +110,7 @@ describe("payments schema", () => {
     const txns = (await rowDatas(snapshot, schema.transactions, group)) as unknown as TransactionRow[];
     const startTxn = txns.find(txn => txn.txnId === "sub-start:sub-trial-start");
     expect(startTxn?.entries.some(entry => entry.type === "money-transfer")).toBe(false);
+    expect(startTxn?.renewalTargetSubscriptionId).toBeNull();
 
     const renewalEvents = await rowDatas(snapshot, schema.subscriptionRenewalEvents);
     expect(renewalEvents).toHaveLength(1);
@@ -116,7 +118,9 @@ describe("payments schema", () => {
       invoiceId: "inv-trial-convert",
       chargedAmount: { USD: "19.00" },
     });
-    expect(txns.find(txn => txn.txnId === "sub-renewal:inv-trial-convert")?.entries).toMatchObject([
+    const renewalTxn = txns.find(txn => txn.txnId === "sub-renewal:inv-trial-convert");
+    expect(renewalTxn?.renewalTargetSubscriptionId).toBe("sub-trial-start");
+    expect(renewalTxn?.entries).toMatchObject([
       { type: "money-transfer", chargedAmount: { USD: "19.00" } },
     ]);
   });
@@ -631,6 +635,7 @@ describe("payments schema", () => {
       customerId: "u-refund",
       paymentProvider: "stripe",
       createdAtMillis: 8000,
+      renewalTargetSubscriptionId: null,
     });
 
     const group = customerGroup("u-refund");
@@ -669,6 +674,7 @@ describe("transactions-by-tenancy date index", () => {
     customerId: opts.customerId,
     paymentProvider: "stripe" as const,
     createdAtMillis: opts.createdAtMillis,
+    renewalTargetSubscriptionId: null,
   });
   const setRefund = async (snapshot: Snapshot, opts: Parameters<typeof refundTxn>[0]) =>
     await set(snapshot, "payments-manual-transactions", opts.txnId, refundTxn(opts) as unknown as PiledriverObject);

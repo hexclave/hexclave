@@ -11,9 +11,8 @@ import {
 } from "spacetimedb";
 
 export default {
-  token: __t.string(),
   question: __t.string(),
   answer: __t.string(),
   publish: __t.bool(),
-  reviewedBy: __t.string(),
+  requestId: __t.string(),
 };

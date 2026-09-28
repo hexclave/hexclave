@@ -83,8 +83,8 @@ describe("StackClientApp cross-domain auth", () => {
       rawHandlerUrl: "/handler/sign-in",
       noRedirectBack: true,
       currentUrl: new URL("https://app.example.test/settings?tab=profile"),
-      localOAuthCallbackUrl: "/handler/oauth-callback",
-      rawHomeUrl: "/home",
+      getLocalOAuthCallbackUrl: () => "/handler/oauth-callback",
+      rawAfterSignInUrl: "/home",
       getCrossDomainHandoffParams: async () => {
         throw new Error("Same-domain redirects must not create cross-domain handoff parameters.");
       },
@@ -96,7 +96,7 @@ describe("StackClientApp cross-domain auth", () => {
     });
   });
 
-  it("returns noRedirectBack cross-domain auth to the source app home", async () => {
+  it("returns noRedirectBack cross-domain auth to the configured after-sign-in page", async () => {
     const handoffState = "no-redirect-back-state";
     const handoffCodeChallenge = "abcdefghijklmnopqrstuvwxyzABCDEFG_0123456789-._~";
     const currentUrl = new URL("https://app.example.test/settings?tab=profile");
@@ -112,8 +112,8 @@ describe("StackClientApp cross-domain auth", () => {
       rawHandlerUrl: "https://auth.example.test/handler/sign-in",
       noRedirectBack: true,
       currentUrl,
-      localOAuthCallbackUrl: "/handler/oauth-callback",
-      rawHomeUrl: "/home",
+      getLocalOAuthCallbackUrl: () => "/handler/oauth-callback",
+      rawAfterSignInUrl: "/home",
       getCrossDomainHandoffParams: async () => {
         throw new Error("Existing cross-domain handoff parameters must be reused.");
       },
@@ -146,6 +146,35 @@ describe("StackClientApp cross-domain auth", () => {
     );
     expect(sourceCallbackUrl.toString()).not.toContain("/settings");
   });
+
+  it.each(["signUp", "onboarding"] as const)(
+    "keeps the source callback when hosted %s uses noRedirectBack",
+    async (handlerName) => {
+      const currentUrl = new URL("https://app.example.test/settings?tab=profile");
+      const redirectPlan = await planRedirectToHandler({
+        handlerName,
+        rawHandlerUrl: `https://auth.example.test/handler/${handlerName === "signUp" ? "sign-up" : "onboarding"}`,
+        noRedirectBack: true,
+        currentUrl,
+        getLocalOAuthCallbackUrl: () => "/handler/oauth-callback",
+        rawAfterSignInUrl: "/signed-in",
+        getCrossDomainHandoffParams: async () => ({
+          state: "no-redirect-back-state",
+          codeChallenge: "no-redirect-back-code-challenge",
+        }),
+      });
+
+      expect(redirectPlan.type).toBe("redirect");
+      if (redirectPlan.type !== "redirect") {
+        throw new Error("Expected a direct hosted redirect plan.");
+      }
+      const hostedUrl = new URL(redirectPlan.url);
+      expect(hostedUrl.searchParams.get("hexclave_cross_domain_after_callback_redirect_url")).toBe(
+        "https://app.example.test/signed-in",
+      );
+      expect(hostedUrl.searchParams.get("after_auth_return_to")).not.toBeNull();
+    },
+  );
 
   it("exposes redirect-back-aware handler URLs for devtool previews", async () => {
     const previousWindow = Reflect.get(globalThis, "window");
@@ -180,6 +209,64 @@ describe("StackClientApp cross-domain auth", () => {
         Reflect.set(globalThis, "window", previousWindow);
       } else {
         Reflect.deleteProperty(globalThis, "window");
+      }
+    }
+  });
+
+  it("rejects hosted sign-in redirects that cannot set the cross-domain verifier cookie", async () => {
+    const previousWindow = Reflect.get(globalThis, "window");
+    const hadPreviousWindow = Reflect.has(globalThis, "window");
+    Reflect.deleteProperty(globalThis, "window");
+
+    try {
+      const clientApp = new StackClientApp({
+        baseUrl: "http://localhost:12345",
+        projectId: "00000000-0000-4000-8000-000000000000",
+        publishableClientKey: "stack-pk-test",
+        tokenStore: "memory",
+        redirectMethod: "none",
+        urls: {
+          default: { type: "hosted" },
+        },
+        noAutomaticPrefetch: true,
+        devTool: false,
+      });
+
+      await expect(
+        clientApp[hexclaveAppInternalsSymbol].getRedirectToHandlerUrl("signIn"),
+      ).rejects.toThrowError(/Cannot redirect to the cross-origin signIn page from a server-rendered context/);
+    } finally {
+      if (hadPreviousWindow) {
+        Reflect.set(globalThis, "window", previousWindow);
+      }
+    }
+  });
+
+  it("rejects custom cross-origin sign-in redirects on the server too", async () => {
+    const previousWindow = Reflect.get(globalThis, "window");
+    const hadPreviousWindow = Reflect.has(globalThis, "window");
+    Reflect.deleteProperty(globalThis, "window");
+
+    try {
+      const clientApp = new StackClientApp({
+        baseUrl: "http://localhost:12345",
+        projectId: "00000000-0000-4000-8000-000000000000",
+        publishableClientKey: "stack-pk-test",
+        tokenStore: "memory",
+        redirectMethod: "none",
+        urls: {
+          signIn: "https://auth.example.test/sign-in",
+        },
+        noAutomaticPrefetch: true,
+        devTool: false,
+      });
+
+      await expect(
+        clientApp[hexclaveAppInternalsSymbol].getRedirectToHandlerUrl("signIn"),
+      ).rejects.toThrowError(/Cannot redirect to the cross-origin signIn page from a server-rendered context/);
+    } finally {
+      if (hadPreviousWindow) {
+        Reflect.set(globalThis, "window", previousWindow);
       }
     }
   });

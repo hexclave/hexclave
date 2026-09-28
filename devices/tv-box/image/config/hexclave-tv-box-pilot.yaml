@@ -1,0 +1,14 @@
+device:
+  layer: hexclave-rpizero2w-armhf
+
+image:
+  layer: hexclave-tv-box-image
+  boot_part_size: 256M
+  root_part_size: 6G
+  state_part_size: 1G
+  swap_part_size: 2G
+  name: hexclave-tv-box-pilot
+  compression: zstd
+
+layer:
+  app: hexclave-tv-box-pilot

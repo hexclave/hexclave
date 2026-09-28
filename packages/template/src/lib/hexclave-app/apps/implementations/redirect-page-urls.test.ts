@@ -12,8 +12,8 @@ async function plan(options: {
   return await planRedirectToHandler({
     ...options,
     noRedirectBack: options.noRedirectBack === true,
-    localOAuthCallbackUrl,
-    rawHomeUrl: "/",
+    getLocalOAuthCallbackUrl: () => localOAuthCallbackUrl,
+    rawAfterSignInUrl: "/",
     getCrossDomainHandoffParams: async () => {
       throw new Error("Continuation-only redirects must not mint a new cross-domain handoff");
     },
@@ -33,6 +33,29 @@ function expectContinuation(url: URL, expectedReturnTo: string): void {
   expect(url.searchParams.get(crossDomainAuthQueryParams.codeChallenge)).toBe("outer-challenge");
   expect(url.searchParams.get(crossDomainAuthQueryParams.afterCallbackRedirectUrl)).toBe("https://customer.example.test/dashboard");
 }
+
+describe("server-side redirect planning", () => {
+  it("does not resolve a browser-only callback URL without a current URL", async () => {
+    const result = await planRedirectToHandler({
+      handlerName: "signIn",
+      rawHandlerUrl: "/handler/sign-in",
+      noRedirectBack: false,
+      currentUrl: null,
+      getLocalOAuthCallbackUrl: () => {
+        throw new Error("Server-side redirect planning must not resolve the browser callback URL");
+      },
+      rawAfterSignInUrl: "/",
+      getCrossDomainHandoffParams: async () => {
+        throw new Error("Server-side redirect planning must not mint cross-domain handoff parameters");
+      },
+    });
+
+    expect(result).toEqual({
+      type: "redirect",
+      url: "/handler/sign-in",
+    });
+  });
+});
 
 describe("password-flow redirect continuation", () => {
   it("carries the complete customer return state through forgot-password and a reset-email new tab", async () => {

@@ -1872,6 +1872,33 @@ const NewPurchasesBlocked = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const TooManyImageAttachments = createKnownErrorConstructor(
+  KnownError,
+  "TOO_MANY_IMAGE_ATTACHMENTS",
+  (maxImages: number) => [
+    400,
+    `Maximum ${maxImages} images per message.`,
+    {
+      max_images: maxImages,
+    },
+  ] as const,
+  (json) => [json.max_images] as const,
+);
+
+const ImageAttachmentTooLarge = createKnownErrorConstructor(
+  KnownError,
+  "IMAGE_ATTACHMENT_TOO_LARGE",
+  (maxBytes: number, actualBytes: number) => [
+    400,
+    `Image exceeds ${maxBytes / (1024 * 1024)}MB limit (${(actualBytes / 1024 / 1024).toFixed(2)}MB).`,
+    {
+      max_bytes: maxBytes,
+      actual_bytes: actualBytes,
+    },
+  ] as const,
+  (json) => [json.max_bytes, json.actual_bytes] as const,
+);
+
 export type KnownErrors = {
   [K in keyof typeof KnownErrors]: InstanceType<typeof KnownErrors[K]>;
 };
@@ -2021,6 +2048,8 @@ export const KnownErrors = {
   AnalyticsQueryTimeout,
   AnalyticsQueryError,
   AnalyticsNotEnabled,
+  TooManyImageAttachments,
+  ImageAttachmentTooLarge,
 } satisfies Record<string, KnownErrorConstructor<any, any>>;
 
 

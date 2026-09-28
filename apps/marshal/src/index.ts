@@ -15,9 +15,9 @@ import app from "../dist/vercel.mjs";
 // exact exported object. Its parser requires a numeric literal here.
 //
 // A service apply (PUT /v1/namespaces/:ns/services/:key) holds the reconciliation lease while it
-// converges Fly — creating the app, volume and machines, and polling machine state — so it is
+// converges GCP resources and polls runtime state, so it is
 // not a sub-minute request. Builds themselves do not count against this: they run on a separate
-// Fly machine and report back over the completion webhook, long after the apply has responded.
+// builder VM and report back over the completion webhook, long after the apply has responded.
 export const config = {
   maxDuration: 800,
 };

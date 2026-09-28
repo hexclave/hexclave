@@ -48,6 +48,7 @@ export function declareInMemoryPiledriverDatabase(dbId: string): PiledriverDatab
     async waitUntilAvailable() {},
     async waitUntilDurable() {},
     async waitUntilReplicated() {},
+    async waitUntilConsistent() {},
     async close() {},
     initialSeq,
   };

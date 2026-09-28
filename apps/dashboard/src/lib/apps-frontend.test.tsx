@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DUMMY_ORIGIN, testItemPath, type NavigableAppFrontend } from "./apps-frontend";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { ALL_APPS_FRONTEND, DUMMY_ORIGIN, getItemPath, testItemPath, type NavigableAppFrontend } from "./apps-frontend";
 
 const PROJECT_ID = "demo-project";
 
@@ -18,34 +19,6 @@ function appWith(navigationItems: NavigableAppFrontend["navigationItems"], href 
     storeDescription: <p>Fixture app.</p>,
   };
 }
-
-describe("growth navigation matching", () => {
-  // Mirrors the real growth navigationItems in apps-frontend.tsx. Lifecycle and detail pages are
-  // deliberately not nav items; the Overview entry claims them.
-  const overview = { displayName: "Overview", href: "." };
-  const chat = { displayName: "Chat", href: "chat" };
-  // const adAccounts = { displayName: "Ad accounts", href: "ad-accounts" };
-  const settings = { displayName: "Settings", href: "settings" };
-  const growth = appWith([overview, chat, /* adAccounts, */ settings], "gtm");
-
-  it("highlights Overview on lifecycle and detail pages", () => {
-    for (const page of ["interview", "report", "actions/some-action-id", "briefs/some-brief-id", "ad-accounts"]) {
-      expect(testItemPath(PROJECT_ID, growth, overview, urlFor(`/projects/demo-project/gtm/${page}`))).toBe(true);
-    }
-  });
-
-  it("highlights each top-level page's own item, deselecting Overview", () => {
-    for (const item of [chat, settings]) {
-      expect(testItemPath(PROJECT_ID, growth, item, urlFor(`/projects/demo-project/gtm/${item.href}`))).toBe(true);
-      expect(testItemPath(PROJECT_ID, growth, overview, urlFor(`/projects/demo-project/gtm/${item.href}`))).toBe(false);
-    }
-  });
-
-  it("does not highlight sibling items on another item's page", () => {
-    expect(testItemPath(PROJECT_ID, growth, chat, urlFor("/projects/demo-project/gtm/settings"))).toBe(false);
-    expect(testItemPath(PROJECT_ID, growth, settings, urlFor("/projects/demo-project/gtm/chat"))).toBe(false);
-  });
-});
 
 describe("testItemPath", () => {
   const overview = { displayName: "Overview", href: "." };
@@ -100,5 +73,75 @@ describe("testItemPath", () => {
     const app = appWith([overview, external]);
 
     expect(testItemPath(PROJECT_ID, app, external, urlFor("/projects/demo-project/demo-app"))).toBe(false);
+  });
+
+  it("matches TV profile navigation independently of query parameters", () => {
+    const tvMode = ALL_APPS_FRONTEND["tv-mode"];
+    const profiles = tvMode.navigationItems[0];
+    const displays = tvMode.navigationItems[1];
+    const createCopy = urlFor("/projects/demo-project/tv-mode/profiles/company-pulse?create=1");
+
+    expect(testItemPath(PROJECT_ID, tvMode, profiles, createCopy)).toBe(true);
+    expect(testItemPath(PROJECT_ID, tvMode, displays, createCopy)).toBe(false);
+  });
+});
+
+describe("TV Mode navigation matching", () => {
+  const projectId = "project-fixture";
+  const app = ALL_APPS_FRONTEND["tv-mode"];
+  const profilesItem = app.navigationItems.at(0)
+    ?? throwErr("TV Mode navigation must include a profiles item");
+  const displaysItem = app.navigationItems.at(1)
+    ?? throwErr("TV Mode navigation must include a displays item");
+
+  function matches(path: string) {
+    const url = new URL(path, DUMMY_ORIGIN);
+    return {
+      profiles: testItemPath(projectId, app, profilesItem, url),
+      displays: testItemPath(projectId, app, displaysItem, url),
+    };
+  }
+
+  it("keeps profile and display active states mutually exclusive", () => {
+    expect({
+      profilesIndex: matches(`/projects/${projectId}/tv-mode`),
+      profilesRoutePrefix: matches(`/projects/${projectId}/tv-mode/profiles`),
+      profileDetail: matches(`/projects/${projectId}/tv-mode/profiles/company-pulse`),
+      displays: matches(`/projects/${projectId}/tv-mode/displays`),
+      presentation: matches(`/projects/${projectId}/tv-mode/present/company-pulse`),
+    }).toMatchInlineSnapshot(`
+      {
+        "displays": {
+          "displays": true,
+          "profiles": false,
+        },
+        "presentation": {
+          "displays": false,
+          "profiles": false,
+        },
+        "profileDetail": {
+          "displays": false,
+          "profiles": true,
+        },
+        "profilesIndex": {
+          "displays": false,
+          "profiles": true,
+        },
+        "profilesRoutePrefix": {
+          "displays": false,
+          "profiles": true,
+        },
+      }
+    `);
+  });
+
+  it("builds project-scoped profile and display destinations without a profile id", () => {
+    expect(app.navigationItems.map((item) => ({
+      displayName: item.displayName,
+      pathname: new URL(getItemPath(projectId, app, item), DUMMY_ORIGIN).pathname,
+    }))).toEqual([
+      { displayName: "Profiles", pathname: `/projects/${projectId}/tv-mode/` },
+      { displayName: "Displays", pathname: `/projects/${projectId}/tv-mode/displays` },
+    ]);
   });
 });

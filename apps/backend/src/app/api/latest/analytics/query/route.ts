@@ -1,13 +1,11 @@
 import { getHexclaveServerApp } from "@/hexclave";
-import { WAREHOUSE_ANALYTICS_CLICKHOUSE_SETTINGS, createClickhouseWarehouseClient, getClickhouseExternalClient } from "@/lib/clickhouse";
+import { withAnalyticsQueryClient } from "@/lib/analytics-query-client";
 import { getSafeClickhouseErrorMessage } from "@/lib/clickhouse-errors";
-import { getDataWarehouseQueryAuth } from "@/lib/data-warehouse";
 import { arePlanLimitsEnforced, getBillingTeamId } from "@/lib/plan-entitlements";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { ITEM_IDS, PLAN_LIMITS } from "@hexclave/shared/dist/plans";
 import { adaptSchema, jsonSchema, serverOrHigherAuthTypeSchema, yupArray, yupBoolean, yupMixed, yupNumber, yupObject, yupRecord, yupString } from "@hexclave/shared/dist/schema-fields";
-import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import type { Json } from "@hexclave/shared/dist/utils/json";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { randomUUID } from "crypto";
@@ -70,66 +68,40 @@ export const POST = createSmartRouteHandler({
       effectiveTimeoutMs = Math.min(body.timeout_ms, maxAllowedMs);
     }
 
-    // Projects with a Data Warehouse connect as their own ClickHouse user instead of
-    // the shared `limited_user`, so queries can also reach their own database. That
-    // user holds `analytics_reader`, so analytics access is unchanged.
-    //
-    // Its `SQL_project_id`/`SQL_branch_id` are pinned as CONST user settings, so they
-    // must not be sent per query — ClickHouse rejects setting a CONST setting at all.
-    //
-    // The shared client bakes its resource ceiling in at construction; do the same
-    // here, or a warehouse project would fall back to the much looser per-query
-    // memory default of its own settings profile and skip the GROUP BY spill and
-    // bounded join algorithm entirely.
-    const warehouseAuth = await getDataWarehouseQueryAuth(auth.tenancy);
-    const client = warehouseAuth == null
-      ? getClickhouseExternalClient()
-      : createClickhouseWarehouseClient(
-        warehouseAuth,
-        getEnvVariable("STACK_CLICKHOUSE_DATABASE", "default"),
-        WAREHOUSE_ANALYTICS_CLICKHOUSE_SETTINGS,
-      );
-    try {
-      const queryId = `${auth.tenancy.project.id}:${auth.tenancy.branchId}:${randomUUID()}`;
-      const resultSet = await Result.fromPromise(client.query({
+    const queryId = `${auth.tenancy.project.id}:${auth.tenancy.branchId}:${randomUUID()}`;
+    const rowsResult = await withAnalyticsQueryClient(auth.tenancy, async (client, analyticsSettings) => {
+      const queryResult = await Result.fromPromise(client.query({
         query: body.query,
         query_id: queryId,
         query_params: body.params,
         clickhouse_settings: {
-          ...warehouseAuth == null ? {
-            SQL_project_id: auth.tenancy.project.id,
-            SQL_branch_id: auth.tenancy.branchId,
-          } : {},
+          ...analyticsSettings,
           max_execution_time: effectiveTimeoutMs / 1000,
-          readonly: "1",
-          allow_ddl: 0,
           max_result_rows: MAX_RESULT_ROWS.toString(),
           max_result_bytes: MAX_RESULT_BYTES.toString(),
           result_overflow_mode: "throw",
         },
         format: "JSONEachRow",
       }));
-
-      if (resultSet.status === "error") {
-        const message = getSafeClickhouseErrorMessage(resultSet.error, body.query);
-        throw new KnownErrors.AnalyticsQueryError(message);
+      if (queryResult.status === "error") {
+        return queryResult;
       }
+      // Read the rows before the helper closes a per-request warehouse client.
+      return Result.ok(await queryResult.data.json<Record<string, Json>>());
+    });
 
-      const rows = await resultSet.data.json<Record<string, Json>>();
-      return {
-        statusCode: 200,
-        bodyType: "json",
-        body: {
-          result: rows,
-          query_id: queryId,
-        },
-      };
-    } finally {
-      // The shared limited-user client is reused; a warehouse client is per request,
-      // so close it to release its HTTP agent and sockets.
-      if (warehouseAuth != null) {
-        await client.close();
-      }
+    if (rowsResult.status === "error") {
+      const message = getSafeClickhouseErrorMessage(rowsResult.error, body.query);
+      throw new KnownErrors.AnalyticsQueryError(message);
     }
+
+    return {
+      statusCode: 200,
+      bodyType: "json",
+      body: {
+        result: rowsResult.data,
+        query_id: queryId,
+      },
+    };
   },
 });

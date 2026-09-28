@@ -87,6 +87,9 @@ function asFrozenHeapObject(object: PiledriverObject): PiledriverHeapObject {
     async get() {
       return object;
     },
+    getValueIfLocallyCreated() {
+      return { status: "database-reference" };
+    },
     [isPiledriverHeapObjectSymbol]: true,
   };
 }

@@ -1,7 +1,7 @@
 import { CrudTypeOf, createCrud } from "../../crud";
 import { ALL_APPS } from "../../apps/apps-config";
 import * as schemaFields from "../../schema-fields";
-import { yupArray, yupObject, yupString } from "../../schema-fields";
+import { yupArray, yupNumber, yupObject, yupString, yupUnion } from "../../schema-fields";
 
 const teamPermissionSchema = yupObject({
   id: yupString().defined(),
@@ -57,13 +57,44 @@ const onboardingConfigChoiceValues = ["create-new", "link-existing"] as const;
 const onboardingSignInMethodValues = ["credential", "magicLink", "passkey", "google", "github", "microsoft"] as const;
 const onboardingPaymentsCountryValues = ["US", "OTHER"] as const;
 
-const projectOnboardingStateSchema = yupObject({
+const legacyProjectOnboardingStateSchema = yupObject({
   selected_config_choice: yupString().oneOf(onboardingConfigChoiceValues).defined(),
   selected_apps: yupArray(yupString().oneOf(Object.keys(ALL_APPS)).defined()).defined(),
   selected_sign_in_methods: yupArray(yupString().oneOf(onboardingSignInMethodValues).defined()).defined(),
   selected_email_theme_id: schemaFields.emailThemeSchema.nullable().defined(),
   selected_payments_country: yupString().oneOf(onboardingPaymentsCountryValues).defined(),
 });
+
+const cloudOnboardingStepValues = [
+  "welcome-to-hexclave",
+  "select-primary-app",
+  "select-additional-apps",
+  "configure-authentication",
+  "select-email-theme",
+  "setup-sdk",
+  "development-setup-complete",
+  "where-is-project",
+  "cli-push",
+  "setup-github-workflow",
+  "onboarding-complete",
+] as const;
+
+export const cloudProjectOnboardingStateSchema = yupObject({
+  version: yupNumber().oneOf([1]).defined(),
+  step: yupString().oneOf(cloudOnboardingStepValues).defined(),
+  journey: yupString().oneOf(["add", "deploy-existing"]).defined(),
+  primary_app_id: yupString().oneOf(Object.keys(ALL_APPS)).nullable().defined(),
+  additional_app_ids: yupArray(yupString().oneOf(Object.keys(ALL_APPS)).defined()).defined(),
+  selected_apps: yupArray(yupString().oneOf(Object.keys(ALL_APPS)).defined()).defined(),
+  selected_sign_in_methods: yupArray(yupString().oneOf(onboardingSignInMethodValues).defined()).defined(),
+  selected_email_theme_id: schemaFields.emailThemeSchema.nullable().defined(),
+  project_location: yupString().oneOf(["local", "github"]).nullable().defined(),
+}).defined();
+
+const projectOnboardingStateSchema = yupUnion(
+  legacyProjectOnboardingStateSchema,
+  cloudProjectOnboardingStateSchema,
+);
 
 export const emailConfigSchema = yupObject({
   type: schemaFields.emailTypeSchema.defined(),

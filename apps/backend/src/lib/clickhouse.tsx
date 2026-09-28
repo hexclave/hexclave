@@ -11,15 +11,11 @@ export type { ClickHouseClient } from "@clickhouse/client";
  * The `default.*` views customers can read through `/analytics/query`, each scoped
  * by a row policy to `SQL_project_id`/`SQL_branch_id`. Drives both those policies
  * and the GRANT SELECT loop in scripts/clickhouse-migrations.ts.
- *
- * Keep in sync with GROWTH_AGENT_QUERYABLE_TABLES in lib/growth/metric-catalog.ts
- * (pinned by metric-catalog.test.ts).
  */
 export const ANALYTICS_TABLES = [
   "events", "users", "contact_channels", "teams", "team_member_profiles",
   "team_permissions", "team_invitations", "email_outboxes",
   "project_permissions", "notification_preferences", "refresh_tokens", "connected_accounts",
-  "growth_daily_metrics", "growth_daily_ad_metrics",
 ] as const;
 
 /**

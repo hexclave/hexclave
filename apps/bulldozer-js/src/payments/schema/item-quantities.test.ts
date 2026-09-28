@@ -556,6 +556,7 @@ describe("item quantities: full-pipeline integration", () => {
       customerId: "u-complex",
       paymentProvider: "test_mode",
       createdAtMillis: 22000,
+      renewalTargetSubscriptionId: null,
     });
     const owned = asRecord((await rowsBySortKey(snapshot, schema.ownedProducts, customerGroup("u-complex"))).at(-1)?.rowData ?? null);
     expect(asRecord(asRecord(owned.ownedProducts)["prod-complex"]).quantity).toBe(1);

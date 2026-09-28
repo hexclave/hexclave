@@ -81,12 +81,6 @@ export type ClientInterfaceOptions = {
    * A single-element array means no fallback occurs.
    */
   getApiUrls: () => string[],
-  /**
-   * When a fallback succeeds and becomes the active server, this is the initial probability
-   * (0–1) that any given request will probe the primary to check if it's back.
-   * Halves on each failed probe, resets on success. Default: 0.3 (30%).
-   */
-  probeRate?: number,
   extraRequestHeaders: Record<string, string>,
   projectId: string,
   prepareRequest?: () => Promise<void>,
@@ -187,15 +181,13 @@ export class HexclaveClientInterface {
   private _requestListeners = new Set<RequestListener>();
 
   /**
-   * Fallback state. When null, we're in normal mode (primary first).
-   * When set, we skip straight to `stickyIndex` and only probe primary occasionally.
+   * Last API URL that succeeded for this client. Requests start here and only
+   * move to the next URL in the ring when the current host looks like an outage.
+   * Null means we have never succeeded yet — start at the primary (index 0).
    */
-  private _sticky: { index: number, probeRate: number } | null = null;
-  private readonly _initialProbeRate: number;
+  private _currentTargetApiUrl: string | null = null;
 
-  constructor(public readonly options: ClientInterfaceOptions) {
-    this._initialProbeRate = options.probeRate ?? 0.3;
-  }
+  constructor(public readonly options: ClientInterfaceOptions) {}
 
   addRequestListener(listener: RequestListener): () => void {
     this._requestListeners.add(listener);
@@ -217,38 +209,34 @@ export class HexclaveClientInterface {
   }
 
   /**
-   * Returns the best-known-good API URL: the sticky fallback if we're in
-   * fallback mode, otherwise the primary. Use for browser-navigated URLs
-   * (e.g. OAuth authorize) where _withFallback can't help.
+   * Returns the current target API URL for browser-navigated URLs (e.g. OAuth
+   * authorize) where `_withFallback` can't iterate hosts. Falls back to the
+   * primary if the remembered URL is no longer in the list.
    */
-  getBestApiUrl(): string {
+  getCurrentTargetApiUrl(): string {
     const apiUrls = this.getApiUrls();
-    if (this._sticky && apiUrls[this._sticky.index]) {
-      return apiUrls[this._sticky.index];
+    if (this._currentTargetApiUrl != null && apiUrls.includes(this._currentTargetApiUrl)) {
+      return this._currentTargetApiUrl;
     }
     return apiUrls[0];
   }
 
   /**
-   * Routes a request through an ordered URL list with automatic failover.
+   * @deprecated Use {@link getCurrentTargetApiUrl} instead.
+   */
+  getBestApiUrl(): string {
+    return this.getCurrentTargetApiUrl();
+  }
+
+  /**
+   * Routes a request through an ordered URL ring with automatic failover.
    *
-   * The URL list is [primary, ...fallbacks]. The logic has two modes:
+   * Starts at `_currentTargetApiUrl` (or primary if unset). On an outage-like
+   * failure, walks `(start + k) % n` for two full laps. On success, remembers
+   * that URL as the new current target. KnownErrors and smart-wrapped 4xx
+   * responses are never retried on another host (application-level errors).
    *
-   * **Normal mode** (`_sticky` is null) — try each URL in order. If a
-   * non-primary URL succeeds, enter sticky mode on that index.
-   *
-   * **Sticky mode** — a previous request already failed over. We remember
-   * which URL worked and go there directly. Occasionally (controlled by a
-   * decaying probe rate) we probe the primary to see if it recovered:
-   *   - Probe succeeds → exit sticky mode, use result.
-   *   - Probe fails → halve probe rate, use sticky URL.
-   *   - Sticky URL fails → exit sticky mode, do a full iteration.
-   *
-   * In both modes, a full iteration tries every URL once per pass for 2
-   * passes before giving up. KnownErrors and 4xx API responses (except 429)
-   * are never retried (they're application-level, not network-level).
-   *
-   * Single-URL lists skip all of this and use 5-retry behavior directly.
+   * Single-URL lists skip the ring and use 5-retry behavior directly.
    */
   protected async _withFallback<T>(cb: (apiUrl: string, retryOptions: { maxAttempts: number, skipDiagnostics: boolean }) => Promise<T>): Promise<T> {
     const apiUrls = this.getApiUrls();
@@ -258,24 +246,59 @@ export class HexclaveClientInterface {
       return await cb(apiUrls[0], { maxAttempts: 5, skipDiagnostics: false });
     }
 
-    // If we're in sticky mode, try the remembered URL (with an optional primary probe first).
-    if (this._sticky) {
-      const result = await this._tryStickyUrl(apiUrls, cb);
-      if (result !== undefined) return result;
-      // Sticky URL failed — _sticky was cleared, fall through to full iteration.
+    const start = Math.max(0, this._currentTargetApiUrl != null ? apiUrls.indexOf(this._currentTargetApiUrl) : 0);
+    const errorsByUrl = new Map<number, Error>();
+
+    for (let k = 0; k < apiUrls.length * 2; k++) {
+      const i = (start + k) % apiUrls.length;
+      try {
+        const result = await cb(apiUrls[i], { maxAttempts: 1, skipDiagnostics: true });
+        this._currentTargetApiUrl = apiUrls[i];
+        return result;
+      } catch (e) {
+        if (this._shouldSkipFallback(e)) {
+          // Host answered with an application-level error (KnownError / smart 4xx),
+          // so it's alive — stick here instead of hammering a dead earlier host next time.
+          this._currentTargetApiUrl = apiUrls[i];
+          throw e;
+        }
+        errorsByUrl.set(i, e instanceof Error ? e : new Error(String(e)));
+      }
     }
 
-    // Full iteration: try every URL in order, 2 passes.
-    return await this._iterateUrls(apiUrls, cb);
+    throw new ApiUrlsFailedError(apiUrls.map((url, i) => ({
+      url,
+      error: errorsByUrl.get(i) ?? throwErr(`Missing failure for API URL ${url}`),
+    })));
   }
 
+  /**
+   * Returns true when the error is an application-level response that should
+   * not hop to another host. Outages (network TypeError, 5xx, non-smart 4xx)
+   * return false so the ring walk continues.
+   */
   private _shouldSkipFallback(error: unknown) {
-    return error instanceof KnownError || this._isNonRetryableApiResponseError(error);
+    if (error instanceof KnownError) return true;
+
+    const response = this._getApiResponseFromError(error);
+    if (response == null) return false;
+
+    // 5xx -> hop (this host looks sick).
+    if (response.status >= 500) return false;
+
+    // Smart-wrapped 4xx -> our API answered; hopping won't help.
+    if (response.status >= 400 && response.status < 500) {
+      return this._isSmartWrappedResponse(response);
+    }
+
+    return false;
   }
 
-  private _isNonRetryableApiResponseError(error: unknown) {
-    const response = this._getApiResponseFromError(error);
-    return response != null && response.status >= 400 && response.status < 500;
+  private _isSmartWrappedResponse(response: Response) {
+    return response.headers.has("x-hexclave-request-id")
+      || response.headers.has("x-stack-request-id")
+      || response.headers.has("x-hexclave-known-error")
+      || response.headers.has("x-stack-known-error");
   }
 
   private _getApiResponseFromError(error: unknown, seenErrors = new Set<Error>()): Response | null {
@@ -288,69 +311,6 @@ export class HexclaveClientInterface {
 
     seenErrors.add(error);
     return this._getApiResponseFromError(error.cause, seenErrors);
-  }
-
-  /**
-   * Attempts the sticky URL, optionally probing primary first.
-   * Returns the result on success, or `undefined` if we should fall through to full iteration.
-   */
-  private async _tryStickyUrl<T>(
-    apiUrls: string[],
-    cb: (apiUrl: string, retryOptions: { maxAttempts: number, skipDiagnostics: boolean }) => Promise<T>,
-  ): Promise<T | undefined> {
-    const sticky = this._sticky!;
-
-    // Probabilistically probe primary to check if it's back.
-    if (Math.random() < sticky.probeRate) {
-      try {
-        const result = await cb(apiUrls[0], { maxAttempts: 1, skipDiagnostics: true });
-        this._sticky = null;
-        return result;
-      } catch (e) {
-        if (this._shouldSkipFallback(e)) throw e;
-        sticky.probeRate = Math.max(sticky.probeRate * 0.5, 0.01);
-      }
-    }
-
-    // Try the sticky URL itself.
-    try {
-      return await cb(apiUrls[sticky.index], { maxAttempts: 1, skipDiagnostics: true });
-    } catch (e) {
-      if (this._shouldSkipFallback(e)) throw e;
-      this._sticky = null;
-      return undefined;
-    }
-  }
-
-  /**
-   * Tries every URL in order for up to 2 passes.
-   * If a non-primary URL (index > 0) succeeds, enters sticky mode on it.
-   */
-  private async _iterateUrls<T>(
-    apiUrls: string[],
-    cb: (apiUrl: string, retryOptions: { maxAttempts: number, skipDiagnostics: boolean }) => Promise<T>,
-  ): Promise<T> {
-    const errorsByUrl = new Map<number, Error>();
-
-    for (let pass = 0; pass < 2; pass++) {
-      for (let i = 0; i < apiUrls.length; i++) {
-        try {
-          const result = await cb(apiUrls[i], { maxAttempts: 1, skipDiagnostics: true });
-          if (i > 0) {
-            this._sticky = { index: i, probeRate: this._initialProbeRate };
-          }
-          return result;
-        } catch (e) {
-          if (this._shouldSkipFallback(e)) throw e;
-          errorsByUrl.set(i, e instanceof Error ? e : new Error(String(e)));
-        }
-      }
-    }
-
-    throw new ApiUrlsFailedError(apiUrls.map((url, i) => ({
-      url,
-      error: errorsByUrl.get(i) ?? throwErr(`Missing failure for API URL ${url}`),
-    })));
   }
 
   getAnalyticsApiUrl() {
@@ -492,7 +452,19 @@ export class HexclaveClientInterface {
         client,
         clientAuthentication,
         refreshToken.token,
-        allowInsecure ? { [oauth.allowInsecureRequests]: true } : undefined,
+        {
+          ...(allowInsecure ? { [oauth.allowInsecureRequests]: true } : {}),
+          [oauth.customFetch]: (url, options) => fetch(url, {
+            ...options,
+            headers: {
+              ...options.headers,
+              // Next.js <15 can cache otherwise-identical POST requests during static generation.
+              "X-Hexclave-Random-Nonce": generateSecureRandomString(),
+            },
+            // Cloudflare Workers does not support RequestInit.cache.
+            ...("WebSocketPair" in globalVar ? {} : { cache: "no-store" }),
+          }),
+        },
       );
 
       const response = await this._processResponse(rawResponse);
@@ -1453,7 +1425,7 @@ export class HexclaveClientInterface {
       throw new Error("Admin session token is currently not supported for OAuth");
     }
     const clientSecret = this.options.publishableClientKey ?? publishableClientKeyNotNecessarySentinel;
-    const url = new URL(this.getBestApiUrl() + "/auth/oauth/authorize/" + options.provider.toLowerCase());
+    const url = new URL(this.getCurrentTargetApiUrl() + "/auth/oauth/authorize/" + options.provider.toLowerCase());
     url.searchParams.set("client_id", this.projectId);
     url.searchParams.set("client_secret", clientSecret);
     url.searchParams.set("redirect_uri", updatedRedirectUrl.toString());

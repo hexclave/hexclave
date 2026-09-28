@@ -83,6 +83,11 @@ export default function SetupPage(props: { toMetrics: () => void }) {
             <Typography type="h2">
               Setup Hexclave in your codebase
             </Typography>
+            <Typography variant="secondary" className="max-w-xl text-sm leading-relaxed">
+              {isRemoteDevelopmentEnvironment
+                ? "You're using the local dashboard on your computer for development. Production uses a separate Hexclave Cloud project."
+                : "You're viewing your production Hexclave Cloud project. The local dashboard runs on your computer during development."}
+            </Typography>
           </div>
 
           <Typography>

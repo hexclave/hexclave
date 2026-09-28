@@ -130,6 +130,28 @@ function getAiResponseText(response: AiQueryResponse): string {
   return contentText != null && contentText.length > 0 ? contentText : "(empty response)";
 }
 
+function getAskMessages(question: string, context?: string | null, project?: string | null): {
+  role: "user",
+  content: string,
+}[] {
+  const supplementalContext = [
+    context == null ? null : `Context:\n${context}`,
+    project == null ? null : `Project:\n${project}`,
+  ].filter((value): value is string => value != null);
+
+  if (supplementalContext.length === 0) {
+    return [{ role: "user", content: question }];
+  }
+
+  return [
+    { role: "user", content: question },
+    {
+      role: "user",
+      content: `Supporting information for the preceding question:\n\n${supplementalContext.join("\n\n")}`,
+    },
+  ];
+}
+
 export async function callHexclaveAskAi(options: {
   backendApiBaseUrl: string,
   question: string,
@@ -161,7 +183,7 @@ export async function callHexclaveAskAi(options: {
           speed: "fast",
           tools: ["docs"],
           systemPrompt: "docs-ask-ai",
-          messages: [{ role: "user", content: options.question }],
+          messages: getAskMessages(options.question, options.context, options.project),
           mcpCallMetadata: {
             // Both the skill.hexclave.com/ask endpoint and the MCP server's ask_hexclave tool
             // are the same docs assistant exposed through two transports, so they share one

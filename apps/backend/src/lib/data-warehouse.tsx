@@ -18,8 +18,10 @@
 // - No downgrade enforcement: losing the entitlement blocks provisioning and
 //   rotation, but an existing ClickHouse user stays active.
 // - Per-user ClickHouse settings are a snapshot taken at provision/rotation time,
-//   so a plan upgrade only takes effect on the next rotation. `/analytics/query`
-//   is unaffected; it computes its timeout per request.
+//   so a plan upgrade only takes effect on the next rotation. That includes the
+//   `max_execution_time` ceiling: until then, an `/analytics/query` request asking
+//   for more than the old plan's timeout is rejected by the ceiling (the dashboard
+//   never asks for more than any warehouse-eligible plan allows).
 // - One database per project, not per branch (the database is named after the
 //   project id, so a second branch would collide).
 
@@ -38,8 +40,10 @@ import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
 
 /**
- * Hard ceiling on `max_execution_time`, regardless of plan. The plan's timeout is
- * only the default; a direct connection may raise it up to this value.
+ * Upper bound for the plan-derived `max_execution_time`, and the value used when
+ * plan limits are not enforced. The plan's own timeout is both the default and the
+ * ceiling for a warehouse user, so a direct connection cannot `SET` its way past
+ * the plan it pays for (see `applyWarehouseDdl`).
  */
 const MAX_EXECUTION_TIME_SECONDS = Math.max(...Object.values(PLAN_LIMITS).map(p => p.analyticsTimeoutSeconds));
 
@@ -89,48 +93,20 @@ const encryptedWarehousePasswordSchema = yupObject({
 }).defined();
 
 /**
- * Table engines that can reach outside this ClickHouse instance. Recent versions
- * revoke these from non-admin users by default, but the warehouse user is the only
- * account that can create tables at all, so we revoke them explicitly rather than
- * trust a server default. Revoking a privilege that was never granted is a no-op.
- */
-const FORBIDDEN_TABLE_ENGINES = [
-  "AzureBlobStorage", "Distributed", "File", "HDFS", "Hive", "JDBC", "Kafka",
-  "MongoDB", "MySQL", "NATS", "ODBC", "PostgreSQL", "RabbitMQ", "Redis", "S3",
-  "SQLite", "URL", "IcebergS3", "DeltaLake",
-] as const;
-
-/**
- * Local-only engines a customer warehouse still needs. With
- * `table_engines_require_grant` enabled, engines must be granted explicitly, so
- * this allow-list is the counterpart to the deny-list above.
+ * Local-only engines a customer warehouse needs. Only granted where the server
+ * enforces engine grants (`table_engines_require_grant`, e.g. our local docker
+ * setup); see `getAdminCanGrantTableEngines`. ClickHouse Cloud does not support
+ * engine grants and allows these engines without one.
+ *
+ * There is deliberately no deny-list of engines: it goes stale with every release,
+ * and engine revokes are not enforced where engine grants are not. Engines that
+ * reach outside the instance are gated by source privileges instead, which
+ * provisioning revokes wholesale with `REVOKE SOURCES`.
  */
 const ALLOWED_TABLE_ENGINES = [
   "MergeTree", "ReplacingMergeTree", "SummingMergeTree", "AggregatingMergeTree",
   "CollapsingMergeTree", "VersionedCollapsingMergeTree", "GraphiteMergeTree",
   "Log", "TinyLog", "StripeLog", "Memory", "Set", "Join", "Buffer", "Null",
-] as const;
-
-/**
- * The matching *source* privileges, gating the table functions (`url()`, `s3()`,
- * `remote()`, `file()`, …). Same reasoning as the engines above.
- *
- * Known gap (ClickHouse #99122): these revokes gate execution but not schema
- * resolution, so `DESCRIBE TABLE mysql(...)`/`postgresql(...)` (and `CREATE TABLE
- * AS ...`) still dial out to an attacker-supplied host. Verified on Cloud
- * 26.2.1.558; `url()`/`s3()`/`remote()` are denied even for DESCRIBE, and the same
- * bypass exists via `/analytics/query` independently of this app.
- *
- * Accepted: the leaking functions speak DB wire protocols, so they cannot reach
- * IMDS (which needs an HTTP GET) and cannot read anything back without valid
- * target credentials. What remains is blind port scanning and blind outbound
- * connects. An app-layer guard would not help — warehouse users hold direct
- * ClickHouse credentials and bypass our routes. Self-hosted operators should
- * firewall ClickHouse egress themselves.
- */
-const FORBIDDEN_SOURCES = [
-  "FILE", "URL", "REMOTE", "MYSQL", "ODBC", "JDBC", "HDFS", "S3", "HIVE",
-  "MONGO", "REDIS", "SQLITE", "POSTGRES", "AZURE",
 ] as const;
 
 /**
@@ -202,13 +178,13 @@ async function getPlanTimeoutSeconds(tenancy: Tenancy): Promise<number> {
 /**
  * Whether the ClickHouse admin can hand `TABLE ENGINE` grants to warehouse users.
  *
- * On a self-managed server it holds the privilege WITH GRANT OPTION and the grants
- * are required, since safe engines are denied until granted. On ClickHouse Cloud it
- * does not, and the grants are unnecessary: Cloud allows the safe engines without a
- * grant and denies the dangerous ones regardless (verified on 26.2.1.558). So we
+ * On a self-managed server with `table_engines_require_grant` it holds the privilege
+ * WITH GRANT OPTION and the grants are required, since safe engines are denied until
+ * granted. On ClickHouse Cloud it does not, and the grants are unnecessary: Cloud
+ * does not support engine grants and allows the safe engines without one. So we
  * decide from the admin's actual capability rather than a deployment label. The
- * FORBIDDEN_* revokes stay unconditional — they never need grant option, and they
- * are the real security boundary.
+ * `REVOKE SOURCES` in provisioning stays unconditional — it never needs grant
+ * option, and it is the real security boundary.
  *
  * Memoized: the admin's own privileges do not change between requests.
  */
@@ -326,12 +302,13 @@ async function applyWarehouseDdl(options: {
         await client.command({ query: `GRANT TABLE ENGINE ON ${engine} TO ${quotedUser}` });
       }
     }
-    for (const engine of FORBIDDEN_TABLE_ENGINES) {
-      await client.command({ query: `REVOKE TABLE ENGINE ON ${engine} FROM ${quotedUser}` });
-    }
-    for (const source of FORBIDDEN_SOURCES) {
-      await client.command({ query: `REVOKE ${source} ON *.* FROM ${quotedUser}` });
-    }
+    // Gates the table functions (`url()`, `s3()`, `remote()`, …) and every engine
+    // backed by an outside source. `SOURCES` is the parent of all source privileges,
+    // so this also covers sources a newer server adds; naming them one by one would
+    // go stale, and a name the server does not know is a syntax error that would
+    // break provisioning. Engines are only mapped to their source from ClickHouse
+    // 26.5 on, so full engine coverage needs a server at least that new.
+    await client.command({ query: `REVOKE SOURCES ON *.* FROM ${quotedUser}` });
 
     await client.command({
       query: `
@@ -355,7 +332,7 @@ async function applyWarehouseDdl(options: {
         SETTINGS
           SQL_project_id = '${tenancy.project.id}' CONST,
           SQL_branch_id = '${tenancy.branchId}' CONST,
-          max_execution_time = ${timeoutSeconds} MIN ${MIN_EXECUTION_TIME_SECONDS} MAX ${MAX_EXECUTION_TIME_SECONDS},
+          max_execution_time = ${timeoutSeconds} MIN ${MIN_EXECUTION_TIME_SECONDS} MAX ${timeoutSeconds},
           max_memory_usage = ${MAX_MEMORY_USAGE_BYTES} MIN ${MIN_MEMORY_USAGE_BYTES} MAX ${MAX_MEMORY_USAGE_BYTES},
           max_memory_usage_for_user = ${MAX_MEMORY_USAGE_FOR_USER_BYTES} MIN ${MIN_MEMORY_USAGE_BYTES} MAX ${MAX_MEMORY_USAGE_FOR_USER_BYTES},
           max_concurrent_queries_for_user = ${MAX_CONCURRENT_QUERIES_FOR_USER} MIN ${MIN_CONCURRENT_QUERIES_FOR_USER} MAX ${MAX_CONCURRENT_QUERIES_FOR_USER},
@@ -578,12 +555,15 @@ export async function rotateDataWarehousePassword(tenancy: Tenancy): Promise<{ p
       if (existing == null) {
         throw new StatusError(400, "This project does not have a data warehouse yet.");
       }
+      // Keyed on the stored password rather than on READY: rotation needs the old
+      // password to fall back to if the new one cannot be applied, and a FAILED
+      // warehouse that still has one (e.g. after a rotation that could not restore
+      // it) should stay rotatable. Without one, provisioning never completed — a
+      // user-reachable state after a failed first provision — and provisioning
+      // (which retries FAILED rows in place) is the way forward.
       const previousPassword = await decryptWarehousePassword(existing.encryptedPassword);
       if (previousPassword == null) {
-        throw new HexclaveAssertionError("A provisioned Data Warehouse must have an encrypted password before it can be rotated", {
-          tenancyId: tenancy.id,
-          warehouseStatus: existing.status,
-        });
+        throw new StatusError(400, "This data warehouse has not finished provisioning. Provision it instead of rotating the password.");
       }
       const password = generateWarehousePassword();
       const encryptedPassword = await encryptWithKms(password);
@@ -649,8 +629,9 @@ export async function rotateDataWarehousePassword(tenancy: Tenancy): Promise<{ p
 }
 
 /**
- * The ClickHouse credentials `/analytics/query` should connect with, or `null` if
- * the project has no usable warehouse (the caller then falls back to `limited_user`).
+ * The ClickHouse credentials analytics queries (`/analytics/query` and the AI SQL
+ * tool, via `withAnalyticsQueryClient`) should connect with, or `null` if the
+ * project has no usable warehouse (the caller then falls back to `limited_user`).
  *
  * Decrypts on every call: caching decrypted passwords would need cross-instance
  * invalidation on rotation.
