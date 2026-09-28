@@ -203,7 +203,7 @@ function DataGridHarness(props: { fillHeight?: boolean }) {
   );
 }
 
-function PaginatedDataGridHarness() {
+function PaginatedDataGridHarness(props: { stickyTop?: number | string } = {}) {
   const [state, setState] = useState(() => createDefaultDataGridState(columns));
 
   return (
@@ -216,6 +216,7 @@ function PaginatedDataGridHarness() {
         onChange={setState}
         paginationMode="paginated"
         fillHeight={false}
+        stickyTop={props.stickyTop}
       />
     </div>
   );
@@ -350,6 +351,13 @@ describe("DataGrid infinite scroll observer", () => {
     const grid = container.querySelector<HTMLElement>('[role="grid"]');
     expect(grid).not.toBeNull();
     expect(grid?.style.maxHeight).toBe("");
+  });
+
+  it("writes an explicit sticky offset to the grid contract", () => {
+    const { container } = render(<PaginatedDataGridHarness stickyTop={0} />);
+
+    const grid = container.querySelector<HTMLElement>('[role="grid"]');
+    expect(grid?.style.getPropertyValue("--data-grid-sticky-top")).toBe("0px");
   });
 });
 

@@ -7,8 +7,17 @@
  * the ingress script (bulldozer-payments-init.ts).
  */
 
+import { Prisma } from "@/generated/prisma/client";
 import { bulldozerCustomerPath, fetchBulldozerServerJson } from "@/lib/bulldozer-server-client";
-import type { ManualTransactionRow } from "@/lib/payments/schema/types";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
+import {
+  PAYMENT_PROVIDERS,
+  TRANSACTION_TYPES,
+  type ManualTransactionRow,
+  type PaymentProvider,
+  type TransactionEntryData,
+  type TransactionType,
+} from "@/lib/payments/schema/types";
 
 function dateToMillis(d: Date | null | undefined): number | null {
   return d ? d.getTime() : null;
@@ -71,6 +80,11 @@ export function subscriptionInvoiceToStoredRow(inv: {
   status: string | null,
   amountTotal: number | null,
   hostedInvoiceUrl: string | null,
+  paidAt?: Date | null,
+  markedUncollectibleAt?: Date | null,
+  voidedAt?: Date | null,
+  currency?: string | null,
+  amountPaid?: number | null,
   createdAt: Date,
 }): Record<string, unknown> {
   return {
@@ -82,6 +96,11 @@ export function subscriptionInvoiceToStoredRow(inv: {
     status: inv.status,
     amountTotal: inv.amountTotal,
     hostedInvoiceUrl: inv.hostedInvoiceUrl,
+    paidAtMillis: dateToMillis(inv.paidAt),
+    markedUncollectibleAtMillis: dateToMillis(inv.markedUncollectibleAt),
+    voidedAtMillis: dateToMillis(inv.voidedAt),
+    currency: inv.currency ?? null,
+    amountPaid: inv.amountPaid ?? null,
     createdAtMillis: dateToMillis(inv.createdAt),
   };
 }
@@ -96,6 +115,9 @@ export function oneTimePurchaseToStoredRow(p: {
   product: unknown,
   quantity: number,
   stripePaymentIntentId: string | null,
+  amountReceived?: number | null,
+  currency?: string | null,
+  paidAt?: Date | null,
   revokedAt: Date | null,
   refundedAt: Date | null,
   creationSource: string,
@@ -111,6 +133,9 @@ export function oneTimePurchaseToStoredRow(p: {
     product: p.product,
     quantity: p.quantity,
     stripePaymentIntentId: p.stripePaymentIntentId,
+    amountReceived: p.amountReceived ?? null,
+    currency: p.currency ?? null,
+    paidAtMillis: dateToMillis(p.paidAt),
     revokedAtMillis: dateToMillis(p.revokedAt),
     refundedAtMillis: dateToMillis(p.refundedAt),
     creationSource: p.creationSource,
@@ -144,6 +169,97 @@ export function itemQuantityChangeToStoredRow(c: {
 
 export function manualTransactionToStoredRow(transaction: ManualTransactionRow): Record<string, unknown> {
   return transaction;
+}
+
+function prismaCustomerTypeFromManualTransaction(customerType: ManualTransactionRow["customerType"]): "USER" | "TEAM" | "CUSTOM" {
+  switch (customerType) {
+    case "user": {
+      return "USER";
+    }
+    case "team": {
+      return "TEAM";
+    }
+    case "custom": {
+      return "CUSTOM";
+    }
+    default: {
+      customerType satisfies never;
+      throw new Error(`Invalid manual transaction customerType: ${JSON.stringify(customerType)}`);
+    }
+  }
+}
+
+function lowerCustomerType(customerType: string): "user" | "team" | "custom" {
+  const lowered = customerType.toLowerCase();
+  if (lowered === "user" || lowered === "team" || lowered === "custom") {
+    return lowered;
+  }
+  throw new Error(`Invalid customer type for Bulldozer row: ${customerType}`);
+}
+
+export function manualTransactionToPrismaRow(transaction: ManualTransactionRow) {
+  return {
+    tenancyId: transaction.tenancyId,
+    txnId: transaction.txnId,
+    type: transaction.type,
+    customerId: transaction.customerId,
+    customerType: prismaCustomerTypeFromManualTransaction(transaction.customerType),
+    paymentProvider: transaction.paymentProvider,
+    effectiveAt: new Date(transaction.effectiveAtMillis),
+    createdAt: new Date(transaction.createdAtMillis),
+    // Prisma Json input is wider than our entry union; shape is validated on read-back.
+    entries: transaction.entries as unknown as Prisma.InputJsonValue,
+  };
+}
+
+function parseManualTransactionType(type: string): TransactionType {
+  for (const candidate of TRANSACTION_TYPES) {
+    if (candidate === type) return candidate;
+  }
+  throw new Error(`Invalid manual transaction type: ${type}`);
+}
+
+function parseManualTransactionPaymentProvider(paymentProvider: string | null): PaymentProvider | null {
+  if (paymentProvider == null) return null;
+  for (const candidate of PAYMENT_PROVIDERS) {
+    if (candidate === paymentProvider) return candidate;
+  }
+  throw new Error(`Invalid manual transaction paymentProvider: ${paymentProvider}`);
+}
+
+/**
+ * Inverse of `manualTransactionToPrismaRow` for backfill: Prisma → Bulldozer row.
+ * Fail loud on scalar shape errors; entries must be a JSON array (element shapes are
+ * enforced when Bulldozer applies the row).
+ */
+export function prismaManualTransactionToBulldozerRow(row: {
+  tenancyId: string,
+  txnId: string,
+  type: string,
+  customerId: string,
+  customerType: string,
+  paymentProvider: string | null,
+  effectiveAt: Date,
+  createdAt: Date,
+  entries: unknown,
+}): ManualTransactionRow {
+  if (!Array.isArray(row.entries)) {
+    throw new Error(`ManualTransaction ${row.tenancyId},${row.txnId} entries must be a JSON array`);
+  }
+  // Entries were stored from ManualTransactionRow; Bulldozer re-validates on write.
+  // `as` is required because Prisma Json has no structural link to TransactionEntryData[].
+  const entries = row.entries as TransactionEntryData[];
+  return {
+    txnId: row.txnId,
+    tenancyId: row.tenancyId,
+    type: parseManualTransactionType(row.type),
+    customerId: row.customerId,
+    customerType: lowerCustomerType(row.customerType),
+    paymentProvider: parseManualTransactionPaymentProvider(row.paymentProvider),
+    effectiveAtMillis: row.effectiveAt.getTime(),
+    createdAtMillis: row.createdAt.getTime(),
+    entries,
+  };
 }
 
 // ── Dual-write executors ──────────────────────────────────────────────
@@ -184,14 +300,6 @@ function groupByTenancy<T>(rows: T[], tenancyOf: (row: T) => string): Map<string
   return groups;
 }
 
-function lowerCustomerType(customerType: string): "user" | "team" | "custom" {
-  const lowered = customerType.toLowerCase();
-  if (lowered === "user" || lowered === "team" || lowered === "custom") {
-    return lowered;
-  }
-  throw new Error(`Invalid customer type for Bulldozer row: ${customerType}`);
-}
-
 function readManualTransactionTenancyId(transaction: ManualTransactionRow): string {
   const tenancyId = transaction.tenancyId;
   if (typeof tenancyId !== "string" || tenancyId.length === 0) {
@@ -204,7 +312,7 @@ export async function bulldozerWriteSubscription(
   sub: Parameters<typeof subscriptionToStoredRow>[0],
 ) {
   await postBulldozerRow(
-    `/v1/${encodeURIComponent(sub.tenancyId)}/stripe/subscriptions/changed`,
+    urlString`/v1/${sub.tenancyId}/stripe/subscriptions/changed`,
     subscriptionToStoredRow(sub),
   );
 }
@@ -213,7 +321,7 @@ export async function bulldozerWriteSubscriptionInvoice(
   inv: Parameters<typeof subscriptionInvoiceToStoredRow>[0],
 ) {
   await postBulldozerRow(
-    `/v1/${encodeURIComponent(inv.tenancyId)}/stripe/subscription-invoices/changed`,
+    urlString`/v1/${inv.tenancyId}/stripe/subscription-invoices/changed`,
     subscriptionInvoiceToStoredRow(inv),
   );
 }
@@ -222,7 +330,7 @@ export async function bulldozerWriteOneTimePurchase(
   purchase: Parameters<typeof oneTimePurchaseToStoredRow>[0],
 ) {
   await postBulldozerRow(
-    `/v1/${encodeURIComponent(purchase.tenancyId)}/stripe/one-time-purchases/changed`,
+    urlString`/v1/${purchase.tenancyId}/stripe/one-time-purchases/changed`,
     oneTimePurchaseToStoredRow(purchase),
   );
 }
@@ -246,8 +354,58 @@ export async function bulldozerWriteManualTransaction(
   transaction: ManualTransactionRow,
 ) {
   await postBulldozerRow(
-    `/v1/${encodeURIComponent(readManualTransactionTenancyId(transaction))}/transactions/${encodeURIComponent(transactionId)}/refund`,
+    urlString`/v1/${readManualTransactionTenancyId(transaction)}/transactions/${transactionId}/refund`,
     manualTransactionToStoredRow(transaction),
+  );
+}
+
+/**
+ * Prisma-then-Bulldozer dual-write for a refund manual transaction. Shared by
+ * the subscription and OTP refund handlers so field updates stay in sync.
+ *
+ * Upsert is the retry path for a *reused* `txnId` (see `makeRefundTxnId`):
+ * same-payload retries after Prisma-ok / Bulldozer-fail converge on one row.
+ * A freshly minted random id would create a second Prisma row instead.
+ *
+ * On conflict the first persisted row is immutable — `update: {}` keeps
+ * effectiveAt / entries / createdAt from the original attempt. We then
+ * dual-write *that* persisted row to Bulldozer (not the newly computed
+ * retry payload), so a late retry cannot shift ledger timestamps or
+ * recompute revocation/expiry entries under the same txnId.
+ */
+export async function persistRefundManualTransaction(
+  prisma: { manualTransaction: { upsert: (args: {
+    where: { tenancyId_txnId: { tenancyId: string, txnId: string } },
+    create: ReturnType<typeof manualTransactionToPrismaRow>,
+    // Empty on purpose: conflict = keep the canonical first row.
+    update: Record<string, never>,
+  }) => Promise<{
+    tenancyId: string,
+    txnId: string,
+    type: string,
+    customerId: string,
+    customerType: string,
+    paymentProvider: string | null,
+    effectiveAt: Date,
+    createdAt: Date,
+    entries: unknown,
+  }> } },
+  refundRow: ManualTransactionRow,
+): Promise<void> {
+  const refundPrismaRow = manualTransactionToPrismaRow(refundRow);
+  const persisted = await prisma.manualTransaction.upsert({
+    where: {
+      tenancyId_txnId: {
+        tenancyId: refundPrismaRow.tenancyId,
+        txnId: refundPrismaRow.txnId,
+      },
+    },
+    create: refundPrismaRow,
+    update: {},
+  });
+  await bulldozerWriteManualTransaction(
+    persisted.txnId,
+    prismaManualTransactionToBulldozerRow(persisted),
   );
 }
 

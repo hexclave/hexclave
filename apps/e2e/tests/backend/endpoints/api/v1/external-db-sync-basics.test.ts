@@ -1,10 +1,13 @@
-import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { wait } from "@hexclave/shared/dist/utils/promises";
+import { SEQUENCE_ALLOCATION_ADVISORY_LOCK_KEY } from "@hexclave/shared/dist/config/db-sync-mappings";
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { niceFetch, STACK_BACKEND_BASE_URL, test } from '../../../../helpers';
 import { withPortPrefix } from '../../../../helpers/ports';
 import { Auth, backendContext, InternalApiKey, Project, User, niceBackendFetch } from '../../../backend-helpers';
 import { randomUUID } from 'node:crypto';
+import { Client } from 'pg';
+import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import {
   TEST_TIMEOUT,
   TestDbManager,
@@ -34,7 +37,10 @@ import {
   waitForSyncedProjectPermissionDeletion,
   waitForCondition,
   waitForSyncedNotificationPreference,
-  waitForTable
+  waitForTable,
+  deleteSyncedRowsWithTombstones,
+  getInternalDatabaseConnectionString,
+  withInternalDatabase,
 } from './external-db-sync-utils';
 
 async function runQueryForCurrentProject(body: { query: string, params?: Record<string, string>, timeout_ms?: number }) {
@@ -97,6 +103,169 @@ async function waitForClickhouseUserDeletion(email: string) {
   }
 
   throw new HexclaveAssertionError(`Timed out waiting for ClickHouse user ${email} to be deleted.`, { response });
+}
+
+async function waitForClickhouseEmailOutbox(id: string, expectedCount: number, deadline: number) {
+  await InternalApiKey.createAndSetProjectKeys();
+
+  const intervalMs = 2_000;
+
+  let response;
+  while (performance.now() < deadline) {
+    response = await runQueryForCurrentProject({
+      query: "SELECT id FROM email_outboxes WHERE id = {id:UUID}",
+      params: { id },
+    });
+    expect(response.status).toBe(200);
+    if (response.body.result.length === expectedCount) {
+      return response;
+    }
+    await wait(intervalMs);
+  }
+
+  const state = expectedCount === 0 ? "to be deleted" : "to sync";
+  throw new HexclaveAssertionError(`Timed out waiting for ClickHouse email outbox ${id} ${state}.`, { response });
+}
+
+async function allocateEmailOutboxSequence(client: Client, tenancyId: string, id: string): Promise<bigint> {
+  // This mirrors the sequencer's EmailOutbox statement. Its SQL shape is pinned by the
+  // backend sequence-visibility test; this e2e test only drives the real external sync path.
+  const rows = await client.query<{ sequenceId: string }>(
+    `
+      WITH rows_to_update AS (
+        SELECT "tenancyId", "id"
+        FROM "EmailOutbox"
+        WHERE "tenancyId" = $1::uuid
+          AND "id" = $2::uuid
+          AND "shouldUpdateSequenceId" = TRUE
+        FOR UPDATE SKIP LOCKED
+      ),
+      updated_rows AS (
+        UPDATE "EmailOutbox" eo
+        SET "sequenceId" = nextval('global_seq_id'),
+            "shouldUpdateSequenceId" = FALSE
+        FROM rows_to_update r
+        WHERE eo."tenancyId" = r."tenancyId"
+          AND eo."id" = r."id"
+        RETURNING eo."sequenceId"
+      )
+      SELECT "sequenceId" FROM updated_rows
+    `,
+    [tenancyId, id],
+  );
+  return BigInt(rows.rows[0]?.sequenceId ?? throwErr(`Sequencer did not update EmailOutbox ${id}`));
+}
+
+async function insertSequenceVisibilityEmail(client: Client, tenancyId: string, id: string, subject: string): Promise<void> {
+  const renderedAt = new Date();
+  await client.query(
+    `
+      INSERT INTO "EmailOutbox"
+        ("tenancyId", "id", "createdAt", "updatedAt", "tsxSource", "isHighPriority", "to", "extraRenderVariables",
+         "shouldSkipDeliverabilityCheck", "createdWith", "renderedByWorkerId", "startedRenderingAt",
+         "finishedRenderingAt", "renderedHtml", "renderedSubject", "renderedIsTransactional",
+         "scheduledAt", "isQueued", "isPaused", "startedSendingAt", "finishedSendingAt", "canHaveDeliveryInfo",
+         "shouldUpdateSequenceId")
+      VALUES
+        ($1::uuid, $2::uuid, $3, $3, '', false, $4::jsonb, '{}'::jsonb,
+         true, 'PROGRAMMATIC_CALL', $5::uuid, $3, $3, '<p>sequence visibility test</p>',
+         $6, true, $3, false, true, null, null, null, false)
+    `,
+    [
+      tenancyId,
+      id,
+      renderedAt,
+      JSON.stringify({ type: "custom-emails", emails: [`sequence-visibility-${id}@example.com`] }),
+      randomUUID(),
+      subject,
+    ],
+  );
+}
+
+async function triggerExternalDbSync(tenancyId: string): Promise<void> {
+  const response = await niceFetch(new URL("/api/latest/internal/external-db-sync/sync-engine", STACK_BACKEND_BASE_URL), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "upstash-signature": "test-bypass",
+    },
+    body: JSON.stringify({ tenancyId }),
+  });
+  expect(response.status).toBe(200);
+}
+
+async function triggerExternalDbSequencer(): Promise<void> {
+  const cronSecret = getEnvVariable("CRON_SECRET", "") || throwErr("Sequence visibility e2e test requires CRON_SECRET");
+  const url = new URL("/api/latest/internal/external-db-sync/sequencer", STACK_BACKEND_BASE_URL);
+  url.searchParams.set("maxDurationMs", "500");
+  const response = await niceFetch(url, {
+    method: "GET",
+    headers: {
+      authorization: `Bearer ${cronSecret}`,
+    },
+  });
+  expect(response.status).toBe(200);
+}
+
+async function waitForEmailOutboxSequence(
+  id: string,
+  reader: "primary" | "replica",
+  retry?: () => Promise<void>,
+): Promise<bigint> {
+  const connectionString = reader === "replica"
+    ? getEnvVariable(
+      "STACK_DATABASE_REPLICA_CONNECTION_STRING",
+      // Match prisma-client.tsx: use the primary when no replica is configured.
+      getEnvVariable("STACK_DATABASE_CONNECTION_STRING", ""),
+    )
+    : null;
+  if (reader === "replica" && connectionString === "") {
+    throwErr("Sequence visibility e2e test requires a database replica connection string");
+  }
+  const client = connectionString == null ? null : new Client({ connectionString });
+  if (client != null) await client.connect();
+  try {
+    let sequenceId: bigint | undefined;
+    await waitForCondition(async () => {
+      if (retry != null) await retry();
+      if (client != null) {
+        const result = await client.query<{ sequenceId: string | null }>(
+          `SELECT "sequenceId" FROM "EmailOutbox" WHERE "id" = $1`,
+          [id],
+        );
+        const value = result.rows[0]?.sequenceId;
+        if (value != null) sequenceId = BigInt(value);
+      } else {
+        await withInternalDatabase(async (primaryClient) => {
+          const result = await primaryClient.query<{ sequenceId: string | null }>(
+            `SELECT "sequenceId" FROM "EmailOutbox" WHERE "id" = $1`,
+            [id],
+          );
+          const value = result.rows[0]?.sequenceId;
+          if (value != null) sequenceId = BigInt(value);
+        });
+      }
+      return sequenceId != null;
+    }, {
+      timeoutMs: 15_000,
+      intervalMs: 250,
+      description: `EmailOutbox ${id} to receive a sequence ID on the ${reader} sync reader`,
+    });
+    return sequenceId ?? throwErr(`The ${reader} sync reader did not return a sequence ID for EmailOutbox ${id}`);
+  } finally {
+    if (client != null) await client.end();
+  }
+}
+
+async function waitForExternalEmailOutbox(client: Client, id: string, expectedCount: number): Promise<void> {
+  await waitForCondition(
+    async () => (await client.query(`SELECT "id" FROM "email_outboxes" WHERE "id" = $1`, [id])).rows.length === expectedCount,
+    {
+      timeoutMs: 20_000,
+      intervalMs: 500,
+      description: `EmailOutbox ${id} to have external row count ${expectedCount}`,
+    },
+  );
 }
 
 // Run tests sequentially to avoid concurrency issues with shared backend state
@@ -1429,6 +1598,127 @@ describe.sequential('External DB Sync - Basic Tests', () => {
     expect(row.is_paused).toBe(false);
   }, TEST_TIMEOUT);
 
+  test("Sequence allocation visibility does not permanently skip an EmailOutbox row", async () => {
+    const dbName = "sequence_visibility_race_test";
+    const connectionString = await dbManager.createDatabase(dbName);
+    const project = await createProjectWithExternalDb({
+      main: {
+        type: "postgres",
+        connectionString,
+      },
+    });
+    const externalClient = dbManager.getClient(dbName);
+    const rowA = randomUUID();
+    const rowB = randomUUID();
+    const baselineRow = randomUUID();
+    const transactionA = new Client({
+      connectionString: getInternalDatabaseConnectionString(),
+    });
+
+    let tenancyId: string | undefined;
+    let transactionAStarted = false;
+    try {
+      await withInternalDatabase(async (client) => {
+        const tenancy = await client.query<{ id: string }>(
+          `SELECT "id" FROM "Tenancy" WHERE "projectId" = $1 AND "branchId" = 'main' LIMIT 1`,
+          [project.projectId],
+        );
+        tenancyId = tenancy.rows[0]?.id ?? throwErr("Could not find the test project's main tenancy");
+        await insertSequenceVisibilityEmail(client, tenancyId, baselineRow, "Sequence visibility baseline");
+      });
+      const testTenancyId = tenancyId ?? throwErr("Test project's tenancy was not initialized");
+
+      await transactionA.connect();
+      await transactionA.query("BEGIN");
+      transactionAStarted = true;
+      await transactionA.query("SET LOCAL lock_timeout = '5000ms'");
+      await transactionA.query(`SELECT pg_advisory_xact_lock($1)`, [SEQUENCE_ALLOCATION_ADVISORY_LOCK_KEY]);
+      await transactionA.query(
+        `UPDATE "EmailOutbox" SET "shouldUpdateSequenceId" = TRUE WHERE "tenancyId" = $1 AND "id" = $2`,
+        [testTenancyId, baselineRow],
+      );
+      await allocateEmailOutboxSequence(transactionA, testTenancyId, baselineRow);
+      await transactionA.query("COMMIT");
+      transactionAStarted = false;
+      await waitForEmailOutboxSequence(baselineRow, "replica");
+      await triggerExternalDbSync(testTenancyId);
+      await waitForExternalEmailOutbox(externalClient, baselineRow, 1);
+
+      await withInternalDatabase(async (client) => {
+        await insertSequenceVisibilityEmail(client, testTenancyId, rowA, "Sequence visibility row A");
+        await insertSequenceVisibilityEmail(client, testTenancyId, rowB, "Sequence visibility row B");
+      });
+
+      await transactionA.query("BEGIN");
+      transactionAStarted = true;
+      await transactionA.query("SET LOCAL lock_timeout = '5000ms'");
+      await transactionA.query(`SELECT pg_advisory_xact_lock($1)`, [SEQUENCE_ALLOCATION_ADVISORY_LOCK_KEY]);
+      await transactionA.query(
+        `UPDATE "EmailOutbox" SET "shouldUpdateSequenceId" = TRUE WHERE "tenancyId" = $1 AND "id" = $2`,
+        [testTenancyId, rowA],
+      );
+      const sequenceA = await allocateEmailOutboxSequence(transactionA, testTenancyId, rowA);
+      await withInternalDatabase(async (client) => {
+        await client.query(
+          `UPDATE "EmailOutbox" SET "shouldUpdateSequenceId" = TRUE WHERE "tenancyId" = $1 AND "id" = $2`,
+          [testTenancyId, rowB],
+        );
+      });
+
+      // T1 holds the production allocation lock after assigning A. A real sequencer invocation
+      // runs while T1 is open and must skip rather than commit a higher value first.
+      await triggerExternalDbSequencer();
+      const rowBSequenceBeforeACommit = await withInternalDatabase(async (client) => {
+        const result = await client.query<{ sequenceId: string | null }>(
+          `SELECT "sequenceId" FROM "EmailOutbox" WHERE "id" = $1`,
+          [rowB],
+        );
+        return result.rows[0]?.sequenceId;
+      });
+      expect(rowBSequenceBeforeACommit, "Sequencer must skip while another transaction holds the allocation lock").toBeNull();
+      await triggerExternalDbSync(testTenancyId);
+
+      await transactionA.query("COMMIT");
+      transactionAStarted = false;
+      const sequenceB = await waitForEmailOutboxSequence(rowB, "primary", triggerExternalDbSequencer);
+      await waitForEmailOutboxSequence(rowA, "replica");
+      await waitForEmailOutboxSequence(rowB, "replica");
+      await triggerExternalDbSync(testTenancyId);
+
+      expect(sequenceA).toBeLessThan(sequenceB);
+      await waitForExternalEmailOutbox(externalClient, rowB, 1);
+      await waitForExternalEmailOutbox(externalClient, rowA, 1);
+      const externalRows = await externalClient.query<{ id: string }>(
+        `SELECT "id"
+         FROM "email_outboxes"
+         WHERE "id" = ANY($1::uuid[])
+         ORDER BY "id"`,
+        [[rowA, rowB]],
+      );
+      expect(externalRows.rows.map(row => row.id)).toEqual([rowA, rowB].sort());
+    } finally {
+      if (transactionAStarted) await transactionA.query("ROLLBACK");
+      await transactionA.end();
+
+      if (tenancyId != null) {
+        await withInternalDatabase(async (client) => {
+          await client.query("BEGIN");
+          try {
+            await deleteSyncedRowsWithTombstones(client, {
+              table: "EmailOutbox",
+              whereClause: `"tenancyId" = $1::uuid AND "id" = ANY($2::uuid[])`,
+              values: [tenancyId, [baselineRow, rowA, rowB]],
+            });
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
+        });
+      }
+    }
+  }, TEST_TIMEOUT);
+
   /**
    * What it does:
    * - Creates a project, sends an email, and verifies the email outbox row
@@ -1497,6 +1787,87 @@ describe.sequential('External DB Sync - Basic Tests', () => {
     expect(response!.body.result.length).toBeGreaterThanOrEqual(1);
     const row = response!.body.result[0];
     expect(row.created_with).toBe('programmatic-call');
+  }, TEST_TIMEOUT);
+
+  test('Deleted EmailOutbox is removed from ClickHouse', async ({ expect }) => {
+    const connectionString = await dbManager.createDatabase("email_outbox_delete_test");
+    const project = await createProjectWithExternalDb({
+      main: {
+        type: "postgres",
+        connectionString,
+      },
+    }, {
+      config: {
+        magic_link_enabled: true,
+        email_config: {
+          type: "standard",
+          host: "localhost",
+          port: Number(withPortPrefix("29")),
+          username: "test",
+          password: "test",
+          sender_name: "Test Project",
+          sender_email: "test@example.com",
+        },
+      },
+    });
+
+    const createUserResponse = await niceBackendFetch("/api/v1/users", {
+      method: "POST",
+      accessType: "server",
+      body: {
+        primary_email: backendContext.value.mailbox.emailAddress,
+        primary_email_verified: true,
+      },
+    });
+    expect(createUserResponse.status).toBe(201);
+
+    const sendResponse = await niceBackendFetch("/api/v1/emails/send-email", {
+      method: "POST",
+      accessType: "server",
+      body: {
+        user_ids: [createUserResponse.body.id],
+        html: "<p>ClickHouse deletion test email</p>",
+        subject: "CH Deletion Test Email",
+        notification_category_name: "Transactional",
+      },
+    });
+    expect(sendResponse.status).toBe(200);
+
+    let emailId!: string;
+    await waitForCondition(
+      async () => {
+        const listResponse = await niceBackendFetch("/api/v1/emails/outbox", {
+          method: "GET",
+          accessType: "server",
+        });
+        if (listResponse.status !== 200 || listResponse.body.items.length === 0) return false;
+        emailId = listResponse.body.items[0].id;
+        return true;
+      },
+      { timeoutMs: 30_000, intervalMs: 500, description: "email to appear in outbox" },
+    );
+
+    // Both ClickHouse assertions share this budget so the helper reports a useful failure before TEST_TIMEOUT.
+    const clickhouseDeadline = performance.now() + 180_000;
+    await InternalApiKey.createAndSetProjectKeys();
+    await waitForClickhouseEmailOutbox(emailId, 1, clickhouseDeadline);
+
+    // No production endpoint deletes EmailOutbox rows, so e2e cannot drive this over HTTP; the tombstone shape is pinned by the backend unit test.
+    await withInternalDatabase(async (client) => {
+      const tenancy = await client.query<{ id: string }>(
+        `SELECT "id" FROM "Tenancy" WHERE "projectId" = $1 AND "branchId" = 'main' LIMIT 1`,
+        [project.projectId],
+      );
+      const tenancyId = tenancy.rows[0]?.id ?? throwErr(`No main tenancy found for project ${project.projectId}`);
+
+      await deleteSyncedRowsWithTombstones(client, {
+        table: "EmailOutbox",
+        whereClause: `"tenancyId" = $1::uuid AND "id" = $2::uuid`,
+        values: [tenancyId, emailId],
+      });
+    });
+
+    await waitForClickhouseEmailOutbox(emailId, 0, clickhouseDeadline);
   }, TEST_TIMEOUT);
 
   /**

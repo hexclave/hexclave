@@ -1,6 +1,7 @@
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import { declareInMemoryLowLevelDatabase } from "../low-level/implementations/in-memory.js";
-import { declarePiledriverDatabase, PiledriverObject } from "../piledriver/index.js";
+import { declareBasePiledriverDatabase } from "../piledriver/implementations/base.js";
+import type { PiledriverObject } from "../piledriver/index.js";
 import {
   declareBulldozerDatabase,
   declareGroupByTable,
@@ -342,11 +343,11 @@ export const exampleFungibleLedgerMigrations: readonly Migration[] = [
 
 export async function createExampleFungibleLedgerDatabase() {
   const db = declareBulldozerDatabase(
-    declarePiledriverDatabase(declareInMemoryLowLevelDatabase(`bulldozer-example-${crypto.randomUUID()}`)),
+    declareBasePiledriverDatabase(declareInMemoryLowLevelDatabase(`bulldozer-example-${crypto.randomUUID()}`)),
     { migrations: exampleFungibleLedgerMigrations },
   );
   await db.applyRemainingMigrations();
-  await db.withSnapshotReplicated(async snapshot => {
+  await db.withSnapshotConsistent(async snapshot => {
     for (const [rowIdentifier, rowData] of Object.entries(exampleLedgerRows)) {
       snapshot = (await snapshot.setOrDeleteRow({ tableId: storedTableId, rowIdentifier, newRowData: rowData as unknown as PiledriverObject })).newSnapshot;
     }

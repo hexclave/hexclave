@@ -11,14 +11,20 @@ import { devEnvStatePath, ensureLocalDashboardSecret, readDevEnvState, recordLoc
 import { CliError, errorMessage } from "../lib/errors.js";
 import { DASHBOARD_PORT_ENV_VAR, dashboardPort, dashboardRequest, dashboardUrl, createRemoteDevelopmentEnvironmentSession, type DashboardSessionResponse } from "../lib/local-dashboard.js";
 import { startProgress } from "../lib/progress.js";
+import { evaluateDeploymentConfig, importDeployModule, resolveDeployFilePath, resolveDevEnv, type EvaluatedService } from "../lib/deployment-config.js";
 
 type ChildCommand = {
   command: string,
   args: string[],
+  // True when `command` is a full command LINE that must be run through the
+  // platform shell (Windows only — see shellChildCommand).
+  shell?: boolean,
 };
 
 type DevOptions = {
   configFile?: string,
+  deployFile?: string,
+  serviceId?: string,
 };
 
 type ConfigSyncEventBase = {
@@ -93,6 +99,37 @@ function splitDevCommandArgs(commandArgs: string[]): ChildCommand {
   }
   const command = commandArgs[0];
   return { command, args: commandArgs.slice(1) };
+}
+
+/**
+ * Wraps a devCommand string (from the deploy file's `deploy` export) for
+ * execution through the platform shell — unlike the `-- <command> [args...]`
+ * form, a devCommand is a single command LINE (e.g. "pnpm dev --port 3000")
+ * and may use shell syntax. Exported for unit tests.
+ */
+export function shellChildCommand(commandLine: string, platform: NodeJS.Platform = process.platform): ChildCommand {
+  if (platform === "win32") {
+    // Passed to spawn(..., { shell: true }) so NODE builds the
+    // `cmd.exe /d /s /c "<line>"` invocation with windowsVerbatimArguments.
+    // Hand-rolling the cmd argv here would make Node apply MSVCRT escaping to
+    // the line (embedded `"` -> `\"`), which cmd.exe does not parse.
+    return { command: commandLine, args: [], shell: true };
+  }
+  return { command: "/bin/sh", args: ["-c", commandLine] };
+}
+
+/**
+ * The env for the dev child process. Precedence (later wins): the service's
+ * env vars from the config file may not shadow the session's credentials — a
+ * stale hexclave.* value baked into the config would otherwise break the dev
+ * session. Exported for unit tests (the ordering IS the contract).
+ */
+export function composeDevChildEnv(processEnv: NodeJS.ProcessEnv, serviceEnv: Record<string, string>, sessionEnv: Record<string, string>): NodeJS.ProcessEnv {
+  return {
+    ...processEnv,
+    ...serviceEnv,
+    ...sessionEnv,
+  };
 }
 
 export function devDashboardCommandFromEnv(env: NodeJS.ProcessEnv): string | undefined {
@@ -726,14 +763,20 @@ child.on("error", (error) => {
 });
 `;
 
-export function runChildProcess(command: ChildCommand, env: NodeJS.ProcessEnv): Promise<number> {
+// `cwd` is undefined when no service is selected (a bare `hexclave dev --
+// <command>` keeps the caller's directory). On POSIX it is handed to the
+// wrapper process, whose own inner spawn inherits it — so the app command
+// lands in the same directory on both platforms.
+export function runChildProcess(command: ChildCommand, env: NodeJS.ProcessEnv, cwd?: string): Promise<number> {
   return new Promise((resolvePromise, reject) => {
     const child = process.platform === "win32"
-      // cross-spawn handles Windows command shims that Node cannot spawn directly.
-      ? crossSpawn(command.command, command.args, { stdio: "inherit", env })
+      // cross-spawn handles Windows command shims that Node cannot spawn
+      // directly (it passes through to plain spawn when `shell` is set).
+      ? crossSpawn(command.command, command.args, { stdio: "inherit", env, cwd, shell: command.shell ?? false })
       : spawn(process.execPath, ["-e", APP_COMMAND_WRAPPER_SCRIPT], {
         detached: true,
         stdio: "inherit",
+        cwd,
         env: {
           ...env,
           [APP_COMMAND_WRAPPER_PARENT_PID_ENV_VAR]: String(process.pid),
@@ -883,25 +926,88 @@ async function closeSession(sessionId: string, secret: string, port: number): Pr
   }
 }
 
+export function validateDevCommandSelection(serviceId: string | undefined, commandArgs: string[]): void {
+  if (serviceId != null && commandArgs.length > 0) {
+    throw new CliError("Cannot combine --service-id <id> with a positional command after --. Choose the service's devCommand or run an explicit command, but not both.");
+  }
+  if (serviceId == null && commandArgs.length === 0) {
+    throw new CliError("Missing command. Pass --service-id <id> to run a service's devCommand from the deploy file, or a command after --: hexclave dev --config-file <path> -- <command> [args...]");
+  }
+}
+
 export function registerDevCommand(program: Command) {
   program
     .command("dev")
-    .usage("--config-file <path> -- <command> [args...]")
-    .description("Run a command with Hexclave development-environment credentials")
+    .usage("--config-file <path> [--service-id <id>] [-- <command> [args...]]")
+    .description("Run a command with Hexclave development-environment credentials. With --service-id, the service's devCommand from the deploy file's `deploy` export is run in the service's rootDirectory and its env vars are injected (secrets resolve to their default values; `service()` returns null, so guard connection values with isDev — reading an output off it, e.g. `service(\"api\").url`, throws).")
     .requiredOption("--config-file <path>", "Path to hexclave.config.ts")
-    .argument("<command...>", "Command and arguments to run after --")
+    .option("--service-id <id>", "Run the devCommand of this service from the deploy file's `deploy` export, in its rootDirectory and with the service's env vars injected")
+    .option("--deploy-file <path>", "Path to the deploy file for --service-id (default: auto-discover hexclave.deploy.ts next to the config file)")
+    .argument("[command...]", "Command and arguments to run after --")
     .action(async (commandArgs: string[], opts: DevOptions) => {
+      validateDevCommandSelection(opts.serviceId, commandArgs);
       if (opts.configFile == null) {
         throw new CliError("--config-file is required.");
       }
 
-      const childCommand = splitDevCommandArgs(commandArgs);
+      const configFilePath = resolveConfigFilePathOption(opts.configFile, { mustExist: opts.serviceId != null });
+
+      // Evaluate the deploy file's services BEFORE starting the dashboard so a
+      // mistake there fails fast (and without a half-started session).
+      let devService: EvaluatedService | undefined;
+      if (opts.serviceId != null) {
+        // Services live in the DEPLOY file, not the config file: --config-file
+        // is what the development-environment session is keyed on, and the two
+        // are separate documents. Default to the deploy file sitting next to
+        // the config file, which is where a single-repo project keeps it.
+        const deployFilePath = resolveDeployFilePath(opts.deployFile, dirname(configFilePath));
+        const deployModule = await importDeployModule(deployFilePath);
+        const { services } = evaluateDeploymentConfig({
+          deployFilePath,
+          deploymentGroupIdExport: deployModule.deploymentGroupId,
+          legacyIdExport: deployModule.legacyId,
+          deployExport: deployModule.deploy,
+          versionExport: deployModule.version,
+          mode: "dev",
+        });
+        devService = services.get(opts.serviceId);
+        if (devService == null) {
+          throw new CliError(`No service named ${JSON.stringify(opts.serviceId)} in the deploy file's \`deploy\` export. Available services: ${[...services.keys()].join(", ")}.`);
+        }
+        // A BLANK devCommand counts as missing. `shellChildCommand("")` runs `sh -c ""`,
+        // which exits 0 immediately — so an empty string would report a successful dev
+        // session that never started the service, instead of naming the actual problem.
+        if (commandArgs.length === 0 && (devService.devCommand == null || devService.devCommand.trim() === "")) {
+          throw new CliError(`The service ${JSON.stringify(opts.serviceId)} has no devCommand in the deploy file's \`deploy\` export. Add one (e.g. devCommand: "npm run dev"), or pass a command after --.`);
+        }
+        // The service's rootDirectory becomes the child's cwd below, so check it
+        // HERE rather than letting spawn fail: spawn reports a bad cwd as an
+        // ENOENT naming the EXECUTABLE ("spawn pnpm ENOENT" — reads as "pnpm is
+        // not installed"), and a cwd that points at a file makes it throw
+        // synchronously, escaping the CliError wrapping in runChildProcess.
+        const rootDirectoryStats = (() => {
+          try {
+            return statSync(devService.absoluteRootDirectory);
+          } catch {
+            return null;
+          }
+        })();
+        if (rootDirectoryStats == null || !rootDirectoryStats.isDirectory()) {
+          throw new CliError(`The rootDirectory of the service ${JSON.stringify(opts.serviceId)} is ${devService.absoluteRootDirectory}, which ${rootDirectoryStats == null ? "does not exist" : "is not a directory"}. Fix \`rootDirectory\` in the deploy file's \`deploy\` export — it is where the service's devCommand runs.`);
+        }
+      }
+      // The selection guard above makes these modes mutually exclusive.
+      const childCommand = commandArgs.length > 0
+        ? splitDevCommandArgs(commandArgs)
+        : shellChildCommand(devService?.devCommand ?? (() => {
+          throw new CliError("Internal error: no dev command resolved despite the checks above.");
+        })());
+
       const port = dashboardPort();
       const localDashboardUrl = dashboardUrl(port);
       const secret = ensureLocalDashboardSecret(port);
       const config = resolveLoginConfig();
       const apiBaseUrl = normalizeApiBaseUrl(config.apiUrl || DEFAULT_API_URL);
-      const configFilePath = resolveConfigFilePathOption(opts.configFile, { mustExist: false });
       await startDashboardIfNeeded({ apiBaseUrl, secret, port });
       const sessionState: DashboardSessionState = {
         session: await createRemoteDevelopmentEnvironmentSession({
@@ -929,10 +1035,16 @@ export function registerDevCommand(program: Command) {
       });
       let exitCode = 1;
       try {
-        exitCode = await runChildProcess(childCommand, {
-          ...process.env,
-          ...sessionState.session.env,
-        });
+        exitCode = await runChildProcess(childCommand, composeDevChildEnv(
+          process.env,
+          devService != null ? resolveDevEnv(devService, sessionState.session.env) : {},
+          sessionState.session.env,
+        // A selected service runs in its own rootDirectory, which is where its
+        // code lives (`pnpm dev` at a monorepo root would otherwise start the
+        // ROOT package, not the service). Applied for an explicit `--
+        // <command>` too when a service is selected: its env vars are already
+        // injected above, so the directory should match the same service.
+        ), devService?.absoluteRootDirectory);
       } finally {
         stopped = true;
         await Promise.all([heartbeat, browserSecretCodePolling]);

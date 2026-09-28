@@ -1,0 +1,111 @@
+---
+title: "Templates & Themes"
+description: "Build email bodies with React Email templates, then wrap them in reusable branded themes."
+sidebarTitle: "Templates & Themes"
+---
+
+Every email Hexclave sends is built from two pieces:
+
+- A **template** - your content (the body, subject, and notification category), written as a React Email component.
+- A **theme** - the shared layout and branding that wraps that content (header, footer, background, logo, unsubscribe link).
+
+Templates and themes are independent: one template renders consistently across any theme, and changing a theme restyles every email at once. Both ship with sensible built-ins and can be customized or replaced from the dashboard.
+
+## Templates
+
+Templates are React Email components written in TSX. Each template receives the current `user`, `project`, and any custom `variables` you pass when sending.
+
+```tsx
+import { type } from "arktype";
+import { Container } from "@react-email/components";
+import { Subject, NotificationCategory, Props } from "@hexclave/emails";
+
+export const variablesSchema = type({
+  featureName: "string",
+});
+
+export function EmailTemplate({
+  user,
+  project,
+  variables,
+}: Props<typeof variablesSchema.infer>) {
+  return (
+    <Container>
+      <Subject value={`New feature: ${variables.featureName}`} />
+      <NotificationCategory value="Transactional" />
+      <p>Hi {user.displayName}, check out {variables.featureName}!</p>
+    </Container>
+  );
+}
+
+EmailTemplate.PreviewVariables = {
+  featureName: "Dark mode",
+} satisfies typeof variablesSchema.infer;
+```
+
+Key concepts:
+
+- **`variablesSchema`**  - Define the shape of your template variables using [arktype](https://arktype.io). Hexclave validates variables against this schema at render time.
+- **`<Subject>`**  - Sets the email subject line from inside the template.
+- **`<NotificationCategory>`**  - Declares whether this is a `"Transactional"` or `"Marketing"` email.
+- **`PreviewVariables`**  - Sample data used for the live preview in the dashboard editor.
+
+### Built-in templates
+
+Hexclave ships with templates for common auth and payment flows. These are sent automatically when the matching event happens:
+
+| Template | Trigger |
+|---|---|
+| **Email Verification** | User signs up or changes their email |
+| **Password Reset** | User requests a password reset |
+| **Magic Link/OTP** | User signs in with magic link or one-time password |
+| **Team Invitation** | User is invited to join a team |
+| **Sign In Invitation** | User is invited to create an account |
+| **Payment Receipt** | A payment succeeds (one-time or subscription) |
+| **Payment Failed** | A payment fails |
+| **Trial Ending Soon** | A [Payments free trial](/guides/apps/payments/products-and-pricing#free-trials) is about to end |
+
+You can customize any built-in template from the dashboard under **Emails → Templates**.
+
+## Themes
+
+Themes wrap your email content in a consistent layout  - header, footer, background, branding. Hexclave includes three built-in themes:
+
+- **Default Light**  - Clean white background with subtle shadow
+- **Default Dark**  - Dark background with light text
+- **Default Colorful**  - Light purple background with an accent border
+
+You can create custom themes in the dashboard under **Emails → Email Settings → Themes**. Themes are also TSX components:
+
+```tsx
+import { Html, Head, Tailwind, Body, Container } from "@react-email/components";
+import { ThemeProps, ProjectLogo } from "@hexclave/emails";
+
+export function EmailTheme({ children, unsubscribeLink, projectLogos }: ThemeProps) {
+  return (
+    <Html>
+      <Head />
+      <Tailwind>
+        <Body className="bg-white font-sans m-0 p-0">
+          <Container className="max-w-[600px] mx-auto p-8">
+            <ProjectLogo data={projectLogos} mode="light" />
+            {children}
+          </Container>
+          {unsubscribeLink && (
+            <p className="text-center text-xs opacity-60">
+              <a href={unsubscribeLink}>Unsubscribe</a>
+            </p>
+          )}
+        </Body>
+      </Tailwind>
+    </Html>
+  );
+}
+```
+
+Set a default theme for your project in the dashboard. You can also override the theme per-email with the `themeId` option, or pass `themeId: false` to send without any theme.
+
+## Related
+
+- [Drafts](./drafts) - compose in the dashboard and send with `draftId` (not TSX templates).
+- [Emails guide](./guide) - start-to-finish implementation: server, templates, sending, and delivery.

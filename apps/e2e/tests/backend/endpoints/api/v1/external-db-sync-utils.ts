@@ -1,5 +1,7 @@
 import { Client, ClientConfig } from 'pg';
 import { expect } from 'vitest';
+import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
+import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { niceFetch, STACK_BACKEND_BASE_URL } from '../../../../helpers';
 import { InternalApiKey, Project } from '../../../backend-helpers';
 
@@ -10,6 +12,69 @@ export const POSTGRES_USER = process.env.EXTERNAL_DB_TEST_USER || 'postgres';
 export const POSTGRES_PASSWORD = process.env.EXTERNAL_DB_TEST_PASSWORD || 'PASSWORD-PLACEHOLDER--uqfEC1hmmv';
 export const TEST_TIMEOUT = 240000;
 export const HIGH_VOLUME_TIMEOUT = 600000; // 10 minutes for 1500+ users
+
+export function getInternalDatabaseConnectionString(): string {
+  const connectionString = getEnvVariable(
+    "HEXCLAVE_DATABASE_CONNECTION_STRING",
+    getEnvVariable("STACK_DATABASE_CONNECTION_STRING", ""),
+  );
+  if (connectionString === "") {
+    throw new HexclaveAssertionError("E2E tests require a configured internal database connection string");
+  }
+  return connectionString;
+}
+
+export async function withInternalDatabase<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+  const client = new Client({
+    connectionString: getInternalDatabaseConnectionString(),
+    connectionTimeoutMillis: 10_000,
+    query_timeout: 30_000,
+  });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
+const syncedCleanupTableConfig = {
+  EmailOutbox: {
+    primaryKey: `jsonb_build_object('tenancyId', "tenancyId", 'id', "id")`,
+  },
+  ProjectUser: {
+    primaryKey: `jsonb_build_object('tenancyId', "tenancyId", 'projectUserId', "projectUserId")`,
+  },
+} as const;
+
+export async function deleteSyncedRowsWithTombstones(client: Client, options: {
+  table: keyof typeof syncedCleanupTableConfig,
+  whereClause: string,
+  values: unknown[],
+}): Promise<void> {
+  const tableConfig = syncedCleanupTableConfig[options.table];
+  await client.query(
+    `
+      WITH deleted_rows AS (
+        DELETE FROM "${options.table}"
+        WHERE ${options.whereClause}
+        RETURNING *
+      )
+      INSERT INTO "DeletedRow"
+        ("id", "tenancyId", "tableName", "primaryKey", "data", "deletedAt", "shouldUpdateSequenceId")
+      SELECT
+        gen_random_uuid(),
+        "tenancyId",
+        '${options.table}',
+        ${tableConfig.primaryKey},
+        to_jsonb(deleted_rows),
+        now(),
+        true
+      FROM deleted_rows
+    `,
+    options.values,
+  );
+}
 
 // Connection settings to prevent connection leaks
 const CLIENT_CONFIG: Partial<ClientConfig> = {

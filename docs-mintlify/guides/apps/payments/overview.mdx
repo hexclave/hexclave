@@ -1,419 +1,111 @@
 ---
 title: "Payments"
-description: "Accept payments and manage billing with Hexclave's Stripe integration"
-icon: "/images/app-icons/payments.svg"
+description: "Sell subscriptions and one-time products, and manage entitlements like credits and seats - billing without the plumbing"
+sidebarTitle: "Overview"
 ---
 
-import { PaymentsConcepts } from "/snippets/payments-concepts.jsx";
+<Visibility for="agents">
+<Note>
+  **For agents/LLMs:** This is a high-level *marketing* overview of the Payments app, not an implementation reference. To actually build with payments, start at [Payments setup](./setup), then use the concept pages: [Products & Pricing](./products-and-pricing), [Items & Entitlements](./items-and-entitlements), [Checkout & Purchases](./checkout), [Subscriptions](./subscriptions), [Billing & Invoices](./billing-and-invoices), [Refunds](./refunds), [Granting Products](./granting-products), and [Customer Types](./customers).
+</Note>
+</Visibility>
 
-Hexclave includes a Payments app that handles billing, subscriptions, and one-time purchases through Stripe. Instead of building your own billing system, you define products in the dashboard and Hexclave takes care of checkout, entitlement tracking, subscription lifecycle, and invoicing.
+import { PricingSkeleton, EntitlementsSkeleton, TransactionsSkeleton } from "/snippets/skeletons/payments-skeletons.jsx";
 
-This guide walks through how to set up payments, sell products, manage subscriptions, and work with item-based entitlements like credits or seats.
+Charging the card is the easy part. Everything *after* that - turning a payment into access, keeping it in sync, handling upgrades, refunds, and renewals - is the part you'd normally build and maintain yourself. The Payments app owns that layer. You define products in the dashboard; Hexclave runs checkout, grants and revokes entitlements, tracks subscriptions, and keeps your billing state correct. Below are the questions developers actually ask, and the honest answers.
 
-## Getting started
+## Can I sell a subscription or one-time product?
 
-<Steps>
-  <Step title="Enable Payments">
-    Go to the **Apps** section in your dashboard, find **Payments**, and enable it.
-  </Step>
-  <Step title="Connect Stripe">
-    Open **Payments -> Settings** and follow the Stripe Connect onboarding flow. You'll be asked for business details, bank info, and identity verification. Once approved, payments are live.
-  </Step>
-  <Step title="Turn on test mode">
-    While building, enable **test mode** in **Payments -> Settings**. All purchases will be free - no real money is charged. You can switch to live when you're ready.
-  </Step>
-</Steps>
-
-<Info>
-  Hexclave Payments is currently only available for US-based businesses. Support for other countries is coming soon.
-</Info>
-
-## Core concepts
-
-Before writing any code, it helps to understand how the pieces fit together.
-
-A **product** is something you sell - a subscription plan, a one-time purchase, or a credit pack. Products can have one or more **prices** (one-time or recurring, in multiple currencies), and they can include **items** - quantifiable entitlements like credits, seats, or API calls.
-
-A **product line** groups products that are mutually exclusive. For example, a "Plan" product line might contain Free, Pro, and Enterprise - a customer can only have one at a time. When they upgrade, the old plan is replaced.
-
-A **customer** is whoever owns the purchase. This can be a user, a team, or a custom external entity.
-
-Here's how these pieces look in practice:
-
-<PaymentsConcepts />
-
-And the typical flow to make it all work:
-
-1. You define products and items in the dashboard
-2. Your app generates a checkout URL and redirects the user to Stripe
-3. The user pays, Stripe notifies Hexclave, and the product is granted
-4. Your app reads the customer's products and item balances to control access
-
-## Defining products
-
-Configure your products in **Payments -> Products & Items**. Each product has:
-
-- **Display name** - What the customer sees
-- **Customer type** - Whether this product is for users, teams, or custom customers
-- **Prices** - One or more prices, each with a currency amount and an optional billing interval (day, week, month, or year). Currency amounts are **decimal strings** like `"9.99"` or `"1000"` — not cent integers. Supported currencies: USD, EUR, GBP, JPY, INR, AUD, CAD.
-- **Included items** - Items granted when the product is purchased, with configurable quantity, repeat schedule, and expiration behavior
-
-A few additional options:
-
-- **Product lines** - Assign products to a product line to make them mutually exclusive (e.g. plan tiers). Configure lines in **Payments -> Product Lines**.
-- **Add-ons** - Set **isAddOnTo** to require the customer to already own a specific base product before purchasing this one.
-- **Free trial** - Give customers a trial period before charging. Can be set on the product or on individual prices.
-- **Server-only** - Hide the product from client SDK responses. Useful for products that should only be granted programmatically.
-- **Stackable** - Allow multiple purchases of the same product (default is one per customer).
-
-## Selling a product
-
-To sell a product, generate a checkout URL and redirect the user to it. The `createCheckoutUrl` method is available on both user and team objects.
-
-<Tabs>
-  <Tab title="Client Component">
-    ```typescript title="app/components/purchase-button.tsx"
-    "use client";
-    import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
-
-    export default function PurchaseButton({ productId }: { productId: string }) {
-      const user = useUser({ or: 'redirect' });
-
-      const handlePurchase = async () => {
-        const checkoutUrl = await user.createCheckoutUrl({
-          productId,
-          returnUrl: window.location.href,
-        });
-        window.location.href = checkoutUrl;
-      };
-
-      return <button onClick={handlePurchase}>Purchase</button>;
-    }
-    ```
-  </Tab>
-  <Tab title="Server Component">
-    ```typescript title="app/purchase/page.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
-
-    export default async function PurchasePage() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
-
-      const checkoutUrl = await user.createCheckoutUrl({
-        productId: "prod_premium_monthly",
-      });
-
-      return <a href={checkoutUrl}>Upgrade to Premium</a>;
-    }
-    ```
-  </Tab>
-</Tabs>
-
-For team purchases, call `createCheckoutUrl` on the team object instead:
+Yes. Define products and prices in the dashboard, then generate a checkout URL and redirect. Hexclave handles the checkout session, the webhook, and granting access on success - you never write a webhook handler.
 
 ```typescript
-const team = user.useTeam(teamId);
-const checkoutUrl = await team.createCheckoutUrl({ productId });
+const checkoutUrl = await user.createCheckoutUrl({
+  productId: "pro_monthly",
+  returnUrl: window.location.href,
+});
+window.location.href = checkoutUrl;
 ```
 
-<Info>
-  If you're using a non-JS backend (Python, Go, etc.), call the REST API directly: `POST /api/v1/payments/purchases/create-purchase-url` with `customer_type`, `customer_id`, and `product_id`. See the [REST API overview](/api/overview) for details.
-</Info>
+<PricingSkeleton />
 
-## Checking what a customer owns
+Group products into a **product line** to make them mutually exclusive - Free, Pro, and Enterprise where a customer can only hold one at a time. Upgrades, downgrades, and proration on plan switches are handled for you. Recurring prices can include a **free trial** — the card is collected at checkout and charged when the trial ends. See [Products & Pricing](./products-and-pricing#free-trials).
 
-After a purchase, you'll want to know what the customer has. There are two ways to do this: check their product list, or check a specific item balance.
+## Can I sell credits, seats, or API quota?
 
-### Listing products
+Yes - and this is the real point. Products include **items**: quantifiable entitlements like credits, seats, or API calls, with their own quantity, refresh schedule, and expiration. When a customer buys, the items are granted. When their plan ends, they're revoked. You don't track any of it in your own database.
 
-```typescript
-// Client component (hook - re-renders on changes)
-const products = user.useProducts();
+<EntitlementsSkeleton />
 
-// Server component
-const products = await user.listProducts();
-```
-
-Each product in the list includes:
-
-- `id` - The product ID (or `null` for inline products)
-- `displayName` - The product name
-- `quantity` - How many the customer owns (relevant for stackable products)
-- `type` - `"one_time"` or `"subscription"`
-- `subscription` - Subscription details (period end, cancel state) if applicable
-- `switchOptions` - Other products in the same product line the customer could switch to
-
-### Checking item balances
-
-Items are the building blocks of entitlements. When a product includes items like "100 credits" or "5 seats", those are tracked as item balances on the customer.
+Read a balance anywhere with a hook that stays in sync, and check access without a billing round-trip:
 
 ```typescript
-// Client component (hook - re-renders on changes)
+// Client - re-renders when the balance changes
 const credits = user.useItem("credits");
+return <span>{credits.nonNegativeQuantity} credits left</span>;
+```
 
-// Server component
+## Can I consume credits safely under load?
+
+Yes. Consume on the server with `tryDecreaseQuantity` - a single transactional operation that returns `false` instead of letting a balance go negative. No read-then-write race, no double-spend when two requests land at once.
+
+```typescript
 const credits = await user.getItem("credits");
+const ok = await credits.tryDecreaseQuantity(1);
+if (!ok) throw new Error("Out of credits");
+// ...do the work
 ```
 
-An item has two quantity fields:
+Grant more with `increaseQuantity`, or adjust manually from the dashboard. This is the consumption layer you'd otherwise build by hand with a ledger table and a pile of webhooks.
 
-- `quantity` - The raw balance (can be negative if you've consumed more than granted)
-- `nonNegativeQuantity` - `Math.max(0, quantity)` for display purposes
+## What exactly does Hexclave own for me?
 
-Here's a practical example - showing a credits counter:
+With a raw payment processor you build and maintain the glue: webhook handlers, granting and revoking access on payment, proration on upgrades, refunds, subscription endings, and keeping your own database in sync with all of it. Hexclave owns that layer:
 
-```typescript title="app/components/credits-widget.tsx"
-"use client";
-import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+- **Webhooks** - received and reconciled for you; there's nothing to host
+- **Grants & revokes** - products and items are applied on payment and removed when a subscription ends or a refund is issued
+- **Subscription lifecycle** - status, renewals, cancellations, and period ends tracked automatically
+- **Proration** - handled automatically on plan switches, triggered through one SDK call
+- **Refunds** - issued from the dashboard (partial or full), with optional entitlement revocation. See [Refunds](./refunds).
+- **Sync** - entitlement and subscription state stays consistent without a database to babysit
 
-export default function CreditsWidget() {
-  const user = useUser({ or: 'redirect' });
-  const credits = user.useItem("credits");
+<TransactionsSkeleton />
 
-  return (
-    <div>
-      <h3>Available Credits</h3>
-      <p>{credits.nonNegativeQuantity}</p>
-    </div>
-  );
-}
-```
+## Can I bill teams and external customers, not just users?
 
-### Consuming credits (server-side)
+Yes. Every customer is a **user**, a **team**, or a **custom customer** (any external entity you key by ID). The billing surface - `createCheckoutUrl`, `useProducts`, `useItem`, `switchSubscription` - lives on user and team objects; custom customers are managed from the server SDK for items, products, and grants.
 
-When your app needs to consume credits (e.g. when a user sends an AI request), use `tryDecreaseQuantity` on the server. It's atomic and race-condition-safe - it will return `false` and do nothing if the balance would go negative.
+## Can I manage subscriptions in code?
 
-```typescript title="lib/credits.ts"
-import { hexclaveServerApp } from "@/stack/server";
-
-export async function consumeCredits(userId: string, amount: number) {
-  const user = await hexclaveServerApp.getUser(userId);
-  if (!user) throw new Error("User not found");
-
-  const credits = await user.getItem("credits");
-  const success = await credits.tryDecreaseQuantity(amount);
-
-  if (!success) {
-    throw new Error("Insufficient credits");
-  }
-
-  return { remaining: credits.quantity };
-}
-```
-
-<Info>
-  Always use `tryDecreaseQuantity()` instead of checking the balance and then decreasing. This prevents race conditions where multiple requests could consume more credits than available.
-</Info>
-
-You can also increase a balance with `credits.increaseQuantity(amount)` or decrease without the safety check using `credits.decreaseQuantity(amount)`.
-
-## Managing subscriptions
-
-### Switching plans
-
-When products belong to the same product line, customers can switch between them. For example, upgrading from Pro to Enterprise:
-
-```typescript title="app/components/upgrade-button.tsx"
-"use client";
-import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
-
-export default function UpgradeButton() {
-  const user = useUser({ or: 'redirect' });
-
-  return (
-    <button onClick={async () => {
-      await user.switchSubscription({
-        fromProductId: "prod_pro",
-        toProductId: "prod_enterprise",
-      });
-    }}>
-      Upgrade to Enterprise
-    </button>
-  );
-}
-```
-
-<Info>
-  Switching plans requires the customer to have a default payment method saved. The switch happens immediately and Stripe prorates the charge automatically.
-</Info>
-
-### Canceling a subscription
-
-`cancelSubscription` is called on the app instance rather than the user object:
-
-<Tabs>
-  <Tab title="Client Component">
-    ```typescript
-    "use client";
-    import { useHexclaveApp } from "@hexclave/next";  // replace `next` with the correct framework SDK package
-
-    export default function CancelButton({ productId }: { productId: string }) {
-      const app = useHexclaveApp();
-      return (
-        <button onClick={async () => {
-          await app.cancelSubscription({ productId });
-        }}>
-          Cancel Subscription
-        </button>
-      );
-    }
-    ```
-  </Tab>
-  <Tab title="Server">
-    ```typescript
-    // Cancel for the current user
-    await hexclaveServerApp.cancelSubscription({ productId: "prod_pro" });
-
-    // Cancel for a team
-    await hexclaveServerApp.cancelSubscription({
-      productId: "prod_team_plan",
-      teamId: "team-id",
-    });
-    ```
-  </Tab>
-</Tabs>
-
-## Billing and payment methods
-
-Customers can save a payment method for future purchases and plan switches. This is built on Stripe's SetupIntents.
+Yes. Switch a customer between plans in the same product line, or cancel, with a single call - proration and timing handled for you.
 
 ```typescript
-// Create a setup intent
-const setupIntent = await user.createPaymentMethodSetupIntent();
-// setupIntent.clientSecret - use with Stripe Elements to collect card details
-// setupIntent.stripeAccountId - the connected Stripe account ID
-
-// After the user completes Stripe's card form:
-const paymentMethod = await user.setDefaultPaymentMethodFromSetupIntent(
-  setupIntentId
-);
-// paymentMethod contains: id, brand, last4, exp_month, exp_year
-```
-
-To check if a customer has a payment method saved:
-
-```typescript
-// Client component (hook)
-const billing = user.useBilling();
-
-// Server component
-const billing = await user.getBilling();
-
-// billing.hasCustomer - whether a Stripe customer exists
-// billing.defaultPaymentMethod - card details or null
-```
-
-## Invoices
-
-List a customer's invoices for displaying billing history:
-
-```typescript
-// Client component (hook)
-const invoices = user.useInvoices();
-
-// Server component
-const invoices = await user.listInvoices();
-```
-
-Each invoice includes `createdAt`, `status` (`"draft"`, `"open"`, `"paid"`, `"uncollectible"`, `"void"`), `amountTotal` (in cents), and `hostedInvoiceUrl` (a link to Stripe's hosted invoice page).
-
-Invoices support pagination:
-
-```typescript
-const firstPage = await user.listInvoices({ limit: 10 });
-const secondPage = await user.listInvoices({
-  limit: 10,
-  cursor: firstPage.nextCursor,
-});
-```
-
-<Info>
-  Invoices are available for user and team customers only, not custom customers.
-</Info>
-
-## Granting products programmatically
-
-Sometimes you need to give a customer a product without going through checkout - free trials, admin grants, promotional offers, etc. Use `grantProduct` on the server:
-
-```typescript
-// Grant a pre-configured product to a user
-await hexclaveServerApp.grantProduct({
-  userId: "user-id",
-  productId: "prod_premium",
+await user.switchSubscription({
+  fromProductId: "pro_monthly",
+  toProductId: "enterprise_monthly",
 });
 
-// Grant to a team
-await hexclaveServerApp.grantProduct({
-  teamId: "team-id",
-  productId: "prod_team_plan",
-});
-
-// Grant to a custom customer
-await hexclaveServerApp.grantProduct({
-  customCustomerId: "external-org-123",
-  productId: "prod_enterprise",
-});
+await hexclaveServerApp.cancelSubscription({ productId: "pro_monthly" });
 ```
 
-You can also grant products with an **inline definition** - no pre-configured product needed. This is useful for one-off grants like bonus credits:
+You can also `grantProduct` directly - for trials, comps, or admin grants - with a pre-defined product or an inline one-off definition.
 
-```typescript
-await hexclaveServerApp.grantProduct({
-  userId: "user-id",
-  product: {
-    display_name: "Bonus Credits",
-    customer_type: "user",
-    server_only: true,
-    stackable: false,
-    prices: {
-      manual: { USD: "0" },
-    },
-    included_items: {
-      credits: { quantity: 100 },
-    },
-  },
-});
-```
+## Can I build and test before going live?
 
-If you have a reference to the user object already, you can also call `user.grantProduct({ productId })` directly.
+Yes. Flip on **test mode** and purchases are granted instantly for free - no real charge, no live round-trip - so you can wire up entitlements end to end before connecting a real account.
 
-## Customer types
+## What it costs, and what it doesn't do
 
-Hexclave supports three types of payment customers:
+Straight answers so there are no surprises:
 
-- **Users** - Individual user accounts. Users can manage their own purchases, billing, and invoices from the client SDK.
-- **Teams** - Team or organization accounts. Team admins can create checkouts, switch plans, and cancel subscriptions for their team.
-- **Custom customers** - External entities identified by an arbitrary string ID. Useful for integrations with external systems. Custom customers can only be managed via the server SDK and do not support billing or invoices.
+- **Platform fee** - Hexclave takes a **0.9%** fee on charges, on top of standard payment processing fees.
+- **Currency** - payments are processed in **USD** today.
+- **Not a marketplace** - Payments run through a single connected payment account per project. It isn't built for marketplace-style payouts to many sellers.
+- **Not locked in** - this is a convenience layer, not a cage. Use it because it saves you the billing plumbing, not because you have to.
 
-All payment methods (`createCheckoutUrl`, `useProducts`, `useItem`, `switchSubscription`, `useBilling`, `useInvoices`, etc.) are available on both user and team objects. For custom customers, use the top-level `hexclaveServerApp` methods with `customCustomerId`.
+## Start here
 
-## Dashboard
+1. [Set up Hexclave](/guides/getting-started/setup), then enable **Payments** in the dashboard.
+2. Connect your payment account under **Payments → Settings**, and turn on **test mode** while you build.
+3. Define a product (with items, if you want entitlements), then call `user.createCheckoutUrl(...)`.
 
-The dashboard gives you full visibility and control over your payments:
-
-- **Product Lines** - Group products into mutually exclusive tiers. Configure in **Payments -> Product Lines**.
-- **Products & Items** - Create and edit products, set pricing, and configure included items. In **Payments -> Products & Items**.
-- **Customers** - View item balances per customer, manually adjust quantities (with optional expiration), and grant products directly. In **Payments -> Customers**.
-- **Transactions** - See all payment activity, filter by type and customer, view details, and issue refunds. In **Payments -> Transactions**.
-- **Payouts** - View payout information. In **Payments -> Payouts**.
-- **Settings** - Connect Stripe, toggle test mode, configure payment methods, and block new purchases. In **Payments -> Settings**.
-
-### Payment emails
-
-Email notifications are sent automatically on payment events:
-
-- **Payment Receipt** - Sent on successful payment with product details, amount, and receipt link
-- **Payment Failed** - Sent on failed payment with product name, amount, and failure reason
-
-These apply to both one-time purchases and subscription renewals. Customize them in **Emails -> Templates**.
-
-## Test mode
-
-During development, enable test mode in **Payments -> Settings**. All purchases will be free and no real money is charged - products are granted immediately without going through Stripe.
-
-When you're ready to test with real Stripe flows (but still using test credentials), disable Stack's test mode and use Stripe's test card numbers:
-
-- **Success**: `4242 4242 4242 4242`
-- **Decline**: `4000 0000 0000 0002`
-- **Insufficient Funds**: `4000 0000 0000 9995`
-
-See [Stripe's testing documentation](https://stripe.com/docs/testing) for more test scenarios.
+Ready for the details - products, items, subscriptions, billing, invoices, refunds, and grants? Start with [Payments setup](./setup).

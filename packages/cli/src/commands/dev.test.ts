@@ -3,7 +3,56 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordLocalDashboardProcess } from "../lib/dev-env-state.js";
-import { configErrorLogPrefix, dashboardEnvWithStatePath, devDashboardCommandFromEnv, isHeartbeatResponse, isVersionNewer, killLocalDashboard, logConfigSyncEvents, processExists, runChildProcess, shouldRestartDashboard } from "./dev.js";
+import { composeDevChildEnv, configErrorLogPrefix, dashboardEnvWithStatePath, devDashboardCommandFromEnv, isHeartbeatResponse, isVersionNewer, killLocalDashboard, logConfigSyncEvents, processExists, runChildProcess, shellChildCommand, shouldRestartDashboard, validateDevCommandSelection } from "./dev.js";
+
+describe("validateDevCommandSelection", () => {
+  it("rejects combining --service-id with a positional command", () => {
+    expect(() => validateDevCommandSelection("web", ["pnpm", "dev"]))
+      .toThrow("Cannot combine --service-id <id> with a positional command after --");
+  });
+
+  it("preserves service-only and command-only modes", () => {
+    expect(() => validateDevCommandSelection("web", [])).not.toThrow();
+    expect(() => validateDevCommandSelection(undefined, ["pnpm", "dev"])).not.toThrow();
+  });
+});
+
+describe("shellChildCommand", () => {
+  it("wraps the command line in /bin/sh on POSIX platforms", () => {
+    expect(shellChildCommand("pnpm dev --port 3000", "darwin")).toEqual({
+      command: "/bin/sh",
+      args: ["-c", "pnpm dev --port 3000"],
+    });
+  });
+
+  it("defers to spawn's shell mode on Windows (quoting-safe)", () => {
+    // Hand-rolling the cmd.exe argv would make Node MSVCRT-escape embedded
+    // double quotes (`"` -> `\"`), which cmd does not parse — spawn's own
+    // shell mode is the only quoting-safe way to run a command line.
+    expect(shellChildCommand('node -e "console.log(1)"', "win32")).toEqual({
+      command: 'node -e "console.log(1)"',
+      args: [],
+      shell: true,
+    });
+  });
+});
+
+describe("composeDevChildEnv", () => {
+  it("lets the session credentials win over service env vars, which win over the process env", () => {
+    // The ordering IS the contract: a stale hexclave.* value baked into the
+    // config file must not shadow the dev session's live credentials.
+    expect(composeDevChildEnv(
+      { FROM_PROCESS: "process", SHADOWED_BY_SERVICE: "process", HEXCLAVE_PROJECT_ID: "process" },
+      { SHADOWED_BY_SERVICE: "service", HEXCLAVE_PROJECT_ID: "stale-config-value", FROM_SERVICE: "service" },
+      { HEXCLAVE_PROJECT_ID: "session" },
+    )).toEqual({
+      FROM_PROCESS: "process",
+      SHADOWED_BY_SERVICE: "service",
+      FROM_SERVICE: "service",
+      HEXCLAVE_PROJECT_ID: "session",
+    });
+  });
+});
 
 describe("isVersionNewer", () => {
   it("compares core versions numerically", () => {

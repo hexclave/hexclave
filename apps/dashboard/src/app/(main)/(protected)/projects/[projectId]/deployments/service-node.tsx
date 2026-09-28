@@ -17,7 +17,10 @@ type ServiceNodeProps = {
 
 export function ServiceNode({ service, variant, selected, dragging, linked, onPointerDown }: ServiceNodeProps) {
   const meta = getServiceTypeMeta(service.type);
-  const accent = getAccentClasses(meta.accent);
+  // Colour comes from the service's deployment SOURCE, not its type — with
+  // several repositories on one map, whose repository a service belongs to is
+  // what a reader needs at a glance, and every container node has the same type.
+  const accent = getAccentClasses(service.accent);
   const Icon = meta.icon;
   const status = STATUS_META.get(service.status);
   const referenceCount = service.envVars.filter((e) => e.type === "connection").length;
@@ -71,8 +74,20 @@ export function ServiceNode({ service, variant, selected, dragging, linked, onPo
           )}
         </div>
 
-        <div className={cn("truncate text-xs text-muted-foreground", variant.mono && "font-mono")}>
-          {service.source}
+        <div className="flex min-w-0 items-center gap-1.5">
+          {/* The deploy file this came from. Colour alone can't be read as an
+              identity — it only groups — so the node names the source too. */}
+          {service.sourceId != null && (
+            <span
+              className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium", accent.chip)}
+              title={`Deployment source: ${service.sourceId}`}
+            >
+              {service.sourceId}
+            </span>
+          )}
+          <span className={cn("min-w-0 truncate text-xs text-muted-foreground", variant.mono && "font-mono")}>
+            {service.source}
+          </span>
         </div>
 
         <div className="mt-auto flex items-center gap-3 text-[11px] text-muted-foreground/80">

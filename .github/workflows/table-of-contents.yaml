@@ -7,6 +7,8 @@ on:
       - dev
   pull_request:
 
+# Grouped per ref (not per sha) on purpose: this pushes a commit back to the branch, so runs must stay
+# serialized to avoid racing pushes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}

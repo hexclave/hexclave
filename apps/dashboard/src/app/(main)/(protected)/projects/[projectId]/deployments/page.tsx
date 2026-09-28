@@ -1,7 +1,7 @@
 import PageClient from "./page-client";
 
 export const metadata = {
-  title: "Deployments",
+  title: "Deploy",
 };
 
 export default function Page() {

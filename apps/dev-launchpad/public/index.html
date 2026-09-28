@@ -129,6 +129,7 @@
         { suffix: "31", label: "OTel collector" },
         { suffix: "21", label: "S3 mock" },
         { suffix: "22", label: "Freestyle mock" },
+        { suffix: "48", label: "Fly mock (Marshal)" },
         { suffix: "23", label: "Stripe mock" },
         { suffix: "24", label: "LocalStack Gateway (AWS mock)" },
         { suffix: "25", label: "QStash mock" },
@@ -174,6 +175,16 @@
             "Payments/Bulldozer HTTP API",
           ],
           img: "https://www.svgrepo.com/show/349299/database.svg",
+          importance: 2,
+        },
+        {
+          name: "Marshal",
+          portSuffix: "47",
+          description: [
+            "Src: ./apps/marshal",
+            "Fly.io deployments runtime HTTP API",
+          ],
+          img: "https://www.svgrepo.com/show/340122/datastore.svg",
           importance: 2,
         },
         {

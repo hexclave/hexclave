@@ -40,5 +40,10 @@ export function getSafeClickhouseErrorMessage(error: unknown, query: string) {
   if (getNodeEnvironment() === "development" || getNodeEnvironment() === "test") {
     return `${DEFAULT_CLICKHOUSE_ERROR_MESSAGE}${!isKnown ? "\n\nThis error is not known and you should probably add it to the safe or unsafe codes in clickhouse-errors.ts." : ""}\n\nAs you are in development mode, you can see the full error: ${errorCode} ${message}`;
   }
-  return DEFAULT_CLICKHOUSE_ERROR_MESSAGE;
+  // The numeric ClickHouse error code alone leaks nothing about the schema or data (unlike the
+  // message, which echoes table/column names), but it is the only thing that lets us tell a
+  // schema mismatch (47/386) apart from a permission problem (497) or a resource limit when a
+  // customer reports the generic message from production. Without it, known-unsafe errors are
+  // neither shown to the user nor reported anywhere, so such reports are undiagnosable.
+  return `${DEFAULT_CLICKHOUSE_ERROR_MESSAGE} (ClickHouse error code ${errorCode})`;
 }

@@ -1,4 +1,4 @@
-ARG NODE_VERSION=22.21.1
+ARG NODE_VERSION=24.19.0
 
 # Base
 FROM node:${NODE_VERSION} AS base
@@ -14,8 +14,10 @@ ENV PATH=$PNPM_HOME:$PNPM_HOME/bin:$PATH
 
 RUN corepack enable
 RUN corepack prepare pnpm@11.5.0 --activate
-RUN pnpm add -g turbo
-RUN pnpm add -g tsx
+# Pinned: unpinned global installs mean an upstream release can change image builds without a commit
+# here (turbo 2.10.11 changed prune's gitignore handling and broke this build).
+RUN pnpm add -g turbo@2.10.11
+RUN pnpm add -g tsx@4.23.12
 
 
 # Prune stage
@@ -26,7 +28,9 @@ COPY . .
 RUN tsx ./scripts/generate-sdks.ts
 
 # https://turbo.build/repo/docs/guides/tools/docker
-RUN turbo prune --scope=@hexclave/backend --scope=@hexclave/dashboard --scope=@hexclave/template --docker
+# The SDK packages generated above (packages/js, packages/next, ...) are gitignored, so prune must not
+# honor .gitignore or their sources would be missing from out/full and the build below would fail.
+RUN turbo prune --scope=@hexclave/backend --scope=@hexclave/dashboard --scope=@hexclave/template --docker --use-gitignore=false
 
 
 
@@ -92,6 +96,16 @@ COPY --from=builder --chown=node:node /app/apps/backend/package.json ./apps/back
 # Add the entrypoint script
 COPY ./docker/server/entrypoint.sh .
 RUN chmod +x entrypoint.sh
+
+# Hash the complete assembled runtime tree once while building the image. The
+# entrypoint uses this manifest to invalidate persistent runtime copies when any
+# bundled backend, dashboard, workspace, or entrypoint artifact changes. Include
+# entry types, modes, symlink targets, and regular-file contents, but not mtimes.
+RUN { \
+      find /app -mindepth 1 ! -path /app/.stack-runtime-build-identity -printf 'entry\t%y\t%m\t%p\t%l\n'; \
+      find /app -mindepth 1 ! -path /app/.stack-runtime-build-identity -type f -exec sha256sum {} +; \
+    } | LC_ALL=C sort | sha256sum | cut -d ' ' -f1 > /tmp/stack-runtime-build-identity && \
+    mv /tmp/stack-runtime-build-identity /app/.stack-runtime-build-identity
 
 WORKDIR /app
 

@@ -21,7 +21,7 @@ Requirements:
 3. Inspect this repository and figure out the correct default branch and Hexclave config file path yourself (common names include \`hexclave.config.ts\` or \`stack.config.ts\`). Do not ask me for those values.
 4. The job should:
    - Check out the repository
-   - Set up Node.js 20
+   - Set up Node.js 24
    - Install dependencies using the repo's package manager (detect from the lockfile: pnpm, yarn, bun, or npm)
    - Run: \`npx --yes @hexclave/cli@latest config push --config-file "$HEXCLAVE_CONFIG_PATH" --source github --source-repo "$HEXCLAVE_SOURCE_REPO" --source-path "$HEXCLAVE_CONFIG_PATH" --source-workflow-path "$HEXCLAVE_SOURCE_WORKFLOW_PATH"\`
 5. Pass these environment variables into the push step:
@@ -90,7 +90,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
       # Install the repo's dependencies so the config file's SDK import (e.g.
       # \`@hexclave/js\`) — and any other package it imports — resolves when the
       # CLI evaluates it. The package manager is detected from the lockfile.

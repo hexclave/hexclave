@@ -2,7 +2,7 @@ import { useAdminApp, useProjectId } from "@/app/(main)/(protected)/projects/[pr
 import { useRouter } from "@/components/router";
 import { Button, cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui";
 import { ALL_APPS_FRONTEND, AppFrontend, getAppPath, getDocumentationHref } from "@/lib/apps-frontend";
-import { isAppEnabled } from "@/lib/apps-utils";
+import { getAppEnableConfigUpdate, isAppEnabled } from "@/lib/apps-utils";
 import { useUpdateConfig } from "@/components/config-update";
 import { CheckIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
 import { ALL_APPS, AppId, getParentAppId } from "@hexclave/shared/dist/apps/apps-config";
@@ -88,7 +88,9 @@ export function AppSquare({
   const performToggle = async () => {
     await updateConfig({
       adminApp,
-      configUpdate: { [`apps.installed.${appId}.enabled`]: !isEnabled },
+      configUpdate: isEnabled
+        ? { [`apps.installed.${appId}.enabled`]: false }
+        : getAppEnableConfigUpdate(appId),
       pushable: true,
     });
     onToggleEnabled?.(!isEnabled);

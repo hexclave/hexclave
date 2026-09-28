@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PiledriverObject } from "../../databases/piledriver/index.js";
-import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf } from "./index.js";
+import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf, splitItemQuantityChangeWithExpiry } from "./index.js";
 import { asRecord, balanceAt, collect, customerGroup, initializedSnapshot, MONTH_MS, product, rowsBySortKey, set, subscription, type Snapshot } from "./schema-test-helpers.js";
 
 // Item-quantities parity suite: restores the ledger coverage from the retired bulldozer-server
@@ -319,22 +319,32 @@ describe("item quantities: split algorithm (expiring grants)", () => {
   // plus a zero-quantity *expire marker* at the expiry time that references that same grantId — so
   // expiry drops that specific grant's remaining rather than being a blind negative deduction.
   // splitChanges isn't stored in time order, so we sort by (effective time, then expiry).
-  const splitRows = async (snapshot: Snapshot, customerId: string) => {
-    const schema = createPaymentsSchema();
-    return (await rowsBySortKey(snapshot, schema.splitChanges, customerGroup(customerId)))
-      .map(row => asRecord(row.rowData))
+  const splitRows = (entries: PiledriverObject[]) => {
+    return entries
+      .flatMap(splitItemQuantityChangeWithExpiry)
+      .map(asRecord)
       .map(row => ({ quantity: Number(row.quantity), at: Number(row.txnEffectiveAtMillis), expiresAtMillis: row.expiresAtMillis, grantId: row.grantId ?? null, expireGrantId: row.expireGrantId ?? null }))
       .sort((a, b) => a.at - b.at || Number(a.expiresAtMillis ?? Infinity) - Number(b.expiresAtMillis ?? Infinity));
   };
+  const itemChange = (id: string, quantity: number, at: number, expiresWhen: number | null, compacted = false): PiledriverObject => ({
+    type: compacted ? "compacted-item-quantity-change" : "item-quantity-change",
+    index: 0,
+    txnId: `miqc:${id}`,
+    txnEffectiveAtMillis: at,
+    customerType: "user",
+    customerId: "u",
+    tenancyId: "t1",
+    itemId: "coins",
+    quantity,
+    expiresWhen,
+  });
 
   it("passes a non-expiring grant through as a single permanent row", async () => {
     /*
      * t=1000  +10 coins (no expiry)  ->  one row: +10 at 1000, no expiry, no expire marker.
      * A non-expiring grant is compacted, so it carries no grantId (nothing will ever expire it).
      */
-    let snapshot = await initializedSnapshot();
-    snapshot = await setManualChange(snapshot, manualChange("g", "u", "coins", 10, 1000, null));
-    expect(await splitRows(snapshot, "u")).toEqual([{ quantity: 10, at: 1000, expiresAtMillis: null, grantId: null, expireGrantId: null }]);
+    expect(splitRows([itemChange("g", 10, 1000, null, true)])).toEqual([{ quantity: 10, at: 1000, expiresAtMillis: null, grantId: null, expireGrantId: null }]);
   });
 
   it("splits an absolute-expiry grant into a grant row and a zero-quantity expire marker for that grant", async () => {
@@ -342,9 +352,7 @@ describe("item quantities: split algorithm (expiring grants)", () => {
      * t=1000  +10 coins, expires at 5000
      *   ->  +10 at 1000 (exp 5000, grantId G),  then  an expire marker at 5000 targeting grant G
      */
-    let snapshot = await initializedSnapshot();
-    snapshot = await setManualChange(snapshot, manualChange("g", "u", "coins", 10, 1000, 5000));
-    expect(await splitRows(snapshot, "u")).toEqual([
+    expect(splitRows([itemChange("g", 10, 1000, 5000)])).toEqual([
       { quantity: 10, at: 1000, expiresAtMillis: 5000, grantId: "miqc:g:0", expireGrantId: null },
       { quantity: 0, at: 5000, expiresAtMillis: null, grantId: null, expireGrantId: "miqc:g:0" },
     ]);
@@ -356,10 +364,10 @@ describe("item quantities: split algorithm (expiring grants)", () => {
      * t=100  +3 coins, expires at 300  (grant gB)
      *   ->  the two grants, then an expire marker at 200 for gA and at 300 for gB
      */
-    let snapshot = await initializedSnapshot();
-    snapshot = await setManualChange(snapshot, manualChange("gA", "u", "coins", 2, 100, 200));
-    snapshot = await setManualChange(snapshot, manualChange("gB", "u", "coins", 3, 100, 300));
-    expect(await splitRows(snapshot, "u")).toEqual([
+    expect(splitRows([
+      itemChange("gA", 2, 100, 200),
+      itemChange("gB", 3, 100, 300),
+    ])).toEqual([
       { quantity: 2, at: 100, expiresAtMillis: 200, grantId: "miqc:gA:0", expireGrantId: null },
       { quantity: 3, at: 100, expiresAtMillis: 300, grantId: "miqc:gB:0", expireGrantId: null },
       { quantity: 0, at: 200, expiresAtMillis: null, grantId: null, expireGrantId: "miqc:gA:0" },
@@ -548,6 +556,7 @@ describe("item quantities: full-pipeline integration", () => {
       customerId: "u-complex",
       paymentProvider: "test_mode",
       createdAtMillis: 22000,
+      renewalTargetSubscriptionId: null,
     });
     const owned = asRecord((await rowsBySortKey(snapshot, schema.ownedProducts, customerGroup("u-complex"))).at(-1)?.rowData ?? null);
     expect(asRecord(asRecord(owned.ownedProducts)["prod-complex"]).quantity).toBe(1);

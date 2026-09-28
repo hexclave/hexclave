@@ -1,7 +1,8 @@
 "use client";
 
 import { ALL_APPS_FRONTEND, hasNavigationItems } from "@/lib/apps-frontend";
-import { ALL_APPS, getParentAppId, type AppId } from "@hexclave/shared/dist/apps/apps-config";
+import { ALL_APPS, expandAppSoftRequirements, getParentAppId, type AppId } from "@hexclave/shared/dist/apps/apps-config";
+import type { EnvironmentConfigOverrideOverride } from "@hexclave/shared/dist/config/schema";
 
 type InstalledAppConfig = {
   enabled?: boolean,
@@ -24,17 +25,21 @@ export function getAppStageLabel(appId: AppId): string | null {
 }
 
 /**
- * Get all available app IDs, filtering out alpha apps in production
+ * Returns the apps that may be shown in discovery surfaces.
+ *
+ * Alpha apps stay hidden until explicitly enabled. Once enabled, they remain
+ * visible so users can navigate to and manage functionality they already use.
  */
+export function getAppIdsForListing(enabledAppIds: Iterable<AppId> = []): AppId[] {
+  const enabledAppIdSet = new Set(enabledAppIds);
+  return Object.keys(ALL_APPS)
+    .filter((appId): appId is AppId => Object.prototype.hasOwnProperty.call(ALL_APPS, appId))
+    .filter((appId) => ALL_APPS[appId].stage !== "alpha" || enabledAppIdSet.has(appId));
+}
+
+/** Get all app IDs that may be shown in discovery surfaces. */
 export function getAllAvailableAppIds(): AppId[] {
-  let apps = Object.keys(ALL_APPS) as AppId[];
-
-  // Filter out alpha apps in production
-  if (process.env.NODE_ENV !== "development") {
-    apps = apps.filter(appId => ALL_APPS[appId].stage !== "alpha");
-  }
-
-  return apps;
+  return getAppIdsForListing();
 }
 
 /**
@@ -74,5 +79,18 @@ export function getEnabledNavigableAppIds(installedApps: InstalledAppsMap): AppI
 export function getUninstalledAppIds(installedApps: AppId[]): AppId[] {
   const installedSet = new Set(installedApps);
   return getAllAvailableAppIds().filter(appId => !installedSet.has(appId));
+}
+
+/**
+ * Enables an app together with its recursively recommended apps. These are
+ * deliberately one-way defaults: disabling any app remains an independent
+ * action because soft requirements are guidance, not config constraints.
+ */
+export function getAppEnableConfigUpdate(appId: AppId): EnvironmentConfigOverrideOverride {
+  const update: EnvironmentConfigOverrideOverride = {};
+  for (const enabledAppId of expandAppSoftRequirements([appId])) {
+    update[`apps.installed.${enabledAppId}.enabled`] = true;
+  }
+  return update;
 }
 

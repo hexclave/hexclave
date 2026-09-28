@@ -1,0 +1,36 @@
+---
+title: "Drafts"
+description: "Compose emails in the dashboard, then send from the UI or with draftId."
+sidebarTitle: "Drafts"
+---
+
+Drafts are emails you compose in the Hexclave dashboard — not TSX files like [templates and themes](./templates-and-themes). Use them for one-off or campaign-style sends when you don't want to ship a template in code.
+
+## Create a draft
+
+Open **Emails → Drafts** in the dashboard:
+
+1. Create a blank draft, or **clone a template into a draft** to start from existing content.
+2. Edit the body (including TSX source with live preview), pick a theme, choose recipients, and optionally schedule a send time.
+3. Save. Active drafts stay editable until you send them; sent drafts move to history and can be tracked in the outbox.
+
+You can create and edit drafts while on the shared email server. On Shared, programmatic sends still go out wrapped as Hexclave dev emails; for production sender identity, configure SMTP, Resend, or Managed in the [cloud dashboard](https://app.hexclave.com). The dashboard may ask you to configure a custom server before sending manual mail from the UI.
+
+## Send a draft
+
+Send from the dashboard when you're ready, or trigger the same draft from your backend:
+
+```typescript
+await hexclaveServerApp.sendEmail({
+  userIds: ["user-id"],
+  draftId: "your-draft-id",
+});
+```
+
+`draftId` is one of the three content options on `sendEmail` (alongside `html` and `templateId`). Recipients, scheduling, and theme overrides work the same as any other send — see the [Emails guide](./guide).
+
+## Related
+
+- [Templates & themes](./templates-and-themes) - reusable TSX content and branding wrappers.
+- [Emails guide](./guide) - full `sendEmail` options, delivery, and server configuration.
+- [Emails overview](./overview) - high-level product overview.

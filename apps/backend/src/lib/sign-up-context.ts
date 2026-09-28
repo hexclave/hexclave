@@ -49,6 +49,7 @@ export function deserializeStoredSignUpRequestContext(data: Partial<StoredSignUp
 export function buildSignUpRuleOptions(params: {
   authMethod: SignUpAuthMethod,
   oauthProvider: string | null,
+  oauthAccountCreatedAtMillis: number | null,
   requestContext: BestEffortEndUserRequestContext | null,
   turnstileAssessment: SignUpTurnstileAssessment,
 }): SignUpRuleOptions {
@@ -58,6 +59,7 @@ export function buildSignUpRuleOptions(params: {
     ipAddress: params.requestContext?.ipAddress ?? null,
     ipTrusted: params.requestContext?.ipTrusted ?? null,
     countryCode: params.requestContext?.location?.countryCode ?? null,
+    oauthAccountCreatedAtMillis: params.oauthAccountCreatedAtMillis,
     requestContext: params.requestContext,
     turnstileAssessment: params.turnstileAssessment,
   };

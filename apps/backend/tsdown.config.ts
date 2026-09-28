@@ -10,7 +10,7 @@ import { createBasePlugin } from "../../configs/tsdown/plugins.ts";
 import { backendRuntimeExternalPackages, isBackendRuntimeExternalPackage } from "./scripts/runtime-external-packages.ts";
 // @ts-expect-error - the explicit .ts extension is required because tsdown loads this config via Node's
 // native ESM loader (type stripping), which doesn't resolve extensionless relative imports. Locally the
-// tsx fallback loader masks this, but CI/Vercel (Node 22) fail with "Cannot find module" without it.
+// tsx fallback loader masks this, but CI/Vercel (Node 24) fail with "Cannot find module" without it.
 import { getSentryRelease } from "./src/sentry-release.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -75,7 +75,7 @@ export default defineConfig({
   ],
   format: ["esm"],
   outDir: resolve(backendDir, "dist"),
-  target: "node22",
+  target: "node24",
   platform: "node",
   noExternal: shouldBundleDependency,
   inlineOnly: false,

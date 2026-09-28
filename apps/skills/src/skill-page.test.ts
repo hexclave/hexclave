@@ -71,7 +71,7 @@ describe("skill site pages", () => {
     expect(html).toContain("https://docs.hexclave.com/guides/getting-started/setup");
   });
 
-  it("serves a Deployments-specific setup prompt on /deployments", async () => {
+  it("serves a Deploy-specific setup prompt on /deployments", async () => {
     const html = await deploymentsGet(htmlRequest("https://skill.hexclave.com/deployments")).text();
 
     // The generic getting-started URL is what this page used to inherit from the
@@ -80,11 +80,11 @@ describe("skill site pages", () => {
     expect(html).toContain(`data-copy="Read https://skill.hexclave.com/deployments and use it to set up Hexclave in this folder"`);
   });
 
-  it("still serves the Deployments skill markdown to non-browser clients", async () => {
+  it("still serves the Deploy skill markdown to non-browser clients", async () => {
     const response = deploymentsGet(markdownRequest("https://skill.hexclave.com/deployments"));
 
     expect(response.headers.get("Content-Type")).toBe("text/markdown; charset=utf-8");
-    await expect(response.text()).resolves.toContain("# Hexclave Deployments");
+    await expect(response.text()).resolves.toContain("# Hexclave Deploy");
   });
 
   it("serves a Workflows-specific setup prompt on /workflows", async () => {

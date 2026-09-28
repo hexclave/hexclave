@@ -20,6 +20,7 @@ import {
   Typography,
 } from "@/components/ui";
 import { getPublicEnvVar } from "@/lib/env";
+import { buildSelectedOnboardingConfigFile } from "@/lib/setup-prompt";
 import { useUpdateConfig } from "@/components/config-update";
 import {
   ArrowsClockwiseIcon,
@@ -30,18 +31,17 @@ import {
   WebhooksLogoIcon,
 } from "@phosphor-icons/react";
 import { type AdminOwnedProject } from "@hexclave/next";
-import { type AppId } from "@hexclave/shared/dist/apps/apps-config";
+import { expandAppSoftRequirements, type AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { type EnvironmentConfigOverrideOverride } from "@hexclave/shared/dist/config/schema";
-import { previewTemplateSource } from "@hexclave/shared/dist/helpers/emails";
 import { runAsynchronously, runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DeploymentChoicePage,
   DomainSetupTransitionState,
+  EmailThemePicker,
   NewProjectEntryPage,
   OnboardingAppCard,
-  OnboardingEmailThemePreview,
   OnboardingPage,
   SetupNewProjectPage,
   WelcomeSlide,
@@ -118,6 +118,11 @@ export function ProjectOnboardingWizard(props: {
   const [paymentsSetupAction, setPaymentsSetupAction] = useState<"defer" | "connect" | null>(null);
   const previousProjectId = useRef<string | null>(null);
   const finalConfigSavePromiseRef = useRef<Promise<boolean> | null>(null);
+  // Soft requirements stay out of the picker UI, but still drive timeline/config.
+  const effectiveSelectedApps = useMemo(
+    () => expandAppSoftRequirements(selectedApps),
+    [selectedApps],
+  );
 
   const runWithSaving = useCallback(async (fn: () => Promise<void>) => {
     setSaving(true);
@@ -176,30 +181,27 @@ export function ProjectOnboardingWizard(props: {
     props.mode === "deploy"
     || isLinkExistingMode
   );
+  const isPreselectedProductMode = props.mode === "setup-products";
   const paymentsAppEnabledInConfig = completeConfig.apps.installed.payments?.enabled === true;
   const includePayments = (
     status === "payments_setup"
     || paymentsAppEnabledInConfig
-    || (!isLinkExistingMode && selectedApps.has("payments"))
+    || (!isLinkExistingMode && effectiveSelectedApps.has("payments"))
   );
   const timelineSteps = useMemo(
-    () => isDeploymentMode ? buildLinkExistingTimeline(includePayments) : buildTimeline(includePayments),
-    [includePayments, isDeploymentMode],
+    () => isDeploymentMode
+      ? buildLinkExistingTimeline(includePayments)
+      : buildTimeline({
+        includeInitialSteps: !isPreselectedProductMode,
+        selectedApps: effectiveSelectedApps,
+      }),
+    [effectiveSelectedApps, includePayments, isDeploymentMode, isPreselectedProductMode],
   );
   const currentTimelineIndex = useMemo(() => getStepIndex(timelineSteps, status), [status, timelineSteps]);
-
-  useEffect(() => {
-    if (isLinkExistingMode || (status !== "apps_selection" && status !== "auth_setup")) {
-      return;
-    }
-
-    runAsynchronously(async () => {
-      const themes = await project.app.listEmailThemes();
-      await Promise.allSettled(themes.map((theme) =>
-        project.app.getEmailPreview({ themeId: theme.id, templateTsxSource: previewTemplateSource })
-      ));
-    }, { noErrorLogging: true });
-  }, [isLinkExistingMode, project.app, status]);
+  const getNextTimelineStep = useCallback((currentStep: ProjectOnboardingStatus): ProjectOnboardingStatus => {
+    const currentIndex = getStepIndex(timelineSteps, currentStep);
+    return timelineSteps[currentIndex + 1]?.id ?? "welcome";
+  }, [timelineSteps]);
 
   useEffect(() => {
     if (status !== "email_theme_setup" || !includePayments) {
@@ -294,6 +296,8 @@ export function ProjectOnboardingWizard(props: {
       if (next.has(appId)) {
         next.delete(appId);
       } else {
+        // Soft requirements are expanded via effectiveSelectedApps, not as visible
+        // picker selections — same silent pattern as always-on analytics.
         next.add(appId);
       }
       return next;
@@ -303,13 +307,13 @@ export function ProjectOnboardingWizard(props: {
   const buildOnboardingState = useCallback((): ProjectOnboardingState => {
     return createProjectOnboardingState({
       selectedConfigChoice,
-      selectedApps,
+      selectedApps: effectiveSelectedApps,
       selectedSignInMethods: signInMethods,
       selectedEmailThemeId: selectedEmailThemeId ?? completeConfig.emails.selectedThemeId,
       selectedPaymentsCountry,
       developmentEnvironment: isDevelopmentEnvironment,
     });
-  }, [completeConfig.emails.selectedThemeId, isDevelopmentEnvironment, selectedApps, selectedConfigChoice, selectedEmailThemeId, selectedPaymentsCountry, signInMethods]);
+  }, [completeConfig.emails.selectedThemeId, effectiveSelectedApps, isDevelopmentEnvironment, selectedConfigChoice, selectedEmailThemeId, selectedPaymentsCountry, signInMethods]);
 
   const saveCurrentOnboardingProgress = useCallback(async (nextStatus: ProjectOnboardingStatus) => {
     await saveOnboardingProgress({
@@ -331,7 +335,7 @@ export function ProjectOnboardingWizard(props: {
       configUpdate["auth.passkey.allowSignIn"] = true;
     }
     for (const appId of ALL_APP_IDS) {
-      if (selectedApps.has(appId)) {
+      if (effectiveSelectedApps.has(appId)) {
         configUpdate[`apps.installed.${appId}.enabled`] = true;
       }
     }
@@ -345,7 +349,7 @@ export function ProjectOnboardingWizard(props: {
       }
     }
     return configUpdate;
-  }, [completeConfig.emails.selectedThemeId, isDevelopmentEnvironment, selectedApps, selectedEmailThemeId, signInMethods]);
+  }, [completeConfig.emails.selectedThemeId, effectiveSelectedApps, isDevelopmentEnvironment, selectedEmailThemeId, signInMethods]);
 
   const buildEnvironmentOAuthConfigUpdate = useCallback(() => {
     const configUpdate: EnvironmentConfigOverrideOverride = {};
@@ -479,7 +483,7 @@ export function ProjectOnboardingWizard(props: {
     await runWithSaving(async () => {
       const nextOnboardingState = createProjectOnboardingState({
         selectedConfigChoice: "link-existing",
-        selectedApps,
+        selectedApps: effectiveSelectedApps,
         selectedSignInMethods: signInMethods,
         selectedEmailThemeId: selectedEmailThemeId ?? completeConfig.emails.selectedThemeId,
         selectedPaymentsCountry,
@@ -491,11 +495,11 @@ export function ProjectOnboardingWizard(props: {
     });
   };
 
-  const openPlainProductionOnboarding = useCallback(async () => {
+  const openDashboardManagedOnboarding = useCallback(async () => {
     await runWithSaving(async () => {
       const nextOnboardingState = createProjectOnboardingState({
         selectedConfigChoice: "create-new",
-        selectedApps,
+        selectedApps: effectiveSelectedApps,
         selectedSignInMethods: signInMethods,
         selectedEmailThemeId: selectedEmailThemeId ?? completeConfig.emails.selectedThemeId,
         selectedPaymentsCountry,
@@ -510,9 +514,9 @@ export function ProjectOnboardingWizard(props: {
     });
   }, [
     completeConfig.emails.selectedThemeId,
+    effectiveSelectedApps,
     runWithSaving,
     saveOnboardingProgress,
-    selectedApps,
     selectedEmailThemeId,
     selectedPaymentsCountry,
     setMode,
@@ -520,6 +524,31 @@ export function ProjectOnboardingWizard(props: {
   ]);
 
   if (props.status === "welcome") {
+    if (isPreselectedProductMode) {
+      const configFile = buildSelectedOnboardingConfigFile({
+        selectedApps: effectiveSelectedApps,
+        passwordEnabled: signInMethods.has("credential"),
+        otpEnabled: signInMethods.has("magicLink"),
+        passkeyEnabled: signInMethods.has("passkey"),
+        sharedOAuthProviderIds: SHARED_OAUTH_SIGN_IN_METHODS.filter((providerId) => signInMethods.has(providerId)),
+        emailThemeId: selectedEmailThemeId ?? completeConfig.emails.selectedThemeId,
+      });
+      return (
+        <SetupNewProjectPage
+          steps={timelineSteps}
+          currentStep="welcome"
+          disabled={saving}
+          onBack={handleBack ?? (() => {
+            runAsynchronouslyWithAlert(async () => {
+              await saveCurrentOnboardingProgress("apps_selection");
+              setMode(null);
+            });
+          })}
+          configFile={configFile}
+          onComplete={() => runAsynchronouslyWithAlert(finalizeOnboarding)}
+        />
+      );
+    }
     return (
       <WelcomeSlide
         steps={timelineSteps}
@@ -639,17 +668,6 @@ export function ProjectOnboardingWizard(props: {
       );
     }
 
-    if (props.mode === "setup-new") {
-      return (
-        <SetupNewProjectPage
-          steps={timelineSteps}
-          currentStep="config_choice"
-          onBack={() => setMode(null)}
-          disabled={saving}
-        />
-      );
-    }
-
     if (props.mode === "deploy") {
       return (
         <DeploymentChoicePage
@@ -663,7 +681,7 @@ export function ProjectOnboardingWizard(props: {
           showAdvancedProductionOption
           onSelect={(source) => {
             if (source === "plain-production") {
-              runAsynchronouslyWithAlert(openPlainProductionOnboarding);
+              runAsynchronouslyWithAlert(openDashboardManagedOnboarding);
               return;
             }
             runAsynchronouslyWithAlert(() => openDeploymentSource(source === "local" ? "deploy-local" : "deploy-github"));
@@ -678,7 +696,13 @@ export function ProjectOnboardingWizard(props: {
         currentStep="config_choice"
         onBack={handleBack}
         disabled={saving}
-        onSelect={setMode}
+        onSelect={(choice) => {
+          if (choice === "setup-new") {
+            runAsynchronouslyWithAlert(openDashboardManagedOnboarding);
+          } else {
+            setMode(choice);
+          }
+        }}
       />
     );
   }
@@ -707,7 +731,7 @@ export function ProjectOnboardingWizard(props: {
             className="w-full rounded-full"
             loading={saving}
             onClick={() => runAsynchronouslyWithAlert(() => runWithSaving(async () => {
-              await saveCurrentOnboardingProgress("auth_setup");
+              await saveCurrentOnboardingProgress(getNextTimelineStep("apps_selection"));
             }))}
           >
             Continue
@@ -810,7 +834,7 @@ export function ProjectOnboardingWizard(props: {
               if (signInMethods.size === 0) {
                 throw new Error("Select at least one sign-in method before continuing.");
               }
-              await saveCurrentOnboardingProgress("email_theme_setup");
+              await saveCurrentOnboardingProgress(getNextTimelineStep("auth_setup"));
             }))}
           >
             Continue
@@ -942,14 +966,11 @@ export function ProjectOnboardingWizard(props: {
           </DesignButton>
         }
       >
-        <Suspense fallback={<EmailThemeSetupStepSkeleton />}>
-          <EmailThemeSetupStep
-            project={props.project}
-            saving={saving}
-            selectedEmailThemeId={selectedEmailThemeId}
-            setSelectedEmailThemeId={setSelectedEmailThemeId}
-          />
-        </Suspense>
+        <EmailThemePicker
+          selectedEmailThemeId={selectedEmailThemeId}
+          setSelectedEmailThemeId={setSelectedEmailThemeId}
+          disabled={saving}
+        />
       </OnboardingPage>
     );
   }
@@ -1023,104 +1044,6 @@ export function ProjectOnboardingWizard(props: {
       </Alert>
       <div className="mt-4 flex justify-end">
         <Button onClick={() => router.push(`/projects/${encodeURIComponent(props.project.id)}`)}>Open Project</Button>
-      </div>
-    </div>
-  );
-}
-
-function EmailThemeSetupStepSkeleton() {
-  return (
-    <div className="grid gap-4 sm:grid-cols-3" data-testid="email-theme-step-skeleton">
-      {["theme-skeleton-one", "theme-skeleton-two", "theme-skeleton-three"].map((id) => (
-        <div
-          key={id}
-          className="relative flex flex-col overflow-hidden rounded-2xl bg-white/90 ring-1 ring-black/[0.06] dark:bg-white/[0.06] dark:ring-white/[0.10]"
-        >
-          <Skeleton className="aspect-[4/3] rounded-none border-b border-black/[0.06] bg-foreground/[0.08] dark:border-white/[0.06]" />
-          <div className="flex items-center justify-between gap-2 p-3">
-            <Skeleton className="h-4 w-28" />
-            <Skeleton className="h-5 w-5 rounded-full" />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function EmailThemeSetupStep({
-  project,
-  saving,
-  selectedEmailThemeId,
-  setSelectedEmailThemeId,
-}: {
-  project: AdminOwnedProject,
-  saving: boolean,
-  selectedEmailThemeId: string | null,
-  setSelectedEmailThemeId: (themeId: string) => void,
-}) {
-  const emailThemes = project.app.useEmailThemes();
-
-  return (
-    <div className="space-y-4">
-      {emailThemes.length === 0 && (
-        <DesignAlert
-          variant="warning"
-          title="No themes found"
-          description="Theme selection is temporarily unavailable. You can still continue."
-        />
-      )}
-      <div className="grid gap-4 sm:grid-cols-3">
-        {emailThemes.map((theme) => {
-          const isSelected = selectedEmailThemeId === theme.id;
-          return (
-            <button
-              key={theme.id}
-              type="button"
-              onClick={() => setSelectedEmailThemeId(theme.id)}
-              disabled={saving}
-              className={cn(
-                "relative flex flex-col overflow-hidden rounded-2xl text-left transition-[box-shadow,background-color] duration-150 hover:transition-none",
-                "disabled:cursor-not-allowed disabled:opacity-60",
-                isSelected
-                  ? cn(
-                      "bg-blue-500/[0.06] dark:bg-blue-500/[0.04] ring-1 ring-blue-500/40",
-                      "shadow-[0_12px_40px_-8px_rgba(59,130,246,0.45),0_0_1px_rgba(59,130,246,0.2)]",
-                      "dark:shadow-[0_14px_48px_-10px_rgba(96,165,250,0.38),0_0_1px_rgba(96,165,250,0.25)]",
-                    )
-                  : cn(
-                      "bg-white/90 dark:bg-white/[0.06]",
-                      "ring-1 ring-black/[0.06] hover:ring-black/[0.10] dark:ring-white/[0.10] dark:hover:ring-white/[0.14]",
-                    ),
-              )}
-            >
-              <div
-                className={cn(
-                  "aspect-[4/3] overflow-hidden border-b border-black/[0.06] dark:border-white/[0.06] bg-background transition-opacity duration-150",
-                  !isSelected && "opacity-[0.65]",
-                )}
-              >
-                <div style={{ transform: "scale(0.5)", transformOrigin: "top left", width: "200%", height: "200%" }}>
-                  <OnboardingEmailThemePreview adminApp={project.app} themeId={theme.id} />
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-2 p-3">
-                <Typography
-                  className={cn(
-                    "min-w-0 flex-1 text-sm font-medium transition-colors duration-150",
-                    isSelected ? "text-foreground" : "text-muted-foreground",
-                  )}
-                >
-                  {theme.displayName}
-                </Typography>
-                {isSelected && (
-                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white shadow-sm">
-                    <CheckCircleIcon className="h-4 w-4" weight="fill" />
-                  </div>
-                )}
-              </div>
-            </button>
-          );
-        })}
       </div>
     </div>
   );

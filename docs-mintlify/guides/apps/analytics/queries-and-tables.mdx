@@ -1,0 +1,291 @@
+---
+title: "Queries & Tables"
+description: "Inspect raw analytics rows and run read-only ClickHouse SQL against your project's dataset"
+sidebarTitle: "Queries & Tables"
+---
+
+The Analytics app stores your project's data in [ClickHouse](https://clickhouse.com/) and gives you two ways to explore it:
+
+- **Tables** - a point-and-click grid for browsing raw rows. Best for "what just happened?" triage.
+- **Queries** - a read-only ClickHouse SQL workspace for aggregation, joins, and reusable analysis.
+
+Both read from the same dataset and are automatically scoped to the current project and branch, so you never see another tenant's data and you never have to filter by `project_id` yourself.
+
+<Note>
+  This guide covers how to *use* Tables and Queries. For enabling the app and capturing events from the SDK, see the [Analytics overview](./overview).
+</Note>
+
+## What you can query
+
+Your dataset is exposed as a set of read-only views. Reference them directly by name (e.g. `events`) or fully-qualified (`default.events`) - both work.
+
+| Table | What it holds |
+|---|---|
+| `events` | Every analytics event (page views, clicks, token refreshes, sign-up rule triggers) |
+| `users` | One row per user, with profile, metadata, and restriction state |
+| `contact_channels` | Emails and other contact channels per user |
+| `teams` | Teams in your project |
+| `team_member_profiles` | Team membership profiles |
+| `team_permissions` | Team-scoped permissions granted to users |
+| `team_invitations` | Outstanding and historical team invites |
+| `project_permissions` | Project-scoped permissions granted to users |
+| `connected_accounts` | OAuth accounts linked to users |
+| `refresh_tokens` | Active and historical refresh tokens |
+| `email_outboxes` | Emails queued/sent by your project |
+| `notification_preferences` | Per-user notification category opt-in/out |
+
+<Tip>
+  Run `SHOW TABLES` or `DESCRIBE events` in the Queries workspace to discover columns at any time - both are allowed.
+</Tip>
+
+### The `events` table
+
+`events` is the table you'll use most. Its columns are:
+
+| Column | Type | Description |
+|---|---|---|
+| `event_type` | `LowCardinality(String)` | The event name, e.g. `$page-view`, `$click`, `$token-refresh`, `$sign-up-rule-trigger` |
+| `event_at` | `DateTime64(3, 'UTC')` | When the event occurred (UTC, millisecond precision) |
+| `data` | `JSON` | Event-specific payload (see [Working with the `data` payload](#working-with-the-data-payload)) |
+| `user_id` | `Nullable(String)` | The acting user, when authenticated |
+| `team_id` | `Nullable(String)` | Reserved; currently always `NULL` |
+| `refresh_token_id` | `Nullable(String)` | Session's refresh token, when applicable |
+| `session_replay_id` | `Nullable(String)` | Linked [session replay](./overview#session-replays), if one exists |
+| `session_replay_segment_id` | `Nullable(String)` | Replay segment that produced the event |
+| `project_id` / `branch_id` | `String` | Tenant identity - filtered automatically; you rarely need these |
+| `created_at` | `DateTime64(3, 'UTC')` | Ingestion time (usually a few ms after `event_at`) |
+
+<Warning>
+  `team_id` on `events` is reserved and currently always `NULL`. Don't build team-level analytics on it - join to `team_member_profiles` via `user_id` instead.
+</Warning>
+
+### Event types and their payloads
+
+The shape of `data` depends on `event_type`. The built-in event types are:
+
+| `event_type` | Captured by | Key `data` fields |
+|---|---|---|
+| `$page-view` | Client SDK | `path`, `url`, `referrer`, `title`, `entry_type`, `viewport_width`, `viewport_height`, `user_agent` |
+| `$click` | Client SDK | `tag_name`, `text`, `href`, `selector`, `url`, `path`, `x`/`y` (and scaled variants) |
+| `$token-refresh` | Server | `refresh_token_id`, `is_anonymous`, `ip_info` (`{ ip, is_trusted, country_code, region_code, city_name, ... }`) |
+| `$sign-up-rule-trigger` | Server | `rule_id`, `action` (`allow` / `reject` / `restrict` / `log`), `email`, `auth_method`, `oauth_provider` |
+
+## Tables
+
+Open **Analytics → Tables**, then pick a table from the sidebar (it opens on `events` by default). The grid shows every column the table returns, newest rows first.
+
+What you can do here:
+
+- **Search** - type in the filter to match text across all columns at once.
+- **Sort** - click any column header. Each table has a sensible default (e.g. `events` sorts by `event_at` descending).
+- **Toggle timestamps** - switch any date/time column between relative ("3 minutes ago") and absolute display from the **Columns** menu.
+- **Show/hide columns** - trim the grid to what you care about.
+- **Inspect a row** - click a row to open a detail dialog with every column and a pretty-printed view of the JSON `data` payload.
+- **Export** - download the current result set as CSV.
+
+Rows load incrementally as you scroll (50 at a time), so large tables stay responsive. Use Tables for fast incident triage; switch to Queries when you need to aggregate or correlate across rows.
+
+## Queries
+
+Open **Analytics → Queries** to get a SQL editor. Write a query, run it, and the results appear in the same grid (with the same sorting, search, and CSV export as Tables).
+
+A minimal starting point:
+
+```sql
+SELECT *
+FROM events
+ORDER BY event_at DESC
+LIMIT 100
+```
+
+### Automatic project scoping
+
+Every query runs against your current project and branch only. Row-level security injects the tenant filter for you, so this:
+
+```sql
+SELECT event_type, count() AS c
+FROM events
+GROUP BY event_type
+ORDER BY c DESC
+```
+
+returns only *your* events - no `WHERE project_id = ...` required. Adding explicit tenant filters is harmless but unnecessary, and you cannot override the scoping to read other tenants' data.
+
+### What's allowed
+
+The workspace is strictly read-only. You can run:
+
+- `SELECT` and `WITH` (CTEs)
+- `SHOW TABLES`, `SHOW GRANTS`, `DESCRIBE`, `EXPLAIN`
+
+Anything that writes or reaches outside the dataset is blocked, including `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE`, `DROP`, `TRUNCATE`, multi-statement scripts, and table functions like `file()`, `url()`, `remote()`, and `s3()`. Most `system.*` tables are off-limits too (table/column metadata is the exception).
+
+### Limits
+
+Queries run inside a budget so a single query can't overload the dataset:
+
+| Limit | Value |
+|---|---|
+| Max result rows | 10,000 |
+| Max result size | 10 MiB |
+| Timeout | Up to your plan's cap (Free 10s · Team 60s · Growth 300s) |
+
+If you hit the row or byte cap the query fails rather than returning a partial result, so always scope with `WHERE`, aggregate, or add a `LIMIT`. If a query times out, narrow the time range (`event_at >= now() - INTERVAL 1 DAY`) or pre-aggregate.
+
+### Parameterized queries
+
+Use ClickHouse's `{name:Type}` placeholders to keep values out of your SQL string and avoid escaping issues:
+
+```sql
+SELECT event_at, user_id, data.path
+FROM events
+WHERE event_type = {event_type:String}
+  AND event_at >= now() - INTERVAL {days:UInt32} DAY
+ORDER BY event_at DESC
+LIMIT 100
+```
+
+### Working with the `data` payload
+
+`data` is a real ClickHouse `JSON` column, so you can reach into it with dot notation and cast as needed:
+
+```sql
+SELECT
+  event_at,
+  data.path        AS path,
+  data.referrer    AS referrer
+FROM events
+WHERE event_type = '$page-view'
+  AND data.path = '/pricing'
+ORDER BY event_at DESC
+LIMIT 50
+```
+
+For values you want to treat as a specific type, cast explicitly:
+
+```sql
+SELECT CAST(data.email, 'Nullable(String)') AS email
+FROM events
+WHERE event_type = '$sign-up-rule-trigger'
+LIMIT 20
+```
+
+To discover which keys exist in a payload, expand them:
+
+```sql
+SELECT arrayJoin(JSONExtractKeys(toString(data))) AS key, count() AS c
+FROM events
+WHERE event_type = '$click'
+GROUP BY key
+ORDER BY c DESC
+```
+
+### Saving queries
+
+Save a query to reuse it later: queries live in **folders** in the sidebar. You can **Save** a new query, **Save As** to copy one, or overwrite the selected query after editing it. Selecting a saved query loads its SQL and runs it immediately. Deleting a folder removes the queries inside it.
+
+## Examples
+
+### Daily active users (last 7 days)
+
+```sql
+SELECT
+  toDate(event_at)       AS day,
+  uniqExact(user_id)     AS active_users
+FROM events
+WHERE event_at >= today() - INTERVAL 7 DAY
+  AND user_id IS NOT NULL
+GROUP BY day
+ORDER BY day
+```
+
+### Top pages by views (last 24 hours)
+
+```sql
+SELECT
+  data.path   AS path,
+  count()     AS views
+FROM events
+WHERE event_type = '$page-view'
+  AND event_at >= now() - INTERVAL 1 DAY
+GROUP BY path
+ORDER BY views DESC
+LIMIT 20
+```
+
+### Event volume per hour
+
+```sql
+SELECT
+  toStartOfHour(event_at) AS hour,
+  event_type,
+  count()                 AS events
+FROM events
+WHERE event_at >= now() - INTERVAL 1 DAY
+GROUP BY hour, event_type
+ORDER BY hour
+```
+
+### Most-clicked elements
+
+```sql
+SELECT
+  data.selector AS selector,
+  data.text     AS label,
+  count()       AS clicks
+FROM events
+WHERE event_type = '$click'
+  AND event_at >= now() - INTERVAL 7 DAY
+GROUP BY selector, label
+ORDER BY clicks DESC
+LIMIT 25
+```
+
+### Recent sign-up rule rejections
+
+```sql
+SELECT
+  event_at                              AS triggered_at,
+  CAST(data.email, 'Nullable(String)')  AS email,
+  CAST(data.rule_id, 'Nullable(String)') AS rule_id
+FROM events
+WHERE event_type = '$sign-up-rule-trigger'
+  AND CAST(data.action, 'Nullable(String)') = 'reject'
+ORDER BY event_at DESC
+LIMIT 100
+```
+
+### New users this week
+
+```sql
+SELECT id, primary_email, signed_up_at
+FROM users
+WHERE signed_up_at >= today() - INTERVAL 7 DAY
+ORDER BY signed_up_at DESC
+```
+
+### Token refreshes by country
+
+```sql
+SELECT
+  CAST(data.ip_info.country_code, 'Nullable(String)') AS country,
+  count()                                             AS refreshes
+FROM events
+WHERE event_type = '$token-refresh'
+  AND event_at >= now() - INTERVAL 30 DAY
+GROUP BY country
+ORDER BY refreshes DESC
+```
+
+## Tips & gotchas
+
+- **Events are eventually consistent.** New events are ingested asynchronously and can take a few seconds to appear. If a fresh event is missing, wait and re-run.
+- **Always bound your time range.** Filtering on `event_at` keeps queries fast and well under the result limits.
+- **Query the views, not internals.** Stick to the table names listed above (the `default.*` views). Internal physical tables aren't granted to the query runner and bypass the tenant safety policies.
+- **Metadata columns are strings.** On `users`, fields like `client_metadata` and `server_metadata` are stored as JSON-encoded `String`, so parse them with `JSONExtract*` functions rather than dot notation.
+- **Legacy rows may use camelCase keys.** Older `$sign-up-rule-trigger` rows can carry `ruleId` instead of `rule_id`; use `COALESCE` over both if you query far back in history.
+
+## Related
+
+- [Analytics Overview](./overview) - enabling the app and capturing events from the SDK.
+- [Sign-up Rules](../authentication/sign-up-rules) - the source of `$sign-up-rule-trigger` events.

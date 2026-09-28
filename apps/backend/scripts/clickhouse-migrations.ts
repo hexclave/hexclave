@@ -17,6 +17,18 @@ export async function runClickhouseMigrations() {
     client.command({ query: SYNC_METADATA_TABLE_SQL }),
   ]);
 
+  // Removing an app's schema definitions only keeps fresh installations clean. Drop the
+  // retired Growth views first, then their backing tables, so existing installations converge
+  // to the same schema without relying on dependencies or CASCADE behavior.
+  await Promise.all([
+    client.command({ query: "DROP VIEW IF EXISTS default.growth_daily_metrics" }),
+    client.command({ query: "DROP VIEW IF EXISTS default.growth_daily_ad_metrics" }),
+  ]);
+  await Promise.all([
+    client.command({ query: "DROP TABLE IF EXISTS analytics_internal.growth_daily_metrics" }),
+    client.command({ query: "DROP TABLE IF EXISTS analytics_internal.growth_daily_ad_metrics" }),
+  ]);
+
   // Create all tables in parallel
   await Promise.all([
     client.command({ query: EVENTS_TABLE_BASE_SQL }),

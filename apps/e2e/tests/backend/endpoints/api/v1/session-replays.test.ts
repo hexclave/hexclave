@@ -591,14 +591,14 @@ it("admin can list session replays, list chunks, and fetch events", async ({ exp
   const recordingId = uploadRes.body?.session_replay_id;
   expect(typeof recordingId).toBe("string");
 
-  const listRes = await niceBackendFetch("/api/v1/internal/session-replays", {
+  const listRes = await niceBackendFetch("/api/v1/session-replays", {
     method: "GET",
     accessType: "admin",
   });
   expect(listRes.status).toBe(200);
   expect(listRes.body?.items?.length).toBeGreaterThanOrEqual(1);
 
-  const chunksRes = await niceBackendFetch(`/api/v1/internal/session-replays/${recordingId}/chunks`, {
+  const chunksRes = await niceBackendFetch(`/api/v1/session-replays/${recordingId}/chunks`, {
     method: "GET",
     accessType: "admin",
   });
@@ -609,7 +609,7 @@ it("admin can list session replays, list chunks, and fetch events", async ({ exp
     throw new Error("Expected session replay chunks response to include an item id.");
   }
 
-  const eventsRes = await niceBackendFetch(`/api/v1/internal/session-replays/${recordingId}/chunks/${chunkId}/events`, {
+  const eventsRes = await niceBackendFetch(`/api/v1/session-replays/${recordingId}/chunks/${chunkId}/events`, {
     method: "GET",
     accessType: "admin",
   });
@@ -654,7 +654,7 @@ it("admin list session replays paginates without skipping items", async ({ expec
     },
   );
 
-  const first = await niceBackendFetch("/api/v1/internal/session-replays?limit=1", {
+  const first = await niceBackendFetch("/api/v1/session-replays?limit=1", {
     method: "GET",
     accessType: "admin",
   });
@@ -669,7 +669,7 @@ it("admin list session replays paginates without skipping items", async ({ expec
     throw new Error("Expected next_cursor to be a string.");
   }
 
-  const second = await niceBackendFetch(`/api/v1/internal/session-replays?limit=1&cursor=${encodeURIComponent(nextCursor)}`, {
+  const second = await niceBackendFetch(`/api/v1/session-replays?limit=1&cursor=${encodeURIComponent(nextCursor)}`, {
     method: "GET",
     accessType: "admin",
   });
@@ -702,7 +702,7 @@ it("admin can fetch a single session replay by id", async ({ expect }) => {
     throw new Error("Expected session replay id.");
   }
 
-  const res = await niceBackendFetch(`/api/v1/internal/session-replays/${recordingId}`, {
+  const res = await niceBackendFetch(`/api/v1/session-replays/${recordingId}`, {
     method: "GET",
     accessType: "admin",
   });
@@ -759,7 +759,7 @@ it("admin session replay endpoints expose the recording session's refresh token"
     throw new Error("Expected the signed-in session to be listed as the current session.");
   }
 
-  const single = await niceBackendFetch(`/api/v1/internal/session-replays/${encodeURIComponent(recordingId)}`, {
+  const single = await niceBackendFetch(`/api/v1/session-replays/${encodeURIComponent(recordingId)}`, {
     method: "GET",
     accessType: "admin",
   });
@@ -779,7 +779,7 @@ it("admin get session replay returns 404 for nonexistent id", async ({ expect })
   await Auth.fastSignUp();
 
   const fakeId = randomUUID();
-  const res = await niceBackendFetch(`/api/v1/internal/session-replays/${fakeId}`, {
+  const res = await niceBackendFetch(`/api/v1/session-replays/${fakeId}`, {
     method: "GET",
     accessType: "admin",
   });
@@ -800,7 +800,7 @@ it("admin get session replay returns 404 for nonexistent id", async ({ expect })
   `);
 });
 
-it("non-admin access cannot call single session replay endpoint", async ({ expect }) => {
+it("client access cannot call single session replay endpoint, but server access can", async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
   await Auth.fastSignUp();
@@ -816,7 +816,7 @@ it("non-admin access cannot call single session replay endpoint", async ({ expec
   const recordingId = upload.body?.session_replay_id;
   expect(typeof recordingId).toBe("string");
 
-  const clientRes = await niceBackendFetch(`/api/v1/internal/session-replays/${recordingId}`, {
+  const clientRes = await niceBackendFetch(`/api/v1/session-replays/${recordingId}`, {
     method: "GET",
     accessType: "client",
   });
@@ -827,9 +827,12 @@ it("non-admin access cannot call single session replay endpoint", async ({ expec
         "code": "INSUFFICIENT_ACCESS_TYPE",
         "details": {
           "actual_access_type": "client",
-          "allowed_access_types": ["admin"],
+          "allowed_access_types": [
+            "server",
+            "admin",
+          ],
         },
-        "error": "The x-hexclave-access-type header must be 'admin', but was 'client'. (The legacy x-stack-access-type header is also accepted.)",
+        "error": "The x-hexclave-access-type header must be 'server' or 'admin', but was 'client'. (The legacy x-stack-access-type header is also accepted.)",
       },
       "headers": Headers {
         "x-stack-known-error": "INSUFFICIENT_ACCESS_TYPE",
@@ -838,27 +841,37 @@ it("non-admin access cannot call single session replay endpoint", async ({ expec
     }
   `);
 
-  const serverRes = await niceBackendFetch(`/api/v1/internal/session-replays/${recordingId}`, {
+  // Server keys read session replays too: the SDK methods live on the server
+  // app, so a secret server key is sufficient. Only client access is rejected.
+  const serverRes = await niceBackendFetch(`/api/v1/session-replays/${recordingId}`, {
     method: "GET",
     accessType: "server",
   });
-  expect(serverRes).toMatchInlineSnapshot(`
-    NiceResponse {
-      "status": 401,
-      "body": {
-        "code": "INSUFFICIENT_ACCESS_TYPE",
-        "details": {
-          "actual_access_type": "server",
-          "allowed_access_types": ["admin"],
-        },
-        "error": "The x-hexclave-access-type header must be 'admin', but was 'server'. (The legacy x-stack-access-type header is also accepted.)",
-      },
-      "headers": Headers {
-        "x-stack-known-error": "INSUFFICIENT_ACCESS_TYPE",
-        <some fields may have been hidden>,
-      },
-    }
-  `);
+  expect(serverRes.status).toBe(200);
+  expect(serverRes.body.id).toBe(recordingId);
+});
+
+it("admin session replay endpoints reject non-UUID ids and cursors with a 400 instead of a database error", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Auth.fastSignUp();
+
+  // The id/cursor columns are Postgres UUIDs, so passing a malformed value
+  // through to Prisma used to surface as a 500 (22P02 invalid input syntax).
+  const malformed = "0a1b2c3d-not-a-uuid";
+  const validId = randomUUID();
+  const paths = [
+    `/api/v1/session-replays/${malformed}`,
+    `/api/v1/session-replays/${malformed}/events`,
+    `/api/v1/session-replays/${malformed}/chunks`,
+    `/api/v1/session-replays/${validId}/chunks?cursor=${malformed}`,
+    `/api/v1/session-replays/${malformed}/chunks/${validId}/events`,
+    `/api/v1/session-replays/${validId}/chunks/${malformed}/events`,
+    `/api/v1/session-replays?cursor=${malformed}`,
+  ];
+  for (const path of paths) {
+    const res = await niceBackendFetch(path, { method: "GET", accessType: "admin" });
+    expect({ path, status: res.status, code: res.body?.code }).toEqual({ path, status: 400, code: "SCHEMA_ERROR" });
+  }
 });
 
 it("admin list session replays rejects unknown cursor", async ({ expect }) => {
@@ -866,7 +879,7 @@ it("admin list session replays rejects unknown cursor", async ({ expect }) => {
   await Auth.fastSignUp();
 
   const cursor = randomUUID();
-  const res = await niceBackendFetch(`/api/v1/internal/session-replays?cursor=${encodeURIComponent(cursor)}`, {
+  const res = await niceBackendFetch(`/api/v1/session-replays?cursor=${encodeURIComponent(cursor)}`, {
     method: "GET",
     accessType: "admin",
   });
@@ -928,7 +941,7 @@ it("admin list chunks paginates and rejects a cursor from another session", asyn
   // Wait for ClickHouse to ingest both sessions' chunks before paginating
   let first: any;
   for (let attempt = 0; attempt < 30; attempt++) {
-    first = await niceBackendFetch(`/api/v1/internal/session-replays/${recording1}/chunks?limit=1`, {
+    first = await niceBackendFetch(`/api/v1/session-replays/${recording1}/chunks?limit=1`, {
       method: "GET",
       accessType: "admin",
     });
@@ -944,7 +957,7 @@ it("admin list chunks paginates and rejects a cursor from another session", asyn
     throw new Error("Expected next_cursor to be a string.");
   }
 
-  const second = await niceBackendFetch(`/api/v1/internal/session-replays/${recording1}/chunks?limit=1&cursor=${encodeURIComponent(nextCursor)}`, {
+  const second = await niceBackendFetch(`/api/v1/session-replays/${recording1}/chunks?limit=1&cursor=${encodeURIComponent(nextCursor)}`, {
     method: "GET",
     accessType: "admin",
   });
@@ -953,7 +966,7 @@ it("admin list chunks paginates and rejects a cursor from another session", asyn
   expect(second.body?.items?.[0]?.id).not.toBe(first.body?.items?.[0]?.id);
 
   // Cursor from another session should be rejected.
-  const otherChunks = await niceBackendFetch(`/api/v1/internal/session-replays/${recording2}/chunks?limit=1`, {
+  const otherChunks = await niceBackendFetch(`/api/v1/session-replays/${recording2}/chunks?limit=1`, {
     method: "GET",
     accessType: "admin",
   });
@@ -964,7 +977,7 @@ it("admin list chunks paginates and rejects a cursor from another session", asyn
     throw new Error("Expected otherCursor to be a string.");
   }
 
-  const bad = await niceBackendFetch(`/api/v1/internal/session-replays/${recording1}/chunks?cursor=${encodeURIComponent(otherCursor)}`, {
+  const bad = await niceBackendFetch(`/api/v1/session-replays/${recording1}/chunks?cursor=${encodeURIComponent(otherCursor)}`, {
     method: "GET",
     accessType: "admin",
   });
@@ -1013,7 +1026,7 @@ it("admin events endpoint does not allow fetching a chunk via the wrong session 
   expect(upload2.status).toBe(200);
   const recording2 = upload2.body?.session_replay_id;
 
-  const chunks = await niceBackendFetch(`/api/v1/internal/session-replays/${recording1}/chunks`, {
+  const chunks = await niceBackendFetch(`/api/v1/session-replays/${recording1}/chunks`, {
     method: "GET",
     accessType: "admin",
   });
@@ -1024,7 +1037,7 @@ it("admin events endpoint does not allow fetching a chunk via the wrong session 
     throw new Error("Expected chunk id.");
   }
 
-  const wrong = await niceBackendFetch(`/api/v1/internal/session-replays/${recording2}/chunks/${chunkId}/events`, {
+  const wrong = await niceBackendFetch(`/api/v1/session-replays/${recording2}/chunks/${chunkId}/events`, {
     method: "GET",
     accessType: "admin",
   });
@@ -1044,11 +1057,11 @@ it("admin events endpoint does not allow fetching a chunk via the wrong session 
   `);
 });
 
-it("non-admin access cannot call internal session replays endpoints", async ({ expect }) => {
+it("client access cannot call internal session replays endpoints, but server access can", async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Auth.fastSignUp();
 
-  const clientRes = await niceBackendFetch("/api/v1/internal/session-replays", {
+  const clientRes = await niceBackendFetch("/api/v1/session-replays", {
     method: "GET",
     accessType: "client",
   });
@@ -1059,9 +1072,12 @@ it("non-admin access cannot call internal session replays endpoints", async ({ e
         "code": "INSUFFICIENT_ACCESS_TYPE",
         "details": {
           "actual_access_type": "client",
-          "allowed_access_types": ["admin"],
+          "allowed_access_types": [
+            "server",
+            "admin",
+          ],
         },
-        "error": "The x-hexclave-access-type header must be 'admin', but was 'client'. (The legacy x-stack-access-type header is also accepted.)",
+        "error": "The x-hexclave-access-type header must be 'server' or 'admin', but was 'client'. (The legacy x-stack-access-type header is also accepted.)",
       },
       "headers": Headers {
         "x-stack-known-error": "INSUFFICIENT_ACCESS_TYPE",
@@ -1070,27 +1086,12 @@ it("non-admin access cannot call internal session replays endpoints", async ({ e
     }
   `);
 
-  const serverRes = await niceBackendFetch("/api/v1/internal/session-replays", {
+  const serverRes = await niceBackendFetch("/api/v1/session-replays", {
     method: "GET",
     accessType: "server",
   });
-  expect(serverRes).toMatchInlineSnapshot(`
-    NiceResponse {
-      "status": 401,
-      "body": {
-        "code": "INSUFFICIENT_ACCESS_TYPE",
-        "details": {
-          "actual_access_type": "server",
-          "allowed_access_types": ["admin"],
-        },
-        "error": "The x-hexclave-access-type header must be 'admin', but was 'server'. (The legacy x-stack-access-type header is also accepted.)",
-      },
-      "headers": Headers {
-        "x-stack-known-error": "INSUFFICIENT_ACCESS_TYPE",
-        <some fields may have been hidden>,
-      },
-    }
-  `);
+  expect(serverRes.status).toBe(200);
+  expect(Array.isArray(serverRes.body.items)).toBe(true);
 });
 
 it("groups batches from same refresh token into one session replay", async ({ expect }) => {
@@ -1144,7 +1145,7 @@ async function uploadEventBatch(options: {
 async function listReplays(queryParams: Record<string, string> = {}) {
   const params = new URLSearchParams(queryParams);
   const qs = params.toString();
-  return await niceBackendFetch(`/api/v1/internal/session-replays${qs ? `?${qs}` : ""}`, {
+  return await niceBackendFetch(`/api/v1/session-replays${qs ? `?${qs}` : ""}`, {
     method: "GET",
     accessType: "admin",
   });

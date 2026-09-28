@@ -11,7 +11,7 @@ import {
   aggregateSessionReplayChunksByReplayIds,
   querySessionReplayAdminRows,
   sessionReplayAdminRowToApiItem,
-} from "../session-replays/session-replay-admin-rows";
+} from "../../session-replays/session-replay-admin-rows";
 import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { DEFAULT_EMAIL_TEMPLATES } from "@hexclave/shared/dist/helpers/emails";
 import { deepPlainEquals, typedEntries } from "@hexclave/shared/dist/utils/objects";
@@ -38,8 +38,7 @@ export const FEATURED_APP_IDS = [
   "emails",
   "payments",
   "analytics",
-  "deployments-alpha",
-  "gtm",
+  "deploy",
 ] as const satisfies readonly AppId[];
 
 export type FeaturedAppId = (typeof FEATURED_APP_IDS)[number];
@@ -285,37 +284,32 @@ export async function loadProjectActivityMetrics(projectIds: string[]): Promise<
       async (projectIdChunk) => {
         const [userRowsResult, activityRowsResult] = await Promise.all([
           clickhouse.query({
-            // Deduplicate the ReplacingMergeTree rows to each user's latest
-            // version with an explicit argMax GROUP BY instead of `FINAL`.
-            // `FINAL` merges parts outside the aggregation pipeline. The
-            // candidate window can therefore exceed the per-query
-            // max_memory_usage cap even though a manual argMax dedup can spill
-            // to disk. Batching project IDs bounds the number of groups in
-            // each query; `(project_id, branch_id, id)` is the table's ORDER BY
-            // / dedup key, so grouping by it reproduces FINAL exactly. Since
-            // the grouping key matches that ORDER BY, this setting also lets
-            // ClickHouse stream the inner aggregation in order.
-            // Re-seeded rows can share a version, so break ties by insertion time.
+            // Deduplicate the ReplacingMergeTree rows with `FINAL` instead of
+            // an explicit argMax GROUP BY on the dedup key: argMax needs one
+            // aggregation state per user, which exceeds the per-query memory
+            // cap on user-heavy batches (even with external group-by spill),
+            // while FINAL is a streaming merge of sorted parts whose memory
+            // scales with part count, not user count. Combined with the
+            // project-ID batching below it stays far under the cap, and it
+            // matches the dedup semantics of the public `default.users` view.
+            // Note that deletion tombstones carry deletedAt as signed_up_at
+            // and thus usually live in a later monthly partition than the
+            // live row; FINAL still collapses the pair because it merges
+            // across partitions by default — so never enable
+            // do_not_merge_across_partitions_select_final on this table, or
+            // deleted users would be counted again (validated empirically).
             query: `
               SELECT
                 project_id AS projectId,
-                countIf(isAnonymous = 0) AS nonAnon,
-                countIf(isAnonymous = 1) AS anon
-              FROM (
-                SELECT
-                  project_id,
-                  argMax(is_anonymous, (sync_sequence_id, sync_created_at)) AS isAnonymous,
-                  argMax(sync_is_deleted, (sync_sequence_id, sync_created_at)) AS syncIsDeleted
-                FROM analytics_internal.users
-                WHERE branch_id = {branchId:String}
-                  AND project_id IN {projectIds:Array(String)}
-                GROUP BY project_id, branch_id, id
-              )
-              WHERE syncIsDeleted = 0
+                countIf(is_anonymous = 0) AS nonAnon,
+                countIf(is_anonymous = 1) AS anon
+              FROM analytics_internal.users FINAL
+              WHERE branch_id = {branchId:String}
+                AND project_id IN {projectIds:Array(String)}
+                AND sync_is_deleted = 0
               GROUP BY project_id
             `,
             query_params: { branchId, projectIds: projectIdChunk },
-            clickhouse_settings: { optimize_aggregation_in_order: 1 },
             format: "JSONEachRow",
           }),
           clickhouse.query({

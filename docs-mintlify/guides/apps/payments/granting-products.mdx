@@ -1,0 +1,65 @@
+---
+title: "Granting Products"
+description: "Give a customer a product without going through checkout"
+---
+
+Sometimes you need to give a customer a product without charging them - comps, promotional offers, or support access. Use `grantProduct` on the server. There is **no grant-product button** in the dashboard — from the dashboard, use [Create checkout](./checkout#creating-a-checkout-url-from-the-dashboard) (even in test mode) or adjust item quantities.
+
+A grant creates a real subscription or one-time product on the customer. It does **not** honor a configured [free trial](./products-and-pricing#free-trials) — access starts immediately. Pass `quantity` for stackable products (defaults to `1`).
+
+## Granting a configured product
+
+```typescript
+import { hexclaveServerApp } from "@/hexclave/server";
+
+// Grant a pre-configured product to a user
+await hexclaveServerApp.grantProduct({
+  userId: "user-id",
+  productId: "prod_premium",
+  quantity: 1,
+});
+
+// Grant to a team
+await hexclaveServerApp.grantProduct({
+  teamId: "team-id",
+  productId: "prod_team_plan",
+});
+
+// Grant to a custom customer
+await hexclaveServerApp.grantProduct({
+  customCustomerId: "external-org-123",
+  productId: "prod_enterprise",
+});
+```
+
+If you already have a reference to a **server** user or team object (for example from `hexclaveServerApp.getUser(userId)`), you can also call `user.grantProduct({ productId, quantity })` directly. This method is server-only.
+
+## Inline products
+
+You can also grant products with an **inline definition** - no pre-configured product needed. This is useful for one-off grants like bonus credits:
+
+```typescript
+import { hexclaveServerApp } from "@/hexclave/server";
+
+await hexclaveServerApp.grantProduct({
+  userId: "user-id",
+  product: {
+    display_name: "Bonus Credits",
+    customer_type: "user",
+    server_only: true,
+    stackable: false,
+    prices: {
+      manual: { USD: "0" },
+    },
+    included_items: {
+      credits: { quantity: 100 },
+    },
+  },
+});
+```
+
+## Related
+
+- [Items & Entitlements](./items-and-entitlements) - the credits and seats a grant hands out
+- [Checkout & Purchases](./checkout) - charge the customer instead
+- [Customer Types](./customers) - grant to users, teams, or custom customers

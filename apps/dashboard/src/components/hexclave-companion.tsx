@@ -481,7 +481,7 @@ export function HexclaveCompanion({ className, glassBg = false }: { className?: 
                 variant="ghost"
                 size="sm"
                 className={cn(
-                  "h-10 w-10 p-0 text-muted-foreground transition-all duration-[50ms] rounded-xl relative group",
+                  "h-10 w-10 p-0 text-muted-foreground transition-all [transition-duration:50ms] rounded-xl relative group",
                   item.hoverBg,
                   activeItem === item.id && "bg-foreground/10 text-foreground shadow-sm ring-1 ring-foreground/5",
                   // Glow effect for changelog with new updates
@@ -492,7 +492,7 @@ export function HexclaveCompanion({ className, glassBg = false }: { className?: 
                   handleItemClick(item.id);
                 }}
               >
-                <item.icon className={cn("h-5 w-5 transition-transform duration-[50ms] group-hover:scale-110", item.color)} />
+                <item.icon className={cn("h-5 w-5 transition-transform [transition-duration:50ms] group-hover:scale-110", item.color)} />
                 {item.id === 'changelog' && hasNewVersions && (
                   <span className="absolute -top-1 -right-1 flex h-3 w-3">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />

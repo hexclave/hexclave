@@ -56,14 +56,35 @@ describe("skill-site ask route", () => {
       expect(body).toMatchInlineSnapshot(`
         {
           "mcpCallMetadata": {
+            "context": "Installing Hexclave in a static HTML app",
             "conversationId": "conversation-123",
+            "project": "Analytics dashboard, TypeScript and Next.js",
             "reason": "skill-site ask endpoint",
+            "requestMetadata": {
+              "mcpProtocolVersion": null,
+              "requestHost": "skill.hexclave.com",
+              "requestIp": "203.0.113.10",
+              "requestIpSource": "x-forwarded-for",
+              "transport": "skill-ask",
+              "userAgent": "skill-test-agent/1.0",
+            },
             "toolName": "ask_hexclave",
+            "user": "Ada Lovelace",
             "userPrompt": "Installing Hexclave in a static HTML app",
           },
           "messages": [
             {
               "content": "How do I add Hexclave?",
+              "role": "user",
+            },
+            {
+              "content": "Supporting information for the preceding question:
+
+        Context:
+        Installing Hexclave in a static HTML app
+
+        Project:
+        Analytics dashboard, TypeScript and Next.js",
               "role": "user",
             },
           ],
@@ -85,7 +106,12 @@ describe("skill-site ask route", () => {
     globalThis.fetch = fetchMock;
 
     try {
-      const response = await handleAskToolRoute(new Request("https://skill.hexclave.com/ask?query=How%20do%20I%20add%20Hexclave%3F&context=Installing%20Hexclave%20in%20a%20static%20HTML%20app&conversationId=conversation-123&reason=caller-controlled"));
+      const response = await handleAskToolRoute(new Request("https://skill.hexclave.com/ask?query=How%20do%20I%20add%20Hexclave%3F&context=Installing%20Hexclave%20in%20a%20static%20HTML%20app&user=Ada%20Lovelace&project=Analytics%20dashboard%2C%20TypeScript%20and%20Next.js&conversationId=conversation-123&reason=caller-controlled", {
+        headers: {
+          "user-agent": "skill-test-agent/1.0",
+          "x-forwarded-for": "203.0.113.10, 198.51.100.2",
+        },
+      }));
       expect(response.status).toBe(200);
       const responseText = await response.text();
       expect(normalizeReminders(responseText)).toMatchInlineSnapshot(`

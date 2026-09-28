@@ -1,0 +1,83 @@
+---
+title: "Items & Entitlements"
+description: "Track and consume credits, seats, and API quota with race-safe item balances"
+---
+
+Items are the building blocks of entitlements. Instead of just recording that a customer "bought the Pro plan," Hexclave tracks the quantifiable things that plan grants - **credits**, **seats**, **API calls** - as item balances on the customer, and keeps them in sync as customers buy, consume, renew, and churn.
+
+When a product includes items like "100 credits" or "5 seats", those quantities are granted on purchase. Each included item is configured with:
+
+- **Quantity** - How much to grant
+- **Repeat** - An optional refresh interval (e.g. grant again every month), or `never`
+- **Expires** - When the grant expires: `never`, `when-purchase-expires`, or `when-repeated`
+
+## Checking item balances
+
+```typescript
+// Client component (hook - re-renders on changes)
+const credits = user.useItem("credits");
+
+// Server component
+const credits = await user.getItem("credits");
+```
+
+An item has two quantity fields:
+
+- `quantity` - The raw balance (can be negative if you've consumed more than granted)
+- `nonNegativeQuantity` - `Math.max(0, quantity)` for display purposes
+
+Here's a practical example - showing a credits counter:
+
+```typescript title="app/components/credits-widget.tsx"
+"use client";
+import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+export default function CreditsWidget() {
+  const user = useUser({ or: 'redirect' });
+  const credits = user.useItem("credits");
+
+  return (
+    <div>
+      <h3>Available Credits</h3>
+      <p>{credits.nonNegativeQuantity}</p>
+    </div>
+  );
+}
+```
+
+## Consuming credits (server-side)
+
+When your app needs to consume credits (e.g. when a user sends an AI request), use `tryDecreaseQuantity` on the server. It's a single transactional operation - it returns `false` and does nothing if the balance would go negative, so concurrent requests can't overspend.
+
+```typescript title="lib/credits.ts"
+import { hexclaveServerApp } from "@/hexclave/server";
+
+export async function consumeCredits(userId: string, amount: number) {
+  const user = await hexclaveServerApp.getUser(userId);
+  if (!user) throw new Error("User not found");
+
+  const credits = await user.getItem("credits");
+  const success = await credits.tryDecreaseQuantity(amount);
+
+  if (!success) {
+    throw new Error("Insufficient credits");
+  }
+
+  return { remaining: credits.quantity };
+}
+```
+
+<Info>
+  Always use `tryDecreaseQuantity()` instead of checking the balance and then decreasing. This prevents race conditions where multiple requests could consume more credits than available.
+</Info>
+
+You can also increase a balance with `credits.increaseQuantity(amount)` or decrease without the safety check using `credits.decreaseQuantity(amount)`. These consumption methods are **server-only** - client-side `useItem` returns a read-only balance.
+
+## Adjusting balances from the dashboard
+
+In **Payments -> Customers** you can view item balances per customer and manually adjust quantities (plus or minus, with an optional description) - useful for support credits, comps, or corrections. The dashboard dialog does not set an expiration on those adjustments.
+
+## Related
+
+- [Products & Pricing](./products-and-pricing) - attach items to a product
+- [Granting Products](./granting-products) - grant a one-off bundle of items

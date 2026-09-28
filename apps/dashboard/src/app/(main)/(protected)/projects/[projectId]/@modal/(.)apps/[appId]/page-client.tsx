@@ -5,7 +5,7 @@ import { AppStoreEntry } from "@/components/app-store-entry";
 import { useRouter } from "@/components/router";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui";
 import { ALL_APPS_FRONTEND, getAppPath } from "@/lib/apps-frontend";
-import { isAppEnabled } from "@/lib/apps-utils";
+import { getAppEnableConfigUpdate, isAppEnabled } from "@/lib/apps-utils";
 import { useUpdateConfig } from "@/components/config-update";
 import { AppId, getParentAppId } from "@hexclave/shared/dist/apps/apps-config";
 import { usePathname } from "next/navigation";
@@ -43,7 +43,7 @@ export default function AppDetailsModalPageClient({ appId }: { appId: AppId }) {
   const handleEnable = async () => {
     await updateConfig({
       adminApp,
-      configUpdate: { [`apps.installed.${appId}.enabled`]: true },
+      configUpdate: getAppEnableConfigUpdate(appId),
       pushable: true,
     });
   };

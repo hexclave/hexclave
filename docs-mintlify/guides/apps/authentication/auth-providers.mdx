@@ -8,11 +8,12 @@ Hexclave supports a variety of authentication providers to give your users flexi
 
 ## Overview
 
-Authentication providers determine how users can sign in to your application. Stack supports the following provider types:
+Authentication providers determine how users can sign in to your application. Hexclave supports the following provider types:
 
 - **Email/Password**: Traditional email and password authentication
 - **Magic Link**: Passwordless authentication via email links
 - **OAuth Providers**: Third-party sign-in with providers like Google, GitHub, Facebook, Microsoft, and more
+- **Custom OIDC**: Bring any OpenID Connect-compliant identity provider (Okta, Auth0, Keycloak, and others)
 - **Passkeys**: WebAuthn-based passwordless authentication
 
 ## Configuring Providers
@@ -28,15 +29,17 @@ Authentication providers determine how users can sign in to your application. St
     Toggle the providers you want to enable for your application.
   </Step>
   <Step title="Configure OAuth providers">
-    For OAuth providers, you can use Stack's shared keys for development or configure your own OAuth client ID and client secret for production.
+    For OAuth providers, you can use Hexclave's shared keys for development or configure your own OAuth client ID and client secret for production.
   </Step>
 </Steps>
 
 ## Shared vs. Custom OAuth Keys
 
 <Info>
-  For development and testing, Stack provides shared OAuth keys that work out of the box. For production, you should set up your own OAuth client credentials.
+  For development and testing, Hexclave provides shared OAuth keys that work out of the box. For production, you should set up your own OAuth client credentials. Custom OIDC providers always use your own credentials.
 </Info>
+
+A [development environment](/guides/going-further/local-vs-cloud-dashboard) typically uses shared keys. Configure your own client ID and secret in the [cloud dashboard](https://app.hexclave.com) before you launch.
 
 ### Shared Keys
 
@@ -93,12 +96,17 @@ For production use, configure your own OAuth client ID and client secret for eac
 
 ## Other Authentication Methods
 
+These aren't OAuth providers, but round out how users sign in and secure their accounts.
+
 <CardGroup cols={2}>
   <Card title="Passkey" icon="key" href="/guides/apps/authentication/auth-providers/passkey">
     WebAuthn-based passwordless authentication
   </Card>
   <Card title="Two-Factor Auth (2FA)" icon="shield-check" href="/guides/apps/authentication/auth-providers/two-factor-auth">
     TOTP-based two-factor authentication
+  </Card>
+  <Card title="Custom OIDC" icon="globe" href="/guides/apps/authentication/auth-providers/custom-oidc">
+    Bring any OpenID Connect identity provider (Okta, Auth0, Keycloak, and more). Team plan or above.
   </Card>
 </CardGroup>
 

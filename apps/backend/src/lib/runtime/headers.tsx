@@ -22,6 +22,9 @@ export function serializeSetCookie(name: string, value: string, options: Respons
   if (options.httpOnly === true) {
     parts.push("HttpOnly");
   }
+  if (options.sameSite != null) {
+    parts.push(`SameSite=${options.sameSite[0].toUpperCase()}${options.sameSite.slice(1)}`);
+  }
 
   return parts.join("; ");
 }
@@ -93,6 +96,21 @@ if (vitest != null) {
     const nameValuePair = serialized.split(";")[0];
     expect(nameValuePair).toBe("session-hint=a%20b");
     expect(parseCookieHeader(nameValuePair)).toEqual(new Map([["session-hint", "a b"]]));
+  });
+
+  test("serializes the independent TV refresh cookie security attributes", ({ expect }) => {
+    const serialized = serializeSetCookie("tv-refresh", "secret", {
+      path: "/api/latest/tv-displays",
+      secure: true,
+      httpOnly: true,
+      sameSite: "strict",
+      maxAge: 60,
+    });
+    expect(serialized).toContain("Path=/api/latest/tv-displays");
+    expect(serialized).toContain("Secure");
+    expect(serialized).toContain("HttpOnly");
+    expect(serialized).toContain("SameSite=Strict");
+    expect(serialized).toContain("Max-Age=60");
   });
 
   test("set() after delete() clears the pending deletion (last write wins)", async ({ expect }) => {

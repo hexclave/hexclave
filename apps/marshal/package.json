@@ -1,0 +1,36 @@
+{
+  "name": "@hexclave/marshal",
+  "version": "1.0.124",
+  "repository": "https://github.com/hexclave/hexclave",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "dev": "NODE_ENV=development tsx watch --clear-screen=false src/server.ts",
+    "build": "tsdown --config tsdown.config.ts",
+    "test": "vitest run",
+    "test:platform-domains:live": "tsx src/live-platform-domain-test-runner.ts",
+    "test:watch": "vitest watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint --ext .ts .",
+    "clean": "rimraf dist && rimraf node_modules"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1089.0",
+    "@aws-sdk/s3-request-presigner": "^3.1089.0",
+    "@elysiajs/node": "^1.4.5",
+    "dotenv": "^16.6.1",
+    "elysia": "^1.4.28"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "rimraf": "^5.0.5",
+    "tsdown": "^0.22.14",
+    "tsx": "4.15.5",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@11.5.0"
+}

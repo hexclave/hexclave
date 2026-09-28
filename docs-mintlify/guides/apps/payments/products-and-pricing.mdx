@@ -1,0 +1,54 @@
+---
+title: "Products & Pricing"
+description: "Define what you sell - products, prices, product lines, add-ons, and trials"
+---
+
+A **product** is anything a customer can buy: a subscription plan, a one-time purchase, or a credit pack. Configure your products in **Payments -> Products & Items**, or in `hexclave.config.ts` under `payments.products`.
+
+## Defining products
+
+Each product has:
+
+- **Display name** - What the customer sees
+- **Customer type** - Whether this product is for users, teams, or custom customers (see [Customer Types](./customers))
+- **Prices** - One or more prices, each with a currency amount and an optional billing interval (day, week, month, or year). Amounts are **decimal strings** like `"9.99"` or `"1000"` — not cent integers. Live charges are processed in **USD**.
+- **Included items** - Items granted when the product is purchased, with configurable quantity, repeat schedule, and expiration behavior (see [Items & Entitlements](./items-and-entitlements))
+
+A few additional options:
+
+- **Free trial** - Give customers a trial period before charging. Prefer setting this **on the price**; a product-level trial is a fallback. See [Free trials](#free-trials).
+- **Add-ons** - Set **isAddOnTo** to require the customer to already own a specific base product before purchasing this one. Every add-on base must live in the **same product line**.
+- **Server-only** - Hide the product (or an individual price) from client SDK responses. Useful for products that should only be granted programmatically.
+- **Stackable** - Allow multiple purchases of the same product (default is one per customer). Quantity is chosen on the [hosted checkout](./checkout#hosted-checkout) page.
+
+A recurring price can be **$0** (a free plan in a product line). One-time $0 prices are not sold through checkout — use [grantProduct](./granting-products) or test mode instead.
+
+## Product lines
+
+A **product line** groups products that are mutually exclusive. For example, a "Plan" product line might contain Free, Pro, and Enterprise - a customer can only hold one at a time. When they upgrade or downgrade, the old product is replaced.
+
+Assign products to a product line to power plan tiers and enable [subscription switching](./subscriptions). Configure lines in **Payments -> Product Lines**.
+
+<Info>
+  Add-ons are exempt from product-line exclusivity - a customer can own an add-on alongside their base product in the same line.
+</Info>
+
+## Free trials
+
+A free trial defers the first charge on a **recurring** price. Checkout still collects a card; it is not charged until the trial ends, and the billing cycle starts from that date. Customers get a **Trial Ending Soon** email beforehand.
+
+Configure the trial **on the price** in the price editor. A product-level trial still works as a fallback, but the price-level value wins when both are set.
+
+Trials cannot be combined with:
+
+- One-time (non-recurring) prices
+- $0 recurring prices
+- Durations longer than **730 days** (a processor limit)
+
+They also **do not run in test mode** — the product is granted immediately with no trial. [Plan switches](./subscriptions) do not start a new trial on the destination product. [grantProduct](./granting-products) also skips trials and creates an active subscription.
+
+## Related
+
+- [Items & Entitlements](./items-and-entitlements) - attach credits, seats, and quota to a product
+- [Checkout & Purchases](./checkout) - sell a product once it's defined
+- [Subscriptions](./subscriptions) - switching plans after a trial or paid period

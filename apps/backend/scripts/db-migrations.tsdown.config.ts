@@ -49,7 +49,7 @@ export default defineConfig({
   entry: [resolve(backendDir, 'scripts/db-migrations.ts')],
   format: ['esm'],
   outDir: resolve(backendDir, 'dist'),
-  target: 'node22',
+  target: 'node24',
   platform: 'node',
   noExternal: [...customNoExternal],
   inlineOnly: false,

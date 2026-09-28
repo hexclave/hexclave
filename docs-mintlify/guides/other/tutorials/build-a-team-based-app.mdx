@@ -17,7 +17,7 @@ If you have not installed Stack yet (handler routes, `HexclaveProvider`, environ
 
 ## Prerequisites
 
-- Hexclave installed as in [Build a SaaS with Hexclave](/guides/other/tutorials/build-a-saas-with-hexclave) (Next.js App Router examples below assume `hexclaveServerApp` in `stack/server.ts` and `@hexclave/next` in the app).
+- Hexclave installed as in [Build a SaaS with Hexclave](/guides/other/tutorials/build-a-saas-with-hexclave) (Next.js App Router examples below assume `hexclaveServerApp` in `hexclave/server.ts` and `@hexclave/next` in the app).
 - A project in the [dashboard](https://app.hexclave.com/projects) where you can edit **Teams** and **Team permissions**.
 
 <Note>
@@ -42,12 +42,12 @@ Use the **current user** as the scope: `listTeams` / `useTeams`, and `getTeam` /
   <Tab title="Server Component">
     ```tsx title="app/team/[teamId]/page.tsx"
     import Link from "next/link";
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     type PageProps = { params: { teamId: string } };
 
     export default async function TeamHomePage({ params }: PageProps) {
-      const user = await hexclaveServerApp.getUser({ or: "redirect" });
+      const user = await hexclaveServerApp.getUser({ or: "throw" });
       const team = await user.getTeam(params.teamId);
 
       if (!team) {
@@ -101,10 +101,10 @@ If your framework types route `params` as a `Promise` (newer Next.js), `await` t
   <Tab title="Server">
     ```tsx title="app/team/page.tsx"
     import Link from "next/link";
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function TeamsIndexPage() {
-      const user = await hexclaveServerApp.getUser({ or: "redirect" });
+      const user = await hexclaveServerApp.getUser({ or: "throw" });
       const teams = await user.listTeams();
 
       return (
@@ -179,7 +179,7 @@ export function CreateWorkspaceButton() {
 For imports, support tools, or other **server** jobs, `hexclaveServerApp.createTeam` creates a team at project scope (see [Teams](/guides/apps/teams/overview)); wire membership separately if your flow requires it.
 
 ```tsx title="scripts/provision-team.example.ts"
-import { hexclaveServerApp } from "@/stack/server";
+import { hexclaveServerApp } from "@/hexclave/server";
 
 export async function provisionEmptyTeam(displayName: string) {
   return await hexclaveServerApp.createTeam({ displayName });
@@ -226,12 +226,12 @@ Replace `export_reports` with a permission you created.
 <Tabs>
   <Tab title="Server Component">
     ```tsx title="app/team/[teamId]/reports/page.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     type PageProps = { params: { teamId: string } };
 
     export default async function ReportsPage({ params }: PageProps) {
-      const user = await hexclaveServerApp.getUser({ or: "redirect" });
+      const user = await hexclaveServerApp.getUser({ or: "throw" });
       const team = await user.getTeam(params.teamId);
       if (!team) {
         return <p>Workspace not found.</p>;
@@ -289,7 +289,7 @@ For listing effective permissions, use `listPermissions` / `usePermissions` ([RB
 ```tsx title="app/actions/reports.ts"
 "use server";
 
-import { hexclaveServerApp } from "@/stack/server";
+import { hexclaveServerApp } from "@/hexclave/server";
 
 export async function requestReportExportAction(teamId: string) {
   const user = await hexclaveServerApp.getUser({ or: "throw" });

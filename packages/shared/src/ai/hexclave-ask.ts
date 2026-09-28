@@ -38,6 +38,52 @@ export type HexclaveAskResult = {
   message: string,
 };
 
+export type HexclaveAskTransport = "skill-ask" | "mcp-ask-hexclave";
+
+export type HexclaveAskRequestMetadata = {
+  transport: HexclaveAskTransport,
+  requestIp: string | null,
+  requestIpSource: string | null,
+  userAgent: string | null,
+  requestHost: string | null,
+  mcpProtocolVersion: string | null,
+};
+
+function getBoundedHeader(headers: Headers, name: string, maxLength: number): string | null {
+  const value = headers.get(name)?.trim();
+  return value == null || value === "" ? null : value.slice(0, maxLength);
+}
+
+function getRequestIp(headers: Headers): Pick<HexclaveAskRequestMetadata, "requestIp" | "requestIpSource"> {
+  // These services run behind different deployment proxies. Keep the source next
+  // to the value because forwarded headers are only as trustworthy as that ingress.
+  const candidates = [
+    ["x-vercel-forwarded-for", getBoundedHeader(headers, "x-vercel-forwarded-for", 500)?.split(",")[0]?.trim()],
+    ["cf-connecting-ip", getBoundedHeader(headers, "cf-connecting-ip", 100)],
+    ["x-forwarded-for", getBoundedHeader(headers, "x-forwarded-for", 500)?.split(",")[0]?.trim()],
+    ["x-real-ip", getBoundedHeader(headers, "x-real-ip", 100)],
+  ];
+  const candidate = candidates.find((entry) => entry[1] != null && entry[1] !== "");
+  return {
+    requestIp: candidate?.[1]?.slice(0, 100) ?? null,
+    requestIpSource: candidate?.[0] ?? null,
+  };
+}
+
+export function getHexclaveAskRequestMetadata(
+  request: Request,
+  transport: HexclaveAskTransport,
+): HexclaveAskRequestMetadata {
+  const ip = getRequestIp(request.headers);
+  return {
+    transport,
+    ...ip,
+    userAgent: getBoundedHeader(request.headers, "user-agent", 1_000),
+    requestHost: new URL(request.url).host.slice(0, 255),
+    mcpProtocolVersion: getBoundedHeader(request.headers, "mcp-protocol-version", 100),
+  };
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -84,12 +130,38 @@ function getAiResponseText(response: AiQueryResponse): string {
   return contentText != null && contentText.length > 0 ? contentText : "(empty response)";
 }
 
+function getAskMessages(question: string, context?: string | null, project?: string | null): {
+  role: "user",
+  content: string,
+}[] {
+  const supplementalContext = [
+    context == null ? null : `Context:\n${context}`,
+    project == null ? null : `Project:\n${project}`,
+  ].filter((value): value is string => value != null);
+
+  if (supplementalContext.length === 0) {
+    return [{ role: "user", content: question }];
+  }
+
+  return [
+    { role: "user", content: question },
+    {
+      role: "user",
+      content: `Supporting information for the preceding question:\n\n${supplementalContext.join("\n\n")}`,
+    },
+  ];
+}
+
 export async function callHexclaveAskAi(options: {
   backendApiBaseUrl: string,
   question: string,
   reason: string,
   userPrompt: string,
+  context?: string | null,
+  user?: string | null,
+  project?: string | null,
   conversationId?: string | null,
+  requestMetadata: HexclaveAskRequestMetadata,
   timeoutMs?: number,
   onDiagnostic?: (diagnostic: HexclaveAskDiagnostic) => void,
 }): Promise<HexclaveAskResult> {
@@ -111,7 +183,7 @@ export async function callHexclaveAskAi(options: {
           speed: "fast",
           tools: ["docs"],
           systemPrompt: "docs-ask-ai",
-          messages: [{ role: "user", content: options.question }],
+          messages: getAskMessages(options.question, options.context, options.project),
           mcpCallMetadata: {
             // Both the skill.hexclave.com/ask endpoint and the MCP server's ask_hexclave tool
             // are the same docs assistant exposed through two transports, so they share one
@@ -119,7 +191,11 @@ export async function callHexclaveAskAi(options: {
             toolName: "ask_hexclave",
             reason: options.reason,
             userPrompt: options.userPrompt,
+            context: options.context,
+            user: options.user,
+            project: options.project,
             conversationId: options.conversationId,
+            requestMetadata: options.requestMetadata,
           },
         }),
         signal: controller.signal,

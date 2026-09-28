@@ -1,0 +1,16 @@
+{
+  "name": "freestyle-mock",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@react-email/components": "1.0.6",
+    "arktype": "2.1.20",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "secure-exec": "0.3.3"
+  }
+}

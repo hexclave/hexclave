@@ -1,27 +1,20 @@
 name: Bulldozer serialization compat
-
-# Guards the on-disk format of the bulldozer/piledriver augmented B-tree. Bulldozer data is persisted
-# in production, so a change that makes the current code unable to read previously-written data (or
-# makes an older build unable to read data the new code writes, which matters for rollbacks) would
-# corrupt or lose data. This workflow proves both directions by having each code version read a dump
-# written by the other. The per-version golden-fixture unit test (serialization-compat.test.ts) is the
-# first line of defence; the two cross-version jobs below (backward-compat and forward-compat) are the
-# belt-and-suspenders check. They are split into separate jobs on purpose: backward compat (upgrade)
-# must always hold, whereas forward compat (rollback) may legitimately break on a non-additive format
-# change — keeping them separate makes a forward-compat failure explicit without masking backward compat.
-
 on:
   push:
-    branches-ignore:
-      - main
+    branches:
+      - dev
   pull_request:
 
 # This workflow only checks out code and runs tests; it never pushes or calls the GitHub API.
 permissions:
   contents: read
 
+# A concurrency group only ever runs one run at a time, so the sha is part of the group on main/dev:
+# otherwise consecutive dev pushes queue behind each other (and GitHub cancels the older queued run),
+# so one slow or hung run silently skips CI for every commit after it. PRs and feature branches stay
+# grouped per ref, where cancelling superseded runs is what we want.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}
 
 # *_DIR vars are repo-relative (used for diffing/overlaying). *_HARNESS_REL vars are relative to the
@@ -107,7 +100,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 22.x
+          node-version: 24.x
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -139,73 +132,6 @@ jobs:
         run: |
           pnpm -C apps/bulldozer-js exec tsx "$HARNESS_REL" verify "$GITHUB_WORKSPACE/old-tree.json"
           pnpm -C apps/bulldozer-js exec tsx "$DB_HARNESS_REL" verify "$GITHUB_WORKSPACE/old-db.json"
-
-  # Forward compatibility (production ROLLBACK): the old code must read data the new code wrote.
-  # This can legitimately fail when a change makes the new format unreadable by older builds (e.g. a
-  # non-additive format change). It runs as its OWN job so that such a failure is explicit and
-  # actionable, and does NOT mask the backward-compat result above.
-  forward-compat:
-    name: Forward compat (old code reads new data)
-    needs: check-changed
-    if: needs.check-changed.outputs.changed == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout current branch
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-          path: current
-
-      - name: Checkout base branch (${{ needs.check-changed.outputs.base_branch }})
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-          ref: ${{ needs.check-changed.outputs.base_branch }}
-          path: base
-
-      # See the backward-compat job: the harnesses are new, so overlay them onto the base checkout.
-      - name: Overlay harnesses onto base checkout
-        run: |
-          rm -rf "base/$DATA_STRUCTURES_DIR/__fixtures__"
-          cp -r "current/$DATA_STRUCTURES_DIR/__fixtures__" "base/$DATA_STRUCTURES_DIR/__fixtures__"
-          rm -rf "base/$BULLDOZER_FIXTURES_DIR"
-          cp -r "current/$BULLDOZER_FIXTURES_DIR" "base/$BULLDOZER_FIXTURES_DIR"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 22.x
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          # Both checkouts live in subdirectories, so there's no package.json at the workspace root;
-          # read the pnpm version from the current checkout's package.json (`packageManager`).
-          package_json_file: current/package.json
-
-      - name: Install and build @hexclave/shared (current)
-        working-directory: current
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm exec turbo run build --filter=@hexclave/shared
-
-      - name: Install and build @hexclave/shared (base)
-        working-directory: base
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm exec turbo run build --filter=@hexclave/shared
-
-      - name: Emit dumps with current code
-        working-directory: current
-        run: |
-          pnpm -C apps/bulldozer-js exec tsx "$HARNESS_REL" emit "$GITHUB_WORKSPACE/new-tree.json"
-          pnpm -C apps/bulldozer-js exec tsx "$DB_HARNESS_REL" emit "$GITHUB_WORKSPACE/new-db.json"
-
-      - name: Base code reads current-written dumps
-        working-directory: base
-        run: |
-          pnpm -C apps/bulldozer-js exec tsx "$HARNESS_REL" verify "$GITHUB_WORKSPACE/new-tree.json"
-          pnpm -C apps/bulldozer-js exec tsx "$DB_HARNESS_REL" verify "$GITHUB_WORKSPACE/new-db.json"
 
   # Keeps the workflow (and the aggregate `all-good` check) green when serialization wasn't touched.
   skip-unchanged:

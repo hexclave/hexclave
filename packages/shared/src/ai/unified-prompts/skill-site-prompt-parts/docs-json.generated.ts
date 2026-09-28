@@ -79,6 +79,7 @@ const docsJson = {
             "pages": [
               "guides/going-further/cli",
               "guides/going-further/local-vs-cloud-dashboard",
+              "guides/going-further/hosted-vs-handler",
               "guides/going-further/hexclave-config"
             ]
           },
@@ -90,11 +91,13 @@ const docsJson = {
                 "icon": "/images/app-icons/authentication.svg",
                 "pages": [
                   "guides/apps/authentication/overview",
+                  "guides/apps/authentication/guide",
                   "guides/apps/authentication/user-onboarding",
                   "guides/apps/authentication/restricted-users",
                   "guides/apps/authentication/connected-accounts",
                   "guides/apps/authentication/jwts",
                   "guides/apps/authentication/sign-up-rules",
+                  "guides/apps/authentication/fraud-protection",
                   "guides/apps/authentication/cli-authentication",
                   {
                     "group": "All Auth Providers",
@@ -109,18 +112,51 @@ const docsJson = {
                       "guides/apps/authentication/auth-providers/google",
                       "guides/apps/authentication/auth-providers/linkedin",
                       "guides/apps/authentication/auth-providers/microsoft",
-                      "guides/apps/authentication/auth-providers/passkey",
                       "guides/apps/authentication/auth-providers/spotify",
                       "guides/apps/authentication/auth-providers/twitch",
+                      "guides/apps/authentication/auth-providers/x-twitter",
+                      "guides/apps/authentication/auth-providers/passkey",
                       "guides/apps/authentication/auth-providers/two-factor-auth",
-                      "guides/apps/authentication/auth-providers/x-twitter"
+                      "guides/apps/authentication/auth-providers/custom-oidc"
                     ]
                   }
                 ]
               },
-              "guides/apps/emails/overview",
-              "guides/apps/payments/overview",
-              "guides/apps/analytics/overview",
+              {
+                "group": "Emails",
+                "icon": "/images/app-icons/emails.svg",
+                "pages": [
+                  "guides/apps/emails/overview",
+                  "guides/apps/emails/guide",
+                  "guides/apps/emails/templates-and-themes",
+                  "guides/apps/emails/drafts"
+                ]
+              },
+              {
+                "group": "Payments",
+                "icon": "/images/app-icons/payments.svg",
+                "pages": [
+                  "guides/apps/payments/overview",
+                  "guides/apps/payments/setup",
+                  "guides/apps/payments/products-and-pricing",
+                  "guides/apps/payments/items-and-entitlements",
+                  "guides/apps/payments/checkout",
+                  "guides/apps/payments/subscriptions",
+                  "guides/apps/payments/billing-and-invoices",
+                  "guides/apps/payments/refunds",
+                  "guides/apps/payments/granting-products",
+                  "guides/apps/payments/customers"
+                ]
+              },
+              {
+                "group": "Analytics",
+                "icon": "/images/app-icons/analytics.svg",
+                "pages": [
+                  "guides/apps/analytics/overview",
+                  "guides/apps/analytics/queries-and-tables",
+                  "guides/apps/analytics/replays-and-clickmaps"
+                ]
+              },
               {
                 "group": "Teams",
                 "icon": "/images/app-icons/teams.svg",
@@ -129,7 +165,6 @@ const docsJson = {
                   "guides/apps/teams/team-selection"
                 ]
               },
-              "guides/apps/fraud-protection/overview",
               "guides/apps/rbac/overview",
               "guides/apps/api-keys/overview",
               "guides/apps/data-vault/overview",
@@ -256,6 +291,74 @@ const docsJson = {
     ]
   },
   "redirects": [
+    {
+      "source": "/sdk/objects/stack-app",
+      "destination": "/sdk/objects/hexclave-app"
+    },
+    {
+      "source": "/sdk/hooks/use-stack-app",
+      "destination": "/sdk/hooks/use-hexclave-app"
+    },
+    {
+      "source": "/rest-api/overview",
+      "destination": "/api/overview"
+    },
+    {
+      "source": "/getting-started/setup",
+      "destination": "/guides/getting-started/setup"
+    },
+    {
+      "source": "/docs/getting-started/setup",
+      "destination": "/guides/getting-started/setup"
+    },
+    {
+      "source": "/docs/next/getting-started/setup",
+      "destination": "/guides/getting-started/setup"
+    },
+    {
+      "source": "/docs/sdk",
+      "destination": "/sdk/overview"
+    },
+    {
+      "source": "/docs/apps/analytics",
+      "destination": "/guides/apps/analytics/overview"
+    },
+    {
+      "source": "/docs/apps/api-keys",
+      "destination": "/guides/apps/api-keys/overview"
+    },
+    {
+      "source": "/docs/others/convex",
+      "destination": "/guides/integrations/convex/overview"
+    },
+    {
+      "source": "/docs/concepts/teams",
+      "destination": "/guides/apps/teams/overview"
+    },
+    {
+      "source": "/docs/concepts/custom-user-data",
+      "destination": "/guides/getting-started/user-fundamentals#custom-metadata"
+    },
+    {
+      "source": "/guides/going-further/user-metadata",
+      "destination": "/guides/getting-started/user-fundamentals#custom-metadata"
+    },
+    {
+      "source": "/others/js-client",
+      "destination": "/sdk/objects/hexclave-app"
+    },
+    {
+      "source": "/guides/going-further/stack-app",
+      "destination": "/sdk/objects/hexclave-app"
+    },
+    {
+      "source": "/guides/apps/fraud-protection/overview",
+      "destination": "/guides/apps/authentication/fraud-protection"
+    },
+    {
+      "source": "/guides/apps/payments/guide",
+      "destination": "/guides/apps/payments/setup"
+    },
     {
       "source": "/guides/going-further/backend-integration",
       "destination": "/guides/going-further/local-vs-cloud-dashboard"

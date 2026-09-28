@@ -1,5 +1,7 @@
 import { getPublicEnvVar } from "@/lib/env";
 import { remindersPrompt } from "@hexclave/shared/dist/ai/unified-prompts/reminders";
+import { ALL_APPS, getParentAppId, type AppId } from "@hexclave/shared/dist/apps/apps-config";
+import type { CompleteConfig } from "@hexclave/shared/dist/config/schema";
 import { deindent } from "@hexclave/shared/dist/utils/strings";
 
 const PROD_DOCS_BASE_URL = "https://docs.hexclave.com";
@@ -117,5 +119,110 @@ export function buildCliDevSetupPrompt(options: {
     After setup finishes, verify that the Hexclave MCP server is registered in your AI client config — name: \`hexclave\`, transport: \`http\`, URL: \`https://mcp.hexclave.com/mcp\`. If it is not registered, add it manually so future agents have live access to Hexclave docs and APIs.
 
     ${reminders}
+  `;
+}
+
+type OnboardingSetupConfig = {
+  apps: {
+    installed: CompleteConfig["apps"]["installed"],
+  },
+  auth: {
+    password: Pick<CompleteConfig["auth"]["password"], "allowSignIn">,
+    otp: Pick<CompleteConfig["auth"]["otp"], "allowSignIn">,
+    passkey: Pick<CompleteConfig["auth"]["passkey"], "allowSignIn">,
+    oauth: {
+      providers: Partial<Record<string, { allowSignIn: boolean }>>,
+    },
+  },
+  emails: Pick<CompleteConfig["emails"], "selectedThemeId">,
+};
+
+function getStandaloneAppIds(): AppId[] {
+  return Object.keys(ALL_APPS)
+    .filter((appId): appId is AppId => Object.prototype.hasOwnProperty.call(ALL_APPS, appId))
+    .filter((appId) => getParentAppId(appId) == null);
+}
+
+export function buildOnboardingConfigFile(config: OnboardingSetupConfig): string {
+  const selectedApps = getStandaloneAppIds().filter((appId) => config.apps.installed[appId]?.enabled === true);
+  const selectedSharedOAuthProviders = ["google", "github", "microsoft"].filter((providerId) => (
+    config.auth.oauth.providers[providerId]?.allowSignIn === true
+  ));
+
+  return buildSelectedOnboardingConfigFile({
+    selectedApps,
+    passwordEnabled: config.auth.password.allowSignIn,
+    otpEnabled: config.auth.otp.allowSignIn,
+    passkeyEnabled: config.auth.passkey.allowSignIn,
+    sharedOAuthProviderIds: selectedSharedOAuthProviders,
+    emailThemeId: config.emails.selectedThemeId,
+  });
+}
+
+export function buildSelectedOnboardingConfigFile(options: {
+  selectedApps: Iterable<AppId>,
+  passwordEnabled: boolean,
+  otpEnabled: boolean,
+  passkeyEnabled: boolean,
+  sharedOAuthProviderIds: Iterable<string>,
+  emailThemeId: string,
+}): string {
+  const selectedApps = new Set(options.selectedApps);
+  const installedApps = Object.fromEntries(
+    getStandaloneAppIds()
+      .filter((appId) => selectedApps.has(appId))
+      .map((appId) => [appId, { enabled: true }]),
+  );
+  const sharedOAuthProviders = [...options.sharedOAuthProviderIds].map((providerId) => [providerId, {
+    type: providerId,
+    allowSignIn: true,
+    allowConnectedAccounts: true,
+  }]);
+  const configValue = {
+    apps: {
+      installed: installedApps,
+    },
+    ...(selectedApps.has("authentication") ? {
+      auth: {
+        password: {
+          allowSignIn: options.passwordEnabled,
+        },
+        otp: {
+          allowSignIn: options.otpEnabled,
+        },
+        passkey: {
+          allowSignIn: options.passkeyEnabled,
+        },
+        oauth: {
+          providers: Object.fromEntries(sharedOAuthProviders),
+        },
+      },
+    } : {}),
+    ...(selectedApps.has("emails") ? {
+      emails: {
+        selectedThemeId: options.emailThemeId,
+      },
+    } : {}),
+  };
+
+  // Keep this framework-agnostic: every SDK accepts an exported config object,
+  // while adding a type import would couple the copy-paste file to one package.
+  return `export const config = ${JSON.stringify(configValue, null, 2)};\n`;
+}
+
+export function prependConfigChangesToSetupPrompt(setupPrompt: string, configFile: string): string {
+  return deindent`
+    IMPORTANT: Apply the selected products and settings from the \`hexclave.config.ts\` example below.
+
+    - If \`hexclave.config.ts\` does not exist, create it with the exact contents shown.
+    - If \`hexclave.config.ts\` already exists, update the existing config to apply the products and settings shown while preserving every unrelated existing setting.
+
+    \`\`\`ts
+    ${configFile.trim()}
+    \`\`\`
+
+    Below is the setup prompt for using Hexclave. Follow it carefully, while applying the \`hexclave.config.ts\` changes described above.
+
+    ${setupPrompt}
   `;
 }

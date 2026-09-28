@@ -5,7 +5,7 @@
 // OTHERWISE THINGS WILL GO BOOM!!
 
 import * as yup from "yup";
-import { ALL_APPS } from "../apps/apps-config";
+import { ALL_APPS, getParentAppId } from "../apps/apps-config";
 import { DEFAULT_EMAIL_TEMPLATES, DEFAULT_EMAIL_THEMES, DEFAULT_EMAIL_THEME_ID } from "../helpers/emails";
 import * as schemaFields from "../schema-fields";
 import { productSchema, userSpecifiedIdSchema, yupBoolean, yupDate, yupMixed, yupNever, yupNumber, yupObject, yupRecord, yupString, yupTuple, yupUnion } from "../schema-fields";
@@ -92,9 +92,13 @@ const branchApiKeysSchema = yupObject({
 const appIds = Object.keys(ALL_APPS) as (keyof typeof ALL_APPS)[];
 const branchAppsSchema = yupObject({
   installed: yupRecord(
-    // App config is persisted independently of backend releases. Retain app IDs
-    // introduced by newer releases so an older backend can still render the
-    // config; getIncompleteConfigWarnings reports IDs it does not recognize.
+    // Each app is configured independently, including apps with parentAppId.
+    // Some dashboard versions interpret sub-apps through their parent, but the
+    // backend must retain the individual value for clients with richer behavior.
+    //
+    // App config is also persisted independently of backend releases. Retain
+    // app IDs introduced by newer releases so an older backend can still render
+    // the config; getIncompleteConfigWarnings reports IDs it does not recognize.
     yupString(),
     yupObject({
       enabled: yupBoolean(),
@@ -303,7 +307,7 @@ import.meta.vitest?.test("branchPaymentsSchema lets productLineId schema reject 
         prices: {},
       },
     },
-  }, { abortEarly: false })).rejects.toThrowErrorMatchingInlineSnapshot(`[ValidationError: productLineId must contain only letters, numbers, underscores, and hyphens, and not start with a hyphen]`);
+  }, { abortEarly: false })).rejects.toThrowErrorMatchingInlineSnapshot(`[ValidationError: productLineId must contain only letters, numbers, underscores, and hyphens, and not start with a hyphen, and must not be one of __proto__, constructor, prototype]`);
 });
 
 const branchDomain = yupObject({});
@@ -311,128 +315,6 @@ const branchDomain = yupObject({});
 const branchOnboardingSchema = yupObject({
   requireEmailVerification: yupBoolean(),
 });
-
-// --- Deployments Schema ---
-// Service DEFINITIONS (type, framework, build config, env vars) live in the
-// branch config so they follow the project's config source: pushable from
-// hexclave.config.ts / GitHub, or editable in the dashboard when the config is
-// unlinked. Operational state (Vercel project id, deployment runs, custom
-// domains and their verification) lives in the backend database instead, keyed
-// by the service id.
-export const DEPLOYMENT_ENV_VAR_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
-export const DEPLOYMENT_SECRET_KEY_REGEX = /^[a-zA-Z0-9_-]+$/;
-// A connection value is `<serviceId>.<outputKey>` — a typed pointer to another
-// service's output (e.g. "hexclave.projectId") that the backend resolves at
-// deploy time. This is deliberately its own env var TYPE rather than a
-// `{serviceId.outputKey}` interpolation syntax inside plain values: with
-// interpolation, a literal value that happens to contain `{...}` would be
-// misinterpreted as a reference, so plain values must stay entirely literal.
-export const DEPLOYMENT_CONNECTION_VALUE_REGEX = /^[a-zA-Z0-9_-]+\.[A-Za-z0-9_]+$/;
-
-// One env var, discriminated by `type`:
-// - absent (plain): a literal `value`, committed to the config.
-// - "secret": only the secret's name (`key`) is in the config; its value must
-//   be supplied at deploy time via `hexclave deploy --secret <key>=<value>`
-//   and is never persisted by Hexclave.
-// - "connection": `value` names another service's output (see the regex
-//   comment above); resolved server-side at deploy time.
-// Exported so the backend's deployments API routes validate request bodies
-// with the exact same rules as pushed configs.
-export const deploymentEnvVarSchema = yupObject({
-  type: yupString().oneOf(["secret", "connection"]).optional(),
-  value: yupString().when("type", ([type], schema) => {
-    switch (type) {
-      case "secret": {
-        return schema.oneOf([undefined], 'deployment env vars with type "secret" must not have a value — the value is supplied at deploy time via `hexclave deploy --secret <key>=<value>`');
-      }
-      case "connection": {
-        return schema.defined().matches(DEPLOYMENT_CONNECTION_VALUE_REGEX, 'deployment env vars with type "connection" must reference a service output like "hexclave.projectId"');
-      }
-      default: {
-        return schema.defined();
-      }
-    }
-  }),
-  key: yupString().when("type", ([type], schema) => type === "secret"
-    ? schema.defined().matches(DEPLOYMENT_SECRET_KEY_REGEX, "deployment secret keys must contain only letters, numbers, underscores, and hyphens")
-    : schema.oneOf([undefined], 'deployment env vars may only have a key when their type is "secret"')),
-});
-
-const branchDeploymentsSchema = yupObject({
-  services: yupRecord(
-    // "hexclave" is the managed backend's slot on the deployments board; a
-    // config entry must never shadow it, so it's rejected at the schema level
-    // (not just in the dashboard-create route — pushed configs go through
-    // validation too).
-    userSpecifiedIdSchema("serviceId").notOneOf(["hexclave"], 'The service id "hexclave" is reserved for the managed Hexclave service'),
-    yupObject({
-      // Which platform runs the service. Only Vercel-backed services exist
-      // today, but the field is required so configs stay unambiguous once more
-      // types are added (every write path must state what it's creating).
-      type: yupString().oneOf(["vercel"]).defined(),
-      framework: yupString().optional(),
-      installCommand: yupString().optional(),
-      buildCommand: yupString().optional(),
-      outputDirectory: yupString().optional(),
-      rootDirectory: yupString().optional(),
-      env: yupRecord(
-        yupString().matches(DEPLOYMENT_ENV_VAR_KEY_REGEX, "deployment env var keys must start with a letter or underscore and contain only letters, digits, and underscores"),
-        deploymentEnvVarSchema,
-      ),
-    }),
-  ),
-});
-
-import.meta.vitest?.test("branchDeploymentsSchema accepts all three env var types", async ({ expect }) => {
-  await expect(branchDeploymentsSchema.validate({
-    services: {
-      web: {
-        type: "vercel",
-        rootDirectory: "./",
-        framework: "nextjs",
-        env: {
-          MY_ENV_VAR: { value: "true" },
-          DATABASE_CONNECTION_STRING: { type: "secret", key: "db_connection" },
-          NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
-        },
-      },
-    },
-  }, { abortEarly: false })).resolves.toBeDefined();
-});
-
-import.meta.vitest?.test("branchDeploymentsSchema rejects services without a type", async ({ expect }) => {
-  await expect(branchDeploymentsSchema.validate({
-    services: {
-      web: { framework: "nextjs" },
-    },
-  }, { abortEarly: false })).rejects.toThrow(/type/);
-});
-
-import.meta.vitest?.test("branchDeploymentsSchema rejects invalid env var shapes", async ({ expect }) => {
-  // A secret with an inline value would defeat the whole point of secrets.
-  await expect(branchDeploymentsSchema.validate({
-    services: { web: { type: "vercel", env: { A: { type: "secret", key: "a", value: "leaked" } } } },
-  }, { abortEarly: false })).rejects.toThrow(/must not have a value/);
-  // A secret without a key can never be filled at deploy time.
-  await expect(branchDeploymentsSchema.validate({
-    services: { web: { type: "vercel", env: { A: { type: "secret" } } } },
-  }, { abortEarly: false })).rejects.toThrow(/key/);
-  // Plain values may not carry a secret key.
-  await expect(branchDeploymentsSchema.validate({
-    services: { web: { type: "vercel", env: { A: { value: "x", key: "a" } } } },
-  }, { abortEarly: false })).rejects.toThrow(/only have a key/);
-  // Connections must point at `<serviceId>.<outputKey>` — braces in particular
-  // are the OLD interpolation syntax and must not validate.
-  await expect(branchDeploymentsSchema.validate({
-    services: { web: { type: "vercel", env: { A: { type: "connection", value: "{hexclave.projectId}" } } } },
-  }, { abortEarly: false })).rejects.toThrow(/service output/);
-  // Env var keys must be valid POSIX-ish env var names.
-  await expect(branchDeploymentsSchema.validate({
-    services: { web: { type: "vercel", env: { "1BAD": { value: "x" } } } },
-  }, { abortEarly: false })).rejects.toThrow(/env var keys/);
-});
-// --- END Deployments Schema ---
-
 
 export const branchConfigSchema = canNoLongerBeOverridden(projectConfigSchema, [
   "sourceOfTruth",
@@ -467,7 +349,6 @@ export const branchConfigSchema = canNoLongerBeOverridden(projectConfigSchema, [
 
   payments: branchPaymentsSchema,
 
-  "deployments-alpha": branchDeploymentsSchema,
   "clerk-integration": clerkIntegrationSchema,
   "better-auth-integration": betterAuthIntegrationSchema,
   "workos-integration": workosIntegrationSchema,
@@ -766,6 +647,34 @@ export function migrateConfigOverride(type: "project" | "branch" | "environment"
   }
   // END
 
+  // BEGIN 2026-07-28: deployment service definitions moved out of the config
+  // entirely — they now come from the `deploy` export and are stored in the
+  // backend database, synced by `hexclave deploy`. The
+  // stored config section is dropped, which in particular removes every
+  // config-era service: they were all `type: "vercel"`, a service type that no
+  // longer exists (containers on Marshal replaced it). The
+  // `apps.installed.deployments-alpha` entry stays for the later app-key
+  // migration — the app itself still exists. This runs after the 2026-07-24
+  // rename above, so pre-rename `deployments` sections are covered too.
+  if (isBranchOrHigher) {
+    res = removeProperty(res, p => p[0] === "deployments-alpha");
+  }
+  // END
+
+  // BEGIN 2026-08-14: the Deploy app's author-facing config key is now `deploy`.
+  // Only the installed-app entry remains in current configs; the legacy top-level
+  // deployment service section was removed by the migration immediately above.
+  if (isBranchOrHigher) {
+    res = renameProperty(res, "apps.installed.deployments-alpha", "deploy");
+  }
+  // END
+
+  // BEGIN 2026-08-31: the Growth app was removed.
+  if (isBranchOrHigher) {
+    res = removeProperty(res, p => p[0] === "apps" && p[1] === "installed" && p[2] === "gtm");
+  }
+  // END
+
   // return the result
   return res;
 };
@@ -786,6 +695,39 @@ import.meta.vitest?.test("migrateConfigOverride removes legacy sourceOfTruth ove
   })).toEqual({});
 });
 
+import.meta.vitest?.test("migrateConfigOverride removes legacy deployments config sections", ({ expect }) => {
+  // Post-rename section name, as an object and as dot-notation override keys.
+  // Every config-era service was `type: "vercel"` — a type that no longer
+  // exists — so this doubles as the guarantee that no vercel service survives
+  // migration.
+  expect(migrateConfigOverride("branch", {
+    "deployments-alpha": { services: { web: { type: "vercel" } } },
+  })).toEqual({});
+  expect(migrateConfigOverride("branch", {
+    "deployments-alpha.services.web.type": "vercel",
+    "deployments-alpha.services.web.env": { A: { value: "x" } },
+  })).toEqual({});
+  // Multiple vercel services, with the full vercel-era field set.
+  expect(migrateConfigOverride("branch", {
+    "deployments-alpha": {
+      services: {
+        web: { type: "vercel", framework: "nextjs", buildCommand: "pnpm build", outputDirectory: "dist" },
+        api: { type: "vercel", rootDirectory: "./api" },
+      },
+    },
+  })).toEqual({});
+  // Pre-rename name: the 2026-07-24 rename runs first, then the removal.
+  expect(migrateConfigOverride("branch", {
+    deployments: { services: { web: { type: "vercel" } } },
+  })).toEqual({});
+  // The app-installation entry must survive and receive its current name — only
+  // the legacy service config section is gone.
+  expect(migrateConfigOverride("branch", {
+    "apps.installed.deployments-alpha": { enabled: true },
+    "deployments-alpha": { services: {} },
+  })).toEqual({ "apps.installed.deploy": { enabled: true } });
+});
+
 import.meta.vitest?.test("migrateConfigOverride removes legacy branch-level dbSync overrides", ({ expect }) => {
   const dbSync = {
     externalDatabases: {
@@ -800,49 +742,78 @@ import.meta.vitest?.test("migrateConfigOverride removes legacy branch-level dbSy
   expect(migrateConfigOverride("environment", { dbSync })).toEqual({ dbSync });
 });
 
-import.meta.vitest?.test("migrateConfigOverride renames the deployments app to deployments-alpha", ({ expect }) => {
+import.meta.vitest?.test("migrateConfigOverride renames legacy deployments app keys to deploy", ({ expect }) => {
   const services = { web: { type: "vercel", rootDirectory: "./" } };
 
-  // Fully nested overrides.
+  // The renamed CONFIG SECTION is subsequently dropped by the 2026-07-28
+  // removal migration (service definitions no longer live in the config), so
+  // only the installed-apps rename remains observable here.
   expect(migrateConfigOverride("branch", {
     deployments: { services },
     apps: { installed: { deployments: { enabled: true } } },
   })).toEqual({
-    "deployments-alpha": { services },
-    apps: { installed: { "deployments-alpha": { enabled: true } } },
+    apps: { installed: { deploy: { enabled: true } } },
   });
 
-  // Dot-notation overrides, which is how the dashboard and the Deployments app
-  // itself write single keys. The flat key form is preserved — only the renamed
-  // segment changes — so the override keeps overriding exactly one leaf rather
-  // than being widened into a whole subtree.
+  // Dot-notation overrides, which is how the dashboard used to write single
+  // keys. The flat key form is preserved — only the renamed segment changes —
+  // so the override keeps overriding exactly one leaf rather than being
+  // widened into a whole subtree.
   expect(migrateConfigOverride("branch", {
     "deployments.services.web.buildCommand": "pnpm build",
     "apps.installed.deployments.enabled": true,
   })).toEqual({
-    "deployments-alpha.services.web.buildCommand": "pnpm build",
-    "apps.installed.deployments-alpha.enabled": true,
-  });
-
-  // A service literally named "deployments" sits below the renamed section and
-  // must survive untouched — only the top-level section and the installed-apps
-  // entry are renamed.
-  expect(migrateConfigOverride("branch", {
-    deployments: { services: { deployments: { type: "vercel" } } },
-  })).toEqual({
-    "deployments-alpha": { services: { deployments: { type: "vercel" } } },
-  });
-
-  // Already-migrated configs are left alone (the migration must be idempotent,
-  // since it re-runs on every read).
-  expect(migrateConfigOverride("branch", {
-    "deployments-alpha": { services },
-  })).toEqual({
-    "deployments-alpha": { services },
+    "apps.installed.deploy.enabled": true,
   });
 
   // Project level is not branch-or-higher, so nothing is renamed there.
   expect(migrateConfigOverride("project", { deployments: { services } })).toEqual({ deployments: { services } });
+});
+
+import.meta.vitest?.test("migrateConfigOverride renames deployments-alpha app installations to deploy", ({ expect }) => {
+  expect(migrateConfigOverride("branch", {
+    apps: { installed: { "deployments-alpha": { enabled: true } } },
+  })).toEqual({
+    apps: { installed: { deploy: { enabled: true } } },
+  });
+  expect(migrateConfigOverride("branch", {
+    "apps.installed.deployments-alpha.enabled": true,
+  })).toEqual({
+    "apps.installed.deploy.enabled": true,
+  });
+  expect(migrateConfigOverride("branch", {
+    "apps.installed.deploy.enabled": false,
+  })).toEqual({
+    "apps.installed.deploy.enabled": false,
+  });
+});
+
+import.meta.vitest?.test("migrateConfigOverride removes Growth app installations", ({ expect }) => {
+  expect(migrateConfigOverride("branch", {
+    apps: {
+      installed: {
+        gtm: { enabled: true },
+        analytics: { enabled: true },
+      },
+    },
+  })).toEqual({
+    apps: {
+      installed: {
+        analytics: { enabled: true },
+      },
+    },
+  });
+  expect(migrateConfigOverride("branch", {
+    "apps.installed.gtm.enabled": true,
+    "apps.installed.analytics.enabled": true,
+  })).toEqual({
+    "apps.installed.analytics.enabled": true,
+  });
+  expect(migrateConfigOverride("project", {
+    "apps.installed.gtm.enabled": true,
+  })).toEqual({
+    "apps.installed.gtm.enabled": true,
+  });
 });
 
 function removeProperty(obj: Record<string, any>, pathCond: (path: (string | symbol)[]) => boolean): any {
@@ -1129,22 +1100,6 @@ const organizationConfigDefaults = {
     externalDatabases: (key: string) => ({
       type: undefined,
       connectionString: undefined,
-    }),
-  },
-
-  "deployments-alpha": {
-    services: (key: string) => ({
-      type: undefined,
-      framework: undefined,
-      installCommand: undefined,
-      buildCommand: undefined,
-      outputDirectory: undefined,
-      rootDirectory: undefined,
-      env: (envVarKey: string) => ({
-        type: undefined,
-        value: undefined,
-        key: undefined,
-      }),
     }),
   },
 
@@ -1764,6 +1719,28 @@ import.meta.vitest?.test("unknown installed apps render with a config warning", 
   expect(await getIncompleteConfigWarnings(branchConfigSchema, config)).toEqual(Result.error(
     "Unknown installed app ID: \"future-app\". This config can still be rendered, but this version cannot validate or operate those apps.",
   ));
+});
+
+import.meta.vitest?.test("sub-apps can be enabled independently of their parent apps", async ({ expect }) => {
+  const subAppEntries: [keyof typeof ALL_APPS, keyof typeof ALL_APPS][] = [];
+  for (const appId of appIds) {
+    const parentAppId = getParentAppId(appId);
+    if (parentAppId != null) {
+      subAppEntries.push([appId, parentAppId]);
+    }
+  }
+  const config = {
+    apps: {
+      installed: Object.fromEntries(subAppEntries.flatMap(([appId, parentAppId]) => [
+        [parentAppId, { enabled: false }],
+        [appId, { enabled: true }],
+      ])),
+    },
+  };
+
+  expect(subAppEntries.length).toBeGreaterThan(0);
+  expect(await getConfigOverrideErrors(branchConfigSchema, config)).toEqual(Result.ok(null));
+  expect(await getIncompleteConfigWarnings(branchConfigSchema, config)).toEqual(Result.ok(null));
 });
 
 

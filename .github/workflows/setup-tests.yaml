@@ -7,8 +7,12 @@ on:
       - dev
   pull_request:
 
+# A concurrency group only ever runs one run at a time, so the sha is part of the group on main/dev:
+# otherwise consecutive dev pushes queue behind each other (and GitHub cancels the older queued run),
+# so one slow or hung run silently skips CI for every commit after it. PRs and feature branches stay
+# grouped per ref, where cancelling superseded runs is what we want.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}
 
 env:
@@ -32,6 +36,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   setup-tests:
+    timeout-minutes: 90
     needs: wait-for-fast-fail
     # `success()` is required because the custom `if` otherwise overrides the
     # implicit success() gate from `needs`, letting this run even if the gate failed.
@@ -43,10 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js v22
+      - name: Setup Node.js v24
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -70,6 +75,39 @@ jobs:
             echo "$?" > "$RUNNER_TEMP/hexclave-dev-exit-code.untracked.txt"
           ) &
           pnpm exec wait-on --timeout 120000 http://localhost:8102 tcp:localhost:8146
+
+      # The readiness gate only proves that 8102 and 8146 accept connections;
+      # both services normally listen within seconds. build-packages:watch then
+      # performs a full non-watch tsdown pass even though build:packages already
+      # ran, rewriting packages/*/dist (about 8.3k of 8.4k files in our
+      # reproduction, including about 270 content changes). Watch-based dev
+      # tasks such as bulldozer-js, which imports @hexclave/shared from dist,
+      # restart when those files land and briefly take their ports down. That
+      # caused the failures in run 31347402547; the observed bulldozer outage
+      # was about 1.7 seconds and happened tens of seconds after this gate.
+      # This is a mitigation, not a guarantee: a slow runner may still be
+      # rebuilding at 60 seconds, and codegen watchers can write files later.
+      # We keep the watchers enabled so this job still exercises pnpm run dev,
+      # and instead allow the initial rebuild and restarts to settle first.
+      - name: Allow development watchers to settle
+        run: sleep 60
+
+      # The cause of missing per-task output in some historical runs is still
+      # unexplained. Snapshot the log before tests so a future run shows
+      # whether the output was absent before testing began or disappeared
+      # later.
+      - name: Snapshot development service diagnostics before tests
+        run: |
+          dev_log="$RUNNER_TEMP/hexclave-dev.untracked.log"
+          if [[ -f "$dev_log" ]]; then
+            echo "Development service log size: $(wc -c < "$dev_log") bytes"
+            echo "Development service log lines: $(wc -l < "$dev_log")"
+            echo "Development service log excerpt (last 200 lines):"
+            tail -n 200 "$dev_log"
+          else
+            echo "Development service log does not exist yet"
+          fi
+
       - name: Run tests (first attempt)
         id: run-tests-first-attempt
         continue-on-error: ${{ (github.head_ref || github.ref_name) != 'main' && (github.head_ref || github.ref_name) != 'dev' }}
@@ -81,17 +119,23 @@ jobs:
         run: pnpm run test run --reporter=verbose
 
       - name: Print development service diagnostics
-        if: ${{ failure() }}
+        # Keep the stream log visible even when a retry turns a transient test
+        # failure into a green job; that is when the first failure is easiest
+        # to diagnose. The log size and line count distinguish a genuinely
+        # sparse log from output that was only truncated in this step.
+        if: ${{ always() }}
         run: |
           if [[ -f "$RUNNER_TEMP/hexclave-dev-exit-code.untracked.txt" ]]; then
             echo "Development service command exited with code $(<"$RUNNER_TEMP/hexclave-dev-exit-code.untracked.txt")"
           else
             echo "Development service command is still running; a child service may have exited"
           fi
+          echo "Development service log size: $(wc -c < "$RUNNER_TEMP/hexclave-dev.untracked.log") bytes"
+          echo "Development service log lines: $(wc -l < "$RUNNER_TEMP/hexclave-dev.untracked.log")"
           tail -n 2000 "$RUNNER_TEMP/hexclave-dev.untracked.log"
 
       - name: Upload development service logs
-        if: ${{ failure() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: setup-tests-development-services

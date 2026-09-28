@@ -1,0 +1,235 @@
+---
+title: "Authentication"
+description: "Implement Hexclave authentication from start to finish — sign-in methods, auth pages, session reads, and route protection."
+sidebarTitle: "Guide"
+---
+
+This guide walks through implementing authentication in your app end to end: pick your sign-in methods, decide where auth pages live, wire up sign-in and sign-out, read the current user, then protect the parts of your app that need a session. For a quick "can I do this?" checklist, see the [Authentication overview](./overview).
+
+You'll need Hexclave installed with a client app (`hexclaveClientApp`), plus a server app (`hexclaveServerApp`) if you read the user on the server. If you don't have that yet, follow [Setup](/guides/getting-started/setup) first.
+
+## 1. Choose your sign-in methods
+
+New projects come with the **Authentication** app already enabled and **email & password** sign-in already turned on, so you have a working way in before you configure anything. Everything else — OTP, passkeys, and every OAuth provider — starts off, so step 1 is really about changing the mix.
+
+In a [development environment](/guides/going-further/local-vs-cloud-dashboard), set the mix in `hexclave.config.ts` so it's versioned with your code:
+
+```ts title="hexclave.config.ts"
+import type { HexclaveConfig } from "@hexclave/js";
+
+export const config: HexclaveConfig = {
+  auth: {
+    allowSignUp: true,
+    otp: { allowSignIn: true },
+    password: { allowSignIn: false },
+  },
+  "auth.oauth": {
+    accountMergeStrategy: "link_method",
+    providers: {
+      google: { type: "google", allowSignIn: true, allowConnectedAccounts: true },
+    },
+  },
+};
+```
+
+That example swaps the default password login for OTP plus one OAuth provider — a reasonable SaaS default, since there are no passwords to reset and one familiar button. Keep `password: { allowSignIn: true }` instead if you want classic email and password, and add `passkey: { allowSignIn: true }` for WebAuthn.
+
+| Method | Config | Default | Notes |
+|---|---|---|---|
+| **Email & password** | `auth.password.allowSignIn` | **On** | Includes the reset flow. |
+| **OTP / magic link** | `auth.otp.allowSignIn` | Off | Passwordless. Uses your email server — Hexclave's shared server covers development. |
+| **Passkey** | `auth.passkey.allowSignIn` | Off | See [Passkey](./auth-providers/passkey). |
+| **OAuth** | `auth.oauth.providers.<id>` | Off | 12 providers, plus your own [OIDC provider](./auth-providers/custom-oidc). |
+| **Two-factor (TOTP)** | Dashboard | Off | See [Two-Factor Auth](./auth-providers/two-factor-auth). |
+
+`auth.allowSignUp` is also on by default, so anyone can create an account until you say otherwise — step 8 covers narrowing that. If the Authentication app was ever turned off for this project, re-enable it with `apps: { installed: { authentication: { enabled: true } } }` or the dashboard's app list.
+
+Google, GitHub, Microsoft, and Spotify work immediately on Hexclave's shared OAuth keys, so you can enable them without registering an app anywhere. Client IDs and secrets are environment-specific and live in the [cloud dashboard](https://app.hexclave.com), not in `hexclave.config.ts` — you'll swap in your own before production in step 9.
+
+`accountMergeStrategy: "link_method"` means someone who signed up with a password and later clicks "Sign in with Google" on the same email lands on their existing account rather than a duplicate. See [Connected accounts](./connected-accounts) for the other strategies.
+
+## 2. Decide where your auth pages live
+
+Hexclave renders sign-in, sign-up, password reset, and account settings for you. You only choose *where* those pages are served, via the `urls` option on your app object.
+
+For new projects, use hosted components:
+
+```ts title="src/hexclave/client.ts"
+import { HexclaveClientApp } from "@hexclave/next"; // replace `next` with the correct framework SDK package
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  tokenStore: "nextjs-cookie", // "cookie" for other web frontends
+  urls: {
+    default: {
+      type: "hosted",
+    },
+  },
+});
+```
+
+Hexclave serves the pages, they stay up to date on their own, and you don't add any routes to your app. The alternative is `{ type: "handler-component" }` plus a catch-all route on your own domain, which you want when auth UI has to be same-origin. [Hosted vs. Handler](/guides/going-further/hosted-vs-handler) covers the tradeoff and how to mix the two.
+
+## 3. Add sign-in, sign-out, and account entry points
+
+With the pages in place, your app needs to send people to them. The quickest route is `<UserButton />`, which covers both states on its own — an avatar menu with account settings and sign-out when someone is signed in, and sign-in and sign-up items when they aren't. It brings its own Suspense boundary, so you can drop it straight into a header:
+
+```tsx
+import { UserButton } from "@hexclave/next"; // replace `next` with the correct framework SDK package
+
+export function Header() {
+  return <header><UserButton /></header>;
+}
+```
+
+Every piece of it is also available on its own, for when you want your own markup. Use these helpers rather than building URLs by hand:
+
+```tsx
+"use client";
+import { useUser, useHexclaveApp } from "@hexclave/next"; // replace `next` with the correct framework SDK package
+
+export function AuthButtons() {
+  const app = useHexclaveApp();
+  const user = useUser();
+
+  if (user == null) {
+    return <button onClick={async () => await app.redirectToSignIn()}>Sign in</button>;
+  }
+  return <button onClick={async () => await user.signOut()}>Sign out</button>;
+}
+```
+
+`app.redirectToSignUp()` and `app.redirectToAccountSettings()` round out the set. `user.signOut()` clears the session and then follows your `afterSignOut` or `home` URL.
+
+<Warning>
+  Reading `app.urls.signIn` **throws** when the app is configured for hosted components, because there is no path on your domain to link to. Call `app.redirectToSignIn()` instead of putting `app.urls.signIn` in an `href`.
+</Warning>
+
+Prefer auth pages inside your own layout? Mount the prebuilt `<SignIn />`, `<SignUp />`, or `<AccountSettings />` components on a route you own, then point the matching `urls` key at that route so the redirect helpers agree with reality:
+
+```ts
+urls: {
+  default: { type: "hosted" },
+  accountSettings: { type: "custom", url: "/settings", version: 0 },
+},
+```
+
+A bare path string (`accountSettings: "/settings"`) still works but is deprecated, so prefer the `{ type: "custom", ... }` form for new code.
+
+## 4. Read the current user
+
+The current user is available on the client as a hook and on the server as an async call, fully typed in both places. Both return `null` when nobody is signed in. The server version is a superset: it can read and write `serverMetadata` and other privileged fields, but it drops session-only methods like `signOut()`, which only make sense where there's a browser session.
+
+```tsx
+// Client component — re-renders whenever the user changes
+"use client";
+import { useUser } from "@hexclave/next"; // replace `next` with the correct framework SDK package
+
+export function Greeting() {
+  const user = useUser();
+  if (user == null) return <p>Not signed in</p>;
+  return <p>Hi, {user.displayName ?? user.primaryEmail}</p>;
+}
+```
+
+```typescript
+// Server component, route handler, or server action
+import { hexclaveServerApp } from "@/hexclave/server";
+
+const user = await hexclaveServerApp.getUser();
+```
+
+`useUser()` suspends while it loads, so it needs a Suspense boundary above it — [Setup](/guides/getting-started/setup) has a dedicated step for adding one. Store your own fields on the user with `clientMetadata`, `clientReadOnlyMetadata`, and `serverMetadata` instead of standing up a separate users table; see [User fundamentals](/guides/getting-started/user-fundamentals).
+
+## 5. Protect a page or route
+
+Pass `or` to turn "maybe a user" into "definitely a user". The return type becomes non-nullable, so there's no `null` branch to forget:
+
+```tsx
+// Sends unauthenticated visitors to sign-in, then back here afterwards
+const user = useUser({ or: "redirect" });
+```
+
+```typescript
+// API routes and server actions, where a redirect makes no sense
+const user = await hexclaveServerApp.getUser({ or: "throw" });
+```
+
+Protect on the server for anything that must not leak. A client-side redirect hides UI but the request already happened, so gate the data too — [Ship production-ready auth](/guides/other/tutorials/ship-production-ready-auth) walks through what each option actually guarantees, including why you should send `Cache-Control: private, no-store` on authenticated responses.
+
+## 6. Collect extra information on sign-up (optional)
+
+If you need a name, company, or address before the app is usable, don't redirect to an onboarding page straight after sign-up — users close that tab, and it fights with the "return to the page I originally wanted" redirect. Store a flag on the user instead and check it where onboarding matters:
+
+```tsx
+await user.update({
+  clientMetadata: { onboarded: true, address },
+});
+```
+
+Write the flag to `clientReadOnlyMetadata` from a server endpoint if onboarding must not be skippable, since clients can write their own `clientMetadata`. Full implementation, including the redirect hook: [Onboarding](./user-onboarding).
+
+## 7. Verify sessions on a separate backend
+
+If your API is a different service, the browser sends the user's access token and your backend verifies it. Hexclave issues standard JWTs you can verify locally against a JWKS endpoint, so there's no round-trip to Hexclave per request — fast enough for middleware and edge functions.
+
+Send the token from the frontend:
+
+```typescript
+const authorizationHeader = await hexclaveClientApp.getAuthorizationHeader();
+const response = await fetch("/my-backend-endpoint", {
+  headers: {
+    ...(authorizationHeader != null ? { Authorization: authorizationHeader } : {}),
+  },
+});
+```
+
+In a JS/TS backend, hand the request straight to the server app:
+
+```typescript
+const user = await hexclaveServerApp.getUser({ tokenStore: request });
+```
+
+For other languages, verify the JWT yourself against `https://api.hexclave.com/api/v1/projects/<project-id>/.well-known/jwks.json`. Note that anonymous and restricted users are signed with different issuers and audiences, so decide deliberately whether to accept them. See [JWTs & session verification](./jwts) and [Restricted users](./restricted-users).
+
+## 8. Control who can sign up (optional)
+
+By default anyone can create an account. [Sign-up rules](./sign-up-rules) are ordered checks over `email`, `emailDomain`, `authMethod`, and `oauthProvider` that fire during sign-up for every method. The first matching rule wins; if none match, the default action applies.
+
+| Action | Effect |
+|---|---|
+| **Allow** | Signs up normally. Use to carve exceptions out of a `reject` default. |
+| **Reject** | Blocks the sign-up. |
+| **Restrict** | Creates the account in a [restricted](./restricted-users) state for review. |
+| **Log** | Records a match without changing the outcome. |
+
+Start with `log` rules to see what they'd catch, then promote them to `reject` or `restrict`. The dashboard has a tester that simulates sign-ups without touching real users, and [Fraud protection](./fraud-protection) adds risk signals you can reference in the same conditions.
+
+## 9. Before you ship to production
+
+The defaults that make development frictionless are exactly the ones you need to replace. The [Launch checklist](../launch-checklist/overview) tracks these four in this order:
+
+1. **Domains** — add your production domain as a trusted domain.
+2. **OAuth providers** — swap Hexclave's shared keys for your own client ID and secret per provider, and register the matching redirect URLs. Shared keys are development-only.
+3. **Email server** — connect a custom server so verification, reset, and magic link mail comes from your domain. See the [Emails guide](../emails/guide).
+4. **Production mode** — turn it on once the first three are done.
+
+OAuth client IDs and secrets, trusted domains, and email credentials are all environment-specific, so they live in the [cloud dashboard](https://app.hexclave.com) rather than `hexclave.config.ts`.
+
+## What you should have now
+
+1. The sign-in methods you want, enabled in config
+2. Auth pages served either by Hexclave or from your own handler route
+3. Sign-in, sign-out, and account settings reachable from your UI
+4. `useUser()` / `getUser()` reading the session on client and server
+5. At least one route that unauthenticated visitors cannot reach
+6. A plan for verifying sessions on any separate backend
+
+Everything else — [teams](../teams/overview), [RBAC](../rbac/overview), [payments](../payments/overview), [emails](../emails/overview), [analytics](../analytics/overview) — keys off this same user directory.
+
+## Related
+
+- [Authentication overview](./overview) — capability FAQ
+- [Hosted vs. Handler](/guides/going-further/hosted-vs-handler) — where auth pages live
+- [All auth providers](./auth-providers) — per-provider setup
+- [User fundamentals](/guides/getting-started/user-fundamentals) — the user object, metadata, and sessions
+- [Ship production-ready auth](/guides/other/tutorials/ship-production-ready-auth) — hardening walkthrough

@@ -951,11 +951,14 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
 
   const cssVars = useMemo<CSSProperties>(() => {
     const vars: Record<string, string | number> = { "--grid-total-w": `${totalContentWidth}px` };
+    if (stickyTop != null) {
+      vars["--data-grid-sticky-top"] = typeof stickyTop === "number" ? `${stickyTop}px` : stickyTop;
+    }
     for (const col of visibleColumns) {
       vars[`--col-${col.id}-size`] = columnSizes[col.id];
     }
     return vars as CSSProperties;
-  }, [visibleColumns, columnSizes, totalContentWidth]);
+  }, [stickyTop, visibleColumns, columnSizes, totalContentWidth]);
 
   // ── Selection handlers ───────────────────────────────────────
   const fireSelection = useCallback(
@@ -1037,6 +1040,7 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
       clipEl.style.setProperty("--data-grid-sticky-overlap", `${overlap}px`);
     };
     updateClip();
+    const frame = requestAnimationFrame(updateClip);
     bodyEl.addEventListener("scroll", updateClip);
     window.addEventListener("scroll", updateClip, true);
     window.addEventListener("resize", updateClip);
@@ -1048,9 +1052,10 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
       bodyEl.removeEventListener("scroll", updateClip);
       window.removeEventListener("scroll", updateClip, true);
       window.removeEventListener("resize", updateClip);
+      cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, []);
+  }, [isLoading, rows.length, totalRowCount, visibleColumns.length]);
 
   // Keep header + body horizontal offsets locked. When the scrollbar lives under
   // the column headers (`horizontalScrollbarPosition="top"`), the header is the

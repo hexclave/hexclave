@@ -5,7 +5,7 @@ import { AppStoreEntry } from "@/components/app-store-entry";
 import { useRouter } from "@/components/router";
 import { useUpdateConfig } from "@/components/config-update";
 import { ALL_APPS_FRONTEND, getAppPath, getDocumentationHref, type AppId } from "@/lib/apps-frontend";
-import { isAppEnabled } from "@/lib/apps-utils";
+import { getAppEnableConfigUpdate, isAppEnabled } from "@/lib/apps-utils";
 import { getParentAppId } from "@hexclave/shared/dist/apps/apps-config";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { PageLayout } from "../../page-layout";
@@ -39,7 +39,7 @@ export default function AppDetailsPageClient({ appId }: { appId: AppId }) {
   const handleEnable = async () => {
     await updateConfig({
       adminApp,
-      configUpdate: { [`apps.installed.${appId}.enabled`]: true },
+      configUpdate: getAppEnableConfigUpdate(appId),
       pushable: true,
     });
     if (documentationHref != null) {

@@ -5,6 +5,18 @@ export { getConvexProvidersConfig } from "./integrations/convex";
 // (per-specifier JSDoc on re-exports does not).
 export type { HexclaveConfig, StackConfig } from "@hexclave/shared/config";
 export { defineHexclaveConfig, defineStackConfig } from "@hexclave/shared/config";
+// The author-facing types for the deploy file's `deploy` export.
+export type {
+  HexclaveDeploymentConfig,
+  HexclaveDeploymentContext,
+  HexclaveDeploymentReference,
+  HexclaveEnvVarValue,
+  HexclavePersistentVolume,
+  HexclaveServerService,
+  HexclaveServerlessService,
+  HexclaveService,
+  HexclaveServiceOutputs,
+} from "@hexclave/shared/config";
 
 // IF_PLATFORM react-like
 export type { AnalyticsOptions, AnalyticsReplayOptions } from "./lib/hexclave-app/apps/implementations/session-replay";

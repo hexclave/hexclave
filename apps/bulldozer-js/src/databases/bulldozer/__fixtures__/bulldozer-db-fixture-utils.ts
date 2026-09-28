@@ -19,11 +19,32 @@
  * repo (which the cross-version CI job relies on when running against the base branch).
  */
 import { decodeBase64, encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { DatabaseSeq } from "../../index.js";
 import { LowLevelDatabase, LowLevelDatabaseDebugSnapshot, LowLevelKvDump, LowLevelKvStore } from "../../low-level/index.js";
-import { PiledriverObject, declarePiledriverDatabase, isPiledriverHeapObjectSymbol } from "../../piledriver/index.js";
+import { isPiledriverHeapObjectSymbol, type PiledriverDatabase, type PiledriverObject } from "../../piledriver/index.js";
 import { BulldozerDatabase, declareBulldozerDatabase } from "../index.js";
 import { exampleFungibleLedgerMigrations } from "../example-schema.js";
+
+async function declareFixturePiledriverDatabase(lowLevel: LowLevelDatabase): Promise<PiledriverDatabase> {
+  // The compat workflow copies this file verbatim onto the base checkout but only overlays fixture
+  // directories. Remove this shim once the base branch contains the piledriver implementation split.
+  const fixtureDirectory = dirname(fileURLToPath(import.meta.url));
+  const hasSplitImplementation = existsSync(join(fixtureDirectory, "../../piledriver/implementations/base.ts"))
+    || existsSync(join(fixtureDirectory, "../../piledriver/implementations/base.js"));
+  const implementation = hasSplitImplementation
+    ? await import("../../piledriver/implementations/base.js")
+    : await import("../../piledriver/index.js");
+  if ("declareBasePiledriverDatabase" in implementation && typeof implementation.declareBasePiledriverDatabase === "function") {
+    return implementation.declareBasePiledriverDatabase(lowLevel);
+  }
+  if ("declarePiledriverDatabase" in implementation && typeof implementation.declarePiledriverDatabase === "function") {
+    return implementation.declarePiledriverDatabase(lowLevel);
+  }
+  throw new Error("Piledriver implementation factory is unavailable");
+}
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -62,9 +83,9 @@ const fixtureLedgerRows: Record<string, PiledriverObject> = {
 // Builds a fresh Bulldozer database (example ledger schema) on top of the given low-level backend,
 // applies the migrations, and runs the deterministic workload.
 export async function buildFixtureBulldozerDatabase(lowLevel: LowLevelDatabase): Promise<BulldozerDatabase> {
-  const db = declareBulldozerDatabase(declarePiledriverDatabase(lowLevel), { migrations: exampleFungibleLedgerMigrations });
+  const db = declareBulldozerDatabase(await declareFixturePiledriverDatabase(lowLevel), { migrations: exampleFungibleLedgerMigrations });
   await db.applyRemainingMigrations();
-  await db.withSnapshotReplicated(async snapshot => {
+  await db.withSnapshotConsistent(async snapshot => {
     for (const [rowIdentifier, rowData] of Object.entries(fixtureLedgerRows)) {
       snapshot = (await snapshot.setOrDeleteRow({ tableId: storedTableId, rowIdentifier, newRowData: rowData })).newSnapshot;
     }
@@ -90,28 +111,56 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   return result;
 }
 
+// The result of reading the entire database. `readModel` covers every table whose rows the reading
+// code can list; `unlistableTableIds` names the tables that *explicitly rejected* row listing (the
+// dedicated "does not support listing rows" error thrown by non-materialized operators such as
+// stateless Sort and count-only GroupBy, and by lazy operators reading through them). Tracking the
+// rejections explicitly lets callers exempt exactly these tables from comparisons without weakening
+// the check for everything else — a table that goes missing for any other reason is still an error.
+export type ComputedReadModel = {
+  readModel: BulldozerReadModel,
+  unlistableTableIds: string[],
+};
+
 // Reads the entire database: every table, every group, every row. The result is deterministic (the
 // backing B-trees are ordered), so it is a stable attestation of the complete logical state.
-export async function computeReadModel(db: BulldozerDatabase): Promise<BulldozerReadModel> {
+export async function computeReadModel(db: BulldozerDatabase): Promise<ComputedReadModel> {
   const { snapshot } = await db.getSnapshot();
   const tables = db.listTables().map(descriptor => descriptor.tableId).sort();
   const readModel: BulldozerReadModel = [];
+  const unlistableTableIds: string[] = [];
   for (const tableId of tables) {
     const groups: ReadModelGroup[] = [];
-    for (const { groupKey } of await collect(snapshot.listGroups({ tableId, range: {} }))) {
-      const rows: ReadModelRow[] = [];
-      for (const row of await collect(snapshot.listRowsInGroup({ tableId, groupKey, range: {} }))) {
-        rows.push({
-          rowIdentifier: row.rowIdentifier,
-          rowSortKey: await resolveHeap(row.rowSortKey),
-          rowData: await resolveHeap(row.rowData),
-        });
+    try {
+      const groupKeys = await collect(snapshot.listGroups({ tableId, range: {} }));
+      // Row-listing support is a property of the table's operator graph, not of its contents, so an
+      // empty table must be classified the same way as a populated one. With no groups to iterate,
+      // the rejection would never be observed, so probe a nonexistent group instead: row-listing
+      // tables yield nothing for unknown group keys (a long-stable property of stored and groupwise
+      // tables, so this also behaves correctly under the older checkouts the cross-version CI job
+      // overlays this module onto), while non-materialized operators throw regardless of the key.
+      if (groupKeys.length === 0) {
+        await collect(snapshot.listRowsInGroup({ tableId, groupKey: null, range: {} }));
       }
-      groups.push({ groupKey: await resolveHeap(groupKey), rows });
+      for (const { groupKey } of groupKeys) {
+        const rows: ReadModelRow[] = [];
+        for (const row of await collect(snapshot.listRowsInGroup({ tableId, groupKey, range: {} }))) {
+          rows.push({
+            rowIdentifier: row.rowIdentifier,
+            rowSortKey: await resolveHeap(row.rowSortKey),
+            rowData: await resolveHeap(row.rowData),
+          });
+        }
+        groups.push({ groupKey: await resolveHeap(groupKey), rows });
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("does not support listing rows")) throw error;
+      unlistableTableIds.push(tableId);
+      continue;
     }
     readModel.push({ tableId, groups });
   }
-  return readModel;
+  return { readModel, unlistableTableIds };
 }
 
 // Serializes a low-level backend's current contents into a portable, base64-encoded KV document.
@@ -129,7 +178,7 @@ function kvEntriesFromDebugSnapshot(snapshot: LowLevelDatabaseDebugSnapshot): { 
 // Bulldozer database was just written to. The backend must expose `debugSnapshot`.
 export async function dumpBulldozerDatabase(lowLevel: LowLevelDatabase, db: BulldozerDatabase): Promise<BulldozerDbDump> {
   if (!lowLevel.debugSnapshot) throw new Error("Low-level backend must support debugSnapshot to be dumped");
-  const readModel = await computeReadModel(db);
+  const { readModel } = await computeReadModel(db);
   return { ...kvEntriesFromDebugSnapshot(await lowLevel.debugSnapshot()), readModel };
 }
 
@@ -161,9 +210,26 @@ function declareSeededLowLevelDatabase(dump: BulldozerDbDump): LowLevelDatabase 
 
   const declare = (kind: "store" | "dump", id: string): LowLevelKvStore & LowLevelKvDump => {
     const map = containerFor(kind, id);
+    const reserveKeys = (count: number) => Array.from({ length: count }, () => crypto.getRandomValues(new Uint8Array(48)).buffer);
     return {
+      reserveKeys,
       async get(key) {
         return { buffer: map.get(encodeBase64(new Uint8Array(key)))?.slice(0) ?? null, seq: seqSentinel };
+      },
+      async listEntries(options) {
+        const compareBytes = (a: Uint8Array, b: Uint8Array) => {
+          const commonLength = Math.min(a.length, b.length);
+          for (let index = 0; index < commonLength; index++) {
+            if (a[index] !== b[index]) return a[index] - b[index];
+          }
+          return a.length - b.length;
+        };
+        const limit = options?.limit ?? 1000;
+        const entries = [...map.entries()]
+          .map(([keyBase64, value]) => ({ key: decodeBase64(keyBase64).buffer, value: value.slice(0) }))
+          .filter(entry => options?.startAfter === undefined || compareBytes(new Uint8Array(entry.key), new Uint8Array(options.startAfter)) > 0)
+          .sort((a, b) => compareBytes(new Uint8Array(a.key), new Uint8Array(b.key)));
+        return { entries: entries.slice(0, limit), hasMore: entries.length > limit };
       },
       async setAll(entries) {
         for (const { key, value } of entries) map.set(encodeBase64(new Uint8Array(key)), value.slice(0));
@@ -173,13 +239,27 @@ function declareSeededLowLevelDatabase(dump: BulldozerDbDump): LowLevelDatabase 
         for (const key of keys) map.delete(encodeBase64(new Uint8Array(key)));
         return { seq: seqSentinel };
       },
-      async insertAll(values) {
-        const keys = values.map(() => crypto.getRandomValues(new Uint8Array(48)).buffer);
+      async insertAll(values, options) {
+        const keys = options?.keys ?? reserveKeys(values.length);
+        if (keys.length !== values.length) throw new Error("KV dump insertion must provide exactly one key per value");
         keys.forEach((key, index) => map.set(encodeBase64(new Uint8Array(key)), values[index].slice(0)));
         return { keys, seq: seqSentinel };
       },
-      async compareAndSet() {
-        throw new Error("compareAndSet is not supported by the seeded fixture low-level database");
+      async compareAndSetAll(entries) {
+        const results = entries.map(({ key, compare }) => {
+          const existing = map.get(encodeBase64(new Uint8Array(key)));
+          if (compare === null) return existing === undefined;
+          if (existing === undefined || existing.byteLength !== compare.byteLength) return false;
+          const compareBytes = new Uint8Array(compare);
+          return new Uint8Array(existing).every((byte, index) => byte === compareBytes[index]);
+        });
+        for (const [index, { key, value }] of entries.entries()) {
+          if (results[index]) map.set(encodeBase64(new Uint8Array(key)), value.slice(0));
+        }
+        return {
+          results: results.map(wasSet => wasSet ? { wasSet: true as const, seq: seqSentinel } : { wasSet: false as const, seq: null }),
+          seq: seqSentinel,
+        };
       },
     };
   };
@@ -197,6 +277,7 @@ function declareSeededLowLevelDatabase(dump: BulldozerDbDump): LowLevelDatabase 
     async waitUntilAvailable() {},
     async waitUntilDurable() {},
     async waitUntilReplicated() {},
+    async waitUntilConsistent() {},
     combineSeqs() {
       return seqSentinel;
     },
@@ -209,6 +290,6 @@ function declareSeededLowLevelDatabase(dump: BulldozerDbDump): LowLevelDatabase 
 
 // Restores a Bulldozer database from a whole-database dump, ready to be read (and mutated) by the
 // current code.
-export function restoreBulldozerDatabase(dump: BulldozerDbDump): BulldozerDatabase {
-  return declareBulldozerDatabase(declarePiledriverDatabase(declareSeededLowLevelDatabase(dump)), { migrations: exampleFungibleLedgerMigrations });
+export async function restoreBulldozerDatabase(dump: BulldozerDbDump): Promise<BulldozerDatabase> {
+  return declareBulldozerDatabase(await declareFixturePiledriverDatabase(declareSeededLowLevelDatabase(dump)), { migrations: exampleFungibleLedgerMigrations });
 }

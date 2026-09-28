@@ -2,14 +2,19 @@ import { KnownErrors } from "@hexclave/shared";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import type { GenericQueryCtx } from "convex/server";
 import type { AnalyticsQueryOptions, AnalyticsQueryResponse } from "@hexclave/shared/dist/interface/crud/analytics";
+import type { AdminGetSessionReplayChunkEventsResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
 import { AsyncStoreProperty, GetCurrentPartialUserOptions, GetCurrentUserOptions } from "../../common";
 import { CustomerProductsList, CustomerProductsRequestOptions, InlineProduct, ServerItem } from "../../customers";
 import { DataVaultStore } from "../../data-vault";
 import { EmailDeliveryInfo, SendEmailOptions } from "../../email";
 import { ServerListTeamsOptions, ServerListUsersOptions, ServerTeam, ServerTeamCreateOptions } from "../../teams";
+import type { AdminSessionReplay, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, SessionReplayAllEventsResult } from "../../session-replays";
 import { ProjectCurrentServerUser, ServerOAuthProvider, ServerUser, ServerUserCreateOptions, SyncedPartialServerUser, TokenPartialUser } from "../../users";
 import { _HexclaveServerAppImpl } from "../implementations";
 import { StackClientApp, StackClientAppConstructorOptions } from "./client-app";
+
+
+export type { AdminSessionReplay, AdminSessionReplayChunk, ListSessionReplaysOptions, ListSessionReplaysResult, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, SessionReplayAllEventsResult } from "../../session-replays";
 
 
 /** @deprecated Use `HexclaveServerAppConstructorOptions` from the `@hexclave/*` package instead — same symbol, new brand name. See https://docs.hexclave.com/migration. */
@@ -48,6 +53,12 @@ export type StackServerApp<HasTokenStore extends boolean = boolean, ProjectId ex
     useUser(options: { from: "convex", ctx: GenericQueryCtx<any>, or?: "return-null" | "anonymous" }): ServerUser | null,
     // END_PLATFORM
 
+    /**
+     * @deprecated Whether an app object has server permissions does not determine whether this
+     * call runs in a browser, so an async read should not implicitly choose a navigation strategy.
+     * In React, use useUser({ or: "redirect" }). Otherwise, call getUser() and explicitly invoke
+     * redirectToSignIn() from browser code when it returns null.
+     */
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'redirect' }): Promise<ProjectCurrentServerUser<ProjectId>>,
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'throw' }): Promise<ProjectCurrentServerUser<ProjectId>>,
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'anonymous' }): Promise<ProjectCurrentServerUser<ProjectId>>,
@@ -107,6 +118,12 @@ export type StackServerApp<HasTokenStore extends boolean = boolean, ProjectId ex
     activateEmailCapacityBoost(): Promise<void>,
 
     queryAnalytics(options: AnalyticsQueryOptions): Promise<AnalyticsQueryResponse>,
+
+    listSessionReplays(options?: ListSessionReplaysOptions): Promise<ListSessionReplaysResult>,
+    getSessionReplay(sessionReplayId: string): Promise<AdminSessionReplay>,
+    listSessionReplayChunks(sessionReplayId: string, options?: ListSessionReplayChunksOptions): Promise<ListSessionReplayChunksResult>,
+    getSessionReplayChunkEvents(sessionReplayId: string, chunkId: string): Promise<AdminGetSessionReplayChunkEventsResponse>,
+    getSessionReplayEvents(sessionReplayId: string, options?: { offset?: number, limit?: number }): Promise<SessionReplayAllEventsResult>,
   }
   & AsyncStoreProperty<"user", [id: string], ServerUser | null, false>
   & Omit<AsyncStoreProperty<"users", [], ServerUser[], true>, "listUsers" | "useUsers">

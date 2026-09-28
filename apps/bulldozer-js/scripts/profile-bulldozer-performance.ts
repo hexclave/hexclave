@@ -1,6 +1,7 @@
 import { declareInMemoryLowLevelDatabase } from "../src/databases/low-level/implementations/in-memory.js";
 import { ConcatTreeList } from "../src/databases/piledriver/data-structures/concat-tree-list.js";
-import { declarePiledriverDatabase, PiledriverObject } from "../src/databases/piledriver/index.js";
+import { declareBasePiledriverDatabase } from "../src/databases/piledriver/implementations/base.js";
+import type { PiledriverObject } from "../src/databases/piledriver/index.js";
 import {
   declareBulldozerDatabase,
   declareGroupByTable,
@@ -124,7 +125,7 @@ function eventRow(index: number, amount = index + 1) {
 
 function createProfiledDatabase() {
   const table = (tableId: string, table: AnyTable) => profileTable(tableId, table);
-  const db = declareBulldozerDatabase(declarePiledriverDatabase(declareInMemoryLowLevelDatabase(crypto.randomUUID())), { migrations: [[
+  const db = declareBulldozerDatabase(declareBasePiledriverDatabase(declareInMemoryLowLevelDatabase(crypto.randomUUID())), { migrations: [[
     { type: "initTable", tableId: "events", table: table("events", defineStoredTable()), inputTables: {} },
     { type: "initTable", tableId: "prices", table: table("prices", defineStoredTable()), inputTables: {} },
     { type: "initTable", tableId: "identityEvents", table: table("identityEvents", defineIdentityTable()), inputTables: { input: "events" } },

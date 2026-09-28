@@ -1,0 +1,131 @@
+---
+title: "Replays & Clickmaps"
+description: "Record real user sessions and visualize where users click"
+---
+
+Beyond raw events and SQL, Analytics ships two visual debugging tools: **Session Replays** (watch a real user's session play back) and **Clickmaps** (see where users actually click on a page). Both are sub-apps of Analytics - they turn on with the Analytics app and are captured automatically by the Hexclave client SDK, so there's no separate script tag to install.
+
+<Info>
+  A **Clickmap** aggregates how many times each on-page element was clicked (with dead-click detection). Clicks are tied to DOM elements, not pixel coordinates.
+</Info>
+
+## Requirements
+
+Replays and clickmaps both depend on the SDK's analytics capture, which runs when **all** of the following are true:
+
+1. The **Analytics** app is enabled in your dashboard (**Apps -> Analytics**). The Session Replays and Clickmaps sub-apps inherit this - you don't enable them separately.
+2. Your client app uses a **persistent `tokenStore`** (e.g. `"cookie"`, or `"nextjs-cookie"` in Next.js). Without one, the SDK does not start capture.
+3. The visitor has a Hexclave **session with a refresh token** (a signed-in user, or an anonymous session created by the SDK). If there is no refresh token, the client may still attempt to send events, but the server will reject them and nothing is stored.
+
+When those hold, the SDK captures `$page-view` and `$click` events and (for replays) records the session - no manual setup required.
+
+## Session Replays
+
+Session replays let you move from "an event happened" to "what the user actually saw." The SDK captures DOM snapshots and mutations, mouse interactions, and page state over time, then plays them back as a reconstruction of the session.
+
+### Enabling and disabling
+
+Replay recording is **on by default** once the requirements above are met. You can tune or opt out of it through the `analytics` option when you create your client app:
+
+```ts
+import { HexclaveClientApp } from "@hexclave/js";  // replace `js` with the correct framework SDK package
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  // ...your existing client app options
+  tokenStore: "cookie", // use "nextjs-cookie" in Next.js
+  analytics: {
+    replays: {
+      // Recording is enabled by default; set to false to opt out.
+      enabled: true,
+      // Privacy controls (see below)
+      maskAllInputs: true,
+    },
+  },
+});
+```
+
+To turn replays off entirely, pass `analytics: { replays: { enabled: false } }`. To stop **all** analytics capture (events and replays), pass `analytics: { enabled: false }`.
+
+### Privacy controls
+
+Replays are masked by default to keep sensitive content out of recordings:
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `maskAllInputs` | `true` | Masks the contents of `<input>` fields so typed values aren't recorded |
+| `blockClass` | — | Block elements matching a CSS class name or `RegExp` from being recorded |
+| `blockSelector` | — | Block elements matching a CSS selector from being recorded |
+
+```ts
+analytics: {
+  replays: {
+    maskAllInputs: true,
+    blockClass: "hx-private",
+    blockSelector: "[data-private]",
+  },
+}
+```
+
+<Warning>
+  Leave `maskAllInputs` on unless you have a specific reason and a data-handling policy for unmasked input. Disabling it records exactly what users type into forms.
+</Warning>
+
+### Viewing replays
+
+Replays live under **Analytics -> Replays** in the dashboard. The list shows each session's user, start and last-activity time, duration, and event/click counts. You can filter by:
+
+- User and team
+- Duration (min/max)
+- Last active (24h / 7d / 30d)
+- Minimum click count
+
+Open a replay to play it back. The player supports:
+
+- Play / pause and scrubbing
+- Playback speeds of **0.5×, 1×, 2×, and 4×**
+- **Skip inactivity** (on by default) to jump past idle gaps
+- Timeline markers for clicks and page views
+- Multi-tab playback, with an optional "follow active tab"
+- A shareable deep link to the exact replay
+
+You can also see a user's replays directly from their profile under the **Session Replays** tab on the user detail page.
+
+### Storage and limits
+
+Recorded replay data is stored privately (the DOM recording is gzipped and kept in object storage), with session metadata in the database. A session groups activity from the same login, and is closed after **3 minutes** of inactivity or **12 hours** total. Plans include a monthly allowance of new replays; once the allowance is exhausted, new recordings are skipped until the next cycle.
+
+## Clickmaps
+
+A clickmap overlays your live site with the **number of clicks each element received**, so you can see what users interact with - and spot "dead clicks" on things that look clickable but aren't. Clicks are tied to DOM elements (not pixel coordinates): a marker appearing in the middle of an element does not mean the user clicked that exact point. Click data comes from the same `$click` events the SDK already captures, so there's nothing extra to instrument.
+
+### Enabling
+
+Clickmaps need only the Analytics app enabled and the SDK capturing clicks (the [requirements](#requirements) above). Unlike replays, the clickmap is rendered **on your own site** as an overlay, not inside the dashboard. To activate it:
+
+1. Go to **Analytics -> Clickmaps** in the dashboard.
+2. Add your site's origin as a trusted domain and generate an overlay token (valid for **24 hours**).
+3. Paste the provided console snippet into your browser's dev console while on your site.
+
+The overlay then appears on the page, reading aggregated click data for the current URL.
+
+### Controls
+
+From the overlay you can adjust:
+
+- **Date range** - 24h, 7d, or 30d (queries span at most 31 days)
+- **Device / viewport** - all, mobile, tablet, laptop, desktop, widescreen, or TV
+- **URL pattern** - target specific pages with `*` wildcards
+- **Element search** - find a specific element
+- **Dead clicks** - show or hide clicks that produced no page response
+
+## How this relates to your events
+
+These features build on the same analytics pipeline described in [Queries & Tables](./queries-and-tables):
+
+- **`$click` and `$page-view` events** land in the `events` table (ClickHouse). Clickmaps read from a derived table populated automatically from `$click` events.
+- **Session replay recordings** are stored separately (object storage + database), not in ClickHouse. Your analytics events carry a `session_replay_id` so you can connect an event row back to the replay it occurred in.
+
+## Related
+
+- [Analytics overview](./overview) - enabling Analytics and what gets tracked
+- [Queries & Tables](./queries-and-tables) - the event schema, SQL runner, and Tables view

@@ -195,9 +195,15 @@ export class InternalSession {
 
     const accessToken = this.getAccessTokenIfNotExpiredYet(minMillisUntilExpiration, maxMillisSinceIssued);
     if (!accessToken) {
-      const newTokens = await this.fetchNewTokens();
+      let newTokens = await this.fetchNewTokens();
+      let issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
+      if (maxMillisSinceIssued !== null && issuedMillisAgo !== undefined && issuedMillisAgo > maxMillisSinceIssued) {
+        // The process may have been suspended after the server issued the token but before this code resumed.
+        // Retry once so an otherwise healthy session does not fail because of that scheduling delay.
+        newTokens = await this.fetchNewTokens();
+        issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
+      }
       const expiresInMillis = newTokens?.accessToken.expiresInMillis;
-      const issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
       if (expiresInMillis !== undefined && expiresInMillis < minMillisUntilExpiration) {
         throw new HexclaveAssertionError(`Required access token expiry ${minMillisUntilExpiration}ms is too long; access tokens are too short when they're generated (${expiresInMillis}ms)`);
       }
@@ -334,6 +340,7 @@ export class InternalSession {
       : async () => await this._options.refreshAccessTokenCallback(refreshToken);
     let refreshPromise: Promise<AccessToken | null> = refresh().then((accessToken) => {
       if (refreshPromise === this._refreshPromise) {
+        this._refreshPromise = null;
         this._accessToken.set(accessToken);
         if (!accessToken) {
           this.markInvalid();
@@ -341,8 +348,7 @@ export class InternalSession {
       }
       return accessToken;
     }).finally(() => {
-      // Provider/network failures are transient; leaving a rejected promise cached would make this
-      // session permanently unable to retry even though the delegated provider session is still valid.
+      // A failed refresh must not poison this session permanently.
       if (refreshPromise === this._refreshPromise) {
         this._refreshPromise = null;
       }

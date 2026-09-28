@@ -338,6 +338,7 @@ export abstract class OAuthBaseProvider {
     public readonly openid?: boolean,
     public readonly alternativeIssuers?: string[],
     public readonly includeScopeInCallbackTokenExchange?: boolean,
+    public readonly noConsentPrompt?: boolean,
   ) {}
 
   protected static async createConstructorArgs(options:
@@ -352,6 +353,7 @@ export abstract class OAuthBaseProvider {
       noPKCE?: boolean,
       alternativeIssuers?: string[],
       includeScopeInCallbackTokenExchange?: boolean,
+      noConsentPrompt?: boolean,
     }
     & (
       | ({
@@ -408,6 +410,7 @@ export abstract class OAuthBaseProvider {
       options.openid,
       options.alternativeIssuers,
       options.includeScopeInCallbackTokenExchange,
+      options.noConsentPrompt,
     ] as const;
   }
 
@@ -425,7 +428,7 @@ export abstract class OAuthBaseProvider {
       state: options.state,
       response_type: "code",
       access_type: "offline",
-      prompt: "consent",
+      ...(this.noConsentPrompt ? {} : { prompt: "consent" }),
       ...this.authorizationExtraParams,
     });
   }

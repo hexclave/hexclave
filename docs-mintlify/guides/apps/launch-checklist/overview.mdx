@@ -1,20 +1,20 @@
 ---
 title: "Launch Checklist"
-description: "Steps to prepare Stack for production use"
+description: "Steps to prepare Hexclave for production use"
 icon: "/images/app-icons/launch-checklist.svg"
 ---
 
-Stack makes development easy with various default settings, but these settings need to be optimized for security and user experience when moving to production. Here's a checklist of things you need to do before switching to production mode:
+Hexclave makes development easy with various default settings, but these settings need to be optimized for security and user experience when moving to production. Here's a checklist of things you need to do before switching to production mode:
 
 ## Domains
 
-By default, Stack allows all localhost paths as valid callback URLs. This is convenient for development but poses a security risk in production because attackers could use their own domains as callback URLs to intercept sensitive information. Therefore, in production, Stack must know your domain (e.g., `https://your-website.com`) and only allow callbacks from those domains.
+By default, Hexclave allows all localhost paths as valid callback URLs. This is convenient for development but poses a security risk in production because attackers could use their own domains as callback URLs to intercept sensitive information. Therefore, in production, Hexclave must know your domain (e.g., `https://your-website.com`) and only allow callbacks from those domains.
 
 Follow these steps when you're ready to push your application to production:
 
 <Steps>
   <Step title="Add Your Domain">
-    Navigate to the `Domain & Handlers` tab in the Stack dashboard. If you haven't configured your handler, you can leave it as the default. (Learn more about handlers [here](/sdk/objects/hexclave-app)).
+    Navigate to the `Domain & Handlers` tab in the Hexclave dashboard. If you haven't configured your handler, you can leave it as the default. (Learn more about handlers [here](/sdk/objects/hexclave-app)).
   </Step>
   <Step title="Disable Localhost Callbacks">
     For enhanced security, disable the `Allow all localhost callbacks for development` option.
@@ -23,13 +23,13 @@ Follow these steps when you're ready to push your application to production:
 
 ## OAuth providers
 
-Stack uses shared OAuth keys for development to simplify setup when using "Sign in with Google/GitHub/etc." However, this isn't secure for production as it displays "Stack Development" on the providers' consent screens, making it unclear to users if the OAuth request is genuinely from your site. Thus, you should configure your own OAuth keys with the providers and connect them to Stack.
+Hexclave uses shared OAuth keys for development to simplify setup when using "Sign in with Google/GitHub/etc." However, this isn't secure for production as it displays "Hexclave Development" on the providers' consent screens, making it unclear to users if the OAuth request is genuinely from your site. Thus, you should configure your own OAuth keys with the providers and connect them to Hexclave.
 
 To use your own OAuth provider setups in production, follow these steps for each provider you use:
 
 <Steps>
   <Step title="Create an OAuth App">
-    On the provider's website, create an OAuth app and set the callback URL to the corresponding Stack callback URL. Copy the client ID and client secret.
+    On the provider's website, create an OAuth app and set the callback URL to the corresponding Hexclave callback URL. Copy the client ID and client secret.
 
     <Tabs>
       <Tab title="Google">
@@ -116,19 +116,19 @@ To use your own OAuth provider setups in production, follow these steps for each
     </Tabs>
   </Step>
   <Step title="Enter OAuth Credentials">
-    Go to the `Auth Methods` section in the Stack dashboard, open the provider's settings, switch from shared keys to custom keys, and enter the client ID and client secret.
+    Go to the `Auth Methods` section in the Hexclave dashboard, open the provider's settings, switch from shared keys to custom keys, and enter the client ID and client secret.
   </Step>
 </Steps>
 
 ## Email server
 
-For development, Stack uses a shared email server, which sends emails from Stack's domain. This is not ideal for production as users may not trust emails from an unfamiliar domain. You should set up an email server connected to your own domain.
+For development, Hexclave uses a shared email server, which sends emails from Hexclave's domain. This is not ideal for production as users may not trust emails from an unfamiliar domain. You should set up an email server connected to your own domain.
 
-Steps to connect your own email server with Stack:
+Steps to connect your own email server with Hexclave:
 
-1. **Setup Email Server**: Configure your own email server and connect it to your domain (this step is beyond Stack's documentation scope).
-2. **Configure Stack's Email Settings**: Navigate to the `Emails` section in the Stack dashboard, click `Edit` in the `Email Server` section, switch from `Shared` to `Custom SMTP server`, enter your SMTP configurations, and save.
+1. **Setup Email Server**: Configure your own email server and connect it to your domain (this step is beyond Hexclave's documentation scope).
+2. **Configure Hexclave's Email Settings**: Navigate to the `Emails` section in the Hexclave dashboard, click `Edit` in the `Email Server` section, switch from `Shared` to `Custom SMTP server`, enter your SMTP configurations, and save.
 
 ## Enabling production mode
 
-After completing the steps above, you can enable production mode on the `Project Settings` tab in the Stack dashboard, ensuring that your website runs securely with Stack in a production environment.
+After completing the steps above, you can enable production mode on the `Project Settings` tab in the Hexclave dashboard, ensuring that your website runs securely with Hexclave in a production environment.

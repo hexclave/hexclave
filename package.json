@@ -46,6 +46,7 @@
     "db:backfill-bulldozer-from-prisma": "pnpm pre && pnpm run --filter=@hexclave/backend db:backfill-bulldozer-from-prisma",
     "db:backfill-internal-free-plans": "pnpm pre && pnpm run --filter=@hexclave/backend db:backfill-internal-free-plans",
     "db:regen-internal-subscriptions-to-latest": "pnpm pre && pnpm run --filter=@hexclave/backend db:regen-internal-subscriptions-to-latest",
+    "gc:piledriver": "pnpm -C apps/bulldozer-js gc:piledriver",
     "dev:full": "pnpm pre && concurrently -k \"pnpm run build-packages:watch\" \"pnpm run generate-sdks:watch\" \"pnpm run generate-setup-prompt-docs:watch\" \"turbo run dev --concurrency 99999\"",
     "dev": "pnpm pre && HEXCLAVE_DEV_UI=stream pnpm run dev:tasks",
     "dev:tui": "pnpm pre && HEXCLAVE_DEV_UI=tui pnpm run dev:tasks",
@@ -63,7 +64,9 @@
     "start:mcp": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/mcp",
     "start:dashboard": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/dashboard",
     "start:mock-oauth-server": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/mock-oauth-server",
+    "start:internal-tool": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/internal-tool",
     "start:bulldozer": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/bulldozer-js",
+    "start:marshal": "pnpm pre && turbo run start --concurrency 99999 --filter=@hexclave/marshal",
     "lint": "pnpm pre && turbo run lint --continue -- --max-warnings=0",
     "release": "pnpm pre && release",
     "dotenv": "dotenv",
@@ -108,7 +111,7 @@
     "wait-on": "^8.0.1"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24.0.0"
   },
   "packageManager": "pnpm@11.5.0+sha512.dbfcc4f81cf48597afd4bc391ffdf12c11f1a9fb83a395bfa6b0a2d9cc2fd8ffebafdb1ccbd529632153f793904c2615b7f09fe1a345473fd1c35845172a8eb1",
   "dependencies": {

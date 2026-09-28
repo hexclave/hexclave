@@ -1,0 +1,87 @@
+---
+title: "Subscriptions"
+description: "Switch plans with automatic proration, and cancel subscriptions"
+---
+
+When products belong to the same [product line](./products-and-pricing#product-lines), customers can move between them, and Hexclave handles the proration and timing for you.
+
+## Switching plans
+
+For example, upgrading from Pro to Enterprise:
+
+```typescript title="app/components/upgrade-button.tsx"
+"use client";
+import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+export default function UpgradeButton() {
+  const user = useUser({ or: 'redirect' });
+
+  return (
+    <button onClick={async () => {
+      await user.switchSubscription({
+        fromProductId: "prod_pro",
+        toProductId: "prod_enterprise",
+        // optional: priceId, quantity (quantity > 1 requires a stackable product)
+      });
+    }}>
+      Upgrade to Enterprise
+    </button>
+  );
+}
+```
+
+<Info>
+  Switching plans requires the customer to have a default payment method saved (see [Billing & Invoices](./billing-and-invoices)). The switch happens immediately and the charge is prorated automatically. You cannot switch to an add-on, and a [free trial](./products-and-pricing#free-trials) on the destination product is not applied.
+</Info>
+
+## Canceling a subscription
+
+`cancelSubscription` is called on the app instance rather than the user object:
+
+<Tabs>
+  <Tab title="Client Component">
+    ```typescript
+    "use client";
+    import { useHexclaveApp } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+    export default function CancelButton({ productId }: { productId: string }) {
+      const app = useHexclaveApp();
+      return (
+        <button onClick={async () => {
+          await app.cancelSubscription({ productId });
+        }}>
+          Cancel Subscription
+        </button>
+      );
+    }
+    ```
+  </Tab>
+  <Tab title="Server">
+    ```typescript
+    import { hexclaveServerApp } from "@/hexclave/server";
+
+    // Cancel for the current user
+    await hexclaveServerApp.cancelSubscription({ productId: "prod_pro" });
+
+    // Cancel for a team
+    await hexclaveServerApp.cancelSubscription({
+      productId: "prod_team_plan",
+      teamId: "team-id",
+    });
+    ```
+  </Tab>
+</Tabs>
+
+`cancelSubscription` is **immediate** for live, processor-backed subscriptions — access ends now. Subscriptions created in **test mode** or via [grantProduct](./granting-products) (no processor subscription) are marked to end at the current period end, so access continues until then.
+
+Pass `subscriptionId` when canceling an [inline product](./granting-products#inline-products) that has no catalog `productId`. One-time purchases cannot be canceled; [refund](./refunds) them instead.
+
+## Reading subscription state
+
+Each subscription product returned by [`useProducts` / `listProducts`](./checkout#checking-what-a-customer-owns) carries a `subscription` field with the current period end and cancellation state, plus `switchOptions` listing the other products in the same product line the customer can switch to.
+
+## Related
+
+- [Checkout & Purchases](./checkout) - start a subscription
+- [Billing & Invoices](./billing-and-invoices) - payment methods and billing history
+- [Refunds](./refunds) - reverse a charge and optionally end the subscription

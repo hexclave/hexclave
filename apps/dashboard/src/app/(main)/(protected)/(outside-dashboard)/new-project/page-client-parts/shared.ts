@@ -1,4 +1,5 @@
 import { hexclaveAppInternalsSymbol } from "@/lib/hexclave-app-internals";
+import { getAppIdsForListing } from "@/lib/apps-utils";
 import { AdminOwnedProject } from "@hexclave/next";
 import { ALL_APPS, getParentAppId, type AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { projectOnboardingStatusValues, type ProjectOnboardingStatus } from "@hexclave/shared/dist/schema-fields";
@@ -21,10 +22,11 @@ export const SIGN_IN_METHODS: Array<{ id: SignInMethod, label: string }> = [
   { id: "microsoft", label: "Microsoft" },
 ];
 
-export const REQUIRED_APP_IDS: AppId[] = ["authentication", "emails"];
+export const REQUIRED_APP_IDS: AppId[] = ["analytics"];
 export const PRIMARY_APP_IDS: AppId[] = ["authentication", "emails", "payments", "analytics"];
+const EARLY_ONBOARDING_DEFAULT_APP_IDS: AppId[] = ["authentication", "emails", "analytics"];
 export const ALL_APP_IDS = Object.keys(ALL_APPS) as AppId[];
-export const ONBOARDING_APP_IDS = ALL_APP_IDS.filter((appId) => ALL_APPS[appId].stage !== "alpha" && getParentAppId(appId) == null);
+export const ONBOARDING_APP_IDS = getAppIdsForListing().filter((appId) => getParentAppId(appId) == null);
 export const OAUTH_SIGN_IN_METHODS = ["google", "github", "microsoft"] satisfies SignInMethod[];
 export const SHARED_OAUTH_SIGN_IN_METHODS = sharedProviders.filter((provider): provider is (typeof sharedProviders)[number] & SignInMethod => {
   return OAUTH_SIGN_IN_METHODS.some((method) => method === provider);
@@ -184,15 +186,25 @@ export function normalizeTrustedDomain(input: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
-export function buildTimeline(includePayments: boolean): TimelineStep[] {
-  const timeline: TimelineStep[] = [
-    { id: "config_choice", label: "Config" },
-    { id: "apps_selection", label: "Apps" },
-    { id: "auth_setup", label: "Auth" },
-    { id: "email_theme_setup", label: "Email Theme" },
-  ];
+export function buildTimeline(options: {
+  includeInitialSteps: boolean,
+  selectedApps: ReadonlySet<AppId>,
+}): TimelineStep[] {
+  const timeline: TimelineStep[] = [];
 
-  if (includePayments) {
+  if (options.includeInitialSteps) {
+    timeline.push(
+      { id: "config_choice", label: "Config" },
+      { id: "apps_selection", label: "Apps" },
+    );
+  }
+  if (options.selectedApps.has("authentication")) {
+    timeline.push({ id: "auth_setup", label: "Auth" });
+  }
+  if (options.selectedApps.has("emails")) {
+    timeline.push({ id: "email_theme_setup", label: "Email Theme" });
+  }
+  if (options.selectedApps.has("payments")) {
     timeline.push({ id: "payments_setup", label: "Payments" });
   }
 
@@ -290,7 +302,10 @@ export function deriveInitialApps(config: ReturnType<AdminOwnedProject["useConfi
     || status === "auth_setup"
   );
 
-  if (enabledApps.size === 0 || (isInEarlyOnboardingStep && enabledApps.size <= REQUIRED_APP_IDS.length)) {
+  const hasOnlyEarlyOnboardingDefaults = [...enabledApps].every((appId) => (
+    EARLY_ONBOARDING_DEFAULT_APP_IDS.some((defaultAppId) => defaultAppId === appId)
+  ));
+  if (enabledApps.size === 0 || (isInEarlyOnboardingStep && hasOnlyEarlyOnboardingDefaults)) {
     for (const primaryAppId of PRIMARY_APP_IDS) {
       enabledApps.add(primaryAppId);
     }

@@ -4,17 +4,26 @@ description: "Create and manage API keys for users and teams"
 icon: "/images/app-icons/api-keys.svg"
 ---
 
-The API Keys app enables your users to generate and manage API keys for programmatic access to your backend services. API keys provide a secure way to authenticate requests, allowing developers to associate API calls with specific users or teams. Hexclave provides prebuilt UI components for users and teams to manage their own API keys.
+The API Keys app enables your users to generate and manage API keys for programmatic access to your backend services. API keys provide a secure way to authenticate requests, allowing developers to associate API calls with specific **users** or **teams**. Hexclave provides prebuilt UI components so users and teams can manage their own keys.
 
-## Overview
+## Concepts
 
-API keys allow your users to access your backend services programmatically without interactive authentication.
+### The authentication flow
 
-The flow works as follows: a user or client sends an API request with an API key to your application server. Your server validates the API key with Hexclave, which returns an authenticated User object. Your server then processes the request and returns the response.
+A user or client sends an API request with an API key to your application server. Your server validates the API key with Hexclave, which returns an authenticated `User` (or `Team`) object. Your server then processes the request and returns the response.
 
-Hexclave provides two types of API keys:
+### Two kinds of API keys
 
-### User API keys
+Hexclave supports two kinds of API keys:
+
+- **User API keys** - associated with an individual user; calls authenticated with this key act on behalf of that user.
+- **Team API keys** - associated with a team; calls authenticated with this key act on behalf of that team. Only users with the `$manage_api_keys` permission for the team can create or revoke them.
+
+<Note>
+  **Don't confuse API Keys with Project Keys.** The **API Keys app** documented here lets your end users issue keys for *their* accounts and teams. If you want to create or rotate the publishable / secret keys that *your* Hexclave project uses to call the Hexclave API, that lives in **Project Settings → Project Keys** instead.
+</Note>
+
+#### User API keys
 
 User API keys are associated with individual users and allow them to authenticate with your API.
 
@@ -42,10 +51,10 @@ User API keys are associated with individual users and allow them to authenticat
   </Tab>
   <Tab title="Next.js Server">
     ```typescript title="app/components/create-api-key.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CreateApiKey() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
 
       const apiKey = await user.createApiKey({
         description: "Admin-provisioned API key",
@@ -84,16 +93,16 @@ User API keys are associated with individual users and allow them to authenticat
 
     def create_user_api_key(request):
         # Get the current user's access token from session/cookie
-        access_token = request.COOKIES.get('stack-access-token')
+        access_token = request.COOKIES.get('hexclave-access-token')
 
         # Create API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/user-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'user_id': 'me',
@@ -115,18 +124,18 @@ User API keys are associated with individual users and allow them to authenticat
     from fastapi import Cookie, HTTPException
 
     @app.post("/api/create-user-api-key")
-    async def create_user_api_key(stack_access_token: str = Cookie(None, alias="stack-access-token")):
-        if not stack_access_token:
+    async def create_user_api_key(hexclave_access_token: str = Cookie(None, alias="hexclave-access-token")):
+        if not hexclave_access_token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
         # Create API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/user-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': stack_access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': hexclave_access_token,
             },
             json={
                 'user_id': 'me',
@@ -149,7 +158,7 @@ User API keys are associated with individual users and allow them to authenticat
 
     @app.route('/api/create-user-api-key', methods=['POST'])
     def create_user_api_key():
-        access_token = request.cookies.get('stack-access-token')
+        access_token = request.cookies.get('hexclave-access-token')
         if not access_token:
             return jsonify({'error': 'Not authenticated'}), 401
 
@@ -157,10 +166,10 @@ User API keys are associated with individual users and allow them to authenticat
         response = requests.post(
             'https://api.hexclave.com/api/v1/user-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'user_id': 'me',
@@ -177,7 +186,7 @@ User API keys are associated with individual users and allow them to authenticat
   </Tab>
 </Tabs>
 
-### Team API keys
+#### Team API keys
 
 Team API keys are associated with teams and can be used to provide access to team resources over your API.
 
@@ -208,7 +217,7 @@ Team API keys are associated with teams and can be used to provide access to tea
   </Tab>
   <Tab title="Next.js Server">
     ```typescript title="app/components/create-team-api-key.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CreateTeamApiKey({ teamId }: { teamId: string }) {
       const team = await hexclaveServerApp.getTeam(teamId);
@@ -258,16 +267,16 @@ Team API keys are associated with teams and can be used to provide access to tea
 
     def create_team_api_key(request, team_id):
         # Get the current user's access token from session/cookie
-        access_token = request.COOKIES.get('stack-access-token')
+        access_token = request.COOKIES.get('hexclave-access-token')
 
         # Create team API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/team-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'team_id': team_id,
@@ -289,18 +298,18 @@ Team API keys are associated with teams and can be used to provide access to tea
     from fastapi import Cookie, HTTPException
 
     @app.post("/api/teams/{team_id}/api-keys")
-    async def create_team_api_key(team_id: str, stack_access_token: str = Cookie(None, alias="stack-access-token")):
-        if not stack_access_token:
+    async def create_team_api_key(team_id: str, hexclave_access_token: str = Cookie(None, alias="hexclave-access-token")):
+        if not hexclave_access_token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
         # Create team API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/team-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': stack_access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': hexclave_access_token,
             },
             json={
                 'team_id': team_id,
@@ -323,7 +332,7 @@ Team API keys are associated with teams and can be used to provide access to tea
 
     @app.route('/api/teams/<team_id>/api-keys', methods=['POST'])
     def create_team_api_key(team_id):
-        access_token = request.cookies.get('stack-access-token')
+        access_token = request.cookies.get('hexclave-access-token')
         if not access_token:
             return jsonify({'error': 'Not authenticated'}), 401
 
@@ -331,10 +340,10 @@ Team API keys are associated with teams and can be used to provide access to tea
         response = requests.post(
             'https://api.hexclave.com/api/v1/team-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'team_id': team_id,
@@ -353,52 +362,61 @@ Team API keys are associated with teams and can be used to provide access to tea
 
 ## Enabling the API Keys App
 
-To use API keys in your application, you need to enable the API Keys app in your Hexclave dashboard:
+To use API keys in your application, you must enable the **API Keys** app in your Hexclave dashboard:
 
-1. Navigate to your Hexclave dashboard
-2. Go to the **Apps** section
-3. Find and click on **API Keys** in the app store
-4. Click the **Enable** button
+1. Open your Hexclave dashboard
+2. Go to **Apps**
+3. Find and open **API Keys**
+4. Click **Enable**
 
-Once enabled, you can configure User API Keys and Team API Keys in the app settings. The app will provide your users with a prebuilt UI to manage their own API keys.
+### Dashboard settings
+
+Once enabled, the API Keys app exposes exactly two toggles under **API Key Settings**:
+
+| Setting             | Config field             | Description                                                                                          |
+| ------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------- |
+| **User API Keys**   | `apiKeys.enabled.user`   | Allow users to create API keys for their accounts. Enables the `user-api-keys` backend routes.       |
+| **Team API Keys**   | `apiKeys.enabled.team`   | Allow users to create API keys for their teams. Enables the `team-api-keys` backend routes.          |
+
+Both are **disabled by default**. Changes require clicking **Save** before they take effect.
+
+Toggling **User API Keys** controls whether the `<AccountSettings>` component shows its API Keys tab. Toggling **Team API Keys** controls whether the team settings page shows its API Keys section to users with the `$manage_api_keys` permission.
+
+### Team permission requirement
+
+Creating, listing, and revoking **team** API keys requires the [`$manage_api_keys`](/guides/apps/rbac/overview) permission on the team. Make sure your team roles grant this permission to the right members (e.g. admins).
 
 ## Prebuilt UI Components
 
-Hexclave provides prebuilt UI components that allow your users to manage their own API keys without any additional code:
+Hexclave provides prebuilt UI components that let your users manage their own API keys without any additional code.
 
 ### User API Keys UI
 
 For frameworks that support React components, the `<AccountSettings>` component includes an API Keys tab where users can:
 
 - View all their active API keys
-- Create new API keys with custom descriptions and expiration dates
+- Create new API keys with a description and an expiration date
 - Revoke existing API keys
-- See when each key was created and when it expires.
+- See when each key was created and when it expires
+
+The tab is only shown when `apiKeys.enabled.user` is on for your project.
 
 <Tabs>
   <Tab title="Next.js">
-    ```typescript title="app/src/account-page.tsx"
+    ```typescript title="app/account/page.tsx"
     import { AccountSettings } from '@hexclave/next';
 
     export default function MyAccountPage() {
-      return (
-        <AccountSettings
-          fullPage={true}
-        />
-      );
+      return <AccountSettings fullPage />;
     }
     ```
   </Tab>
   <Tab title="React">
-    ```typescript title="app/src/account-page.tsx"
+    ```typescript title="src/account-page.tsx"
     import { AccountSettings } from '@hexclave/react';
 
     export default function MyAccountPage() {
-      return (
-        <AccountSettings
-          fullPage={true}
-        />
-      );
+      return <AccountSettings fullPage />;
     }
     ```
   </Tab>
@@ -406,17 +424,44 @@ For frameworks that support React components, the `<AccountSettings>` component 
 
 ### Team API Keys UI
 
-For team API keys, the team settings page automatically includes an API Keys section when:
+The team settings page automatically includes an **API Keys** section when **all** of the following are true:
 
 - The API Keys app is enabled
-- `allowTeamApiKeys` is configured in your project settings
-- The user has the `$manage_api_keys` permission for the team
+- `apiKeys.enabled.team` is on for your project
+- The current user has the `$manage_api_keys` permission on the team
 
-Users with appropriate permissions can manage team API keys directly from the team settings interface.
+Users with the right permission can create, list, and revoke team API keys directly from the team settings interface - no extra code required.
+
+## The `ApiKey` object
+
+Both `user.listApiKeys()` and `team.listApiKeys()` return arrays of `ApiKey` objects. The same shape comes back from `user.createApiKey(...)` / `team.createApiKey(...)`, except the `value` is the full plaintext key only on the first view.
+
+| Field                  | Type                                              | Description                                                                                          |
+| ---------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `id`                   | `string`                                          | Stable identifier for the key                                                                        |
+| `description`          | `string`                                          | Human-readable description set on creation                                                           |
+| `createdAt`            | `Date`                                            | When the key was created                                                                             |
+| `expiresAt`            | `Date \| undefined`                               | Optional expiration timestamp                                                                        |
+| `manuallyRevokedAt`    | `Date \| null \| undefined`                       | Set when the key was explicitly revoked                                                              |
+| `value`                | `string` (first view) / `{ lastFour: string }`    | Full key on first view only, then just the last 4 characters                                         |
+| `type`                 | `"user" \| "team"`                                | Which flavor of key this is                                                                          |
+| `userId` / `teamId`    | `string`                                          | The owning user (for `type: "user"`) or team (for `type: "team"`)                                    |
+| `update(options)`      | `(options) => Promise<void>`                      | Update `description`, `expiresAt`, or `revoked`                                                      |
+| `revoke()`             | `() => Promise<void>`                             | Convenience for `update({ revoked: true })`                                                          |
+| `isValid()`            | `() => boolean`                                   | `true` if the key is not expired and not manually revoked                                            |
+| `whyInvalid()`         | `() => "manually-revoked" \| "expired" \| null`   | Reason the key is invalid, or `null` if it's still valid                                             |
+
+<Warning>
+  The full plaintext value of an API key is **only returned once** - at creation time. After that, the SDK only ever exposes `value.lastFour`. Display, copy, or store the value immediately on creation; it cannot be retrieved later.
+</Warning>
+
+### `isPublic` keys
+
+When creating a key, pass `isPublic: true` to exempt it from Hexclave's secret scanner. The secret scanner automatically revokes API keys it detects in public places (e.g. exposed in a GitHub repo). Use `isPublic` only for keys that are intentionally exposed to clients (e.g. anonymous-style access tokens).
 
 ## Working with API Keys
 
-### Creating User API Keys
+### Creating a user API key
 
 <Tabs>
   <Tab title="Next.js Client">
@@ -430,7 +475,7 @@ Users with appropriate permissions can manage team API keys directly from the te
       const handleCreateKey = async () => {
         const apiKey = await user.createApiKey({
           description: "My client application",
-          expiresAt: new Date(Date.now() + (90 * 24 * 60 * 60 * 1000)), // 90 days
+          expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
         });
 
         console.log("API Key created:", apiKey.value);
@@ -442,14 +487,14 @@ Users with appropriate permissions can manage team API keys directly from the te
   </Tab>
   <Tab title="Next.js Server">
     ```typescript title="app/components/create-api-key.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CreateApiKey() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
 
       const apiKey = await user.createApiKey({
         description: "Admin-provisioned API key",
-        expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
       });
 
       return <div>API Key: {apiKey.value}</div>;
@@ -467,7 +512,7 @@ Users with appropriate permissions can manage team API keys directly from the te
       const handleCreateKey = async () => {
         const apiKey = await user.createApiKey({
           description: "My client application",
-          expiresAt: new Date(Date.now() + (90 * 24 * 60 * 60 * 1000)), // 90 days
+          expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
         });
 
         console.log("API Key created:", apiKey.value);
@@ -480,20 +525,21 @@ Users with appropriate permissions can manage team API keys directly from the te
   <Tab title="Django">
     ```python title="views.py"
     import requests
+    import time
     from django.http import JsonResponse
 
     def create_user_api_key(request):
         # Get the current user's access token from session/cookie
-        access_token = request.COOKIES.get('stack-access-token')
+        access_token = request.COOKIES.get('hexclave-access-token')
 
         # Create API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/user-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'user_id': 'me',
@@ -515,18 +561,18 @@ Users with appropriate permissions can manage team API keys directly from the te
     from fastapi import Cookie, HTTPException
 
     @app.post("/api/create-user-api-key")
-    async def create_user_api_key(stack_access_token: str = Cookie(None, alias="stack-access-token")):
-        if not stack_access_token:
+    async def create_user_api_key(hexclave_access_token: str = Cookie(None, alias="hexclave-access-token")):
+        if not hexclave_access_token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
         # Create API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/user-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': stack_access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': hexclave_access_token,
             },
             json={
                 'user_id': 'me',
@@ -549,7 +595,7 @@ Users with appropriate permissions can manage team API keys directly from the te
 
     @app.route('/api/create-user-api-key', methods=['POST'])
     def create_user_api_key():
-        access_token = request.cookies.get('stack-access-token')
+        access_token = request.cookies.get('hexclave-access-token')
         if not access_token:
             return jsonify({'error': 'Not authenticated'}), 401
 
@@ -557,10 +603,10 @@ Users with appropriate permissions can manage team API keys directly from the te
         response = requests.post(
             'https://api.hexclave.com/api/v1/user-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'user_id': 'me',
@@ -577,7 +623,9 @@ Users with appropriate permissions can manage team API keys directly from the te
   </Tab>
 </Tabs>
 
-### Creating Team API Keys
+### Creating a team API key
+
+Requires the `$manage_api_keys` team permission.
 
 <Tabs>
   <Tab title="Next.js Client">
@@ -594,7 +642,7 @@ Users with appropriate permissions can manage team API keys directly from the te
 
         const teamApiKey = await team.createApiKey({
           description: "Team integration service",
-          expiresAt: new Date(Date.now() + (60 * 24 * 60 * 60 * 1000)), // 60 days
+          expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000), // 60 days
         });
 
         console.log("Team API Key created:", teamApiKey.value);
@@ -606,7 +654,7 @@ Users with appropriate permissions can manage team API keys directly from the te
   </Tab>
   <Tab title="Next.js Server">
     ```typescript title="app/components/create-team-api-key.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CreateTeamApiKey({ teamId }: { teamId: string }) {
       const team = await hexclaveServerApp.getTeam(teamId);
@@ -615,9 +663,10 @@ Users with appropriate permissions can manage team API keys directly from the te
         return <div>Team not found</div>;
       }
 
+
       const teamApiKey = await team.createApiKey({
         description: "Admin-provisioned team API key",
-        expiresAt: new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)), // 30 days
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
       });
 
       return <div>Team API Key: {teamApiKey.value}</div>;
@@ -638,7 +687,7 @@ Users with appropriate permissions can manage team API keys directly from the te
 
         const teamApiKey = await team.createApiKey({
           description: "Team integration service",
-          expiresAt: new Date(Date.now() + (60 * 24 * 60 * 60 * 1000)), // 60 days
+          expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000), // 60 days
         });
 
         console.log("Team API Key created:", teamApiKey.value);
@@ -656,16 +705,16 @@ Users with appropriate permissions can manage team API keys directly from the te
 
     def create_team_api_key(request, team_id):
         # Get the current user's access token from session/cookie
-        access_token = request.COOKIES.get('stack-access-token')
+        access_token = request.COOKIES.get('hexclave-access-token')
 
         # Create team API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/team-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'team_id': team_id,
@@ -687,18 +736,18 @@ Users with appropriate permissions can manage team API keys directly from the te
     from fastapi import Cookie, HTTPException
 
     @app.post("/api/teams/{team_id}/api-keys")
-    async def create_team_api_key(team_id: str, stack_access_token: str = Cookie(None, alias="stack-access-token")):
-        if not stack_access_token:
+    async def create_team_api_key(team_id: str, hexclave_access_token: str = Cookie(None, alias="hexclave-access-token")):
+        if not hexclave_access_token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
         # Create team API key via client API
         response = requests.post(
             'https://api.hexclave.com/api/v1/team-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': stack_access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': hexclave_access_token,
             },
             json={
                 'team_id': team_id,
@@ -721,7 +770,7 @@ Users with appropriate permissions can manage team API keys directly from the te
 
     @app.route('/api/teams/<team_id>/api-keys', methods=['POST'])
     def create_team_api_key(team_id):
-        access_token = request.cookies.get('stack-access-token')
+        access_token = request.cookies.get('hexclave-access-token')
         if not access_token:
             return jsonify({'error': 'Not authenticated'}), 401
 
@@ -729,10 +778,10 @@ Users with appropriate permissions can manage team API keys directly from the te
         response = requests.post(
             'https://api.hexclave.com/api/v1/team-api-keys',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             },
             json={
                 'team_id': team_id,
@@ -749,7 +798,7 @@ Users with appropriate permissions can manage team API keys directly from the te
   </Tab>
 </Tabs>
 
-### Listing API Keys
+### Listing API keys
 
 <Tabs>
   <Tab title="Next.js Client">
@@ -778,10 +827,10 @@ Users with appropriate permissions can manage team API keys directly from the te
   </Tab>
   <Tab title="Next.js Server">
     ```typescript title="app/components/api-keys-list.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function ApiKeysList() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const apiKeys = await user.listApiKeys();
 
       return (
@@ -830,16 +879,16 @@ Users with appropriate permissions can manage team API keys directly from the te
 
     def list_user_api_keys(request):
         # Get the current user's access token from session/cookie
-        access_token = request.COOKIES.get('stack-access-token')
+        access_token = request.COOKIES.get('hexclave-access-token')
 
         # List user's API keys via client API
         response = requests.get(
             'https://api.hexclave.com/api/v1/user-api-keys?user_id=me',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             }
         )
 
@@ -855,18 +904,18 @@ Users with appropriate permissions can manage team API keys directly from the te
     from fastapi import Cookie, HTTPException
 
     @app.get("/api/user-api-keys")
-    async def list_user_api_keys(stack_access_token: str = Cookie(None, alias="stack-access-token")):
-        if not stack_access_token:
+    async def list_user_api_keys(hexclave_access_token: str = Cookie(None, alias="hexclave-access-token")):
+        if not hexclave_access_token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
         # List user's API keys via client API
         response = requests.get(
             'https://api.hexclave.com/api/v1/user-api-keys?user_id=me',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': stack_access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': hexclave_access_token,
             }
         )
 
@@ -883,7 +932,7 @@ Users with appropriate permissions can manage team API keys directly from the te
 
     @app.route('/api/user-api-keys', methods=['GET'])
     def list_user_api_keys():
-        access_token = request.cookies.get('stack-access-token')
+        access_token = request.cookies.get('hexclave-access-token')
         if not access_token:
             return jsonify({'error': 'Not authenticated'}), 401
 
@@ -891,10 +940,10 @@ Users with appropriate permissions can manage team API keys directly from the te
         response = requests.get(
             'https://api.hexclave.com/api/v1/user-api-keys?user_id=me',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             }
         )
 
@@ -906,69 +955,45 @@ Users with appropriate permissions can manage team API keys directly from the te
   </Tab>
 </Tabs>
 
-### Revoking API Keys
+The same pattern works for team API keys via `team.useApiKeys()` (client) or `team.listApiKeys()` (server), and the `/api/v1/team-api-keys` REST endpoint.
 
-API keys can be revoked when they are no longer needed or if they have been compromised.
+### Validating an incoming API key on your server
+
+This is the core authentication flow: an incoming request includes an API key, and your server needs to know **which user or team** it represents. Pass the plaintext key directly to `hexclaveServerApp.getUser({ apiKey })` or `hexclaveServerApp.getTeam({ apiKey })` - Hexclave validates it and returns the corresponding object, or `null` if the key is invalid, expired, or revoked.
 
 <Tabs>
-  <Tab title="Next.js Client">
-    ```typescript title="app/components/revoke-api-key.tsx"
-    "use client";
-    import { useUser } from "@hexclave/next";
-
-    export default function RevokeApiKey({ apiKeyId }: { apiKeyId: string }) {
-      const user = useUser({ or: 'redirect' });
-      const apiKeys = user.useApiKeys();
-
-      const handleRevoke = async () => {
-        const apiKeyToRevoke = apiKeys.find(key => key.id === apiKeyId);
-
-        if (apiKeyToRevoke) {
-          await apiKeyToRevoke.revoke();
-          console.log("API Key revoked");
-        }
-      };
-
-      return <button onClick={handleRevoke}>Revoke API Key</button>;
-    }
-    ```
-  </Tab>
   <Tab title="Next.js Server">
-    ```typescript title="lib/api-keys.ts"
-    import { hexclaveServerApp } from "@/stack/server";
+    ```typescript title="app/api/protected/route.ts"
+    import { hexclaveServerApp } from "@/hexclave/server";
 
-    export async function revokeApiKey(userId: string, apiKeyId: string) {
-      const user = await hexclaveServerApp.getUser(userId);
-      if (!user) return;
-
-      const apiKeys = await user.listApiKeys();
-      const apiKeyToRevoke = apiKeys.find(key => key.id === apiKeyId);
-
-      if (apiKeyToRevoke) {
-        await apiKeyToRevoke.revoke();
+    export async function GET(request: Request) {
+      const auth = request.headers.get("authorization");
+      const apiKey = auth?.replace(/^Bearer\s+/i, "");
+      if (!apiKey) {
+        return new Response("Missing API key", { status: 401 });
       }
+
+      const user = await hexclaveServerApp.getUser({ apiKey });
+      if (!user) {
+        return new Response("Invalid API key", { status: 401 });
+      }
+
+      return Response.json({ userId: user.id, displayName: user.displayName });
     }
     ```
   </Tab>
-  <Tab title="React">
-    ```typescript title="components/RevokeApiKey.tsx"
-    "use client";
-    import { useUser } from "@hexclave/react";
+  <Tab title="Team key (Next.js Server)">
+    ```typescript title="app/api/team-protected/route.ts"
+    import { hexclaveServerApp } from "@/hexclave/server";
 
-    export default function RevokeApiKey({ apiKeyId }: { apiKeyId: string }) {
-      const user = useUser({ or: 'redirect' });
-      const apiKeys = user.useApiKeys();
+    export async function GET(request: Request) {
+      const apiKey = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+      if (!apiKey) return new Response("Missing API key", { status: 401 });
 
-      const handleRevoke = async () => {
-        const apiKeyToRevoke = apiKeys.find(key => key.id === apiKeyId);
+      const team = await hexclaveServerApp.getTeam({ apiKey });
+      if (!team) return new Response("Invalid team API key", { status: 401 });
 
-        if (apiKeyToRevoke) {
-          await apiKeyToRevoke.revoke();
-          console.log("API Key revoked");
-        }
-      };
-
-      return <button onClick={handleRevoke}>Revoke API Key</button>;
+      return Response.json({ teamId: team.id, displayName: team.displayName });
     }
     ```
   </Tab>
@@ -977,58 +1002,76 @@ API keys can be revoked when they are no longer needed or if they have been comp
     import requests
     from django.http import JsonResponse
 
-    def revoke_api_key(request, api_key_id):
-        # Get the current user's access token from session/cookie
-        access_token = request.COOKIES.get('stack-access-token')
+    def protected_view(request):
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return JsonResponse({'error': 'Missing API key'}, status=401)
+        api_key = auth_header[len('Bearer '):]
 
-        # Revoke API key via client API (update with revoked: true)
-        response = requests.patch(
-            f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
+        # Check the API key via server API
+        check = requests.post(
+            'https://api.hexclave.com/api/v1/user-api-keys/check',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'server',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-secret-server-key': hexclave_secret_server_key,
             },
-            json={
-                'revoked': True,
-            }
+            json={'api_key': api_key},
         )
 
-        if response.status_code != 200:
-            raise Exception(f"Failed to revoke API key: {response.text}")
+        if check.status_code != 200:
+            return JsonResponse({'error': 'Invalid API key'}, status=401)
 
-        return JsonResponse({'message': 'API key revoked successfully'})
+        api_key_obj = check.json()
+        # Fetch the owning user
+        user_resp = requests.get(
+            f'https://api.hexclave.com/api/v1/users/{api_key_obj["user_id"]}',
+            headers={
+                'x-hexclave-access-type': 'server',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-secret-server-key': hexclave_secret_server_key,
+            },
+        )
+        user = user_resp.json()
+        return JsonResponse({'userId': user['id'], 'displayName': user.get('display_name')})
     ```
   </Tab>
   <Tab title="FastAPI">
     ```python title="main.py"
     import requests
-    from fastapi import Cookie, HTTPException
+    from fastapi import Header, HTTPException
 
-    @app.delete("/api/user-api-keys/{api_key_id}")
-    async def revoke_api_key(api_key_id: str, stack_access_token: str = Cookie(None, alias="stack-access-token")):
-        if not stack_access_token:
-            raise HTTPException(status_code=401, detail="Not authenticated")
+    @app.get("/api/protected")
+    async def protected_view(authorization: str = Header(None)):
+        if not authorization or not authorization.startswith('Bearer '):
+            raise HTTPException(status_code=401, detail="Missing API key")
+        api_key = authorization[len('Bearer '):]
 
-        # Revoke API key via client API (update with revoked: true)
-        response = requests.patch(
-            f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
+        # Check the API key via server API
+        check = requests.post(
+            'https://api.hexclave.com/api/v1/user-api-keys/check',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': stack_access_token,
+                'x-hexclave-access-type': 'server',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-secret-server-key': hexclave_secret_server_key,
             },
-            json={
-                'revoked': True,
-            }
+            json={'api_key': api_key},
         )
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+        if check.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
-        return {"message": "API key revoked successfully"}
+        api_key_obj = check.json()
+        user_resp = requests.get(
+            f'https://api.hexclave.com/api/v1/users/{api_key_obj["user_id"]}',
+            headers={
+                'x-hexclave-access-type': 'server',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-secret-server-key': hexclave_secret_server_key,
+            },
+        )
+        user = user_resp.json()
+        return {'userId': user['id'], 'displayName': user.get('display_name')}
     ```
   </Tab>
   <Tab title="Flask">
@@ -1036,37 +1079,45 @@ API keys can be revoked when they are no longer needed or if they have been comp
     import requests
     from flask import request, jsonify
 
-    @app.route('/api/user-api-keys/<api_key_id>', methods=['DELETE'])
-    def revoke_api_key(api_key_id):
-        access_token = request.cookies.get('stack-access-token')
-        if not access_token:
-            return jsonify({'error': 'Not authenticated'}), 401
+    @app.route('/api/protected', methods=['GET'])
+    def protected_view():
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Missing API key'}), 401
+        api_key = auth_header[len('Bearer '):]
 
-        # Revoke API key via client API (update with revoked: true)
-        response = requests.patch(
-            f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
+        # Check the API key via server API
+        check = requests.post(
+            'https://api.hexclave.com/api/v1/user-api-keys/check',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'server',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-secret-server-key': hexclave_secret_server_key,
             },
-            json={
-                'revoked': True,
-            }
+            json={'api_key': api_key},
         )
 
-        if response.status_code != 200:
-            return jsonify({'error': response.text}), response.status_code
+        if check.status_code != 200:
+            return jsonify({'error': 'Invalid API key'}), 401
 
-        return jsonify({'message': 'API key revoked successfully'})
+        api_key_obj = check.json()
+        user_resp = requests.get(
+            f'https://api.hexclave.com/api/v1/users/{api_key_obj["user_id"]}',
+            headers={
+                'x-hexclave-access-type': 'server',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-secret-server-key': hexclave_secret_server_key,
+            },
+        )
+        user = user_resp.json()
+        return jsonify({'userId': user['id'], 'displayName': user.get('display_name')})
     ```
   </Tab>
 </Tabs>
 
-### Checking API Key Validity
+### Checking an existing key's validity
 
-You can check if an API key is still valid:
+When you already hold an `ApiKey` object (e.g. from `useApiKeys()`), use its synchronous helpers `isValid()` and `whyInvalid()`. The latter returns `"manually-revoked"`, `"expired"`, or `null`.
 
 <Tabs>
   <Tab title="Next.js Client">
@@ -1095,7 +1146,7 @@ You can check if an API key is still valid:
   </Tab>
   <Tab title="Next.js Server">
     ```typescript title="app/components/check-api-key.tsx"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CheckApiKeyValidity({
       userId,
@@ -1155,16 +1206,16 @@ You can check if an API key is still valid:
 
     def check_api_key_validity(request, api_key_id):
         # Get the current user's access token from session/cookie
-        access_token = request.COOKIES.get('stack-access-token')
+        access_token = request.COOKIES.get('hexclave-access-token')
 
         # Get API key details via client API
         response = requests.get(
             f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             }
         )
 
@@ -1198,18 +1249,18 @@ You can check if an API key is still valid:
     from fastapi import Cookie, HTTPException
 
     @app.get("/api/check-api-key/{api_key_id}")
-    async def check_api_key_validity(api_key_id: str, stack_access_token: str = Cookie(None, alias="stack-access-token")):
-        if not stack_access_token:
+    async def check_api_key_validity(api_key_id: str, hexclave_access_token: str = Cookie(None, alias="hexclave-access-token")):
+        if not hexclave_access_token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
         # Get API key details via client API
         response = requests.get(
             f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': stack_access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': hexclave_access_token,
             }
         )
 
@@ -1244,7 +1295,7 @@ You can check if an API key is still valid:
 
     @app.route('/api/check-api-key/<api_key_id>', methods=['GET'])
     def check_api_key_validity(api_key_id):
-        access_token = request.cookies.get('stack-access-token')
+        access_token = request.cookies.get('hexclave-access-token')
         if not access_token:
             return jsonify({'error': 'Not authenticated'}), 401
 
@@ -1252,10 +1303,10 @@ You can check if an API key is still valid:
         response = requests.get(
             f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
             headers={
-                'x-stack-access-type': 'client',
-                'x-stack-project-id': stack_project_id,
-                'x-stack-publishable-client-key': stack_publishable_client_key,
-                'x-stack-access-token': access_token,
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
             }
         )
 
@@ -1283,3 +1334,170 @@ You can check if an API key is still valid:
     ```
   </Tab>
 </Tabs>
+
+### Revoking an API key
+
+API keys can be revoked when they are no longer needed or if they have been compromised. Revoking is irreversible: a revoked key's `manuallyRevokedAt` becomes set and `isValid()` returns `false` (`whyInvalid()` returns `"manually-revoked"`).
+
+<Tabs>
+  <Tab title="Next.js Client">
+    ```typescript title="app/components/revoke-api-key.tsx"
+    "use client";
+    import { useUser } from "@hexclave/next";
+
+    export default function RevokeApiKey({ apiKeyId }: { apiKeyId: string }) {
+      const user = useUser({ or: 'redirect' });
+      const apiKeys = user.useApiKeys();
+
+      const handleRevoke = async () => {
+        const apiKeyToRevoke = apiKeys.find(key => key.id === apiKeyId);
+
+        if (apiKeyToRevoke) {
+          await apiKeyToRevoke.revoke();
+          console.log("API Key revoked");
+        }
+      };
+
+      return <button onClick={handleRevoke}>Revoke API Key</button>;
+    }
+    ```
+  </Tab>
+  <Tab title="Next.js Server">
+    ```typescript title="lib/api-keys.ts"
+    import { hexclaveServerApp } from "@/hexclave/server";
+
+    export async function revokeApiKey(userId: string, apiKeyId: string) {
+      const user = await hexclaveServerApp.getUser(userId);
+      if (!user) return;
+
+      const apiKeys = await user.listApiKeys();
+      const apiKeyToRevoke = apiKeys.find(key => key.id === apiKeyId);
+
+      if (apiKeyToRevoke) {
+        await apiKeyToRevoke.revoke();
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="React">
+    ```typescript title="components/RevokeApiKey.tsx"
+    "use client";
+    import { useUser } from "@hexclave/react";
+
+    export default function RevokeApiKey({ apiKeyId }: { apiKeyId: string }) {
+      const user = useUser({ or: 'redirect' });
+      const apiKeys = user.useApiKeys();
+
+      const handleRevoke = async () => {
+        const apiKeyToRevoke = apiKeys.find(key => key.id === apiKeyId);
+
+        if (apiKeyToRevoke) {
+          await apiKeyToRevoke.revoke();
+          console.log("API Key revoked");
+        }
+      };
+
+      return <button onClick={handleRevoke}>Revoke API Key</button>;
+    }
+    ```
+  </Tab>
+  <Tab title="Django">
+    ```python title="views.py"
+    import requests
+    from django.http import JsonResponse
+
+    def revoke_api_key(request, api_key_id):
+        # Get the current user's access token from session/cookie
+        access_token = request.COOKIES.get('hexclave-access-token')
+
+        # Revoke API key via client API (update with revoked: true)
+        response = requests.patch(
+            f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
+            headers={
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
+            },
+            json={
+                'revoked': True,
+            }
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"Failed to revoke API key: {response.text}")
+
+        return JsonResponse({'message': 'API key revoked successfully'})
+    ```
+  </Tab>
+  <Tab title="FastAPI">
+    ```python title="main.py"
+    import requests
+    from fastapi import Cookie, HTTPException
+
+    @app.delete("/api/user-api-keys/{api_key_id}")
+    async def revoke_api_key(api_key_id: str, hexclave_access_token: str = Cookie(None, alias="hexclave-access-token")):
+        if not hexclave_access_token:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        # Revoke API key via client API (update with revoked: true)
+        response = requests.patch(
+            f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
+            headers={
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': hexclave_access_token,
+            },
+            json={
+                'revoked': True,
+            }
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+
+        return {"message": "API key revoked successfully"}
+    ```
+  </Tab>
+  <Tab title="Flask">
+    ```python title="app.py"
+    import requests
+    from flask import request, jsonify
+
+    @app.route('/api/user-api-keys/<api_key_id>', methods=['DELETE'])
+    def revoke_api_key(api_key_id):
+        access_token = request.cookies.get('hexclave-access-token')
+        if not access_token:
+            return jsonify({'error': 'Not authenticated'}), 401
+
+        # Revoke API key via client API (update with revoked: true)
+        response = requests.patch(
+            f'https://api.hexclave.com/api/v1/user-api-keys/{api_key_id}',
+            headers={
+                'x-hexclave-access-type': 'client',
+                'x-hexclave-project-id': hexclave_project_id,
+                'x-hexclave-publishable-client-key': hexclave_publishable_client_key,
+                'x-hexclave-access-token': access_token,
+            },
+            json={
+                'revoked': True,
+            }
+        )
+
+        if response.status_code != 200:
+            return jsonify({'error': response.text}), response.status_code
+
+        return jsonify({'message': 'API key revoked successfully'})
+    ```
+  </Tab>
+</Tabs>
+
+## Best Practices
+
+1. **Show the value once.** API key values are returned in plaintext only at creation. Always display, copy, or send them immediately - don't expect to fetch them again later.
+2. **Set sensible expirations.** Long-lived keys are convenient but risky. Default to short expirations (30–90 days) and let users rotate.
+3. **Don't share user keys across users.** A user API key acts as that exact user. If a service needs to act independently, prefer a team API key with a service-style role.
+4. **Use `$manage_api_keys` deliberately.** Only grant this team permission to roles you'd trust to lock or unlock the entire team's programmatic access.
+5. **Mark public keys with `isPublic: true`.** This opts them out of the secret scanner so your legitimately-public keys don't get auto-revoked.
+6. **Use `getUser({ apiKey })` / `getTeam({ apiKey })` for validation.** Never try to parse or compare the plaintext value yourself - Hexclave handles hashing, expiration, and revocation.

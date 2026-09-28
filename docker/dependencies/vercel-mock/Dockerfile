@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:24-slim
 
 # A minimal in-memory mock of the subset of the Vercel REST API used by the
 # backend's Deployments app (apps/backend/src/lib/deployments/vercel-client.tsx).

@@ -206,7 +206,7 @@ export function ImpersonateUserDialog(props: {
           </div>
         </div>
         <Typography variant="secondary" className="text-sm">
-          Paste this snippet into the browser console on your app.
+          Open a page in your app that the impersonated user can access, then paste this snippet into its browser console. It switches users and reloads that page.
         </Typography>
         {fallbackSnippetLoading ? (
           <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">

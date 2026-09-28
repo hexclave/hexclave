@@ -1,4 +1,4 @@
-import { getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
+import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { PRODUCTION_AI_PROXY_BASE_URL } from "./proxy-url";
@@ -18,32 +18,32 @@ const MODEL_SELECTION_MATRIX: Record<
 > = {
   dumb: {
     slow: {
-      authenticated: { modelId: "z-ai/glm-4.5-air" },
-      unauthenticated: { modelId: "nvidia/nemotron-3-super-120b-a12b" },
+      authenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
+      unauthenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
     },
     fast: {
-      authenticated: { modelId: "openai/gpt-oss-120b:nitro" },
-      unauthenticated: { modelId: "nvidia/nemotron-3-super-120b-a12b:nitro" },
+      authenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
+      unauthenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
     },
   },
   smart: {
     slow: {
-      authenticated: { modelId: "openai/gpt-5.5" },
-      unauthenticated: { modelId: "z-ai/glm-5.2:nitro" },
+      authenticated: { modelId: "openai/gpt-5.6-sol:nitro" },
+      unauthenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
     },
     fast: {
-      authenticated: { modelId: "openai/gpt-5.5" },
-      unauthenticated: { modelId: "z-ai/glm-5.2:nitro" },
+      authenticated: { modelId: "openai/gpt-5.6-sol:nitro" },
+      unauthenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
     },
   },
   smartest: {
     slow: {
-      authenticated: { modelId: "openai/gpt-5.5" },
-      unauthenticated: { modelId: "z-ai/glm-5.2:nitro" },
+      authenticated: { modelId: "openai/gpt-5.6-sol:nitro" },
+      unauthenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
     },
     fast: {
-      authenticated: { modelId: "openai/gpt-5.5" },
-      unauthenticated: { modelId: "z-ai/glm-5.2:nitro" },
+      authenticated: { modelId: "openai/gpt-5.6-sol:nitro" },
+      unauthenticated: { modelId: "z-ai/glm-5.3-flash:nitro" },
     },
   },
 };
@@ -59,10 +59,18 @@ export const ALLOWED_MODEL_IDS: ReadonlySet<string> = new Set([
   ),
 ]);
 
-export function createOpenRouterProvider() {
-  const baseURL = getNodeEnvironment() === "development"
-    ? "http://localhost:8102/api/latest/integrations/ai-proxy/v1"
+export function getOpenRouterProxyBaseUrl() {
+  // Development AI calls loop back into this backend's OpenRouter proxy. Use the
+  // configured port prefix so non-default prefixes (91/92/93) don't ECONNREFUSED
+  // against a hardcoded 8102 that isn't running.
+  const portPrefix = getEnvVariable("NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX", "81");
+  return (getNodeEnvironment() === "development")
+    ? `http://localhost:${portPrefix}02/api/latest/integrations/ai-proxy/v1`
     : `${PRODUCTION_AI_PROXY_BASE_URL}/v1`;
+}
+
+export function createOpenRouterProvider() {
+  const baseURL = getOpenRouterProxyBaseUrl();
   return createOpenRouter({
     apiKey: "forwarded",
     baseURL,

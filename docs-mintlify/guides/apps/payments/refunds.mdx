@@ -1,0 +1,38 @@
+---
+title: "Refunds"
+description: "Reverse a charge from the dashboard, and optionally end the customer's access"
+---
+
+Refunds are issued from **Payments -> Transactions**. Open a **purchase** row and choose **Refund**. You can return money, end the product, or both.
+
+## Dashboard refunds
+
+Each refund has two knobs:
+
+1. **Amount (USD)** - Partial or full. Leave at `0` to change access without returning money (for example after a prior partial refund, or for a test-mode purchase).
+2. **Product / subscription lifecycle**
+   - **End now** - Revoke the product immediately and expire item grants that were tied to the purchase (`when-purchase-expires` or `when-repeated`). Permanent grants (`expires: never`) stay.
+   - **End at period end** - Subscriptions only. Access continues until the current period ends.
+   - **No change** - Refund money only; the customer keeps the product.
+
+You must set a non-zero amount **or** change the lifecycle. Multiple partial refunds are allowed until the original charge is fully returned.
+
+<Info>
+  The dashboard refunds the **original purchase**, not later **subscription-renewal** rows. One-time purchases only support **End now** (they have no period).
+</Info>
+
+### Test mode
+
+Test-mode purchases never charged a card, so money refunds are disabled. You can still choose **End now** to revoke access.
+
+### Platform fee
+
+Hexclave's **0.9%** platform fee is not returned when you refund a charge. Processor fees follow the processor's own refund rules.
+
+Subscriptions created with [`grantProduct`](./granting-products) have no processor charge, so a refund can only change lifecycle — not return money.
+
+## Related
+
+- [Billing & Invoices](./billing-and-invoices) - invoices and saved payment methods
+- [Subscriptions](./subscriptions) - cancel without a refund
+- [Items & Entitlements](./items-and-entitlements) - what happens to credits when access ends

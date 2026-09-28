@@ -1,4 +1,4 @@
-// A small .gitignore/.vercelignore matcher for `hexclave deploy`'s source
+// A small .gitignore/.dockerignore matcher for `hexclave deploy`'s source
 // packaging. Implements the commonly-used gitignore syntax: comments, blank
 // lines, negation (!), directory-only patterns (trailing /), anchoring
 // (patterns containing a slash are relative to the ignore file's directory),

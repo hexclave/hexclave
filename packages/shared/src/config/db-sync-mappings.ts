@@ -1,3 +1,9 @@
+/**
+ * PostgreSQL advisory-lock key shared by sequence allocation and its regression tests.
+ * Both the sequencer and the sequence-visibility regression test take this lock.
+ */
+export const SEQUENCE_ALLOCATION_ADVISORY_LOCK_KEY = 178555;
+
 export const DEFAULT_DB_SYNC_MAPPINGS = {
   "users": {
     sourceTables: { "ProjectUser": "ProjectUser" },

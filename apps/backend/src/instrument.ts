@@ -9,7 +9,7 @@ import backendPackageJson from "../package.json";
 import { createBackendInstrumentationPlan } from "./instrumentation-plan";
 import { initPerfStats } from "./lib/dev-perf-stats";
 import { getSentryRelease } from "./sentry-release";
-import { sanitizeBackendSentryEvent, sanitizeBackendSentrySpan } from "./sentry-scrubbing";
+import { prepareBackendSentryEvent, sanitizeBackendSentrySpan } from "./sentry-scrubbing";
 
 globalThis.global = globalThis;
 // The Elysia process is the Node runtime; set the marker before shared helpers that still ask for Next runtime metadata.
@@ -70,9 +70,9 @@ export function registerBackendInstrumentation() {
       packageName: backendPackageJson.name,
       packageVersion: backendPackageJson.version,
     }),
-    beforeSend: sanitizeBackendSentryEvent,
+    beforeSend: prepareBackendSentryEvent,
     beforeSendSpan: sanitizeBackendSentrySpan,
-    beforeSendTransaction: sanitizeBackendSentryEvent,
+    beforeSendTransaction: prepareBackendSentryEvent,
   });
 }
 

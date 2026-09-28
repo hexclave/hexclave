@@ -12,6 +12,7 @@ type LinkProps = {
   children: React.ReactNode,
   className?: string,
   target?: string,
+  rel?: string,
   onClick?: (e: React.MouseEvent<HTMLAnchorElement>) => void,
   style?: React.CSSProperties,
   scroll?: boolean,

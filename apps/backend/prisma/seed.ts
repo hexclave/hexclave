@@ -15,6 +15,7 @@ import { DayInterval } from '@hexclave/shared/dist/utils/dates';
 import { getEnvVariable } from '@hexclave/shared/dist/utils/env';
 import { throwErr } from '@hexclave/shared/dist/utils/errors';
 import { typedEntries, typedFromEntries } from '@hexclave/shared/dist/utils/objects';
+import { resolveInternalProjectKeyAlias } from './seed-env';
 
 const MONTHLY_REPEAT: DayInterval = [1, "month"];
 
@@ -357,8 +358,18 @@ export async function seed() {
 
   // Upsert the internal API key set before any flake-prone work (dummy-project
   // seed, email/svix, clickhouse).
-  const rawPck = getEnvVariable("STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY", "");
-  const rawSsk = getEnvVariable("STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY", "");
+  const rawPck = resolveInternalProjectKeyAlias(
+    "STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY",
+    "STACK_SEED_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY",
+    getEnvVariable("STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY", ""),
+    getEnvVariable("STACK_SEED_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY", ""),
+  );
+  const rawSsk = resolveInternalProjectKeyAlias(
+    "STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY",
+    "STACK_SEED_INTERNAL_PROJECT_SECRET_SERVER_KEY",
+    getEnvVariable("STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY", ""),
+    getEnvVariable("STACK_SEED_INTERNAL_PROJECT_SECRET_SERVER_KEY", ""),
+  );
   const rawAdminKey = getEnvVariable("STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY", "");
   const hasAnyKey = rawPck !== "" || rawSsk !== "" || rawAdminKey !== "";
   const hasAllKeys = rawPck !== "" && rawSsk !== "" && rawAdminKey !== "";

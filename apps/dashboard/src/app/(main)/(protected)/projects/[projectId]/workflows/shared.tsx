@@ -20,6 +20,7 @@ import {
   ChartLineIcon,
   LightningIcon,
   MoonIcon,
+  PauseIcon,
   PlayIcon,
   TrashIcon,
   WarningCircleIcon,
@@ -138,14 +139,68 @@ export function WorkflowTriggers({ triggers }: { triggers: AdminWorkflowTrigger[
   );
 }
 
+/** The "no new runs" marker, shown wherever a workflow is identified. */
+export function PausedBadge({ workflow }: { workflow: AdminWorkflow }) {
+  if (!workflow.isPaused) return null;
+  return <DesignBadge label="Paused" color="orange" size="sm" />;
+}
+
 /** The slug + version + trigger chips row atop the workflow detail. */
 export function WorkflowTitleRow({ workflow }: { workflow: AdminWorkflow }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span className="font-mono text-lg font-semibold">{workflow.id}</span>
       <DesignBadge label={`v${workflow.latestVersion}`} color="blue" size="sm" />
+      <PausedBadge workflow={workflow} />
       <WorkflowTriggers triggers={workflow.triggers} />
     </div>
+  );
+}
+
+/**
+ * Pause/resume toggle. Pausing only closes the intake, so the banner copy is
+ * explicit that in-flight runs keep going and that events arriving while
+ * paused are dropped rather than queued — the two things an operator would
+ * otherwise have to guess at.
+ */
+export function WorkflowPauseButton({ workflow }: { workflow: AdminWorkflow }) {
+  const adminApp = useAdminApp();
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="flex max-w-xs flex-col items-end gap-1">
+      {/* DesignButton wraps an async onClick in its own loading state, so there
+          is deliberately no `pending` here to fall out of sync with it. */}
+      <DesignButton
+        size="sm"
+        variant={workflow.isPaused ? "default" : "outline"}
+        onClick={async () => {
+          setError(null);
+          try {
+            await adminApp.setWorkflowPaused(workflow.id, !workflow.isPaused);
+          } catch (toggleError) {
+            setError(toggleError instanceof Error ? toggleError.message : String(toggleError));
+          }
+        }}
+      >
+        {workflow.isPaused
+          ? <><PlayIcon className="mr-1 h-3.5 w-3.5" />Resume workflow</>
+          : <><PauseIcon className="mr-1 h-3.5 w-3.5" />Pause workflow</>}
+      </DesignButton>
+      {error != null && <span role="alert" className="text-right text-[11px] text-red-600 dark:text-red-400">{error}</span>}
+    </div>
+  );
+}
+
+/** The banner on a paused workflow's detail page. */
+export function PausedWorkflowAlert({ workflow }: { workflow: AdminWorkflow }) {
+  if (!workflow.isPaused) return null;
+  return (
+    <DesignAlert
+      variant="default"
+      title={workflow.pausedAtMillis == null ? "This workflow is paused" : `This workflow was paused ${fromNow(new Date(workflow.pausedAtMillis))}`}
+      description="No new runs are created while it is paused: matching events (and schedule ticks) are dropped rather than queued up for later. Runs already in flight keep executing."
+    />
   );
 }
 
@@ -202,7 +257,14 @@ export function getInFlightRunCount(workflow: AdminWorkflow): number {
   return workflow.stats.activeRuns + workflow.stats.sleepingRuns;
 }
 
-function createWorkflowColumns(onRequestDelete: (workflow: AdminWorkflow) => void): DataGridColumnDef<AdminWorkflow>[] {
+// TODO(workflows-pause): pause state is invisible to the grid's quick search
+// and sorting — `accessor: "id"` feeds both, and the badge lives only in
+// renderCell — so on a long list the only way to find paused workflows is to
+// spot the badges. A dedicated (hidden-by-default) status column would fix it.
+function createWorkflowColumns(actions: {
+  onRequestDelete: (workflow: AdminWorkflow) => void,
+  onTogglePause: (workflow: AdminWorkflow) => void,
+}): DataGridColumnDef<AdminWorkflow>[] {
   return [
     {
       id: "id",
@@ -210,7 +272,12 @@ function createWorkflowColumns(onRequestDelete: (workflow: AdminWorkflow) => voi
       accessor: "id",
       width: 250,
       type: "string",
-      renderCell: ({ row }) => <span className="truncate font-mono text-xs font-medium">{row.id}</span>,
+      renderCell: ({ row }) => (
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={cn("truncate font-mono text-xs font-medium", row.isPaused && "text-muted-foreground")}>{row.id}</span>
+          <PausedBadge workflow={row} />
+        </div>
+      ),
     },
     {
       id: "triggers",
@@ -294,13 +361,21 @@ function createWorkflowColumns(onRequestDelete: (workflow: AdminWorkflow) => voi
             triggerLabel={`Actions for ${row.id}`}
             align="end"
             withIcons
-            items={[{
-              id: "delete",
-              label: "Delete workflow",
-              icon: <TrashIcon className="h-4 w-4" />,
-              itemVariant: "destructive",
-              onClick: () => onRequestDelete(row),
-            }]}
+            items={[
+              {
+                id: "pause",
+                label: row.isPaused ? "Resume workflow" : "Pause workflow",
+                icon: row.isPaused ? <PlayIcon className="h-4 w-4" /> : <PauseIcon className="h-4 w-4" />,
+                onClick: () => actions.onTogglePause(row),
+              },
+              {
+                id: "delete",
+                label: "Delete workflow",
+                icon: <TrashIcon className="h-4 w-4" />,
+                itemVariant: "destructive",
+                onClick: () => actions.onRequestDelete(row),
+              },
+            ]}
           />
         </div>
       ),
@@ -313,12 +388,13 @@ function getWorkflowRowId(workflow: AdminWorkflow): string {
 }
 
 /** The level-1 workflows table — infinite-scroll grid, same as the Users page. */
-export function WorkflowsTable({ workflows, onOpen, onRequestDelete }: {
+export function WorkflowsTable({ workflows, onOpen, onRequestDelete, onTogglePause }: {
   workflows: AdminWorkflow[],
   onOpen: (workflowId: string) => void,
   onRequestDelete: (workflow: AdminWorkflow) => void,
+  onTogglePause: (workflow: AdminWorkflow) => void,
 }) {
-  const workflowColumns = useMemo(() => createWorkflowColumns(onRequestDelete), [onRequestDelete]);
+  const workflowColumns = useMemo(() => createWorkflowColumns({ onRequestDelete, onTogglePause }), [onRequestDelete, onTogglePause]);
   const [gridState, setGridState] = useState(() => ({
     ...createDefaultDataGridState(workflowColumns),
     sorting: DEFAULT_WORKFLOW_SORT,

@@ -5,40 +5,109 @@ sidebarTitle: RBAC
 icon: "/images/app-icons/rbac.svg"
 ---
 
-Permissions are a way to control what each user can do and access within your application.
+Permissions are a way to control what each user can do and access within your application. Hexclave RBAC lets you define reusable permission IDs in the dashboard, compose them into higher-level roles, assign team permissions to team members, and check permissions from the SDK.
 
 ## Permission Types
 
-Stack supports two types of permissions:
+Hexclave supports two types of permissions:
 
 1. **Team Permissions**: Control what a user can do within a specific team
-2. **User Permissions**: Control what a user can do globally, across the entire project
+2. **Project Permissions**: Control what a user can do globally, across the entire project
 
 Both permission types can be managed from the dashboard, and both support arbitrary nesting.
 
+## Dashboard
+
+The RBAC app adds two dashboard pages:
+
+- **Project Permissions** - Global permissions that apply outside of a team context. The dashboard page defines the permissions and their hierarchy.
+- **Team Permissions** - Permissions scoped to a team. The dashboard page defines the permissions and their hierarchy, and team-member assignment happens from the Teams app.
+
+The RBAC pages define permission definitions. Team permission assignment is available from the Teams member table; project permission grants and revokes are done from server-side SDK code.
+
+### Permission table
+
+Both pages use the same permission table:
+
+- **ID** - The permission ID used in SDK calls, such as `access_admin_dashboard` or `team:billing:manage`.
+- **Description** - Optional human-readable context for the permission.
+- **Contained Permissions** - Directly contained permissions, shown as badges. This column intentionally shows only direct children, not the full recursive expansion.
+- **Actions** - Edit and delete actions for custom permissions.
+
+The table has a **Filter** search box, infinite loading for larger team-permission sets, and URL-synced table state so filtered views can be shared or reloaded.
+
+### Creating a permission
+
+Click **Create Permission** from either RBAC page. The dialog contains:
+
+- **ID** - Required, unique across project and team permission definitions. IDs may contain lowercase letters, numbers, `_`, and `:` only.
+- **Description** - Optional text shown in the dashboard table.
+- **Contained Permission IDs** - A checklist of permissions of the same type. For example, a team permission can contain other team permissions, and a project permission can contain other project permissions.
+
+Contained permissions are recursive. If `admin` contains `moderator`, and `moderator` contains `read`, then a user with `admin` also has `read`.
+
+### Editing a permission
+
+Use the row action menu and choose **Edit**. The edit dialog keeps the same fields, with one important difference: **ID** is disabled. To rename a permission, create a new permission and migrate your checks/assignments.
+
+The contained-permissions checklist shows inherited permissions with a `from <permission-id>` note, so you can tell whether a permission is selected directly or included through another selected permission.
+
+### Deleting a permission
+
+Use the row action menu and choose **Delete**. Deleting is destructive and requires confirming:
+
+```text
+I understand this will remove the permission from all users and other permissions that contain it.
+```
+
+Deleting a permission removes the definition, removes it from users who had it directly, and removes it from other permissions that contained it.
+
+### System permissions
+
+Hexclave comes with predefined team permissions known as system permissions. These IDs start with `$`.
+
+System permissions:
+
+- Can be assigned to members
+- Can be included inside custom permissions
+- Cannot be edited or deleted from the dashboard
+
+The permission table marks system permissions with an info tooltip, and hides the edit/delete action menu for those rows.
+
+### Assigning team permissions
+
+Team permission definitions are created in **RBAC -> Team Permissions**, but assignments happen from the Teams app:
+
+1. Open **Teams**.
+2. Select a team.
+3. Open the members table.
+4. Use the row action menu for a member and choose **Edit permissions**.
+
+The member permissions dialog shows the same nested permission checklist. The members table's **Permissions** column shows only direct permissions for each user. If the permission lookup fails, the row shows **Failed to load** and the edit action is disabled until the table is reloaded.
+
 ## Team Permissions
 
-Team permissions control what a user can do within each team. You can create and assign permissions to team members from the Stack dashboard. These permissions could include actions like `create_post` or `read_secret_info`, or roles like `admin` or `moderator`. Within your app, you can verify if a user has a specific permission within a team.
+Team permissions control what a user can do within each team. You can create and assign permissions to team members from the Hexclave dashboard. These permissions could include actions like `create_post` or `read_secret_info`, or roles like `admin` or `moderator`. Within your app, you can verify if a user has a specific permission within a team.
 
 Permissions can be nested to create a hierarchical structure. For example, an `admin` permission can include both `moderator` and `user` permissions. We provide tools to help you verify whether a user has a permission directly or indirectly.
 
 ### Creating a Permission
 
-To create a new permission, navigate to the `Team Permissions` section of the Stack dashboard. You can select the permissions that the new permission will contain. Any permissions included within these selected permissions will also be recursively included.
+To create a new permission, navigate to **RBAC -> Team Permissions** in the Hexclave dashboard. Click **Create Permission**, set the permission ID, optionally add a description, and choose any contained permissions. Any permissions included within these selected permissions will also be recursively included.
 
 ### System Permissions
 
-Stack comes with a few predefined team permissions known as system permissions. These permissions start with a dollar sign (`$`). While you can assign these permissions to members or include them within other permissions, you cannot modify them as they are integral to the Stack backend system.
+Hexclave comes with a few predefined team permissions known as system permissions. These permissions start with a dollar sign (`$`). While you can assign these permissions to members or include them within other permissions, you cannot modify them as they are integral to the Hexclave backend system.
 
 ### Checking if a User has a Permission
 
-To check whether a user has a specific permission, use the `getPermission` method or the `usePermission` hook on the `User` object. This returns the `Permission` object if the user has it; otherwise, it returns `null`. Always perform permission checks on the server side for business logic, as client-side checks can be bypassed. Here's an example:
+To check whether a user has a specific permission within a team, use `hasPermission`, `getPermission`, or the `usePermission` hook on the `User` object. `getPermission` returns the `Permission` object if the user has it; otherwise, it returns `null`. Always perform permission checks on the server side for business logic, as client-side checks can be bypassed. Here's an example:
 
 <Tabs>
   <Tab title="Client Component">
     ```tsx title="Check user permission on the client"
     "use client";
-    import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+    import { useUser } from "@hexclave/next";
 
     export function CheckUserPermission() {
       const user = useUser({ or: 'redirect' });
@@ -56,10 +125,10 @@ To check whether a user has a specific permission, use the `getPermission` metho
   </Tab>
   <Tab title="Server Component">
     ```tsx title="Check user permission on the server"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CheckUserPermission() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const team = await hexclaveServerApp.getTeam('some-team-id');
       const permission = await user.getPermission(team, 'read');
 
@@ -74,19 +143,38 @@ To check whether a user has a specific permission, use the `getPermission` metho
   </Tab>
 </Tabs>
 
+For authorization logic, prefer a boolean server-side check:
+
+```tsx title="app/api/team-settings/route.ts"
+import { hexclaveServerApp } from "@/hexclave/server";
+
+export async function POST() {
+  const user = await hexclaveServerApp.getUser({ or: "throw" });
+  const team = await hexclaveServerApp.getTeam("some-team-id");
+
+  if (!team || !(await user.hasPermission(team, "team:settings:update"))) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  // Update team settings here.
+  return new Response("OK");
+}
+```
+
 ### Listing All Permissions of a User
 
-To get a list of all permissions a user has, use the `listPermissions` method or the `usePermissions` hook on the `User` object. This method retrieves both direct and indirect permissions. Here is an example:
+To get a list of all permissions a user has in a team, use the `listPermissions` method or the `usePermissions` hook on the `User` object. By default, the list includes direct and indirect permissions. Pass `{ recursive: false }` if you only want direct assignments. Here is an example:
 
 <Tabs>
   <Tab title="Client Component">
     ```tsx title="List user permissions on the client"
     "use client";
-    import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+    import { useUser } from "@hexclave/next";
 
     export function DisplayUserPermissions() {
       const user = useUser({ or: 'redirect' });
-      const permissions = user.usePermissions();
+      const team = user.useTeam('some-team-id');
+      const permissions = user.usePermissions(team);
 
       return (
         <div>
@@ -100,11 +188,12 @@ To get a list of all permissions a user has, use the `listPermissions` method or
   </Tab>
   <Tab title="Server Component">
     ```tsx title="List user permissions on the server"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function DisplayUserPermissions() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
-      const permissions = await user.listPermissions();
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
+      const team = await hexclaveServerApp.getTeam('some-team-id');
+      const permissions = team ? await user.listPermissions(team) : [];
 
       return (
         <div>
@@ -125,6 +214,7 @@ To grant a permission to a user, use the `grantPermission` method on the `Server
 ```tsx
 const team = await hexclaveServerApp.getTeam('teamId');
 const user = await hexclaveServerApp.getUser();
+if (!team || !user) throw new Error("Team or user not found");
 await user.grantPermission(team, 'read');
 ```
 
@@ -135,6 +225,7 @@ To revoke a permission from a user, use the `revokePermission` method on the `Se
 ```tsx
 const team = await hexclaveServerApp.getTeam('teamId');
 const user = await hexclaveServerApp.getUser();
+if (!team || !user) throw new Error("Team or user not found");
 await user.revokePermission(team, 'read');
 ```
 
@@ -144,17 +235,17 @@ Project permissions are global permissions that apply to a user across the entir
 
 ### Creating a Project Permission
 
-To create a new project permission, navigate to the `Project Permissions` section of the Stack dashboard. Similar to team permissions, you can select other permissions that the new permission will contain, creating a hierarchical structure.
+To create a new project permission, navigate to **RBAC -> Project Permissions** in the Hexclave dashboard. Similar to team permissions, you can set an ID, add a description, and select other project permissions that the new permission contains.
 
 ### Checking if a User has a Project Permission
 
-To check whether a user has a specific project permission, use the `getPermission` method or the `usePermission` hook. Here's an example:
+To check whether a user has a specific project permission, use `hasPermission`, `getPermission`, or the `usePermission` hook. Here's an example:
 
 <Tabs>
   <Tab title="Client Component">
     ```tsx title="Check user permission on the client"
     "use client";
-    import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+    import { useUser } from "@hexclave/next";
 
     export function CheckGlobalPermission() {
       const user = useUser({ or: 'redirect' });
@@ -170,10 +261,10 @@ To check whether a user has a specific project permission, use the `getPermissio
   </Tab>
   <Tab title="Server Component">
     ```tsx title="Check user permission on the server"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CheckGlobalPermission() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const permission = await user.getPermission('access_admin_dashboard');
 
       return (
@@ -186,15 +277,32 @@ To check whether a user has a specific project permission, use the `getPermissio
   </Tab>
 </Tabs>
 
+For authorization logic, prefer a server-side boolean check:
+
+```tsx title="app/admin/page.tsx"
+import { hexclaveServerApp } from "@/hexclave/server";
+
+export default async function AdminPage() {
+  const user = await hexclaveServerApp.getUser({ or: "throw" });
+  const canAccessAdmin = await user.hasPermission("access_admin_dashboard");
+
+  if (!canAccessAdmin) {
+    return <div>Access denied</div>;
+  }
+
+  return <div>Admin dashboard</div>;
+}
+```
+
 ### Listing All Project Permissions
 
-To get a list of all global permissions a user has, use the `listPermissions` method or the `usePermissions` hook:
+To get a list of all global permissions a user has, use the `listPermissions` method or the `usePermissions` hook. Pass `{ recursive: false }` if you only want direct grants:
 
 <Tabs>
   <Tab title="Client Component">
     ```tsx title="List global permissions on the client"
     "use client";
-    import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+    import { useUser } from "@hexclave/next";
 
     export function DisplayGlobalPermissions() {
       const user = useUser({ or: 'redirect' });
@@ -212,10 +320,10 @@ To get a list of all global permissions a user has, use the `listPermissions` me
   </Tab>
   <Tab title="Server Component">
     ```tsx title="List global permissions on the server"
-    import { hexclaveServerApp } from "@/stack/server";
+    import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function DisplayGlobalPermissions() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const permissions = await user.listPermissions();
 
       return (
@@ -230,12 +338,19 @@ To get a list of all global permissions a user has, use the `listPermissions` me
   </Tab>
 </Tabs>
 
+If you only want direct project permission grants, pass `{ recursive: false }`:
+
+```tsx
+const directPermissions = await user.listPermissions({ recursive: false });
+```
+
 ### Granting a Project Permission
 
 To grant a global permission to a user, use the `grantPermission` method:
 
 ```tsx
 const user = await hexclaveServerApp.getUser();
+if (!user) throw new Error("User not found");
 await user.grantPermission('access_admin_dashboard');
 ```
 
@@ -245,7 +360,25 @@ To revoke a global permission from a user, use the `revokePermission` method:
 
 ```tsx
 const user = await hexclaveServerApp.getUser();
+if (!user) throw new Error("User not found");
 await user.revokePermission('access_admin_dashboard');
 ```
 
-By following these guidelines, you can efficiently manage and verify both team and user permissions within your application.
+## Direct vs. inherited permissions
+
+A permission can be present in two ways:
+
+- **Direct** - The user was explicitly granted that permission.
+- **Inherited** - The user was granted a permission that contains it, directly or recursively.
+
+The dashboard definition tables show direct containment only. The SDK can return recursive or direct-only lists:
+
+```tsx
+// Includes inherited permissions
+const allPermissions = await user.listPermissions(team);
+
+// Direct assignments only
+const directPermissions = await user.listPermissions(team, { recursive: false });
+```
+
+For checks like `hasPermission` and `getPermission`, Hexclave resolves contained permissions recursively so roles work as expected.

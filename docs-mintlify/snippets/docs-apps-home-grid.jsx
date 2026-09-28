@@ -21,7 +21,6 @@ export const DocsAppsHomeGrid = () => {
     { name: "Payments", href: "/guides/apps/payments/overview", iconSrc: "/images/app-icons/payments.svg" },
     { name: "Analytics", href: "/guides/apps/analytics/overview", iconSrc: "/images/app-icons/analytics.svg" },
     { name: "Teams", href: "/guides/apps/teams/overview", iconSrc: "/images/app-icons/teams.svg" },
-    { name: "Fraud Protection", href: "/guides/apps/fraud-protection/overview", iconSrc: "/images/app-icons/fraud-protection.svg" },
     { name: "RBAC", href: "/guides/apps/rbac/overview", iconSrc: "/images/app-icons/rbac.svg" },
     { name: "API Keys", href: "/guides/apps/api-keys/overview", iconSrc: "/images/app-icons/api-keys.svg" },
     { name: "Data Vault", href: "/guides/apps/data-vault/overview", iconSrc: "/images/app-icons/data-vault.svg" },

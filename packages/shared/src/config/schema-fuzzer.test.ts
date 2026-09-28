@@ -185,43 +185,6 @@ const branchSchemaFuzzerConfig = [{
   onboarding: [{
     requireEmailVerification: [true, false],
   }],
-  "deployments-alpha": [{
-    services: [{
-      "some-service-id": [{
-        type: ["vercel"] as const,
-        framework: ["nextjs", "vite", ""],
-        installCommand: ["pnpm install", ""],
-        buildCommand: ["pnpm build", ""],
-        outputDirectory: [".next", "dist", ""],
-        rootDirectory: ["./", "./apps/web", ""],
-        env: [{
-          "SOME_PLAIN_VAR": [{
-            type: [undefined] as ("secret" | "connection" | undefined)[],
-            value: ["some-value", ""],
-            key: [undefined] as (string | undefined)[],
-          }],
-          "SOME_CONNECTION_VAR": [{
-            type: ["connection"] as const,
-            // Stays valid even when the fuzzer drops `type`: without it, the
-            // entry reads as a plain env var whose literal value happens to be
-            // "hexclave.projectId".
-            value: ["hexclave.projectId", "some-other-service.url"],
-            key: [undefined] as (string | undefined)[],
-          }],
-          "SOME_SECRET_VAR": [{
-            type: ["secret"] as const,
-            value: [undefined] as (string | undefined)[],
-            // Kept undefined: `key` is only allowed when type is "secret", and
-            // the fuzzer randomizes each field independently so it cannot honor
-            // that coupling (same situation as oauth's customCallbackUrl). The
-            // accept path is covered by the schema unit tests and the
-            // deployments e2e tests.
-            key: [undefined] as (string | undefined)[],
-          }],
-        }],
-      }],
-    }],
-  }],
   "clerk-integration": [{
     issuer: [undefined, "https://clerk.example.com"] as (string | undefined)[],
     authorizedParties: [undefined, "https://example.com, https://app.example.com"] as (string | undefined)[],

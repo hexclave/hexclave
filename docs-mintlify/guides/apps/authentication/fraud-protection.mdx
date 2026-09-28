@@ -1,0 +1,126 @@
+---
+title: "Fraud Protection"
+description: "Detect bots, free-trial abuse, and other fraudulent sign-ups."
+sidebarTitle: "Fraud Protection"
+---
+
+Fraud Protection is a sub-app of [Authentication](./overview). It isn't a separate page or a separate toggle - it's the name we give to the **risk signals** that the Authentication app already attaches to every sign-up attempt (bot score, free-trial abuse score, and country), and the conditions you can write against them in [Sign-up Rules](./sign-up-rules).
+
+In the dashboard, Fraud Protection appears as its own tile (grouped under the Authentication category) with a **Go to Authentication** button that takes you straight to **Authentication → Sign-up Rules**. There's nothing to configure on a separate screen - everything happens in the rule builder.
+
+<Note>
+  Since Authentication is always on, Fraud Protection is on. There is no independent toggle.
+</Note>
+
+## Available signals
+
+Every sign-up attempt is scored with the following fields. They're always available in the CEL condition builder alongside `email`, `emailDomain`, `authMethod`, and `oauthProvider`. The **Operators** column lists the choices shown in the builder's dropdown; under the hood each rule is stored as a CEL expression, so `equals` becomes `==`, `in_list` becomes `in [...]`, `greater_or_equal` becomes `>=`, and so on:
+
+| Field | Type | Operators | Description |
+|---|---|---|---|
+| `countryCode` | string (ISO-3166-1 alpha-2) | `equals`, `not_equals`, `in_list` | Country associated with the sign-up attempt (e.g. `"US"`, `"DE"`, `"NG"`). Empty if unavailable. |
+| `riskScores.bot` | number (0-100) | `equals`, `not_equals`, `greater_than`, `greater_or_equal`, `less_than`, `less_or_equal` | Bot risk score. Higher means more likely automated. |
+| `riskScores.free_trial_abuse` | number (0-100) | same as `riskScores.bot` | Free-trial abuse risk score. Higher means more likely abuse. |
+
+These fields evaluate together with the rest of the sign-up context, so a single rule can combine them freely.
+
+## Using signals in rules
+
+Open **Authentication → Sign-up Rules → Add rule**. The rule builder is the same one documented in [Sign-up Rules](./sign-up-rules#creating-rules) - the fraud-specific fields just appear in the field dropdown.
+
+### Block obvious bots
+
+- Condition: `riskScores.bot >= 80`
+- Action: **Reject**
+
+### Restrict suspected free-trial abuse for manual review
+
+Send borderline accounts to a restricted state instead of blocking outright, so support can review them:
+
+- Condition: `riskScores.free_trial_abuse >= 60`
+- Action: **Restrict**
+
+**What Restrict means:** the account is created, but marked restricted (`isRestricted`). Hexclave treats restricted users like unauthenticated users in most SDK calls until an admin clears the restriction or they finish whatever verification is required. See [Restricted Users](./restricted-users) for SDK handling and JWT claims, and [Sign-up Rules → Restrict](./sign-up-rules#restrict) for how the action behaves in the rule engine.
+
+### Combine signals with email and geo
+
+Allow sign-ups from a known corporate domain, but still hard-block anything that smells like automation:
+
+1. Rule 1: `emailDomain == "company.com" && riskScores.bot < 70` → **Allow**
+2. Rule 2: `riskScores.bot >= 70` → **Reject**
+3. Rule 3: `countryCode in ["CN", "RU"] && riskScores.free_trial_abuse >= 40` → **Restrict**
+4. Default: **Allow**
+
+Remember rules are evaluated **top-to-bottom by priority**. A matching **Allow** or **Reject** is terminal - it stops evaluation and decides the outcome. A matching **Restrict** or **Log** is recorded but evaluation *continues* down the list (only the first matching `Restrict` rule is attributed to the user). Place explicit allows above broader blocks if you want allow-lists to short-circuit.
+
+### Log first, enforce later
+
+When you start tuning thresholds, set the action to **Log** instead of `Reject` / `Restrict`. The rule will trigger and show up in the per-rule sparkline + trigger history, but the sign-up flow is unaffected. Once you're confident, switch the action to `Reject` or `Restrict`.
+
+## Testing fraud signals
+
+The Sign-up Rules **rule tester** (button **Open tester** at the bottom of the page) has a dedicated **Risk overrides** section for the fraud fields:
+
+- **Country** - override the resolved country code (any ISO-3166-1 alpha-2).
+- **Bot score** - 0–100. Must be provided together with **Free-trial abuse** or both must be blank.
+- **Free-trial abuse** - 0–100. Same pairing rule as Bot score.
+
+Click **Run test** to see how each rule evaluates against the simulated context. The result panel shows:
+
+- **Outcome** - allow / reject and whether it came from a rule or the default action.
+- **Triggered rules** - which rules matched, plus which one was the decision.
+- **Evaluation trace** - every rule's status (`Matched` / `No match` / `Disabled` / `No condition` / `Error`).
+- **Normalized context** - the exact values the engine used, so you can sanity-check your overrides against the rendered context.
+
+This is the safest way to validate a new threshold before flipping it from **Log** to **Reject**.
+
+## Trigger history & analytics
+
+Each rule row on the Sign-up Rules page shows a **sparkline** with the count of triggers in the recent analytics window (typically last 48h). Click the sparkline to open the **trigger history** dialog, which shows:
+
+- All-time and recent counts.
+- A per-rule activity chart.
+- A paginated list of every individual trigger (timestamp + email when captured).
+
+For high-risk rules, this is where you'll watch volume in real time as you tune `riskScores.*` thresholds.
+
+## On the user page
+
+The fraud signals also surface per-user. Open any user from **Users → \<user\>**, switch to the **Authentication** tab, and scroll to the **Fraud** section. It shows a 2-column grid with four fields:
+
+| Field | Editable | Notes |
+|---|---|---|
+| **Manual restriction** | via dialog | Status text - `Not restricted` / `Restricted by admin` / `Not manually restricted (<reason>)`. The reason mirrors the underlying restriction (`anonymous`, `email_not_verified`, `restricted_by_administrator`). |
+| **Risk score: bot** | inline | `user.riskScores.signUp.bot` (0-100). Click to override. |
+| **Risk score: free trial abuse** | inline | `user.riskScores.signUp.freeTrialAbuse` (0-100). Click to override. |
+| **Sign-up country code** | inline | `user.countryCode` (ISO-3166-1 alpha-2, uppercased). Empty if not resolved. |
+
+These are the same values the [Sign-up Rules engine](./sign-up-rules) saw at sign-up time. Editing them is useful for back-filling test data, fixing a miscalibrated score, or overriding the country before re-running a downstream flow.
+
+### Restricting a user
+
+A **Restrict user** button sits in the section header (and the action also lives in the user's top-right `⋮` menu). It's red (destructive) while the user has no manual restriction, and switches to an outline style once one is in place. It opens the **User Restriction** dialog with two fields:
+
+- **Public reason** - shown to the user when they try to access your app.
+- **Private details** - admin-only notes (e.g. internal ticket links).
+
+Click **Save & restrict user** to mark the user as `restrictedByAdmin: true`. The action label reflects the user's current state: **Restrict user** when they're unrestricted, **Add manual restriction** when they're already restricted for another reason (e.g. unverified email), and **Edit or remove manual restriction** once a manual restriction exists - in which case the dialog also gains a **Remove manual restriction** action.
+
+A `Restrict` outcome from your sign-up rules also lands users here - but with `restrictedReason.type === "restricted_by_administrator"` you can tell the difference between a rule-driven restriction (which carries a rule ID in analytics) and a hand-picked manual one.
+
+### Restriction banner
+
+If a user is restricted for any reason, a destructive banner shows at the top of their page explaining why:
+
+- `anonymous` - Anonymous users must sign up with credentials to remove this restriction.
+- `email_not_verified` - The user needs to verify their email address.
+- `restricted_by_administrator` - Shows the public reason and private details if set.
+
+The banner also exposes the same restriction action button so you can manage it without scrolling.
+
+## Related
+
+- [Authentication Overview](./overview) - parent app.
+- [Sign-up Rules](./sign-up-rules) - the enforcement layer that consumes these signals.
+- [Restricted Users](./restricted-users) - what restricted accounts can and can't do.
+- [JWT Tokens](./jwts) - how the `Restrict` action surfaces in user tokens.

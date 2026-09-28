@@ -2,42 +2,17 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { describe } from "vitest";
 import { ITEM_IDS } from "@hexclave/shared/dist/plans";
-import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { planUsageResponseSchema, type PlanUsageResponse } from "@hexclave/shared/dist/interface/plan-usage";
 import { it } from "../../../../../helpers";
 import { Auth, InternalProjectKeys, Project, backendContext, niceBackendFetch } from "../../../../backend-helpers";
+import { deleteSyncedRowsWithTombstones, withInternalDatabase } from "../external-db-sync-utils";
 
 type ProjectUsageContext = {
   projectId: string,
   tenancyId: string,
 };
-
-function getInternalDatabaseConnectionString(): string {
-  const connectionString = getEnvVariable(
-    "HEXCLAVE_DATABASE_CONNECTION_STRING",
-    getEnvVariable("STACK_DATABASE_CONNECTION_STRING", ""),
-  );
-  if (connectionString === "") {
-    throw new HexclaveAssertionError("Plan usage E2E tests require a configured internal database connection string");
-  }
-  return connectionString;
-}
-
-async function withInternalDatabase<T>(fn: (client: Client) => Promise<T>): Promise<T> {
-  const client = new Client({
-    connectionString: getInternalDatabaseConnectionString(),
-    connectionTimeoutMillis: 10_000,
-    query_timeout: 30_000,
-  });
-  await client.connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.end();
-  }
-}
 
 async function getMainTenancyId(client: Client, projectId: string): Promise<string> {
   const tenancies = await client.query<{ id: string }>(
@@ -56,9 +31,25 @@ async function getProjectUsageContext(client: Client, projectId: string): Promis
 
 async function clearSeededUsageRows(client: Client, tenancies: readonly ProjectUsageContext[]): Promise<void> {
   const tenancyIds = tenancies.map((tenancy) => tenancy.tenancyId);
-  await client.query(`DELETE FROM "SessionReplay" WHERE "tenancyId" = ANY($1::uuid[])`, [tenancyIds]);
-  await client.query(`DELETE FROM "EmailOutbox" WHERE "tenancyId" = ANY($1::uuid[])`, [tenancyIds]);
-  await client.query(`DELETE FROM "ProjectUser" WHERE "tenancyId" = ANY($1::uuid[])`, [tenancyIds]);
+  await client.query("BEGIN");
+  try {
+    await client.query(`DELETE FROM "SessionReplay" WHERE "tenancyId" = ANY($1::uuid[])`, [tenancyIds]);
+    // Deletions of synced tables only reach ClickHouse through DeletedRow.
+    await deleteSyncedRowsWithTombstones(client, {
+      table: "EmailOutbox",
+      whereClause: `"tenancyId" = ANY($1::uuid[])`,
+      values: [tenancyIds],
+    });
+    await deleteSyncedRowsWithTombstones(client, {
+      table: "ProjectUser",
+      whereClause: `"tenancyId" = ANY($1::uuid[])`,
+      values: [tenancyIds],
+    });
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
 }
 
 async function insertProjectUsers(client: Client, context: ProjectUsageContext, options: {
@@ -164,10 +155,19 @@ async function insertEmailOutboxRow(client: Client, tenancyId: string, startedSe
 // CI shards — locally they settle before seeding). Deleting the non-seeded rows
 // keeps the test measuring exactly the usage it controls.
 async function deleteIncidentalEmailRows(client: Client, tenancyIds: readonly string[]): Promise<void> {
-  await client.query(
-    `DELETE FROM "EmailOutbox" WHERE "tenancyId" = ANY($1::uuid[]) AND "renderedSubject" IS DISTINCT FROM $2`,
-    [tenancyIds, SEEDED_EMAIL_SUBJECT],
-  );
+  await client.query("BEGIN");
+  try {
+    // Deletions of synced tables only reach ClickHouse through DeletedRow.
+    await deleteSyncedRowsWithTombstones(client, {
+      table: "EmailOutbox",
+      whereClause: `"tenancyId" = ANY($1::uuid[]) AND "renderedSubject" IS DISTINCT FROM $2`,
+      values: [tenancyIds, SEEDED_EMAIL_SUBJECT],
+    });
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
 }
 
 async function insertSessionReplayRow(client: Client, context: ProjectUsageContext, projectUserId: string, startedAt: Date): Promise<void> {

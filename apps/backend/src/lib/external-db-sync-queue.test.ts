@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@/generated/prisma/client";
+import { EmailOutboxCreatedWith, PrismaClient } from "@/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { globalPrismaClient, globalPrismaSchema, sqlQuoteIdent } from "@/prisma-client";
+import { globalPrismaClient, globalPrismaSchema, retryTransaction, sqlQuoteIdent } from "@/prisma-client";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { enqueueExternalDbSync, enqueueExternalDbSyncBatch } from "./external-db-sync-queue";
+import { recordExternalDbSyncDeletion } from "./external-db-sync";
+import { getSoleTenancyFromProjectBranch } from "./tenancies";
 
 const DEDUP_PREFIX = "sentinel-sync-key-";
 
@@ -172,6 +174,89 @@ describe("enqueueExternalDbSyncBatch (real DB, isolated schema)", () => {
 
       const rows = await findRowsForTenancies(ids);
       expect(rows).toHaveLength(BATCH_SIZE);
+    }
+  });
+});
+
+describe("recordExternalDbSyncDeletion", () => {
+  it("writes an EmailOutbox tombstone with the complete primary key in the delete transaction", async () => {
+    const tenancyId = (await getSoleTenancyFromProjectBranch("internal", "main")).id;
+    const id = randomUUID();
+
+    await retryTransaction(globalPrismaClient, async (tx) => {
+      await tx.emailOutbox.create({
+        data: {
+          id,
+          tenancyId,
+          tsxSource: `/* external-db-sync-test-${id} */`,
+          themeId: null,
+          isHighPriority: false,
+          to: { type: "custom-emails", emails: ["external-db-sync-test@example.com"] },
+          extraRenderVariables: {},
+          shouldSkipDeliverabilityCheck: true,
+          createdWith: EmailOutboxCreatedWith.PROGRAMMATIC_CALL,
+          scheduledAt: new Date(),
+          isQueued: true,
+          renderedByWorkerId: "00000000-0000-0000-0000-000000000000",
+          startedRenderingAt: new Date(),
+          finishedRenderingAt: new Date(),
+          renderedHtml: "<p>external DB sync test</p>",
+          renderedText: "external DB sync test",
+          renderedSubject: "external DB sync test",
+          renderedIsTransactional: false,
+          startedSendingAt: null,
+          finishedSendingAt: null,
+          sendRetries: 0,
+          nextSendRetryAt: null,
+          isPaused: true,
+        },
+      });
+    });
+
+    try {
+      await retryTransaction(globalPrismaClient, async (tx) => {
+        await recordExternalDbSyncDeletion(tx, {
+          tableName: "EmailOutbox",
+          tenancyId,
+          emailOutboxId: id,
+        });
+        await tx.emailOutbox.delete({
+          where: { tenancyId_id: { tenancyId, id } },
+        });
+      });
+
+      // Read from primary because the tombstone was just committed and replica lag would make this assertion flaky.
+      const tombstones = await globalPrismaClient.$queryRaw<{
+        primaryKey: { tenancyId: string, id: string },
+        shouldUpdateSequenceId: boolean,
+      }[]>`
+        SELECT "primaryKey", "shouldUpdateSequenceId"
+        FROM "DeletedRow"
+        WHERE "tableName" = 'EmailOutbox'
+          AND "tenancyId" = ${tenancyId}::uuid
+          AND "primaryKey"->>'id' = ${id}
+        ORDER BY "sequenceId" DESC
+        LIMIT 1
+      `;
+      expect(tombstones).toHaveLength(1);
+      expect(tombstones[0]).toMatchObject({
+        primaryKey: { tenancyId, id },
+        shouldUpdateSequenceId: true,
+      });
+      expect(await globalPrismaClient.emailOutbox.findUnique({
+        where: { tenancyId_id: { tenancyId, id } },
+      })).toBeNull();
+    } finally {
+      await retryTransaction(globalPrismaClient, async (tx) => {
+        await recordExternalDbSyncDeletion(tx, {
+          tableName: "EmailOutbox",
+          tenancyId,
+          emailOutboxId: id,
+        });
+        await tx.emailOutbox.deleteMany({
+          where: { tenancyId, id },
+        });
+      });
     }
   });
 });

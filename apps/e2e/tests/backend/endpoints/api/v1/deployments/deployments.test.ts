@@ -1,16 +1,29 @@
 import { createTar } from "@hexclave/shared/dist/utils/tar";
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { describe } from "vitest";
 import { it } from "../../../../../helpers";
 import { InternalApiKey, Project, backendContext, niceBackendFetch } from "../../../../backend-helpers";
 
-// These tests run against the vercel-mock docker service (see
-// docker/dependencies/vercel-mock) — the backend's .env.development points at
-// it via the mock HEXCLAVE_VERCEL_BEARER_TOKEN. CI never talks to real Vercel.
-const VERCEL_MOCK_URL = `http://localhost:${process.env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX || "81"}26`;
+// These tests run against the local Marshal dev server (apps/marshal), which
+// itself talks to the fly-mock docker service (docker/dependencies/fly-mock)
+// and the s3mock bucket — the backend's .env.development points at Marshal via
+// the mock HEXCLAVE_MARSHAL_API_KEY, and Marshal's .env.development enables
+// the mock builder (instant fake digests). CI never talks to real Fly.
+// Secret values are KMS-encrypted server-side via the localstack container.
+const FLY_MOCK_URL = `http://localhost:${process.env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX || "81"}48`;
+// Same well-known dev token Marshal uses (MOCK_FLY_TOKEN in apps/marshal/src/config.ts).
+// The mock's /__mock namespace requires it because its listing exposes resolved secrets.
+const FLY_MOCK_TOKEN = "mock_hexclave_fly_key";
 
-function makeSourceTarball(files: Record<string, string> = { "index.html": "<h1>hello</h1>" }): Uint8Array {
+// Service ids are randomized per test because the fly-mock accumulates apps
+// for its whole container lifetime: metadata-based lookups (see findMockApp)
+// must not collide with earlier runs or concurrently-running tests.
+function uniqueServiceId(prefix: string): string {
+  return `${prefix}-${randomUUID().slice(0, 8)}`;
+}
+
+function makeSourceTarball(files: Record<string, string> = { "Dockerfile": "FROM nginx:alpine\n", "index.html": "<h1>hello</h1>" }): Uint8Array {
   return gzipSync(createTar(Object.entries(files).map(([path, content]) => ({
     path,
     data: new TextEncoder().encode(content),
@@ -26,7 +39,7 @@ async function createUpload(files?: Record<string, string>): Promise<{ uploadId:
   const uploadUrl = (uploadResponse.body as any).upload_url;
   const contentType = (uploadResponse.body as any).content_type;
   if (typeof uploadUrl !== "string" || typeof contentType !== "string") {
-    throw new Error(`Upload response is missing the presigned URL or content type: ${JSON.stringify(uploadResponse.body)}`);
+    throw new Error(`Upload response is missing the upload URL or content type: ${JSON.stringify(uploadResponse.body)}`);
   }
   const source = makeSourceTarball(files);
   const putResponse = await fetch(uploadUrl, {
@@ -41,39 +54,151 @@ async function createUpload(files?: Record<string, string>): Promise<{ uploadId:
   return { uploadId: (uploadResponse.body as any).id };
 }
 
-async function createServiceAndUpload(serviceId: string, files?: Record<string, string>): Promise<{ uploadId: string }> {
-  const createResponse = await niceBackendFetch("/api/v1/deployments/services", {
-    method: "POST",
+type RuntimeLogLine = { at_millis: number, stream: string, instance: string | null, text: string };
+
+/**
+ * Reads one page of a service's runtime logs.
+ *
+ * `follow=false` matters: the endpoint's whole point is that a runtime log never
+ * ends, so the default follows for minutes and a test that read the body would
+ * block for all of them.
+ */
+async function readRuntimeLogs(serviceId: string, options?: { sinceMillis?: number }): Promise<{ status: number, contentType: string | null, lines: RuntimeLogLine[] }> {
+  const params = new URLSearchParams({ follow: "false" });
+  if (options?.sinceMillis !== undefined) params.set("since_millis", String(options.sinceMillis));
+  const response = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/logs?${params.toString()}`, { accessType: "admin" });
+  // Only a 200 is NDJSON; an error status carries an ordinary JSON error body,
+  // which would blow up the per-line parse below.
+  //
+  // The body arrives as an ArrayBuffer, not a string: the test helper decodes
+  // `application/json` and `text/*` and hands everything else back raw, and
+  // `application/x-ndjson` is neither.
+  const text = response.status !== 200
+    ? ""
+    : typeof response.body === "string"
+      ? response.body
+      : new TextDecoder().decode(response.body as ArrayBuffer);
+  return {
+    status: response.status,
+    contentType: response.headers.get("content-type"),
+    lines: text.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as RuntimeLogLine),
+  };
+}
+
+// Syncs service definitions the way `hexclave deploy` does (its first step
+// after evaluating the deploy file's `services`). Scoped to a DEPLOYMENT SOURCE:
+// one deploy file, whose services this sync is the whole truth about.
+async function syncServices(services: Record<string, unknown>, sourceId: string = uniqueServiceId("src")): Promise<{ syncId: string, sourceId: string, removedServiceIds: string[] }> {
+  const response = await niceBackendFetch("/api/v1/deployments/services", {
+    method: "PUT",
     accessType: "admin",
-    body: { id: serviceId },
+    body: { source_id: sourceId, services },
   });
-  if (createResponse.status !== 201) throw new Error(`Failed to create service: ${JSON.stringify(createResponse.body)}`);
-  return await createUpload(files);
+  if (response.status !== 200) throw new Error(`Failed to sync services: ${JSON.stringify(response.body)}`);
+  const syncId = (response.body as any).sync_id;
+  if (typeof syncId !== "string") throw new Error(`Sync response is missing sync_id: ${JSON.stringify(response.body)}`);
+  return { syncId, sourceId, removedServiceIds: (response.body as any).removed_service_ids ?? [] };
 }
 
-// The mock advances a deployment one state per read (queued -> building ->
-// ready), so two run polls settle it.
-async function pollRunToReady(runId: string): Promise<void> {
-  await niceBackendFetch(`/api/v1/deployments/runs/${runId}`, { accessType: "admin" });
-  const secondPoll = await niceBackendFetch(`/api/v1/deployments/runs/${runId}`, { accessType: "admin" });
-  if ((secondPoll.body as any).status !== "ready") throw new Error(`Run did not become ready: ${JSON.stringify(secondPoll.body)}`);
+async function syncServiceAndUpload(serviceId: string, definition: Record<string, unknown> = {}, files?: Record<string, string>, existingSourceId?: string): Promise<{ uploadId: string, definitionSyncId: string, sourceId: string }> {
+  // Pass existingSourceId to re-sync a service this test already synced: service ids are
+  // unique per PROJECT, so a second source claiming one is refused by design.
+  const { syncId, sourceId } = await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {}, ...definition } }, existingSourceId);
+  return { ...await createUpload(files), definitionSyncId: syncId, sourceId };
 }
 
-function mockProjectName(serviceId: string): string {
-  const projectKeys = backendContext.value.projectKeys;
-  if (projectKeys === "no-project") throw new Error("No project in context");
-  const readable = `hxc-${projectKeys.projectId}-${serviceId}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-");
-  const hash = createHash("sha256").update(JSON.stringify([projectKeys.projectId, serviceId])).digest("hex").slice(0, 12);
-  return `${readable.slice(0, 87).replace(/-+$/, "")}-${hash}`;
-}
-
-async function fetchMockEnvValues(serviceId: string): Promise<Record<string, string>> {
-  const projectName = mockProjectName(serviceId);
-  const response = await fetch(`${VERCEL_MOCK_URL}/__mock/projects/${encodeURIComponent(projectName)}/env-values`, {
-    headers: { authorization: "Bearer mock_hexclave_vercel_key" },
+// Deploys a whole deployment source: one upload, one build of every service it
+// declares, then the applies in the given dependency order.
+async function startDeploy(options: {
+  sourceId: string,
+  // Omitted when every service in the deploy names an already-built image:
+  // nothing is built, so there is no source archive and the backend refuses one.
+  uploadId?: string,
+  definitionSyncId: string,
+  levels: string[][],
+  extraBody?: Record<string, unknown>,
+  accessType?: "admin" | "server",
+}): Promise<string> {
+  const response = await niceBackendFetch("/api/v1/deployments/deployments", {
+    method: "POST",
+    accessType: options.accessType ?? "admin",
+    body: {
+      source_id: options.sourceId,
+      ...(options.uploadId === undefined ? {} : { upload_id: options.uploadId }),
+      definition_sync_id: options.definitionSyncId,
+      levels: options.levels,
+      ...options.extraBody,
+    },
   });
-  if (!response.ok) throw new Error(`vercel-mock env-values returned ${response.status}`);
-  return (await response.json()).values;
+  if (response.status !== 200) throw new Error(`Failed to start deploy: ${JSON.stringify(response.body)}`);
+  return (response.body as any).id;
+}
+
+/** Sync + upload + deploy one service, which is what most tests here need. */
+async function deployOneService(serviceId: string, definition: Record<string, unknown> = {}, files?: Record<string, string>): Promise<string> {
+  const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId, definition, files);
+  return await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] });
+}
+
+// The mock builder completes asynchronously and the applies advance on READ (Marshal has no
+// background worker), so poll the deployment until it settles. The wall-clock budget matches
+// the declared test timeout so a slow CI runner doesn't fail early with 100s of the timeout
+// unused; the give-up error includes the last observed body for debuggability.
+async function pollDeploymentToStatus(deploymentId: string, wantedStatus: "deployed" | "failed"): Promise<Record<string, any>> {
+  let last: any = null;
+  for (let attempt = 0; attempt < 240; attempt++) {
+    const poll = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}`, { accessType: "admin" });
+    last = poll;
+    const body = poll.body as any;
+    if (body?.status === wantedStatus) return body;
+    if (body?.status === "deployed" || body?.status === "failed" || body?.status === "canceled") {
+      throw new Error(`Deployment reached ${body.status} instead of ${wantedStatus}: ${JSON.stringify(body)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Deployment ${deploymentId} did not become ${wantedStatus} in time; last poll: ${last?.status} ${JSON.stringify(last?.body)}`);
+}
+
+/** One service's outcome within a deployment. */
+function serviceOutcome(deployment: Record<string, any>, serviceId: string): Record<string, any> {
+  const outcome = (deployment.services as any[]).find((service) => service.service_id === serviceId);
+  if (outcome === undefined) throw new Error(`Deployment has no outcome for ${serviceId}: ${JSON.stringify(deployment)}`);
+  return outcome;
+}
+
+type MockApp = {
+  name: string,
+  sharedIpv4: string | null,
+  dedicatedIps: { id: string, address: string, type: string }[],
+  machines: { id: string, state: string, image: string, metadata: Record<string, string>, env: Record<string, string>, mounts: { volume: string, path: string }[], init: { exec?: string[] } | null }[],
+  volumes: { id: string, name: string, size_gb: number, attached_machine_id: string | null }[],
+  certificates: { hostname: string, clientStatus: string }[],
+};
+
+// Finds the fly-mock app backing a service by the hexclave_key metadata its machines carry
+// (the test doesn't need Marshal's app-naming scheme), and waits for the expected machine
+// count as an independent assertion on the runtime fleet. Matches on ns too so a fixed-id
+// service in a parallel worker can't shadow it.
+async function findMockApp(serviceId: string, expectedMachines = 1, ns?: string): Promise<MockApp> {
+  let seen: MockApp | undefined;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    // The /__mock namespace is authenticated: its listing includes each machine's
+    // resolved env, which holds decrypted project secrets.
+    const response = await fetch(`${FLY_MOCK_URL}/__mock/apps`, {
+      headers: { authorization: `Bearer ${FLY_MOCK_TOKEN}` },
+    });
+    if (response.ok) {
+      const { apps } = await response.json() as { apps: MockApp[] };
+      const matches = apps.filter((candidate) => candidate.machines.some((machine) =>
+        machine.metadata.hexclave_key === serviceId && (ns === undefined || machine.metadata.hexclave_ns === ns)));
+      if (matches.length > 0) {
+        seen = matches[0];
+        if (seen.machines.length >= expectedMachines) return seen;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`fly-mock app for ${serviceId} never converged to ${expectedMachines} machine(s) (last saw ${seen?.machines.length ?? 0})`);
 }
 
 describe("access control", () => {
@@ -100,88 +225,636 @@ describe("access control", () => {
         },
       }
     `);
+    const secretsResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "client" });
+    expect(secretsResponse.status).toBe(401);
   });
 
-  it("accepts secret-server-key access (the CLI's CI auth)", async ({ expect }) => {
+  it("accepts secret-server-key access for the whole CI deploy sequence", async ({ expect }) => {
     await Project.createAndSwitch();
     await InternalApiKey.createAndSetProjectKeys();
-    const response = await niceBackendFetch("/api/v1/deployments/services", { accessType: "server" });
-    expect(response).toMatchInlineSnapshot(`
+    // Every route the CLI hits in a server-key-only environment (CI) must
+    // accept server access, not just admin: list, sync, secrets pre-flight,
+    // and upload creation. (The deploy POST itself is covered with
+    // accessType: "server" in the end-to-end test below.)
+    const listResponse = await niceBackendFetch("/api/v1/deployments/services", { accessType: "server" });
+    expect(listResponse).toMatchInlineSnapshot(`
       NiceResponse {
         "status": 200,
         "body": { "items": [] },
         "headers": Headers { <some fields may have been hidden> },
       }
     `);
+    const syncResponse = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "server",
+      body: { source_id: "ci-src", services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } } },
+    });
+    expect(syncResponse.status).toBe(200);
+    const secretsResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "server" });
+    expect(secretsResponse.status).toBe(200);
+    const uploadResponse = await niceBackendFetch("/api/v1/deployments/uploads", { method: "POST", accessType: "server" });
+    expect(uploadResponse.status).toBe(201);
   });
 });
 
-describe("service CRUD", () => {
-  it("creates, reads, updates, and deletes a service definition", async ({ expect }) => {
+describe("definition sync", () => {
+  it("syncs, lists, and reads container service definitions", async ({ expect }) => {
     await Project.createAndSwitch();
 
-    const createResponse = await niceBackendFetch("/api/v1/deployments/services", {
+    await syncServices({
+      api: {
+        type: "serverless",
+        ports: { 8080: { protocol: "http" } },
+        // min_instances stays 0: this project's billing team is on the Free
+        // plan, where always-on instances are rejected by the sync route.
+        min_instances: 0,
+        max_instances: 3,
+        root_directory: "api",
+        env: {
+          MY_ENV_VAR: { value: "true" },
+          DATABASE_CONNECTION_STRING: { type: "secret", key: "db_connection" },
+          NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
+        },
+      },
+    });
+
+    const getResponse = await niceBackendFetch("/api/v1/deployments/services/api", { accessType: "admin" });
+    expect(getResponse.status).toBe(200);
+    const body = getResponse.body as any;
+    expect(body).toMatchObject({
+      id: "api",
+      type: "serverless",
+      // Defaults filled in: a bare `{}` is an HTTP port, and a service is private.
+      public: false,
+      ports: { 8080: { protocol: "http" } },
+      min_instances: 0,
+      max_instances: 3,
+      root_directory: "api",
+      provisioned: false,
+      // Never parked before it has ever run. Reported as its own field rather
+      // than as a status, because a parked service still has a last deploy that
+      // succeeded or failed on its own terms.
+      parked_at: null,
+      parked_reason: null,
+      status: "not_deployed",
+      has_successful_deploy: false,
+      url: null,
+      domains: [],
+      latest_deployment_id: null,
+    });
+    expect(body.env).toEqual([
+      { key: "DATABASE_CONNECTION_STRING", type: "secret", value: null, secret_key: "db_connection" },
+      { key: "MY_ENV_VAR", type: "plain", value: "true", secret_key: null },
+      { key: "NEXT_PUBLIC_HEXCLAVE_PROJECT_ID", type: "connection", value: "hexclave.projectId", secret_key: null },
+    ]);
+
+    const listResponse = await niceBackendFetch("/api/v1/deployments/services", { accessType: "admin" });
+    expect((listResponse.body as any).items.map((item: any) => item.id)).toEqual(["api"]);
+  });
+
+  it("stores a mixed port list and rejects the ones it could not serve", async ({ expect }) => {
+    await Project.createAndSwitch();
+
+    await syncServices({
+      database: { type: "serverless", ports: { 5432: { protocol: "tcp" } }, env: {} },
+      // Several PRIVATE ports of mixed protocols. min_instances is written out because this
+      // project is on the Free plan, where an always-on instance — a `server`'s default — is
+      // refused before any of the port handling under test runs.
+      gateway: {
+        type: "server",
+        min_instances: 0,
+        ports: { 3000: { protocol: "http" }, 9090: { protocol: "http" }, 5433: { protocol: "tcp" } },
+        env: {},
+      },
+    });
+    const database = await niceBackendFetch("/api/v1/deployments/services/database", { accessType: "admin" });
+    expect(database.status).toBe(200);
+    expect(database.body).toMatchObject({ public: false, ports: { 5432: { protocol: "tcp" } } });
+    const gateway = await niceBackendFetch("/api/v1/deployments/services/gateway", { accessType: "admin" });
+    expect((gateway.body as any).ports).toEqual({
+      3000: { protocol: "http" },
+      9090: { protocol: "http" },
+      5433: { protocol: "tcp" },
+    });
+
+    const rejects = async (service: Record<string, unknown>, expectedMessage: string) => {
+      const response = await niceBackendFetch("/api/v1/deployments/services", {
+        method: "PUT",
+        accessType: "admin",
+        body: { source_id: "ports-test", services: { svc: { type: "serverless", env: {}, ...service } } },
+      });
+      expect(response.status, JSON.stringify(service)).toBe(400);
+      expect(JSON.stringify(response.body)).toContain(expectedMessage);
+    };
+    // Raw TCP carries no SNI or Host header, so a shared public address cannot
+    // tell which service a connection is for.
+    await rejects({ public: true, ports: { 5432: { protocol: "tcp" } } }, "raw TCP carries no SNI or Host header");
+    // Public ingress with nothing behind it to serve.
+    await rejects({ public: true, ports: {} }, "must declare at least one port");
+    // The old ARRAY shape is refused by the schema itself. A duplicate port needs no rule of
+    // its own any more: two entries for one port are impossible in a record keyed by it.
+    await rejects({ ports: [{ port: 3000 }, { port: 9090 }] }, "must be a `object` type");
+  });
+
+  it("accepts a public service with several ports, and reports which owns 80/443", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: "multi-public",
+        services: { web: { type: "serverless", public: true, ports: { 8443: { protocol: "http" }, 3000: { protocol: "http" } }, env: {} } },
+      },
+    });
+    expect(response.status).toBe(200);
+    const service = await niceBackendFetch("/api/v1/deployments/services/web", { accessType: "admin" });
+    expect(service.status).toBe(200);
+    // Visibility is the SERVICE's, and the ports carry only their protocol.
+    expect((service.body as any).public).toBe(true);
+    expect((service.body as any).ports).toEqual({ 3000: { protocol: "http" }, 8443: { protocol: "http" } });
+  });
+
+  it("lets a public service hold a custom domain on the port that owns 80/443", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("multi-domain");
+    await syncServices({ [serviceId]: { type: "serverless", public: true, ports: { 8443: { protocol: "http" }, 3000: { protocol: "http" } }, env: {} } });
+    const added = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
       method: "POST",
       accessType: "admin",
-      body: { id: "api", framework: "nextjs", install_command: "pnpm install", build_command: "pnpm build", output_directory: ".next", root_directory: "./api" },
+      body: { hostname: `${serviceId}.verified.test` },
     });
-    expect(createResponse).toMatchInlineSnapshot(`
+    // A public service is already reachable, so a domain publishes nothing new.
+    // This is the case the PRIVATE multi-port rule refuses — see the domains
+    // suite — and it is accepted here precisely because nothing becomes newly
+    // reachable. (Which port it fronts is stored, not exposed by the API; that
+    // the holder is the lowest port is covered by domainPortForService's tests.)
+    expect(added.status).toBe(201);
+    expect((added.body as any).hostname).toBe(`${serviceId}.verified.test`);
+  });
+
+  it("rejects always-on instances on the Free plan, naming the offending services", async ({ expect }) => {
+    // A project created through the internal projects API is owned by a billing
+    // team that starts on the Free plan (Project.create waits for that
+    // entitlement), so this exercises the gate's POSITIVE path — unlike the
+    // other tests here, whose projects have no owner team and are never gated.
+    const { createProjectResponse } = await Project.createAndSwitch();
+    expect(createProjectResponse.body.owner_team_id).toEqual(expect.any(String));
+
+    // The gate deliberately respects the same HEXCLAVE_DISABLE_PLAN_LIMITS
+    // switch as every other Hexclave plan limit, and local `.env.local` files
+    // commonly set it. Read what the backend actually does rather than assuming
+    // — otherwise this test silently means the opposite thing on a dev machine.
+    const planUsage = await niceBackendFetch("/api/v1/internal/plan-usage", { accessType: "admin" });
+    const enforced = (planUsage.body as any)?.are_plan_limits_enforced !== false;
+
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: "plan-src",
+        services: {
+          web: { type: "serverless", ports: { 3000: { protocol: "http" } }, min_instances: 1, env: {} },
+          worker: { type: "serverless", ports: { 3001: { protocol: "http" } }, min_instances: 2, max_instances: 3, env: {} },
+          idle: { type: "serverless", ports: { 3002: { protocol: "http" } }, env: {} },
+        },
+      },
+    });
+
+    if (!enforced) {
+      // Plan limits off: the gate must fail OPEN, not half-apply.
+      expect(response.status).toBe(200);
+      return;
+    }
+
+    expect(response.status).toBe(400);
+    const message = JSON.stringify(response.body);
+    expect(message).toContain("Free plan");
+    // Names every offending service, and only those. Matched with backticks
+    // because the message's own prose contains the bare word "idle".
+    expect(message).toContain("`web`");
+    expect(message).toContain("`worker`");
+    expect(message).not.toContain("`idle`");
+
+    // Nothing was written: the gate runs before the upsert.
+    const listResponse = await niceBackendFetch("/api/v1/deployments/services", { accessType: "admin" });
+    expect((listResponse.body as any).items).toEqual([]);
+
+    // The same services scale-to-zero sync fine.
+    const accepted = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: "plan-src",
+        services: {
+          web: { type: "serverless", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 3, env: {} },
+          worker: { type: "serverless", ports: { 3001: { protocol: "http" } }, env: {} },
+        },
+      },
+    });
+    expect(accepted.status).toBe(200);
+  });
+
+  it("stores a volume and surfaces it on the service", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("vol");
+    const { sourceId } = await syncServices({
+      [serviceId]: { type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1, persistent_volumes: { data: { path: "/data", size_gb: 10 } }, env: {} },
+    });
+    const getResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect(getResponse.status).toBe(200);
+    // Keyed by volume id, the same shape the config file declares.
+    expect((getResponse.body as any).persistent_volumes).toEqual({ data: { path: "/data", size_gb: 10 } });
+
+    // Re-syncing without the volume must clear ALL THREE columns, not leave a
+    // half-written tuple that would keep mounting a disk the config dropped.
+    // Same source: this is the SAME deploy file re-syncing, and a service id
+    // another source already owns is refused rather than reassigned.
+    await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1, env: {} } }, sourceId);
+    const afterRemoval = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((afterRemoval.body as any).persistent_volumes).toBe(null);
+  });
+
+  it("rejects shrinking a volume at sync time, before anything is uploaded", async ({ expect }) => {
+    // Paid: this grows the disk past the Free plan's per-volume ceiling, and the point of
+    // the test is the grow-only rule rather than the plan gate. min_instances is still
+    // written out because a `server` defaults to an always-on instance.
+    await Project.createAndSwitchOnPaidPlan();
+    const serviceId = uniqueServiceId("shrink");
+    const definition = (sizeGb: number) => ({
+      [serviceId]: { type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1, persistent_volumes: { data: { path: "/data", size_gb: sizeGb } }, env: {} },
+    });
+    const { sourceId } = await syncServices(definition(10));
+
+    // Growing is fine; shrinking must fail HERE rather than at apply time, when
+    // the CLI has already packaged and uploaded the source.
+    await syncServices(definition(20), sourceId);
+    const shrunk = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT", accessType: "admin", body: { source_id: sourceId, services: definition(5) },
+    });
+    expect(shrunk.status).toBe(400);
+    expect(JSON.stringify(shrunk.body)).toContain("cannot be shrunk");
+
+    // The rejected sync wrote nothing — the stored size is still the grown one.
+    const read = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((read.body as any).persistent_volumes).toEqual({ data: { path: "/data", size_gb: 20 } });
+
+    // Detaching entirely is always allowed, whatever the size.
+    const detached = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT", accessType: "admin",
+      body: { source_id: sourceId, services: { [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, max_instances: 1, env: {} } } },
+    });
+    expect(detached.status).toBe(200);
+  });
+
+  it("caps the Free plan at one volume per project, and at 10GB each", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const planUsage = await niceBackendFetch("/api/v1/internal/plan-usage", { accessType: "admin" });
+    const enforced = (planUsage.body as any)?.are_plan_limits_enforced !== false;
+    const disk = (serviceId: string, sizeGb: number) => ({
+      // A Fly `server` at min_instances 0 suspends rather than staying up, which is what
+      // lets a Free project declare one at all — and so what makes a disk reachable here.
+      [serviceId]: {
+        type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1,
+        persistent_volumes: { data: { path: "/data", size_gb: sizeGb } }, env: {},
+      },
+    });
+    const sync = async (services: Record<string, unknown>, sourceId: string) => await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT", accessType: "admin", body: { source_id: sourceId, services },
+    });
+
+    const oneServiceId = uniqueServiceId("vol1");
+    // At the ceiling exactly: 10GB is allowed, so the cap is > rather than >=.
+    expect((await sync(disk(oneServiceId, 10), "vol-cap-src")).status).toBe(200);
+    // Re-syncing the SAME disk is not a second disk — it already has a row, and counting
+    // the row and the declaration would refuse every re-deploy of a project's one volume.
+    expect((await sync(disk(oneServiceId, 10), "vol-cap-src")).status).toBe(200);
+
+    const oversized = await sync(disk(uniqueServiceId("vol2"), 11), "vol-size-src");
+    const second = await sync(disk(uniqueServiceId("vol3"), 1), "vol-count-src");
+    if (!enforced) {
+      expect(oversized.status).toBe(200);
+      expect(second.status).toBe(200);
+      return;
+    }
+    expect(oversized.status).toBe(400);
+    expect(JSON.stringify(oversized.body)).toContain("larger than 10GB are not available on the Free plan");
+    expect(JSON.stringify(oversized.body)).toContain("upgrade your plan");
+    // A second disk in ANOTHER deploy file still counts: the cap is per project, which is
+    // what a per-source count would miss.
+    expect(second.status).toBe(400);
+    expect(JSON.stringify(second.body)).toContain("Free plan allows 1 persistent volume per project");
+    expect(JSON.stringify(second.body)).toContain("upgrade your plan");
+  });
+
+  it("counts a Free project's unmounted disks, and says so", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const planUsage = await niceBackendFetch("/api/v1/internal/plan-usage", { accessType: "admin" });
+    if ((planUsage.body as any)?.are_plan_limits_enforced === false) return;
+    const serviceId = uniqueServiceId("orphan");
+    const { sourceId } = await syncServices({
+      [serviceId]: {
+        type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1,
+        persistent_volumes: { data: { path: "/data", size_gb: 1 } }, env: {},
+      },
+    });
+    // Dropping the volume DETACHES it — the row (and the disk Fly bills for) stays. A
+    // count over the deploy file alone would now see zero disks and let a second one in.
+    await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, max_instances: 1, env: {} } }, sourceId);
+
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT", accessType: "admin",
+      body: {
+        source_id: sourceId,
+        services: {
+          [uniqueServiceId("next")]: {
+            type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1,
+            persistent_volumes: { data2: { path: "/data", size_gb: 1 } }, env: {},
+          },
+        },
+      },
+    });
+    expect(response.status).toBe(400);
+    const message = JSON.stringify(response.body);
+    expect(message).toContain("Free plan allows 1 persistent volume per project");
+    // The unmounted disk is invisible in the deploy file, so the message has to name it or
+    // the count reads as the platform miscounting.
+    expect(message).toContain("no service currently mounts");
+  });
+
+  it("lets a paid plan hold several volumes, and larger ones", async ({ expect }) => {
+    await Project.createAndSwitchOnPaidPlan();
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: "vol-paid-src",
+        services: {
+          [uniqueServiceId("big")]: {
+            type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1,
+            persistent_volumes: { data: { path: "/data", size_gb: 50 } }, env: {},
+          },
+          [uniqueServiceId("also")]: {
+            type: "server", ports: { 3001: { protocol: "http" } }, min_instances: 0, max_instances: 1,
+            persistent_volumes: { more: { path: "/more", size_gb: 20 } }, env: {},
+          },
+        },
+      },
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects a volume on a service that could run more than one instance", async ({ expect }) => {
+    await Project.createAndSwitch();
+    // A Fly volume attaches to one machine, so a fleet would silently give each
+    // instance its own separate disk. Only a "server" is single-instance by
+    // construction, so that is where the rule lives now.
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "vol-src", services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, max_instances: 2, persistent_volumes: { data: { path: "/data", size_gb: 1 } }, env: {} } } },
+    });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body)).toContain("only a \\\"server\\\" service may have persistent volumes");
+
+    // A server may not restate bounds that contradict its type.
+    const badBounds = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { services: { web: { type: "server", ports: { 3000: { protocol: "http" } }, max_instances: 2, persistent_volumes: { data: { path: "/data", size_gb: 1 } }, env: {} } } },
+    });
+    expect(badBounds.status).toBe(400);
+
+    // More than one disk on one machine is beyond what Fly can mount.
+    const twoVolumes = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "vol-src", services: { web: { type: "server", ports: { 3000: { protocol: "http" } }, env: {},
+        persistent_volumes: { data: { path: "/data", size_gb: 1 }, cache: { path: "/cache", size_gb: 1 } } } } },
+    });
+    expect(twoVolumes.status).toBe(400);
+    expect(JSON.stringify(twoVolumes.body)).toContain("at most 1 persistent volume");
+  });
+
+  it("rejects a volume mount path that is not a normalized absolute path", async ({ expect }) => {
+    await Project.createAndSwitch();
+    for (const path of ["data", "/", "/data/../etc"]) {
+      const response = await niceBackendFetch("/api/v1/deployments/services", {
+        method: "PUT",
+        accessType: "admin",
+        body: { source_id: "vol-src", services: { web: { type: "server", ports: { 3000: { protocol: "http" } }, persistent_volumes: { data: { path, size_gb: 1 } }, env: {} } } },
+      });
+      expect(response.status, `path ${JSON.stringify(path)}`).toBe(400);
+      expect(JSON.stringify(response.body)).toContain("normalized absolute path");
+    }
+  });
+
+  it("stores dockerfile_path and rejects one escaping the source root", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const ok = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "df-src", services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, dockerfile_path: "docker/Dockerfile.web", env: {} } } },
+    });
+    expect(ok.status).toBe(200);
+    expect((ok.body as any).items.find((item: any) => item.id === "web").dockerfile_path).toBe("docker/Dockerfile.web");
+    const escaping = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "df-src", services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, dockerfile_path: "../Dockerfile", env: {} } } },
+    });
+    expect(escaping.status).toBe(400);
+    expect(JSON.stringify(escaping.body)).toContain("dockerfile_path");
+  });
+
+  it("stores a prebuilt image, normalized, and refuses one that also builds", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const ok = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      // min_instances written out: a `server` defaults to 1, and this project's
+      // billing team is on the Free plan, which refuses always-on instances.
+      body: { source_id: "img-src", services: { db: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, image: "postgres:16", env: {} } } },
+    });
+    expect(ok.status).toBe(200);
+    const list = await niceBackendFetch("/api/v1/deployments/services", { accessType: "admin" });
+    const stored = (list.body as any).items.find((item: any) => item.id === "db");
+    // Fully qualified, so the stored definition names what is actually pulled.
+    expect(stored.image).toBe("docker.io/library/postgres:16");
+    // ...and the source fields stay empty, because nothing is built from the upload.
+    expect(stored.root_directory).toBeNull();
+    expect(stored.dockerfile_path).toBeNull();
+
+    // `image` and `dockerfile_path` each say what the build starts from.
+    const both = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "img-src", services: { db: { type: "server", ports: {}, min_instances: 0, image: "postgres:16", dockerfile_path: "Dockerfile", env: {} } } },
+    });
+    expect(both.status).toBe(400);
+    expect(JSON.stringify(both.body)).toContain("not both");
+
+    // An untagged image means ":latest", which moves under a running service.
+    const untagged = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "img-src", services: { db: { type: "server", ports: {}, min_instances: 0, image: "postgres", env: {} } } },
+    });
+    expect(untagged.status).toBe(400);
+    expect(JSON.stringify(untagged.body)).toContain("no tag or digest");
+  });
+
+  it("stores build and start commands, and turns an image into a base", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const ok = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: "cmd-src",
+        services: {
+          // No image and no Dockerfile: built on the Hexclave base image, which
+          // is why the start command is what makes it runnable.
+          web: {
+            type: "serverless", ports: { 3000: { protocol: "http" } }, root_directory: "apps/web",
+            build_command: "pnpm install && pnpm build", start_command: "pnpm start", env: {},
+          },
+          // An image with a build command is a BASE, so it keeps its root
+          // directory — the source is copied onto it and the command runs there.
+          api: {
+            type: "serverless", ports: { 8080: { protocol: "http" } }, image: "python:3.12-slim",
+            root_directory: "api", build_command: "pip install -r requirements.txt",
+            start_command: "python -m uvicorn main:app --host 0.0.0.0 --port 8080", env: {},
+          },
+          // A start command alone builds nothing: it is applied by the runtime.
+          cache: {
+            type: "server", ports: { 6379: { protocol: "tcp" } }, min_instances: 0,
+            image: "redis:7-alpine", start_command: "redis-server --appendonly yes", env: {},
+          },
+        },
+      },
+    });
+    expect(ok.status).toBe(200);
+    const items = (ok.body as any).items;
+    const byId = (id: string) => items.find((item: any) => item.id === id);
+    expect(byId("web").build_command).toBe("pnpm install && pnpm build");
+    expect(byId("web").start_command).toBe("pnpm start");
+    expect(byId("api").image).toBe("docker.io/library/python:3.12-slim");
+    expect(byId("api").root_directory).toBe("api");
+    expect(byId("cache").build_command).toBeNull();
+    expect(byId("cache").start_command).toBe("redis-server --appendonly yes");
+  });
+
+  it("refuses a command that could not survive the file it is written into", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const service = (extra: Record<string, unknown>) => ({
+      source_id: "cmd-bad-src",
+      services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {}, ...extra } },
+    });
+    // A newline is a second Dockerfile instruction; it is refused rather than escaped.
+    const newline = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT", accessType: "admin",
+      body: service({ build_command: "npm ci\nrm -rf /", start_command: "npm start" }),
+    });
+    expect(newline.status).toBe(400);
+    expect(JSON.stringify(newline.body)).toContain("build_command");
+    // The Hexclave base image starts nothing on its own.
+    const noStart = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT", accessType: "admin",
+      body: service({ build_command: "npm ci" }),
+    });
+    expect(noStart.status).toBe(400);
+    expect(JSON.stringify(noStart.body)).toContain("no command of its own");
+    // A root directory on a service that is not built from the upload.
+    const strayRoot = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT", accessType: "admin",
+      body: service({ image: "postgres:16", root_directory: "db" }),
+    });
+    expect(strayRoot.status).toBe(400);
+    expect(JSON.stringify(strayRoot.body)).toContain("has no `root_directory`");
+  });
+
+  it("rejects definitions without a port and with a non-container type", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const noPort = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { services: { web: { type: "serverless", env: {} } } },
+    });
+    expect(noPort.status).toBe(400);
+    const wrongType = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "type-src", services: { web: { type: "vercel", ports: { 3000: { protocol: "http" } }, env: {} } } },
+    });
+    expect(wrongType.status).toBe(400);
+  });
+
+  it("rejects the reserved `hexclave` service id and an empty services map", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const reserved = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { services: { hexclave: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } } },
+    });
+    expect(reserved.status).toBe(400);
+    const empty = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "empty-src", services: {} },
+    });
+    // An empty services map is rejected — the CLI only syncs when the config declares at
+    // least one service (evaluateServicesFunction errors on an empty export).
+    expect(empty.status).toBe(400);
+  });
+});
+
+describe("secrets", () => {
+  it("sets, lists, overwrites, and deletes write-only secret values", async ({ expect }) => {
+    await Project.createAndSwitch();
+
+    const setResponse = await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
+      accessType: "admin",
+      body: { key: "db_connection", value: "postgres://user:hunter2@db.example.com/app" },
+    });
+    expect(setResponse).toMatchInlineSnapshot(`
       NiceResponse {
-        "status": 201,
+        "status": 200,
         "body": {
-          "build_command": "pnpm build",
-          "domains": [],
-          "env": [],
-          "framework": "nextjs",
-          "has_successful_deploy": false,
-          "id": "api",
-          "install_command": "pnpm install",
-          "latest_run": null,
-          "output_directory": ".next",
-          "provisioned": false,
-          "root_directory": "./api",
-          "status": "not_deployed",
-          "type": "vercel",
-          "url": null,
+          "created": true,
+          "key": "db_connection",
         },
         "headers": Headers { <some fields may have been hidden> },
       }
     `);
 
-    // Duplicate id is rejected.
-    const duplicateResponse = await niceBackendFetch("/api/v1/deployments/services", {
+    // Overwriting reports created: false; the value is never echoed anywhere.
+    const overwriteResponse = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { id: "api" },
+      body: { key: "db_connection", value: "postgres://user:hunter3@db.example.com/app" },
     });
-    expect(duplicateResponse.status).toBe(400);
+    expect((overwriteResponse.body as any).created).toBe(false);
 
-    // The reserved managed-service id is rejected.
-    const reservedResponse = await niceBackendFetch("/api/v1/deployments/services", {
+    const listResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect(listResponse.status).toBe(200);
+    expect((listResponse.body as any).items.map((item: any) => item.key)).toEqual(["db_connection"]);
+    expect(JSON.stringify(listResponse.body)).not.toContain("hunter");
+
+    // Invalid keys and empty values are rejected.
+    const invalidKeyResponse = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { id: "hexclave" },
+      body: { key: "bad key", value: "x" },
     });
-    expect(reservedResponse).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 400,
-        "body": "The service id \\"hexclave\\" is reserved for the managed Hexclave service.",
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
-
-    const patchResponse = await niceBackendFetch("/api/v1/deployments/services/api", {
-      method: "PATCH",
+    expect(invalidKeyResponse.status).toBe(400);
+    const emptyValueResponse = await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
       accessType: "admin",
-      body: { build_command: "pnpm build:prod" },
+      body: { key: "some_key", value: "" },
     });
-    expect(patchResponse.status).toBe(200);
-    expect((patchResponse.body as any).build_command).toBe("pnpm build:prod");
+    expect(emptyValueResponse.status).toBe(400);
 
-    const listResponse = await niceBackendFetch("/api/v1/deployments/services", { accessType: "admin" });
-    expect((listResponse.body as any).items.map((item: any) => item.id)).toEqual(["api"]);
-
-    const deleteResponse = await niceBackendFetch("/api/v1/deployments/services/api", {
+    const deleteResponse = await niceBackendFetch("/api/v1/project-secrets/db_connection", {
       method: "DELETE",
       accessType: "admin",
     });
@@ -192,826 +865,1447 @@ describe("service CRUD", () => {
         "headers": Headers { <some fields may have been hidden> },
       }
     `);
-
-    const getAfterDelete = await niceBackendFetch("/api/v1/deployments/services/api", { accessType: "admin" });
-    expect(getAfterDelete.status).toBe(404);
-  });
-
-  it("manages definition env vars of all three types on an unprovisioned service", async ({ expect }) => {
-    await Project.createAndSwitch();
-    await niceBackendFetch("/api/v1/deployments/services", {
-      method: "POST",
-      accessType: "admin",
-      body: { id: "web" },
-    });
-    const patchResponse = await niceBackendFetch("/api/v1/deployments/services/web", {
-      method: "PATCH",
-      accessType: "admin",
-      body: {
-        env: {
-          MY_ENV_VAR: { value: "true" },
-          DATABASE_CONNECTION_STRING: { type: "secret", key: "db_connection" },
-          NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
-        },
-      },
-    });
-    expect(patchResponse.status).toBe(200);
-    expect((patchResponse.body as any).env).toMatchInlineSnapshot(`
-      [
-        {
-          "key": "DATABASE_CONNECTION_STRING",
-          "secret_key": "db_connection",
-          "type": "secret",
-          "value": null,
-        },
-        {
-          "key": "MY_ENV_VAR",
-          "secret_key": null,
-          "type": "plain",
-          "value": "true",
-        },
-        {
-          "key": "NEXT_PUBLIC_HEXCLAVE_PROJECT_ID",
-          "secret_key": null,
-          "type": "connection",
-          "value": "hexclave.projectId",
-        },
-      ]
-    `);
-
-    const invalidKeyResponse = await niceBackendFetch("/api/v1/deployments/services/web", {
-      method: "PATCH",
-      accessType: "admin",
-      body: { env: { "1-BAD-KEY": { value: "x" } } },
-    });
-    expect(invalidKeyResponse.status).toBe(400);
-
-    // A secret with an inline value would defeat the point of secrets.
-    const secretWithValueResponse = await niceBackendFetch("/api/v1/deployments/services/web", {
-      method: "PATCH",
-      accessType: "admin",
-      body: { env: { A: { type: "secret", key: "a", value: "leaked" } } },
-    });
-    expect(secretWithValueResponse.status).toBe(400);
-
-    // The legacy `{service.output}` interpolation syntax is not a connection.
-    const legacyReferenceResponse = await niceBackendFetch("/api/v1/deployments/services/web", {
-      method: "PATCH",
-      accessType: "admin",
-      body: { env: { A: { type: "connection", value: "{hexclave.projectId}" } } },
-    });
-    expect(legacyReferenceResponse.status).toBe(400);
-  });
-});
-
-describe("read-only enforcement for pushed config sources", () => {
-  it("blocks definition edits (including env vars) but allows domains when the config is pushed from GitHub", async ({ expect }) => {
-    await Project.createAndSwitch();
-    await Project.pushConfig({
-      "deployments-alpha": {
-        services: {
-          api: {
-            type: "vercel",
-            framework: "nextjs",
-            buildCommand: "pnpm build",
-            env: {
-              SOME_KEY: { value: "some-value" },
-            },
-          },
-        },
-      },
-    }, {
-      type: "pushed-from-github",
-      owner: "acme",
-      repo: "monorepo",
-      branch: "main",
-      commit_hash: "0000000000000000000000000000000000000000",
-      config_file_path: "hexclave.config.ts",
-    });
-
-    // The pushed definition is visible, including its env vars.
-    const listResponse = await niceBackendFetch("/api/v1/deployments/services", { accessType: "admin" });
-    expect((listResponse.body as any).items.map((item: any) => ({ id: item.id, framework: item.framework, env: item.env }))).toEqual([{
-      id: "api",
-      framework: "nextjs",
-      env: [{ key: "SOME_KEY", type: "plain", value: "some-value", secret_key: null }],
-    }]);
-
-    const createResponse = await niceBackendFetch("/api/v1/deployments/services", {
-      method: "POST",
-      accessType: "admin",
-      body: { id: "another" },
-    });
-    expect(createResponse).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 400,
-        "body": "This project's configuration is managed by GitHub, so deployment services can't be edited here. Edit the \`deployments-alpha.services\` section of your hexclave.config.ts instead.",
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
-
-    const patchBuildResponse = await niceBackendFetch("/api/v1/deployments/services/api", {
-      method: "PATCH",
-      accessType: "admin",
-      body: { build_command: "pnpm build:evil" },
-    });
-    expect(patchBuildResponse.status).toBe(400);
-
-    const deleteResponse = await niceBackendFetch("/api/v1/deployments/services/api", {
+    const deleteAgainResponse = await niceBackendFetch("/api/v1/project-secrets/db_connection", {
       method: "DELETE",
       accessType: "admin",
     });
-    expect(deleteResponse.status).toBe(400);
-
-    // Env vars are part of the definition now, so they are read-only too.
-    const envPatchResponse = await niceBackendFetch("/api/v1/deployments/services/api", {
-      method: "PATCH",
-      accessType: "admin",
-      body: { env: { SOME_KEY: { value: "changed" } } },
-    });
-    expect(envPatchResponse.status).toBe(400);
-
-    // Domains are operational state (not part of the definition), so they stay
-    // manageable even for GitHub-sourced configs.
-    const addDomainResponse = await niceBackendFetch("/api/v1/deployments/services/api/domains", {
-      method: "POST",
-      accessType: "admin",
-      body: { hostname: "app.example.com" },
-    });
-    expect(addDomainResponse.status).toBe(201);
+    expect(deleteAgainResponse.status).toBe(404);
+    const emptyListResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect((emptyListResponse.body as any).items).toEqual([]);
   });
 
-  // Removing a service through a whole-config write is NOT a teardown: only the
-  // dashboard's DELETE route deletes the Vercel project. This pins the current
-  // (leaky) behaviour so it changes deliberately — see the "KNOWN GAP" note in
-  // the backend's lib/deployments, and the cron sweep that should replace it.
-  it("hides a service but keeps its Vercel project when a config push removes it", async ({ expect }) => {
+  it("scopes secrets per project", async ({ expect }) => {
     await Project.createAndSwitch();
-    const pushedSource = {
-      type: "pushed-from-github" as const,
-      owner: "acme",
-      repo: "monorepo",
-      branch: "main",
-      commit_hash: "0000000000000000000000000000000000000000",
-      config_file_path: "hexclave.config.ts",
-    };
-    await Project.pushConfig({
-      "deployments-alpha": {
-        services: {
-          orphan: { type: "vercel" },
-        },
-      },
-    }, pushedSource);
-    const { uploadId } = await createUpload();
-    const firstDeploy = await niceBackendFetch("/api/v1/deployments/services/orphan/deploy", {
+    await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { upload_id: uploadId },
+      body: { key: "shared_key", value: "project-a-value" },
     });
-    expect(firstDeploy.status).toBe(200);
-
-    const provisionedProjectResponse = await fetch(`${VERCEL_MOCK_URL}/v9/projects/${encodeURIComponent(mockProjectName("orphan"))}?teamId=team_mock_hexclave`, {
-      headers: { authorization: "Bearer mock_hexclave_vercel_key" },
-    });
-    expect(provisionedProjectResponse.status).toBe(200);
-
-    await Project.pushConfig({ "deployments-alpha": { services: {} } }, pushedSource);
-
-    // The service is gone from the API, because listings are built from the
-    // config definitions and never from the leftover operational row.
-    const listAfterRemoval = await niceBackendFetch("/api/v1/deployments/services", {
-      accessType: "admin",
-    });
-    expect(listAfterRemoval.status).toBe(200);
-    expect((listAfterRemoval.body as any).items.map((item: any) => item.id)).not.toContain("orphan");
-
-    // ...but its Vercel project is still live. This is the leak.
-    const removedProjectResponse = await fetch(`${VERCEL_MOCK_URL}/v9/projects/${encodeURIComponent(mockProjectName("orphan"))}?teamId=team_mock_hexclave`, {
-      headers: { authorization: "Bearer mock_hexclave_vercel_key" },
-    });
-    expect(removedProjectResponse.status).toBe(200);
-
-    // Re-adding the same service id picks the surviving operational row back
-    // up and redeploys onto the same project instead of provisioning a new one.
-    await Project.pushConfig({
-      "deployments-alpha": {
-        services: {
-          orphan: { type: "vercel" },
-        },
-      },
-    }, pushedSource);
-    const { uploadId: secondUploadId } = await createUpload();
-    const secondDeploy = await niceBackendFetch("/api/v1/deployments/services/orphan/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: secondUploadId },
-    });
-    expect(secondDeploy.status).toBe(200);
+    await Project.createAndSwitch();
+    const otherProjectList = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect((otherProjectList.body as any).items).toEqual([]);
   });
 });
 
-describe("deploys against the vercel-mock", () => {
-  it("deploys end to end: upload, provision, env resolution, status polling, and redacted logs", async ({ expect }) => {
+describe("deploys against the Marshal runtime", () => {
+  it("deploys a service end to end: sync, upload, build, machines, env resolution", { timeout: 120_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
-    // The internal API key set also backs the {hexclave.secretServerKey} and
-    // {hexclave.publishableClientKey} env var references.
     await InternalApiKey.createAndSetProjectKeys();
-    const projectKeys = backendContext.value.projectKeys;
-    if (projectKeys === "no-project") throw new Error("No project in context");
+    const serviceId = uniqueServiceId("web");
 
-    const { uploadId } = await createServiceAndUpload("api");
-
-    const deployResponse = await niceBackendFetch("/api/v1/deployments/services/api/deploy", {
+    // Store a secret value first (the dashboard flow), then reference it.
+    const setSecret = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
-      accessType: "server",
-      body: {
-        upload_id: uploadId,
-        build_config: { framework: "nextjs", build_command: "pnpm build" },
+      accessType: "admin",
+      body: { key: "openai_api_key", value: "sk-secret-value-123" },
+    });
+    expect(setSecret.status).toBe(200);
+
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [serviceId]: {
+        type: "serverless",
+        ports: { 3000: { protocol: "http" } },
+        min_instances: 0,
+        max_instances: 2,
+        // Rides through the whole deploy into the Marshal spec — this covers the
+        // backend→Marshal dockerfile_path passthrough (Marshal validates it on the spec
+        // PUT; the mock builder then ignores it, as builds are not exercised here).
+        dockerfile_path: "docker/Dockerfile.web",
         env: {
-          HEXCLAVE_PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
-          HEXCLAVE_SECRET_SERVER_KEY: { type: "connection", value: "hexclave.secretServerKey" },
-          PLAIN_VALUE: { value: "hello-world" },
-          DB_PASSWORD: { type: "secret", key: "db_connection" },
-          // Regression test for the removal of the `{service.output}`
-          // interpolation syntax: a plain value that LOOKS like the old
-          // reference syntax must be pushed verbatim, never resolved.
-          LOOKS_LIKE_A_REFERENCE: { value: "{hexclave.projectId}" },
-        },
-        secrets: {
-          db_connection: "postgres://user:hunter2@db.example.com/app",
+          PLAIN_VAR: { value: "plain-value" },
+          OPENAI_KEY: { type: "secret", key: "openai_api_key" },
+          PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
+          ["__proto__"]: { value: "special-key-value" },
         },
       },
     });
-    expect(deployResponse).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 200,
-        "body": { "run_id": "<stripped UUID>" },
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
-    const runId = (deployResponse.body as any).run_id;
+    const { uploadId } = await createUpload();
+    const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]], accessType: "server" });
+    const deployment = await pollDeploymentToStatus(deploymentId, "deployed");
+    expect(deployment.deployment_source_id).toBe(sourceId);
+    expect(deployment.triggered_by).toBe("server");
+    const outcome = serviceOutcome(deployment, serviceId);
+    expect(outcome.status).toBe("deployed");
+    // Container services are private by default: no verified domain, no URL.
+    expect(outcome.url).toBeNull();
 
-    // The mock advances one state per poll: queued -> building -> ready.
-    const firstPoll = await niceBackendFetch(`/api/v1/deployments/runs/${runId}`, { accessType: "admin" });
-    expect((firstPoll.body as any).url).toBe(`https://${mockProjectName("api")}.vercel-mock.localhost`);
-    (firstPoll.body as any).url = "<deployment URL>";
-    expect(firstPoll).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 200,
-        "body": {
-          "created_at_millis": <stripped field 'created_at_millis'>,
-          "error": null,
-          "finished_at_millis": null,
-          "id": "<stripped UUID>",
-          "service_id": "api",
-          "status": "building",
-          "target": "production",
-          "triggered_by": "server",
-          "url": "<deployment URL>",
-        },
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
-    const secondPoll = await niceBackendFetch(`/api/v1/deployments/runs/${runId}`, { accessType: "admin" });
-    expect((secondPoll.body as any).status).toBe("ready");
-    expect((secondPoll.body as any).finished_at_millis).not.toBeNull();
+    // The service board shape after a successful deploy.
+    const serviceResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    const service = serviceResponse.body as any;
+    expect(service.status).toBe("deployed");
+    expect(service.provisioned).toBe(true);
+    expect(service.has_successful_deploy).toBe(true);
 
-    // The service now reports as deployed & provisioned.
-    const serviceResponse = await niceBackendFetch("/api/v1/deployments/services/api", { accessType: "admin" });
-    expect((serviceResponse.body as any).status).toBe("deployed");
-    expect((serviceResponse.body as any).provisioned).toBe(true);
-    expect((serviceResponse.body as any).has_successful_deploy).toBe(true);
+    // The fly-mock shows the machines Marshal created: max_instances of them,
+    // with the resolved env (secrets and hexclave connections resolved
+    // server-side; nothing unresolved leaks through).
+    const app = await findMockApp(serviceId, 2);
+    expect(app.machines).toHaveLength(2);
+    const projectKeys = backendContext.value.projectKeys;
+    if (projectKeys === "no-project") throw new Error("No project in context");
+    for (const machine of app.machines) {
+      expect(machine.env).toEqual({
+        PLAIN_VAR: "plain-value",
+        OPENAI_KEY: "sk-secret-value-123",
+        PROJECT_ID: projectKeys.projectId,
+        ["__proto__"]: "special-key-value",
+        // Every deployed service is handed its project's Hexclave credentials, plus
+        // NEXT_PUBLIC_/VITE_ copies of the PUBLIC three — a framework that inlines values at
+        // build time only reads its own prefix, so an unprefixed name is invisible to the
+        // client bundle. Asserted with toEqual (not toMatchObject) so an accidental fourth
+        // prefixed copy — of the secret server key above all — fails this test.
+        HEXCLAVE_PROJECT_ID: projectKeys.projectId,
+        HEXCLAVE_API_URL: expect.any(String),
+        HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
+        HEXCLAVE_SECRET_SERVER_KEY: expect.any(String),
+        NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: projectKeys.projectId,
+        NEXT_PUBLIC_HEXCLAVE_API_URL: expect.any(String),
+        NEXT_PUBLIC_HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
+        VITE_HEXCLAVE_PROJECT_ID: projectKeys.projectId,
+        VITE_HEXCLAVE_API_URL: expect.any(String),
+        VITE_HEXCLAVE_PUBLISHABLE_CLIENT_KEY: expect.any(String),
+      });
+      expect(machine.image).toMatch(/^registry\.fly\.io\/.*@sha256:[0-9a-f]{64}$/);
+      expect(machine.metadata.hexclave_key).toBe(serviceId);
+    }
 
-    // Env vars were resolved server-side before being pushed to the target:
-    // connections resolve to outputs, secrets to the --secret values, and
-    // plain values pass through verbatim — even when they look like the old
-    // `{service.output}` interpolation syntax.
-    const envValues = await fetchMockEnvValues("api");
-    expect(envValues.HEXCLAVE_PROJECT_ID).toBe(projectKeys.projectId);
-    expect(envValues.HEXCLAVE_SECRET_SERVER_KEY).toBe(projectKeys.secretServerKey);
-    expect(envValues.PLAIN_VALUE).toBe("hello-world");
-    expect(envValues.DB_PASSWORD).toBe("postgres://user:hunter2@db.example.com/app");
-    expect(envValues.LOOKS_LIKE_A_REFERENCE).toBe("{hexclave.projectId}");
-
-    // The build logs echo the build environment (mock behavior); the secret
-    // server key must be redacted, non-secrets stay readable. Known
-    // limitation, pinned deliberately: --secret values are never persisted by
-    // Hexclave, so they CANNOT be redacted from later log reads — improving
-    // this requires a conscious design change (e.g. storing salted value
-    // hashes), not an accident.
-    const logsResponse = await niceBackendFetch(`/api/v1/deployments/runs/${runId}/logs`, { accessType: "admin" });
+    // Build logs stream with every env VALUE redacted. The mock builder echoes the resolved
+    // env into the log (MARSHAL_MOCK_ENV), standing in for a build step that echoes its own
+    // environment — so this is a REAL redaction check, not a shape assertion.
+    //
+    // The plain var is scrubbed alongside the secret, and deliberately so: env vars reach
+    // the build over a single channel with no marker saying which are sensitive, so Marshal
+    // cannot tell "plain-value" from a database password and treats both as the latter.
+    const logsResponse = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}/logs`, { accessType: "admin" });
     expect(logsResponse.status).toBe(200);
     const logsText = typeof logsResponse.body === "string" ? logsResponse.body : JSON.stringify(logsResponse.body);
-    expect(logsText).toContain("Build environment:");
-    expect(logsText).toContain(`HEXCLAVE_PROJECT_ID=${projectKeys.projectId}`);
-    expect(logsText).toContain("HEXCLAVE_SECRET_SERVER_KEY=<redacted>");
-    expect(logsText).not.toContain(projectKeys.secretServerKey);
-    expect(logsText).toContain("DB_PASSWORD=postgres://user:hunter2@db.example.com/app");
+    expect(logsText).toContain("MARSHAL_MOCK_ENV");
+    expect(logsText).toContain("PLAIN_VAR=<redacted>");
+    expect(logsText).toContain("OPENAI_KEY=<redacted>");
+    expect(logsText).not.toContain("sk-secret-value-123");
+    expect(logsText).not.toContain("plain-value");
+
+    // Runtime logs: what the SERVICE printed, as opposed to what its build did.
+    // The fly-mock writes a line per machine lifecycle event, so a deployed
+    // service always has some.
+    const runtime = await readRuntimeLogs(serviceId);
+    expect(runtime.status).toBe(200);
+    expect(runtime.contentType).toContain("application/x-ndjson");
+    expect(runtime.lines.length).toBeGreaterThan(0);
+    for (const line of runtime.lines) {
+      expect(typeof line.at_millis).toBe("number");
+      expect(line.at_millis).toBeGreaterThan(0);
+      expect(["stdout", "stderr", "system"]).toContain(line.stream);
+    }
+
+    // The stream classification is the one piece of real logic in the mapping:
+    // a line from a non-"app" provider is the RUNTIME talking about the service
+    // (machine started), not the service talking. Getting this backwards would
+    // present platform chatter as the app's own output.
+    const machineStarted = runtime.lines.find((line) => line.text.includes("Machine started"));
+    expect(machineStarted?.stream).toBe("system");
+    const appOutput = runtime.lines.find((line) => line.text.includes("mock app listening"));
+    expect(appOutput?.stream).toBe("stdout");
+
+    // Instances are named, which is what lets a reader filter a multi-instance
+    // service down to one machine. (The build-log path deliberately nulls this;
+    // the runtime path must not.)
+    const machineIds = new Set(app.machines.map((machine: any) => machine.id));
+    const runtimeInstances = new Set(runtime.lines.map((line) => line.instance).filter((instance) => instance != null));
+    expect(runtimeInstances.size).toBeGreaterThan(0);
+    for (const instance of runtimeInstances) expect(machineIds).toContain(instance);
+
+    // Resuming from the newest timestamp returns nothing: the cursor is what
+    // makes a reconnect neither repeat nor skip, and it is the whole reason this
+    // endpoint serves NDJSON rather than the build log's plain text.
+    const newestAtMillis = Math.max(...runtime.lines.map((line) => line.at_millis));
+    const resumed = await readRuntimeLogs(serviceId, { sinceMillis: newestAtMillis + 1 });
+    expect(resumed.status).toBe(200);
+    expect(resumed.lines).toEqual([]);
+
+    // A cursor BEFORE the first line replays from there — the same request the
+    // dashboard makes when it reconnects mid-history.
+    const oldestAtMillis = Math.min(...runtime.lines.map((line) => line.at_millis));
+    const replayed = await readRuntimeLogs(serviceId, { sinceMillis: oldestAtMillis });
+    expect(replayed.status).toBe(200);
+    expect(replayed.lines.length).toBeGreaterThan(0);
+    for (const line of replayed.lines) expect(line.at_millis).toBeGreaterThanOrEqual(oldestAtMillis);
   });
 
-  it("rejects deploys with missing, unknown, or dangling env references without consuming the upload", async ({ expect }) => {
+  it("refuses runtime logs for a service that was never deployed, and for one that does not exist", async ({ expect }) => {
     await Project.createAndSwitch();
-    const { uploadId } = await createServiceAndUpload("strict");
-
-    // Secret env var without a matching secret value.
-    const missingSecretResponse = await niceBackendFetch("/api/v1/deployments/services/strict/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        env: { DB_PASSWORD: { type: "secret", key: "db_connection" } },
+    await InternalApiKey.createAndSetProjectKeys();
+    const serviceId = uniqueServiceId("never-deployed");
+    // Synced but never deployed: the definition exists, the runtime has no app
+    // for it, and Fly answers a missing app with an empty page — which would
+    // render as a silently empty stream if this were not refused up front.
+    await syncServices({
+      [serviceId]: {
+        type: "serverless",
+        ports: { 3000: { protocol: "http" } },
+        min_instances: 0,
+        max_instances: 1,
+        env: {},
       },
     });
-    expect(missingSecretResponse).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 400,
-        "body": "Missing secret values for: db_connection. This service's env vars reference these secrets — pass them with \`--secret <key>=<value>\`.",
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
+    const notDeployed = await readRuntimeLogs(serviceId);
+    expect(notDeployed.status).toBe(400);
 
-    // A secret that no env var references is a typo, not a no-op.
-    const unknownSecretResponse = await niceBackendFetch("/api/v1/deployments/services/strict/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        env: { PLAIN: { value: "x" } },
-        secrets: { db_connectoin: "oops" },
-      },
-    });
-    expect(unknownSecretResponse.status).toBe(400);
-    expect(unknownSecretResponse.body).toContain("Unknown secrets: db_connectoin");
-
-    // A connection to a service that doesn't exist.
-    const danglingConnectionResponse = await niceBackendFetch("/api/v1/deployments/services/strict/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        env: { OTHER_URL: { type: "connection", value: "nonexistent.url" } },
-      },
-    });
-    expect(danglingConnectionResponse.status).toBe(400);
-    expect(danglingConnectionResponse.body).toContain("points to a service that doesn't exist");
-
-    // None of the failed attempts may have consumed the upload: the same
-    // upload id must still deploy fine once the request is valid.
-    const validResponse = await niceBackendFetch("/api/v1/deployments/services/strict/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        env: { DB_PASSWORD: { type: "secret", key: "db_connection" } },
-        secrets: { db_connection: "hunter2" },
-      },
-    });
-    expect(validResponse.status).toBe(200);
+    const missing = await readRuntimeLogs(uniqueServiceId("no-such-service"));
+    expect(missing.status).toBe(404);
   });
 
-  it("reconciles the Vercel env on redeploy and uses the stored definition when the request omits env", async ({ expect }) => {
+  it("deploys a prebuilt image with no upload and no build at all", { timeout: 120_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
-    const projectKeys = backendContext.value.projectKeys;
-    if (projectKeys === "no-project") throw new Error("No project in context");
-
-    // First deploy: two plain vars and a secret, persisted config-as-code.
-    const { uploadId } = await createServiceAndUpload("recon");
-    const firstDeploy = await niceBackendFetch("/api/v1/deployments/services/recon/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        env: {
-          KEEP_ME: { value: "kept" },
-          REMOVE_ME: { value: "stale" },
-          DB_PASSWORD: { type: "secret", key: "db_connection" },
-        },
-        secrets: { db_connection: "hunter2" },
+    await InternalApiKey.createAndSetProjectKeys();
+    const serviceId = uniqueServiceId("db");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [serviceId]: {
+        type: "server",
+        ports: { 5432: { protocol: "tcp" } },
+        // min_instances stays 0 (suspend when idle): this project's billing team
+        // is on the Free plan, which refuses always-on instances.
+        min_instances: 0,
+        max_instances: 1,
+        image: "postgres:16",
+        env: { POSTGRES_PASSWORD: { value: "hunter2" } },
       },
     });
-    expect(firstDeploy.status).toBe(200);
-    expect((await fetchMockEnvValues("recon")).REMOVE_ME).toBe("stale");
+    // No createUpload: nothing is built, so there is nothing to package. The
+    // backend refuses an upload here rather than consuming one nothing can use.
+    const deploymentId = await startDeploy({ sourceId, definitionSyncId, levels: [[serviceId]] });
+    const deployment = await pollDeploymentToStatus(deploymentId, "deployed");
+    // No builder ran, so there is no build log to offer.
+    expect(deployment.has_build_logs).toBe(false);
 
-    // The persisted definition exposes the secret's NAME only — the value must
-    // not appear anywhere readable.
-    const serviceResponse = await niceBackendFetch("/api/v1/deployments/services/recon", { accessType: "admin" });
-    expect((serviceResponse.body as any).env).toEqual([
-      { key: "DB_PASSWORD", type: "secret", value: null, secret_key: "db_connection" },
-      { key: "KEEP_ME", type: "plain", value: "kept", secret_key: null },
-      { key: "REMOVE_ME", type: "plain", value: "stale", secret_key: null },
-    ]);
-    expect(JSON.stringify(serviceResponse.body)).not.toContain("hunter2");
+    const outcome = serviceOutcome(deployment, serviceId);
+    expect(outcome.status).toBe("deployed");
+    // The deploy records what it actually RAN, which for a tag is a fact only the
+    // platform has: nothing resolves the reference before the machine is created,
+    // so this digest is what the platform reported back for it.
+    expect(outcome.image).toMatch(/^docker\.io\/library\/postgres@sha256:[0-9a-f]{64}$/);
 
-    // Redeploy WITHOUT env: the stored definition governs, so the secret is
-    // still demanded — this is exactly what the CLI's dashboard mode relies on.
-    const { uploadId: secondUploadId } = await createUpload();
-    const missingSecret = await niceBackendFetch("/api/v1/deployments/services/recon/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: secondUploadId },
-    });
-    expect(missingSecret.status).toBe(400);
-    expect(missingSecret.body).toContain("Missing secret values for: db_connection");
+    const app = await findMockApp(serviceId, 1);
+    expect(app.machines).toHaveLength(1);
+    // The machine is given the reference AS WRITTEN — the author's image from its
+    // own registry, not a Fly-registry image (which is what a built service gets),
+    // and a tag rather than the digest the outcome reports.
+    expect(app.machines[0].image).toBe("docker.io/library/postgres:16");
+    expect(app.machines[0].env).toMatchObject({ POSTGRES_PASSWORD: "hunter2" });
 
-    // Redeploy with a REDUCED env set: the removed key must be deleted from
-    // the Vercel project, not linger in future builds (deploys reconcile, not
-    // just upsert — CLI/GitHub-managed configs have no other removal path).
-    const reducedDeploy = await niceBackendFetch("/api/v1/deployments/services/recon/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: secondUploadId,
-        env: {
-          KEEP_ME: { value: "kept" },
-          DB_PASSWORD: { type: "secret", key: "db_connection" },
-        },
-        secrets: { db_connection: "hunter2" },
-      },
-    });
-    expect(reducedDeploy.status).toBe(200);
-    const envValues = await fetchMockEnvValues("recon");
-    expect(envValues.KEEP_ME).toBe("kept");
-    expect(envValues.DB_PASSWORD).toBe("hunter2");
-    expect(envValues.REMOVE_ME).toBeUndefined();
+    // The definition still reports the reference the author wrote.
+    const service = (await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" })).body as any;
+    expect(service.image).toBe("docker.io/library/postgres:16");
+    expect(service.status).toBe("deployed");
   });
 
-  it("pushes dashboard env edits through to a provisioned service, deferring secrets and pending connections", async ({ expect }) => {
+  it("starts a service with its start command, and builds one on a base image", { timeout: 180_000 }, async ({ expect }) => {
+    // The two halves of the feature in one deploy: a start command that costs no
+    // build (the image service still has none), and a build command that turns a
+    // service with no Dockerfile into a base-image build.
     await Project.createAndSwitch();
-    const { uploadId } = await createServiceAndUpload("editable");
-    const deployResponse = await niceBackendFetch("/api/v1/deployments/services/editable/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        env: {
-          CHANGE_ME: { value: "before" },
-          REMOVE_ME: { value: "stale" },
-          DB_PASSWORD: { type: "secret", key: "db_connection" },
-        },
-        secrets: { db_connection: "hunter2" },
+    await InternalApiKey.createAndSetProjectKeys();
+    const cacheServiceId = uniqueServiceId("cache");
+    const webServiceId = uniqueServiceId("web");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [cacheServiceId]: {
+        type: "server", ports: { 6379: { protocol: "tcp" } }, min_instances: 0, max_instances: 1,
+        image: "redis:7-alpine", start_command: "redis-server --appendonly yes", env: {},
+      },
+      [webServiceId]: {
+        type: "serverless", ports: { 3000: { protocol: "http" } },
+        build_command: "npm ci && npm run build", start_command: "node server.js", env: {},
       },
     });
-    expect(deployResponse.status).toBe(200);
-
-    // A second service that exists but has never deployed — a connection to it
-    // is a legitimate PENDING state that must not fail the save (deploy order
-    // must not matter when wiring services up).
-    await niceBackendFetch("/api/v1/deployments/services", { method: "POST", accessType: "admin", body: { id: "undeployed" } });
-
-    const patchResponse = await niceBackendFetch("/api/v1/deployments/services/editable", {
-      method: "PATCH",
-      accessType: "admin",
-      body: {
-        env: {
-          CHANGE_ME: { value: "after" },
-          DB_PASSWORD: { type: "secret", key: "db_connection" },
-          PENDING_URL: { type: "connection", value: "undeployed.url" },
-        },
-      },
-    });
-    expect(patchResponse.status).toBe(200);
-
-    const envValues = await fetchMockEnvValues("editable");
-    expect(envValues.CHANGE_ME).toBe("after");
-    // Removed from the definition -> deleted from the Vercel project.
-    expect(envValues.REMOVE_ME).toBeUndefined();
-    // Secret entries are skipped by the write-through (no value exists at save
-    // time); the deploy-time value stays until the next deploy.
-    expect(envValues.DB_PASSWORD).toBe("hunter2");
-    // The pending connection is skipped, not pushed and not an error.
-    expect(envValues.PENDING_URL).toBeUndefined();
-
-    // Static typos, in contrast, must reject the save — they can never become
-    // resolvable later.
-    const danglingPatch = await niceBackendFetch("/api/v1/deployments/services/editable", {
-      method: "PATCH",
-      accessType: "admin",
-      body: { env: { OOPS: { type: "connection", value: "nonexistent.url" } } },
-    });
-    expect(danglingPatch.status).toBe(400);
-    expect(danglingPatch.body).toContain("points to a service that doesn't exist");
-    const selfRefPatch = await niceBackendFetch("/api/v1/deployments/services/editable", {
-      method: "PATCH",
-      accessType: "admin",
-      body: { env: { MY_URL: { type: "connection", value: "editable.url" } } },
-    });
-    expect(selfRefPatch.status).toBe(400);
-    expect(selfRefPatch.body).toContain("cannot reference itself");
-  });
-
-  it("resolves connections to another service's production url", async ({ expect }) => {
-    await Project.createAndSwitch();
-    const projectKeys = backendContext.value.projectKeys;
-    if (projectKeys === "no-project") throw new Error("No project in context");
-
-    // Deploy the producer to READY first.
-    const { uploadId } = await createServiceAndUpload("api");
-    const apiDeploy = await niceBackendFetch("/api/v1/deployments/services/api/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: uploadId },
-    });
-    expect(apiDeploy.status).toBe(200);
-    await pollRunToReady((apiDeploy.body as any).run_id);
-
-    // The consumer's connection resolves to the producer's latest READY
-    // production deployment URL (the mock's URLs are deterministic).
-    const { uploadId: frontUploadId } = await createServiceAndUpload("front");
-    const frontDeploy = await niceBackendFetch("/api/v1/deployments/services/front/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: frontUploadId,
-        env: { API_URL: { type: "connection", value: "api.url" } },
-      },
-    });
-    expect(frontDeploy.status).toBe(200);
-    expect((await fetchMockEnvValues("front")).API_URL).toBe(`https://${mockProjectName("api")}.vercel-mock.localhost`);
-  });
-
-  it("applies request build config and env to builds on GitHub-managed configs without persisting them", async ({ expect }) => {
-    await Project.createAndSwitch();
-    await Project.pushConfig({
-      "deployments-alpha": {
-        services: {
-          api: {
-            type: "vercel",
-            env: {
-              FROM_REPO: { value: "repo-value" },
-            },
-          },
-        },
-      },
-    }, {
-      type: "pushed-from-github",
-      owner: "acme",
-      repo: "monorepo",
-      branch: "main",
-      commit_hash: "0000000000000000000000000000000000000000",
-      config_file_path: "hexclave.config.ts",
-    });
-
-    // Deploying a service the repo doesn't define is rejected before anything
-    // is consumed.
+    // The upload is required because of the BUILD COMMAND: without it the web
+    // service would have nothing to build, even though it names no Dockerfile.
     const { uploadId } = await createUpload();
-    const unknownService = await niceBackendFetch("/api/v1/deployments/services/other/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: uploadId },
-    });
-    expect(unknownService.status).toBe(400);
-    expect(unknownService.body).toContain("managed by GitHub");
+    const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[cacheServiceId], [webServiceId]] });
+    const deployment = await pollDeploymentToStatus(deploymentId, "deployed");
+    expect(deployment.has_build_logs).toBe(true);
+    expect(serviceOutcome(deployment, cacheServiceId).status).toBe("deployed");
+    expect(serviceOutcome(deployment, webServiceId).status).toBe("deployed");
+    // The image service was NOT built: a start command is applied by the runtime,
+    // so it still runs the reference the author wrote.
+    expect(serviceOutcome(deployment, cacheServiceId).image).toMatch(/^docker\.io\/library\/redis@sha256:[0-9a-f]{64}$/);
+    // ...while the base-image build pushed an image of its own.
+    expect(serviceOutcome(deployment, webServiceId).image).toMatch(/^registry\.fly\.io\/.*@sha256:[0-9a-f]{64}$/);
 
-    // The request's env governs THIS build (the CLI sends the same file
-    // content the repo holds) — but nothing is persisted: the rendered
-    // definition still shows the repo's env afterwards.
-    const deployResponse = await niceBackendFetch("/api/v1/deployments/services/api/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        env: { FROM_REQUEST: { value: "request-value" } },
-      },
-    });
-    expect(deployResponse.status).toBe(200);
-    expect((await fetchMockEnvValues("api")).FROM_REQUEST).toBe("request-value");
-    const serviceResponse = await niceBackendFetch("/api/v1/deployments/services/api", { accessType: "admin" });
-    expect((serviceResponse.body as any).env).toEqual([
-      { key: "FROM_REPO", type: "plain", value: "repo-value", secret_key: null },
-    ]);
+    // What the machines are actually started with. `exec` (not `cmd`) is what
+    // replaces the image's entrypoint as well as its command — verified against
+    // real Fly, where `cmd` alone is passed TO the entrypoint as arguments.
+    const cacheApp = await findMockApp(cacheServiceId, 1);
+    expect(cacheApp.machines[0].image).toBe("docker.io/library/redis:7-alpine");
+    expect(cacheApp.machines[0].init).toEqual({ exec: ["/bin/sh", "-c", "redis-server --appendonly yes"] });
+    const webApp = await findMockApp(webServiceId, 1);
+    expect(webApp.machines[0].init).toEqual({ exec: ["/bin/sh", "-c", "node server.js"] });
+
+    // Both commands survive the round trip into the service board.
+    const service = (await niceBackendFetch(`/api/v1/deployments/services/${webServiceId}`, { accessType: "admin" })).body as any;
+    expect(service.build_command).toBe("npm ci && npm run build");
+    expect(service.start_command).toBe("node server.js");
   });
 
-  it("unsets stored build config fields when the deploy request sends null", async ({ expect }) => {
+  it("deploys a mixed source-built and prebuilt deployment in one go", { timeout: 180_000 }, async ({ expect }) => {
+    // The common shape: an app built from the repo, wired to a stock database
+    // image. One deployment, one build covering only the built service, and both
+    // applied in dependency order.
     await Project.createAndSwitch();
-    await niceBackendFetch("/api/v1/deployments/services", {
-      method: "POST",
-      accessType: "admin",
-      body: { id: "web", build_command: "pnpm build:custom", framework: "nextjs" },
+    await InternalApiKey.createAndSetProjectKeys();
+    const dbServiceId = uniqueServiceId("db");
+    const webServiceId = uniqueServiceId("web");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [dbServiceId]: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, max_instances: 1, image: "postgres:16", env: {} },
+      [webServiceId]: {
+        type: "serverless",
+        ports: { 3000: { protocol: "http" } },
+        env: { DATABASE_HOST: { type: "connection", value: `${dbServiceId}.hostname` } },
+      },
     });
-    // The CLI sends null for fields absent from the config file — deleting a
-    // field there must actually clear the stored value (fall back to platform
-    // auto-detection), not silently keep it forever.
+    // The upload IS required here: one of the two services is built from it.
     const { uploadId } = await createUpload();
-    const deployResponse = await niceBackendFetch("/api/v1/deployments/services/web/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        build_config: { framework: "nextjs", build_command: null },
-      },
-    });
-    expect(deployResponse.status).toBe(200);
-    const serviceResponse = await niceBackendFetch("/api/v1/deployments/services/web", { accessType: "admin" });
-    expect((serviceResponse.body as any).build_command).toBe(null);
-    expect((serviceResponse.body as any).framework).toBe("nextjs");
+    const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[dbServiceId], [webServiceId]] });
+    const deployment = await pollDeploymentToStatus(deploymentId, "deployed");
+    // A build ran, so this one does have logs.
+    expect(deployment.has_build_logs).toBe(true);
+
+    // The prebuilt service runs its own registry's image; the built one runs what
+    // the build pushed to Fly's. Both outcomes name a digest — the prebuilt one
+    // because the platform reported what its tag resolved to.
+    expect(serviceOutcome(deployment, dbServiceId).image).toMatch(/^docker\.io\/library\/postgres@sha256:[0-9a-f]{64}$/);
+    expect(serviceOutcome(deployment, webServiceId).image).toMatch(/^registry\.fly\.io\/.*@sha256:[0-9a-f]{64}$/);
+    expect(serviceOutcome(deployment, dbServiceId).status).toBe("deployed");
+    expect(serviceOutcome(deployment, webServiceId).status).toBe("deployed");
+
+    // The connection resolved across the two kinds of service, which is the whole
+    // point of deploying them together. The hostname is derived (and hashed), so
+    // this asserts that it resolved to a private address at all rather than
+    // matching the service id inside it.
+    const webApp = await findMockApp(webServiceId, 1);
+    expect(webApp.machines[0].env.DATABASE_HOST).toMatch(/\.flycast$/);
   });
 
-  it("marks a failing build as errored", async ({ expect }) => {
+  it("records what the deploy packaged, and reports it back with the deployment", { timeout: 120_000 }, async ({ expect }) => {
+    // The uploaded tarball is consumed by the build and deleted, so this listing
+    // is the only thing left to answer "why was my upload this big, and did my
+    // .dockerignore work". It is stored as the client reports it — the client is
+    // what packaged the tree — and read back on the deployment.
     await Project.createAndSwitch();
-    const { uploadId } = await createServiceAndUpload("failing");
-    const deployResponse = await niceBackendFetch("/api/v1/deployments/services/failing/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: {
-        upload_id: uploadId,
-        // The mock fails any build whose build command contains this marker.
-        build_config: { build_command: "fail-this-build" },
-      },
+    await InternalApiKey.createAndSetProjectKeys();
+    const serviceId = uniqueServiceId("web");
+    const { definitionSyncId, sourceId, uploadId } = await syncServiceAndUpload(serviceId);
+    const manifest = {
+      file_count: 3,
+      total_bytes: 6_500,
+      compressed_bytes: 2_100,
+      entries: [
+        { path: "web/public/hero.png", bytes: 6_000 },
+        { path: "web/src/index.ts", bytes: 480 },
+        { path: "web/Dockerfile", bytes: 20 },
+      ],
+    };
+    const deploymentId = await startDeploy({
+      sourceId,
+      uploadId,
+      definitionSyncId,
+      levels: [[serviceId]],
+      extraBody: { source_manifest: manifest },
     });
-    expect(deployResponse.status).toBe(200);
-    const runId = (deployResponse.body as any).run_id;
-    await niceBackendFetch(`/api/v1/deployments/runs/${runId}`, { accessType: "admin" });
-    const secondPoll = await niceBackendFetch(`/api/v1/deployments/runs/${runId}`, { accessType: "admin" });
-    expect((secondPoll.body as any).status).toBe("error");
-    expect((secondPoll.body as any).error).toMatchInlineSnapshot(`"Build failed with exit code 1"`);
+    const deployment = await pollDeploymentToStatus(deploymentId, "deployed");
+    expect(deployment.source_manifest).toEqual(manifest);
   });
 
-  it("rejects invalid uploads and consumes each upload slot once", async ({ expect }) => {
+  it("stores no manifest rather than a false one when the client reports nothing usable", async ({ expect }) => {
+    // A debugging aid must degrade to "not recorded" rather than 400 a deploy or
+    // store a shape the dashboard cannot read.
     await Project.createAndSwitch();
-    await niceBackendFetch("/api/v1/deployments/services", {
-      method: "POST",
-      accessType: "admin",
-      body: { id: "api" },
+    await InternalApiKey.createAndSetProjectKeys();
+    const serviceId = uniqueServiceId("web");
+    const { definitionSyncId, sourceId, uploadId } = await syncServiceAndUpload(serviceId);
+    const deploymentId = await startDeploy({
+      sourceId,
+      uploadId,
+      definitionSyncId,
+      levels: [[serviceId]],
+      extraBody: { source_manifest: { file_count: 2, entries: "not an array" } },
     });
+    const deployment = await pollDeploymentToStatus(deploymentId, "deployed");
+    expect(deployment.source_manifest).toBe(null);
+  });
 
-    // Deploy with a nonexistent upload.
-    const missingUploadResponse = await niceBackendFetch("/api/v1/deployments/services/api/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: "00000000-0000-4000-8000-000000000001" },
-    });
-    expect(missingUploadResponse.status).toBe(404);
-
-    const { uploadId } = await createUpload();
-
-    // A non-gzip upload is rejected at deploy time with a clean 400.
-    const badUploadResponse = await niceBackendFetch("/api/v1/deployments/uploads", { method: "POST", accessType: "admin" });
-    const badBytes = new TextEncoder().encode("definitely not a gzip stream");
-    const badPutResponse = await fetch((badUploadResponse.body as any).upload_url, {
+  it("refuses `__proto__` as a service id, at the door", async ({ expect }) => {
+    // REGRESSION: it used to be accepted, and then broke silently everywhere a
+    // service id keys a record — `images[key] = ref` invokes the prototype
+    // setter instead of creating an own property, so the deploy failed with "no
+    // image was built for __proto__"; and Prisma's JSON serializer drops the key
+    // outright, so the outcome stayed "pending" whatever the runtime reported.
+    // The storage layer cannot represent it, so the honest fix is to say so on
+    // the request that introduces it rather than mid-deploy.
+    await Project.createAndSwitch();
+    await InternalApiKey.createAndSetProjectKeys();
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
       method: "PUT",
-      headers: {
-        "content-type": (badUploadResponse.body as any).content_type,
-        "content-length": badBytes.length.toString(),
-      },
-      body: new Uint8Array(badBytes).slice().buffer,
-    });
-    expect(badPutResponse.ok).toBe(true);
-    const badDeployResponse = await niceBackendFetch("/api/v1/deployments/services/api/deploy", {
-      method: "POST",
       accessType: "admin",
-      body: { upload_id: (badUploadResponse.body as any).id },
+      // A COMPUTED key: `{ __proto__: ... }` in an object literal sets the
+      // prototype rather than adding a property, so the literal form would send
+      // an empty record. The same hazard, one layer up.
+      body: { source_id: "proto-src", services: { ["__proto__"]: { type: "server", ports: {}, min_instances: 0, image: "postgres:16", env: {} } } },
     });
-    expect(badDeployResponse).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 400,
-        "body": "Uploaded source is not a valid gzip stream.",
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
-
-    // Consumed uploads can't be reused: deploy once, then replay the request.
-    const deployResponse = await niceBackendFetch("/api/v1/deployments/services/api/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: uploadId },
-    });
-    expect(deployResponse.status).toBe(200);
-    const replayResponse = await niceBackendFetch("/api/v1/deployments/services/api/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: uploadId },
-    });
-    expect(replayResponse.status).toBe(404);
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body)).toContain("reserved");
   });
+
+  it("refuses an upload for a deployment that builds nothing", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await InternalApiKey.createAndSetProjectKeys();
+    const serviceId = uniqueServiceId("db");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [serviceId]: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, image: "postgres:16", env: {} },
+    });
+    const { uploadId } = await createUpload();
+    // Refused rather than ignored: an upload nothing can build from would be
+    // consumed for no reason, and it means the caller and the stored definitions
+    // disagree about what this deploy is.
+    const response = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: uploadId, definition_sync_id: definitionSyncId, levels: [[serviceId]] },
+    });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body)).toContain("must be omitted");
+  });
+
+  it("gives the build every plain env value, and only those", { timeout: 120_000 }, async ({ expect }) => {
+    // Frameworks that inline values (NEXT_PUBLIC_*, VITE_*) need them while they compile,
+    // not just at runtime. There is no build/runtime marker on an env var: everything with
+    // a resolvable value goes to the build, secrets included. A `service(...)` connection
+    // is the one thing that cannot — the target has no address until it is rolled out.
+    await Project.createAndSwitch();
+    await InternalApiKey.createAndSetProjectKeys();
+    const apiServiceId = uniqueServiceId("api");
+    const webServiceId = uniqueServiceId("web");
+    await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
+      accessType: "admin",
+      body: { key: "inline_secret", value: "sk-build-secret-value" },
+    });
+
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [apiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" } }, env: {} },
+      [webServiceId]: {
+        type: "serverless",
+        ports: { 3000: { protocol: "http" } },
+        env: {
+          NEXT_PUBLIC_API_URL: { value: "https://api.example.com" },
+          BUILD_SECRET: { type: "secret", key: "inline_secret" },
+          NEXT_PUBLIC_HEXCLAVE_PROJECT_ID: { type: "connection", value: "hexclave.projectId" },
+          // Short enough to fall under the redaction floor, which exists so a log doesn't
+          // become a wall of <redacted> over values like "true" and "5432".
+          PORT: { value: "3000" },
+          // A service connection: resolvable at rollout, unresolvable at build time.
+          API_INTERNAL_URL: { type: "connection", value: `${apiServiceId}.url` },
+        },
+      },
+    });
+    // The api deploys first: an unnamed `url` blocks until its target's spec exists.
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: (await createUpload()).uploadId, definitionSyncId, levels: [[apiServiceId]] }), "deployed");
+    const { uploadId } = await createUpload();
+    const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[webServiceId]] });
+    await pollDeploymentToStatus(deploymentId, "deployed");
+
+    const logsResponse = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}/logs`, { accessType: "admin" });
+    expect(logsResponse.status).toBe(200);
+    const logsText = typeof logsResponse.body === "string" ? logsResponse.body : JSON.stringify(logsResponse.body);
+    // MARSHAL_BUILD_ENV_KEYS lists the NAMES the build was handed (the mock builder starts
+    // no machine, so this line is the only window onto that selection).
+    expect(logsText).toContain("MARSHAL_BUILD_ENV_KEYS");
+    for (const key of ["NEXT_PUBLIC_API_URL", "BUILD_SECRET", "NEXT_PUBLIC_HEXCLAVE_PROJECT_ID", "PORT"]) {
+      expect(logsText).toContain(key);
+    }
+    expect(logsText).not.toContain("API_INTERNAL_URL");
+
+    // The build value is scrubbed from the log, the short one is not, and the connection
+    // still resolves for the RUNNING container — build-time absence is not runtime absence.
+    expect(logsText).not.toContain("sk-build-secret-value");
+    expect(logsText).toContain("PORT=3000");
+    const webApp = await findMockApp(webServiceId);
+    expect(webApp.machines[0].env.API_INTERNAL_URL).toMatch(/^http:\/\/.*:8080$/);
+    expect(webApp.machines[0].env.BUILD_SECRET).toBe("sk-build-secret-value");
+  });
+
+  it("provisions a volume and mounts it on the machine", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("vol");
+    // `server`, because only a single-instance service may hold a disk. Its
+    // min_instances 0 is scale-to-zero by SUSPENDING, so the disk comes back
+    // with the machine (and Free-plan projects can't pin instances anyway).
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId, {
+      type: "server",
+      min_instances: 0,
+      max_instances: 1,
+      persistent_volumes: { data: { path: "/data", size_gb: 3 } },
+    });
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
+
+    const app = await findMockApp(serviceId, 1);
+    expect(app.volumes).toHaveLength(1);
+    expect(app.volumes[0]).toMatchObject({ name: "hxv_data", size_gb: 3 });
+    // The machine mounts that exact volume at the configured path.
+    expect(app.machines[0].mounts).toEqual([{ volume: app.volumes[0].id, path: "/data" }]);
+    expect(app.volumes[0].attached_machine_id).toBe(app.machines[0].id);
+
+    // Growing the volume reuses the SAME volume rather than creating a second
+    // one — the disk (and its data) must survive the redeploy.
+    // The SAME deployment source re-syncing: another source claiming this service id is
+    // refused, which is the point of the ownership rule.
+    const { syncId: grownSyncId } = await syncServices({
+      [serviceId]: { type: "server", ports: { 3000: { protocol: "http" } }, min_instances: 0, max_instances: 1, persistent_volumes: { data: { path: "/data", size_gb: 5 } }, env: {} },
+    }, sourceId);
+    const { uploadId: grownUploadId } = await createUpload();
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: grownUploadId, definitionSyncId: grownSyncId, levels: [[serviceId]] }), "deployed");
+
+    const grownApp = await findMockApp(serviceId, 1);
+    expect(grownApp.volumes).toHaveLength(1);
+    expect(grownApp.volumes[0].id).toBe(app.volumes[0].id);
+    expect(grownApp.volumes[0].size_gb).toBe(5);
+  });
+
+  it("adds a volume to an already-deployed service by recreating the machine", { timeout: 180_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("voladd");
+
+    // Deploy WITHOUT a volume first. `server` from the start, so that the only
+    // thing changing in the second sync is the volume itself — a type change
+    // would force a recreate on its own and hide what this test is pinning.
+    const first = await syncServiceAndUpload(serviceId, { type: "server", min_instances: 0, max_instances: 1 });
+    await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
+    const before = await findMockApp(serviceId, 1);
+    expect(before.volumes).toHaveLength(0);
+    expect(before.machines[0].mounts).toEqual([]);
+    const originalMachineId = before.machines[0].id;
+
+    // Now add a volume. A machine's mounts cannot change in place — Fly places a
+    // machine on its volume's host, and rejects an update that introduces a mount
+    // on an already-placed machine (the mock reproduces that 400). So this must
+    // provision the volume and RECREATE the machine, not update it. Before the
+    // recreate path existed this deploy failed and every retry failed identically.
+    const second = await syncServiceAndUpload(serviceId, {
+      type: "server",
+      min_instances: 0,
+      max_instances: 1,
+      persistent_volumes: { data: { path: "/data", size_gb: 2 } },
+    }, undefined, first.sourceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId: second.sourceId, uploadId: second.uploadId, definitionSyncId: second.definitionSyncId, levels: [[serviceId]] }), "deployed");
+
+    const after = await findMockApp(serviceId, 1);
+    expect(after.volumes).toHaveLength(1);
+    expect(after.volumes[0]).toMatchObject({ name: "hxv_data", size_gb: 2 });
+    expect(after.machines[0].mounts).toEqual([{ volume: after.volumes[0].id, path: "/data" }]);
+    // A NEW machine, on the volume's host — not the original one updated in place.
+    expect(after.machines[0].id).not.toBe(originalMachineId);
+    expect(after.machines).toHaveLength(1);
+  });
+
+  it("marks the run failed and reports blocked when a `url` connection has no verified domain", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const apiServiceId = uniqueServiceId("api");
+    const webServiceId = uniqueServiceId("web");
+    // web references the API's PUBLIC url, which needs a verified domain the API doesn't have.
+    const sync = await syncServices({
+      [apiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" } }, env: {} },
+      [webServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API_URL: { type: "connection", value: `${apiServiceId}.url` } } },
+    });
+    const upload = await createUpload();
+    const deploymentId = await startDeploy({ sourceId: sync.sourceId, uploadId: upload.uploadId, definitionSyncId: sync.syncId, levels: [[webServiceId]] });
+    const run = await pollDeploymentToStatus(deploymentId, "failed");
+    expect(JSON.stringify(run.error)).toContain("blocked");
+    // The service reports blocked and has no public URL.
+    const service = await niceBackendFetch(`/api/v1/deployments/services/${webServiceId}`, { accessType: "admin" });
+    expect((service.body as any).url).toBeNull();
+  });
+
+  it("gives public services a deterministic proxy endpoint without certificates and removes ingress when private", { timeout: 180_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("public");
+
+    const first = await syncServiceAndUpload(serviceId, { public: true, ports: { 3000: { protocol: "http" } } });
+    const publicRun = await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[serviceId]] }), "deployed");
+    // <app suffix>-<16 hex signature>: the gateway routes only hostnames Marshal signed.
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(/^https:\/\/[a-z0-9-]+-[0-9a-f]{16}\.deploy\.built-with-hexclave\.com$/);
+    const publicService = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((publicService.body as any).public).toBe(true);
+    expect((publicService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
+    expect((publicService.body as any).url).toBe(serviceOutcome(publicRun, serviceId).url);
+    const publicApp = await findMockApp(serviceId);
+    expect(serviceOutcome(publicRun, serviceId).url).toMatch(new RegExp(`^https://${publicApp.name.slice(4)}-[0-9a-f]{16}\\.deploy\\.built-with-hexclave\\.com$`));
+    expect(publicApp.certificates).toEqual([]);
+    expect(publicApp.sharedIpv4).not.toBeNull();
+    expect(publicApp.dedicatedIps.some((ip) => ip.type === "v6")).toBe(true);
+
+    const second = await syncServiceAndUpload(serviceId, { public: false, ports: { 3000: { protocol: "http" } } }, undefined, first.sourceId);
+    const privateRun = await pollDeploymentToStatus(await startDeploy({ sourceId: second.sourceId, uploadId: second.uploadId, definitionSyncId: second.definitionSyncId, levels: [[serviceId]] }), "deployed");
+    expect(serviceOutcome(privateRun, serviceId).url).toBeNull();
+    const privateService = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((privateService.body as any).public).toBe(false);
+    expect((privateService.body as any).ports).toEqual({ 3000: { protocol: "http" } });
+    expect((privateService.body as any).url).toBeNull();
+    const privateApp = await findMockApp(serviceId);
+    expect(privateApp.sharedIpv4).toBeNull();
+    expect(privateApp.dedicatedIps.filter((ip) => ip.type === "v6")).toEqual([]);
+  });
+
+  it("rejects a connection to a service that doesn't exist", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("web");
+    const { syncId, sourceId } = await syncServices({
+      [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { X: { type: "connection", value: "nonexistent.url" } } },
+    });
+    const { uploadId } = await createUpload();
+    const response = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: uploadId, definition_sync_id: syncId, levels: [[serviceId]] },
+    });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body)).toContain("doesn't exist");
+  });
+
+  it("resolves url connections between services deterministically, named or not", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const apiServiceId = uniqueServiceId("api");
+    const webServiceId = uniqueServiceId("web");
+
+    // The API deploys first...
+    const { syncId: sync1, sourceId } = await syncServices({
+      [apiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" } }, env: {} },
+      [webServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API_URL: { type: "connection", value: `${apiServiceId}.url` } } },
+    });
+    const upload1 = await createUpload();
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: upload1.uploadId, definitionSyncId: sync1, levels: [[apiServiceId]] }), "deployed");
+
+    // ...and the web service's env gets the API's flycast address, which is
+    // deterministic (it doesn't even require the API to be deployed).
+    const upload2 = await createUpload();
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: upload2.uploadId, definitionSyncId: sync1, levels: [[webServiceId]] }), "deployed");
+
+    const webApp = await findMockApp(webServiceId);
+    const apiApp = await findMockApp(apiServiceId);
+    // The URL carries the PORT. Every port answers on its own number on the
+    // private network — which is what lets a service expose more than one — so
+    // there is no single well-known port to leave implicit.
+    expect(webApp.machines[0].env.API_URL).toBe(`http://${apiApp.name}.flycast:8080`);
+
+    // A multi-port target has to be named explicitly: a bare url() is ambiguous
+    // and rejected, while `:9090` resolves to that port.
+    const multiServiceId = uniqueServiceId("multi");
+    const consumerId = uniqueServiceId("consumer");
+    const ambiguous = await syncServices({
+      [multiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, env: {} },
+      [consumerId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API: { type: "connection", value: `${multiServiceId}.url` } } },
+    });
+    const consumerUpload = await createUpload();
+    const ambiguousDeploy = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: {
+        source_id: ambiguous.sourceId,
+        upload_id: consumerUpload.uploadId,
+        definition_sync_id: ambiguous.syncId,
+        levels: [[consumerId]],
+      },
+    });
+    expect(ambiguousDeploy.status).toBe(400);
+    expect(JSON.stringify(ambiguousDeploy.body)).toContain("exactly one HTTP port");
+
+    const named = await syncServices({
+      [multiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, env: {} },
+      [consumerId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API: { type: "connection", value: `${multiServiceId}.url:9090` } } },
+    }, ambiguous.sourceId);
+    const namedUpload = await createUpload();
+    // The consumer is applied FIRST, before the target it references: naming a PRIVATE port
+    // makes the URL fully determined from the deployment's own targets, so it resolves
+    // without waiting for the target to come up — which is the whole difference from a
+    // public `url`, and what keeps mutually-wired services from being circular.
+    await pollDeploymentToStatus(
+      await startDeploy({ sourceId: named.sourceId, uploadId: namedUpload.uploadId, definitionSyncId: named.syncId, levels: [[consumerId], [multiServiceId]] }),
+      "deployed",
+    );
+    const consumerApp = await findMockApp(consumerId);
+    expect(consumerApp.machines[0].env.API).toMatch(/^http:\/\/hxc-.+\.flycast:9090$/);
+    // The API must report the reference it actually stored, port and all —
+    // reporting a bare `url` would name a DIFFERENT (and, on this multi-port
+    // target, invalid) config.
+    const consumerService = await niceBackendFetch(`/api/v1/deployments/services/${consumerId}`, { accessType: "admin" });
+    expect((consumerService.body as any).env).toContainEqual(
+      { key: "API", type: "connection", value: `${multiServiceId}.url:9090`, secret_key: null },
+    );
+    // A port suffix is meaningful only on `url`: a hostname is the service's private DNS
+    // name, which no port belongs to.
+    const strayPort = await syncServices({
+      [multiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" }, 9090: { protocol: "http" } }, env: {} },
+      [consumerId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { H: { type: "connection", value: `${multiServiceId}.hostname:9090` } } },
+    }, named.sourceId);
+    const strayUpload = await createUpload();
+    const strayDeploy = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: {
+        source_id: strayPort.sourceId,
+        upload_id: strayUpload.uploadId,
+        definition_sync_id: strayPort.syncId,
+        levels: [[consumerId]],
+      },
+    });
+    expect(strayDeploy.status).toBe(400);
+    // Quote-free substring: the body is JSON-stringified, so the message's own quotes are escaped.
+    expect(JSON.stringify(strayDeploy.body)).toContain("names a port, but only");
+  });
+
+  it("fails the run when the container build fails", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("failing");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId, {
+      // The magic env key makes Marshal's mock builder fail the build.
+      env: { MARSHAL_MOCK_FAIL_BUILD: { value: "1" } },
+    });
+    const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] });
+    const run = await pollDeploymentToStatus(deploymentId, "failed");
+    expect(String(run.error)).toContain("mock build failed");
+  });
+
+  it("does not consume the upload when secrets are missing, and lists every missing key", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("needs-secret");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [serviceId]: {
+        type: "serverless",
+        ports: { 3000: { protocol: "http" } },
+        env: {
+          REQUIRED: { type: "secret", key: "never_set_secret" },
+          ALSO_REQUIRED: { type: "secret", key: "also_never_set" },
+        },
+      },
+    });
+    const { uploadId } = await createUpload();
+    const failedDeploy = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: uploadId, definition_sync_id: definitionSyncId, levels: [[serviceId]] },
+    });
+    expect(failedDeploy.status).toBe(400);
+    // Both missing keys are named in one error (not just the first).
+    expect(JSON.stringify(failedDeploy.body)).toContain("never_set_secret");
+    expect(JSON.stringify(failedDeploy.body)).toContain("also_never_set");
+
+    // The upload survives the rejected deploy: set both secrets and reuse it.
+    for (const key of ["never_set_secret", "also_never_set"]) {
+      await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { key, value: "now-set" } });
+    }
+    const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] });
+    await pollDeploymentToStatus(deploymentId, "deployed");
+  });
+
+  it("404s a deploy referencing an upload id that doesn't exist", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("web");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } });
+    const response = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: randomUUID(), definition_sync_id: definitionSyncId, levels: [[serviceId]] },
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it("consumes an upload exactly once", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("once");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
+    const secondDeploy = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: uploadId, definition_sync_id: definitionSyncId, levels: [[serviceId]] },
+    });
+    expect(secondDeploy.status).toBe(404);
+  });
+
+  it("rejects deploys with a stale definition sync id", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("stale");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
+    // A second sync of the SAME source regenerates the fencing token...
+    await syncServices({ [serviceId]: { type: "serverless", ports: { 3001: { protocol: "http" } }, env: {} } }, sourceId);
+    // ...so the first deploy's token is now stale.
+    const response = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: uploadId, definition_sync_id: definitionSyncId, levels: [[serviceId]] },
+    });
+    expect(response.status).toBe(409);
+    expect(JSON.stringify(response.body)).toContain("changed after this deploy synced its definitions");
+  });
+
+  it("400s deploys naming a deployment source that was never synced", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const { uploadId } = await createUpload();
+    const response = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: {
+        source_id: "never-synced",
+        upload_id: uploadId,
+        definition_sync_id: randomUUID(),
+        levels: [["never-synced-service"]],
+      },
+    });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(response.body)).toContain("No deployment source");
+  });
+
+  it("keeps the machine env in sync when a redeploy drops a var", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("recon");
+    const { syncId: sync1, sourceId } = await syncServices({
+      [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { KEEP: { value: "yes" }, DROP: { value: "bye" } } },
+    });
+    const upload1 = await createUpload();
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: upload1.uploadId, definitionSyncId: sync1, levels: [[serviceId]] }), "deployed");
+    // toMatchObject, not toEqual: every service also receives its project's Hexclave
+    // credentials, which the end-to-end test above pins exactly. What matters here is the
+    // declared pair, and below, that DROP is really gone.
+    expect((await findMockApp(serviceId)).machines[0].env).toMatchObject({ KEEP: "yes", DROP: "bye" });
+
+    // The SAME deployment source re-syncing: a different one claiming this
+    // service id would be refused, which is the point of the ownership rule.
+    const { syncId: sync2 } = await syncServices({
+      [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { KEEP: { value: "yes" } } },
+    }, sourceId);
+    const upload2 = await createUpload();
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: upload2.uploadId, definitionSyncId: sync2, levels: [[serviceId]] }), "deployed");
+    // The machines were fully replaced with the new spec's env — the dropped
+    // var is actually gone, not merely unlisted.
+    const redeployedEnv = (await findMockApp(serviceId)).machines[0].env;
+    expect(redeployedEnv).toMatchObject({ KEEP: "yes" });
+    expect(Object.hasOwn(redeployedEnv, "DROP")).toBe(false);
+  });
+
+  it("redeploys a server that autostop has suspended", { timeout: 120_000 }, async ({ expect }) => {
+    // A `min_instances: 0` server is suspended by Fly once idle, and a deploy onto a
+    // suspended machine leaves it stopped after a transition during which a start is
+    // refused. This is how every redeploy of an idle server failed with "did not start in
+    // time" while the same image booted fine on the next request: the one start Marshal
+    // fired was rejected mid-transition and silently dropped.
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("idle");
+    const definition = { type: "server", min_instances: 0, ports: { 3000: { protocol: "http" } }, env: {} };
+    const { syncId: sync1, sourceId } = await syncServices({ [serviceId]: definition });
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: (await createUpload()).uploadId, definitionSyncId: sync1, levels: [[serviceId]] }), "deployed");
+    const before = await findMockApp(serviceId);
+    expect(before.machines[0].state).toBe("started");
+
+    // Park it the way autostop does.
+    const suspend = await fetch(`${FLY_MOCK_URL}/v1/apps/${before.name}/machines/${before.machines[0].id}/suspend`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${FLY_MOCK_TOKEN}` },
+    });
+    expect(suspend.status).toBe(200);
+    expect((await findMockApp(serviceId)).machines[0].state).toBe("suspended");
+
+    const { syncId: sync2 } = await syncServices({ [serviceId]: { ...definition, env: { CHANGED: { value: "yes" } } } }, sourceId);
+    const deployment = await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId: (await createUpload()).uploadId, definitionSyncId: sync2, levels: [[serviceId]] }), "deployed");
+    expect(serviceOutcome(deployment, serviceId).status).toBe("deployed");
+    const after = await findMockApp(serviceId);
+    // Same machine, new config, and actually running — not left stopped by the update.
+    expect(after.machines[0].id).toBe(before.machines[0].id);
+    expect(after.machines[0].env).toMatchObject({ CHANGED: "yes" });
+    expect(after.machines[0].state).toBe("started");
+  });
+
+  // Skipped: Marshal serializes concurrent applies with a lease built on conditional writes
+  // (If-None-Match), and the s3mock container this suite runs against does not honour them
+  // atomically — two callers both "acquire" the lease, so the serialization this asserts
+  // cannot hold here. Real S3/R2 does honour them, and the losing deploy now returns a clean
+  // 409 rather than a 500. Un-skip once the e2e object store enforces conditional writes.
+  it.skip("serializes concurrent deploys so a stale completion cannot overwrite the winner", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("concurrent");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } });
+    const [firstUpload, secondUpload] = await Promise.all([createUpload(), createUpload()]);
+    const [firstDeploymentId, secondDeploymentId] = await Promise.all([
+      startDeploy({ sourceId, uploadId: firstUpload.uploadId, definitionSyncId, levels: [[serviceId]] }),
+      startDeploy({ sourceId, uploadId: secondUpload.uploadId, definitionSyncId, levels: [[serviceId]] }),
+    ]);
+
+    const terminalStatuses = new Map<string, string>();
+    for (let attempt = 0; attempt < 240 && terminalStatuses.size < 2; attempt++) {
+      for (const deploymentId of [firstDeploymentId, secondDeploymentId]) {
+        if (terminalStatuses.has(deploymentId)) continue;
+        const response = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}`, { accessType: "admin" });
+        const status = (response.body as any)?.status;
+        if (status === "deployed" || status === "failed" || status === "canceled") terminalStatuses.set(deploymentId, status);
+      }
+      if (terminalStatuses.size < 2) await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    expect([...terminalStatuses.values()].sort()).toEqual(["canceled", "deployed"]);
+  });
+
+  // NOTE: there is deliberately no backend DELETE-service route (removal is config-driven;
+  // auto-cleanup of services dropped from the config is a tracked gap), so Marshal's
+  // deleteService — which releases the hostname claim and tears down the Fly app — has no
+  // backend-e2e path to exercise. Worth a direct Marshal-level test when one is added.
 });
 
 describe("domains", () => {
-  it("adds domains, reads back DNS records, and removes them", async ({ expect }) => {
+  it("reserves deployment platform hostnames without creating custom-domain claims", async ({ expect }) => {
     await Project.createAndSwitch();
-    await niceBackendFetch("/api/v1/deployments/services", {
+    const serviceId = uniqueServiceId("reserved-domain");
+    await syncServices({ [serviceId]: { type: "serverless", public: true, ports: { 3000: { protocol: "http" } }, env: {} } });
+    for (const hostname of ["Example.deploy.built-with-hexclave.com", "deploy.built-with-hexclave.com", "nested.example.deploy.built-with-hexclave.com"]) {
+      const response = await niceBackendFetch(`/api/v1/deployments/services/${encodeURIComponent(serviceId)}/domains`, {
+        method: "POST",
+        accessType: "admin",
+        body: { hostname, is_primary: true },
+      });
+      expect(response.status).toBe(400);
+      expect(JSON.stringify(response.body)).toContain("managed automatically");
+    }
+  });
+
+  it("adds a domain, reports its DNS records, and removes it", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("domained");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
+
+    // The magic ".verified.test" suffix makes the fly-mock verify instantly.
+    const hostname = `${serviceId}.verified.test`;
+    const addResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
       method: "POST",
       accessType: "admin",
-      body: { id: "web" },
+      body: { hostname, is_primary: true },
     });
+    expect(addResponse.status).toBe(201);
+    expect((addResponse.body as any).verified).toBe(true);
 
-    // Before the first deploy: the domain is stored, DNS guidance is generic.
-    const addResponse = await niceBackendFetch("/api/v1/deployments/services/web/domains", {
+    const getResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, { accessType: "admin" });
+    expect(getResponse.status).toBe(200);
+    expect((getResponse.body as any).verified).toBe(true);
+    expect((getResponse.body as any).pending_first_deploy).toBe(false);
+
+    // A verified primary domain becomes the service's public URL...
+    const serviceResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((serviceResponse.body as any).url).toBe(`https://${hostname}`);
+
+    // ...and an unverified one reports the records to create.
+    const pendingHostname = `${serviceId}.example.com`;
+    const addPending = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
       method: "POST",
       accessType: "admin",
-      body: { hostname: "app.example.com", is_primary: true },
+      body: { hostname: pendingHostname },
     });
-    expect(addResponse).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 201,
-        "body": {
-          "hostname": "app.example.com",
-          "is_primary": true,
-          "verified": false,
-        },
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
-    const preDeployDetails = await niceBackendFetch("/api/v1/deployments/services/web/domains/app.example.com", { accessType: "admin" });
-    expect(preDeployDetails).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 200,
-        "body": {
-          "dns_records": [
-            {
-              "name": "app",
-              "type": "CNAME",
-              "value": "cname.vercel-dns.com",
-            },
-          ],
-          "hostname": "app.example.com",
-          "is_primary": true,
-          "pending_first_deploy": true,
-          "verified": false,
-        },
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
+    expect(addPending.status).toBe(201);
+    expect((addPending.body as any).verified).toBe(false);
+    const getPending = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${pendingHostname}`, { accessType: "admin" });
+    const records = (getPending.body as any).dns_records;
+    expect(Array.isArray(records)).toBe(true);
+    expect(records.length).toBeGreaterThan(0);
 
-    // Duplicates and URLs (instead of hostnames) are rejected.
-    const duplicateResponse = await niceBackendFetch("/api/v1/deployments/services/web/domains", {
-      method: "POST",
-      accessType: "admin",
-      body: { hostname: "app.example.com" },
-    });
-    expect(duplicateResponse.status).toBe(400);
-    const urlResponse = await niceBackendFetch("/api/v1/deployments/services/web/domains", {
-      method: "POST",
-      accessType: "admin",
-      body: { hostname: "https://app.example.com" },
-    });
-    expect(urlResponse.status).toBe(400);
-
-    // Deploy so the service gets provisioned; the stored domain is synced
-    // to the target and Vercel's verification state takes over.
-    const { uploadId } = await createUpload();
-    await niceBackendFetch("/api/v1/deployments/services/web/deploy", {
-      method: "POST",
-      accessType: "admin",
-      body: { upload_id: uploadId },
-    });
-
-    const postDeployDetails = await niceBackendFetch("/api/v1/deployments/services/web/domains/app.example.com", { accessType: "admin" });
-    expect(postDeployDetails).toMatchInlineSnapshot(`
-      NiceResponse {
-        "status": 200,
-        "body": {
-          "dns_records": [
-            {
-              "name": "app",
-              "type": "CNAME",
-              "value": "cname.vercel-dns.com",
-            },
-            {
-              "name": "_vercel.example.com",
-              "type": "TXT",
-              "value": "vc-domain-verify=app.example.com,mock0000",
-            },
-          ],
-          "hostname": "app.example.com",
-          "is_primary": true,
-          "pending_first_deploy": false,
-          "verified": false,
-        },
-        "headers": Headers { <some fields may have been hidden> },
-      }
-    `);
-
-    // The mock auto-verifies *.verified.test domains — verified domains have
-    // no pending DNS records.
-    await niceBackendFetch("/api/v1/deployments/services/web/domains", {
-      method: "POST",
-      accessType: "admin",
-      body: { hostname: "web.verified.test" },
-    });
-    const verifiedDetails = await niceBackendFetch("/api/v1/deployments/services/web/domains/web.verified.test", { accessType: "admin" });
-    expect((verifiedDetails.body as any).verified).toBe(true);
-    expect((verifiedDetails.body as any).dns_records).toEqual([]);
-
-    // A failing ownership check (Vercel's verify endpoint answers 400
-    // missing_txt_record) is the normal pending state, NOT an error: the read
-    // must still succeed and include the outstanding TXT challenge.
-    await niceBackendFetch("/api/v1/deployments/services/web/domains", {
-      method: "POST",
-      accessType: "admin",
-      body: { hostname: "claimed.txt-challenge.test" },
-    });
-    const challengedDetails = await niceBackendFetch("/api/v1/deployments/services/web/domains/claimed.txt-challenge.test", { accessType: "admin" });
-    expect(challengedDetails.status).toBe(200);
-    expect((challengedDetails.body as any).verified).toBe(false);
-    expect((challengedDetails.body as any).dns_records.some((record: any) => record.type === "TXT")).toBe(true);
-
-    // Removal drops the domain from the service.
-    const removeResponse = await niceBackendFetch("/api/v1/deployments/services/web/domains/app.example.com", {
+    const deleteResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, {
       method: "DELETE",
       accessType: "admin",
     });
-    expect(removeResponse.status).toBe(200);
-    const serviceResponse = await niceBackendFetch("/api/v1/deployments/services/web", { accessType: "admin" });
-    expect((serviceResponse.body as any).domains.map((domain: any) => domain.hostname).sort()).toEqual(["claimed.txt-challenge.test", "web.verified.test"]);
+    expect(deleteResponse.status).toBe(200);
+    const serviceAfterDelete = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((serviceAfterDelete.body as any).url).toBeNull();
+  });
+
+  it("treats a replayed add of the same hostname on the same service as success", { timeout: 120_000 }, async ({ expect }) => {
+    // The SDK re-issues a request on the next API host whenever one times out or answers 5xx
+    // (`_withFallback`), and it does not spare non-idempotent methods; the dashboard's Add
+    // button also stays live during the seconds an attach takes. Both replay this POST after
+    // the first attempt has already committed the row, and answering 400 there told users
+    // their domain had failed to be added while it was in fact live.
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("replayed");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
+
+    const hostname = `${serviceId}.verified.test`;
+    const add = () => niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname, is_primary: true },
+    });
+
+    const firstAdd = await add();
+    expect(firstAdd.status).toBe(201);
+
+    const replayedAdd = await add();
+    expect(replayedAdd.status).toBe(201);
+    // The replay reports the state that exists, is_primary included — it must not silently
+    // report a different domain than the one the first attempt actually created.
+    expect(replayedAdd.body).toEqual(firstAdd.body);
+
+    // The replay is a re-assert, not a re-create: still exactly one row, still attached, and
+    // the service still advertises it.
+    const listed = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((listed.body as any).domains.filter((domain: any) => domain.hostname === hostname)).toHaveLength(1);
+    expect((listed.body as any).url).toBe(`https://${hostname}`);
+    const read = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, { accessType: "admin" });
+    expect(read.status).toBe(200);
+    expect((read.body as any).verified).toBe(true);
+
+    // Still removable exactly once — a replay must not have left a second claim behind.
+    const deleted = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(deleted.status).toBe(200);
+    const afterDelete = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, { accessType: "admin" });
+    expect(afterDelete.status).toBe(404);
+  });
+
+  it("treats a CONCURRENT replay on the same service as success", { timeout: 120_000 }, async ({ expect }) => {
+    // The host ring hops on a TIMEOUT, so the request it gave up waiting for can still be in
+    // flight when the replay lands. That pair races on the database reservation and takes the
+    // other duplicate branch (the one behind `skipDuplicates`), which must reach the same
+    // answer as the sequential case above.
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("replay-race");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] }), "deployed");
+
+    const hostname = `${serviceId}.verified.test`;
+    const [first, second] = await Promise.all([
+      niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+        method: "POST", accessType: "admin", body: { hostname },
+      }),
+      niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+        method: "POST", accessType: "admin", body: { hostname },
+      }),
+    ]);
+    expect([first.status, second.status]).toEqual([201, 201]);
+
+    const listed = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((listed.body as any).domains.filter((domain: any) => domain.hostname === hostname)).toHaveLength(1);
+  });
+
+  it("rejects a hostname already attached to another project's service", { timeout: 120_000 }, async ({ expect }) => {
+    // The hostname registry is global across namespaces (Fly itself does NOT
+    // enforce cross-app hostname uniqueness — Marshal's bucket registry does).
+    const hostname = `contested-${randomUUID().slice(0, 8)}.verified.test`;
+
+    await Project.createAndSwitch();
+    const firstServiceId = uniqueServiceId("first");
+    const first = await syncServiceAndUpload(firstServiceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId: first.sourceId, uploadId: first.uploadId, definitionSyncId: first.definitionSyncId, levels: [[firstServiceId]] }), "deployed");
+    const firstAdd = await niceBackendFetch(`/api/v1/deployments/services/${firstServiceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname },
+    });
+    expect(firstAdd.status).toBe(201);
+
+    await Project.createAndSwitch();
+    const secondServiceId = uniqueServiceId("second");
+    const second = await syncServiceAndUpload(secondServiceId);
+    await pollDeploymentToStatus(await startDeploy({ sourceId: second.sourceId, uploadId: second.uploadId, definitionSyncId: second.definitionSyncId, levels: [[secondServiceId]] }), "deployed");
+    const secondAdd = await niceBackendFetch(`/api/v1/deployments/services/${secondServiceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname },
+    });
+    expect(secondAdd.status).toBe(409);
+    expect(JSON.stringify(secondAdd.body)).toContain("already attached elsewhere");
+  });
+
+  it("rejects a hostname already attached to another service in the SAME project", { timeout: 120_000 }, async ({ expect }) => {
+    // Marshal holds exactly one claim per hostname, so two services in one project must not
+    // both keep a row for it: the loser would go on advertising a verified URL that routes to
+    // the winner, and either service's delete would tear down the other's live certificate.
+    await Project.createAndSwitch();
+    const ownerServiceId = uniqueServiceId("owner");
+    const otherServiceId = uniqueServiceId("other");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [ownerServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+      [otherServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+    });
+    // Both services in ONE deployment: a deploy ships its whole source, and Fly mutations of
+    // a source are serialized behind its lease — so two back-to-back deploys of the same
+    // source are contention this test has no reason to create.
+    const upload = await createUpload();
+    await pollDeploymentToStatus(
+      await startDeploy({ sourceId, uploadId: upload.uploadId, definitionSyncId, levels: [[ownerServiceId], [otherServiceId]] }),
+      "deployed",
+    );
+
+    const hostname = `${ownerServiceId}.verified.test`;
+    const ownerAdd = await niceBackendFetch(`/api/v1/deployments/services/${ownerServiceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname, is_primary: true },
+    });
+    expect(ownerAdd.status).toBe(201);
+
+    const otherAdd = await niceBackendFetch(`/api/v1/deployments/services/${otherServiceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname },
+    });
+    expect(otherAdd.status).toBe(400);
+    expect(JSON.stringify(otherAdd.body)).toContain("already added to another service");
+
+    // Reading the domain is a pure read on the runtime, so the owner still holds the
+    // certificate afterwards and its public URL is unchanged.
+    const ownerGet = await niceBackendFetch(`/api/v1/deployments/services/${ownerServiceId}/domains/${hostname}`, { accessType: "admin" });
+    expect(ownerGet.status).toBe(200);
+    expect((ownerGet.body as any).verified).toBe(true);
+    const ownerService = await niceBackendFetch(`/api/v1/deployments/services/${ownerServiceId}`, { accessType: "admin" });
+    expect((ownerService.body as any).url).toBe(`https://${hostname}`);
+    const otherService = await niceBackendFetch(`/api/v1/deployments/services/${otherServiceId}`, { accessType: "admin" });
+    expect((otherService.body as any).url).toBeNull();
+  });
+
+  it("uses the database reservation as the arbiter for concurrent same-project domain adds", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const firstServiceId = uniqueServiceId("race-a");
+    const secondServiceId = uniqueServiceId("race-b");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [firstServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+      [secondServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+    });
+    // One deployment ships both services: Fly mutations of a source are serialized behind
+    // its lease, so racing two deploys of the SAME source would only test that lease. The
+    // race under test is the one below, between two domain adds.
+    const upload = await createUpload();
+    await pollDeploymentToStatus(
+      await startDeploy({ sourceId, uploadId: upload.uploadId, definitionSyncId, levels: [[firstServiceId], [secondServiceId]] }),
+      "deployed",
+    );
+
+    const hostname = `race-${randomUUID().slice(0, 8)}.verified.test`;
+    const [firstAdd, secondAdd] = await Promise.all([
+      niceBackendFetch(`/api/v1/deployments/services/${firstServiceId}/domains`, {
+        method: "POST", accessType: "admin", body: { hostname },
+      }),
+      niceBackendFetch(`/api/v1/deployments/services/${secondServiceId}/domains`, {
+        method: "POST", accessType: "admin", body: { hostname },
+      }),
+    ]);
+    expect([firstAdd.status, secondAdd.status].sort((first, second) => first - second)).toEqual([201, 400]);
+
+    const winner = firstAdd.status === 201 ? firstServiceId : secondServiceId;
+    const loser = winner === firstServiceId ? secondServiceId : firstServiceId;
+    const winnerService = await niceBackendFetch(`/api/v1/deployments/services/${winner}`, { accessType: "admin" });
+    const loserService = await niceBackendFetch(`/api/v1/deployments/services/${loser}`, { accessType: "admin" });
+    expect((winnerService.body as any).url).toBe(`https://${hostname}`);
+    expect((loserService.body as any).url).toBeNull();
+  });
+
+  it("refuses a domain on a service whose ports cannot hold one", async ({ expect }) => {
+    await Project.createAndSwitch();
+
+    // No HTTP port: a domain terminates TLS and routes HTTP, so there is nothing to route to.
+    const tcpOnlyId = uniqueServiceId("tcponly");
+    await syncServices({ [tcpOnlyId]: { type: "serverless", ports: { 5432: { protocol: "tcp" } }, env: {} } });
+    const tcpAdd = await niceBackendFetch(`/api/v1/deployments/services/${tcpOnlyId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname: `${tcpOnlyId}.verified.test` },
+    });
+    expect(tcpAdd.status).toBe(400);
+    expect(JSON.stringify(tcpAdd.body)).toContain("http");
+
+    // A PRIVATE service with an HTTP port and a TCP sibling. The sync is legal —
+    // nothing is public — but attaching a domain allocates public IPs, and the
+    // runtime's proxy serves every declared port on every address the app holds,
+    // which would put the 5432 on the internet.
+    const siblingId = uniqueServiceId("sibling");
+    await syncServices({ [siblingId]: { type: "serverless", ports: { 3000: { protocol: "http" }, 5432: { protocol: "tcp" } }, env: {} } });
+    const siblingAdd = await niceBackendFetch(`/api/v1/deployments/services/${siblingId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname: `${siblingId}.verified.test` },
+    });
+    expect(siblingAdd.status).toBe(400);
+    expect(JSON.stringify(siblingAdd.body)).toContain("it is private and declares more than one port");
+  });
+
+  it("refuses to re-sync a domain-holding service into a port list that cannot hold one", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("resynced");
+    const { sourceId } = await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } });
+    const addResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname: `${serviceId}.verified.test` },
+    });
+    expect(addResponse.status).toBe(201);
+
+    // Adding the sibling port later must be refused too, or the rule enforced at attach time
+    // could be walked around by attaching first and re-syncing after.
+    const resync = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: sourceId, services: { [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" }, 5432: { protocol: "tcp" } }, env: {} } } },
+    });
+    expect(resync.status).toBe(400);
+    expect(JSON.stringify(resync.body)).toContain("custom domain");
+  });
+
+  it("keeps domains as rows before the first deploy", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("undeployed");
+    await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } });
+    const addResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname: `${serviceId}.verified.test` },
+    });
+    expect(addResponse.status).toBe(201);
+    expect((addResponse.body as any).verified).toBe(false);
+    const getResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${serviceId}.verified.test`, { accessType: "admin" });
+    expect((getResponse.body as any).pending_first_deploy).toBe(true);
+  });
+});
+
+describe("deployments of a whole deployment source", () => {
+  it("builds once and rolls out every service in dependency order", { timeout: 180_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const apiServiceId = uniqueServiceId("api");
+    const webServiceId = uniqueServiceId("web");
+    // web reads the API's private URL, so it applies after the API — one deploy,
+    // one build, two services.
+    const { syncId, sourceId } = await syncServices({
+      [apiServiceId]: { type: "serverless", ports: { 8080: { protocol: "http" } }, env: {} },
+      [webServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { API_URL: { type: "connection", value: `${apiServiceId}.url:8080` } } },
+    });
+    const { uploadId } = await createUpload();
+    const deploymentId = await startDeploy({
+      sourceId,
+      uploadId,
+      definitionSyncId: syncId,
+      levels: [[apiServiceId], [webServiceId]],
+    });
+    const deployment = await pollDeploymentToStatus(deploymentId, "deployed");
+
+    expect(deployment.deployment_source_id).toBe(sourceId);
+    expect(deployment.has_build_logs).toBe(true);
+    // Reported in apply order, which is the order a reader wants progress in.
+    expect(deployment.services.map((service: any) => service.service_id)).toEqual([apiServiceId, webServiceId]);
+    expect(deployment.services.every((service: any) => service.status === "deployed")).toBe(true);
+
+    // Both are actually running, and web got the API's flycast address.
+    const apiApp = await findMockApp(apiServiceId);
+    const webApp = await findMockApp(webServiceId);
+    expect(webApp.machines[0].env.API_URL).toBe(`http://${apiApp.name}.flycast:8080`);
+
+    // ONE build log covering both services: they shared a builder machine.
+    const logs = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}/logs`, { accessType: "admin" });
+    expect(logs.status).toBe(200);
+    expect(String(logs.body)).toContain(apiServiceId);
+    expect(String(logs.body)).toContain(webServiceId);
+  });
+
+  it("fails the whole deployment when the build fails, and ships nothing", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const goodServiceId = uniqueServiceId("good");
+    const badServiceId = uniqueServiceId("bad");
+    // The mock builder fails the build when any target declares this var — which
+    // is what a real builder does too: one machine builds them all, so the first
+    // failure ends the run.
+    const { syncId, sourceId } = await syncServices({
+      [goodServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+      [badServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: { MARSHAL_MOCK_FAIL_BUILD: { value: "1" } } },
+    });
+    const { uploadId } = await createUpload();
+    const deployment = await pollDeploymentToStatus(
+      await startDeploy({ sourceId, uploadId, definitionSyncId: syncId, levels: [[goodServiceId], [badServiceId]] }),
+      "failed",
+    );
+    expect(String(deployment.error)).toContain("mock build failed");
+    // Nothing was applied — not even the target that would have built fine.
+    expect(deployment.services.every((service: any) => service.status === "skipped")).toBe(true);
+  });
+
+  it("refuses a service id another deployment source already owns", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("shared");
+    const { sourceId } = await syncServices({ [serviceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } }, "frontend-repo");
+    expect(sourceId).toBe("frontend-repo");
+
+    // A second deploy file claiming the same id would otherwise overwrite the
+    // first one's definition on every deploy, with neither author able to see why.
+    const conflicting = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "backend-repo", services: { [serviceId]: { type: "serverless", ports: { 4000: { protocol: "http" } }, env: {} } } },
+    });
+    expect(conflicting.status).toBe(409);
+    expect(JSON.stringify(conflicting.body)).toContain("frontend-repo");
+  });
+
+  it("removes a service the deploy file no longer declares, keeping its disk", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const keptServiceId = uniqueServiceId("kept");
+    const droppedServiceId = uniqueServiceId("dropped");
+    const { syncId, sourceId } = await syncServices({
+      [keptServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+      [droppedServiceId]: { type: "server", min_instances: 0, max_instances: 1, ports: { 5432: { protocol: "tcp" } }, env: {}, persistent_volumes: { data: { path: "/data", size_gb: 1 } } },
+    });
+    const { uploadId } = await createUpload();
+    await pollDeploymentToStatus(
+      await startDeploy({ sourceId, uploadId, definitionSyncId: syncId, levels: [[keptServiceId], [droppedServiceId]] }),
+      "deployed",
+    );
+
+    // The same source syncs again without the second service.
+    const resync = await syncServices({ [keptServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } }, sourceId);
+    expect(resync.removedServiceIds).toEqual([droppedServiceId]);
+
+    const gone = await niceBackendFetch(`/api/v1/deployments/services/${droppedServiceId}`, { accessType: "admin" });
+    expect(gone.status).toBe(404);
+    const kept = await niceBackendFetch(`/api/v1/deployments/services/${keptServiceId}`, { accessType: "admin" });
+    expect(kept.status).toBe(200);
+  });
+
+  it("keeps the first conclusion's timestamp when concluded again", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("conclude");
+    const deploymentId = await deployOneService(serviceId);
+
+    const first = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}/conclude`, {
+      method: "POST", accessType: "admin", body: {},
+    });
+    expect(first.status).toBe(200);
+    const second = await niceBackendFetch(`/api/v1/deployments/deployments/${deploymentId}/conclude`, {
+      method: "POST", accessType: "admin", body: {},
+    });
+    // Idempotent: a retried CLI request must not stretch the recorded duration.
+    expect(second.status).toBe(200);
+    expect((second.body as any).finished_at_millis).toBe((first.body as any).finished_at_millis);
+  });
+
+  it("404s on a deployment that doesn't exist", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const response = await niceBackendFetch(`/api/v1/deployments/deployments/${randomUUID()}/conclude`, {
+      method: "POST", accessType: "admin", body: {},
+    });
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("compute sizing", () => {
+  it("reports the size a service runs at, and the CPU that comes with it", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await syncServices({
+      sized: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+      // A server with no size runs on the 512MB shared machine every service always ran on.
+      db: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, image: "postgres:16", env: {} },
+    }, "sizing-src");
+
+    const sized = await niceBackendFetch("/api/v1/deployments/services/sized", { accessType: "admin" });
+    expect(sized.status).toBe(200);
+    // Resolved, never null: a service that declares no size is running its default, not
+    // running nothing — and on Fly the default is one shared, burstable vCPU at 512MB.
+    expect(sized.body).toMatchObject({ runtime: "fly", memory: "512MB", cpu: { count: 1, shared: true } });
+    const db = await niceBackendFetch("/api/v1/deployments/services/db", { accessType: "admin" });
+    expect(db.body).toMatchObject({ runtime: "fly", memory: "512MB", cpu: { count: 1, shared: true } });
+  });
+
+  it("refuses sizes off the ladder, and gates the rest on the plan", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const planUsage = await niceBackendFetch("/api/v1/internal/plan-usage", { accessType: "admin" });
+    const enforced = (planUsage.body as any)?.are_plan_limits_enforced !== false;
+    const sync = async (body: Record<string, unknown>) => await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: { source_id: "sizing-gate-src", ...body },
+    });
+    // A size off the ladder names a machine shape the runtime does not have.
+    expect((await sync({ services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, memory: "3GB", env: {} } } })).status).toBe(400);
+    // The default rung always syncs, whatever the plan — and on Fly a SERVER may be 512MB.
+    expect((await sync({
+      services: {
+        web: { type: "serverless", ports: { 3000: { protocol: "http" } }, memory: "512MB", env: {} },
+        db: { type: "server", ports: { 5432: { protocol: "tcp" } }, min_instances: 0, image: "postgres:16", memory: "512MB", env: {} },
+      },
+    })).status).toBe(200);
+    const oversized = await sync({ services: { web: { type: "serverless", ports: { 3000: { protocol: "http" } }, memory: "4GB", env: {} } } });
+    if (enforced) {
+      expect(oversized.status).toBe(400);
+      expect(JSON.stringify(oversized.body)).toContain("Extra memory is not available on the Free plan");
+    } else {
+      expect(oversized.status).toBe(200);
+    }
+  });
+
+  it("sizes the machine on a paid plan, and derives the CPU from it", async ({ expect }) => {
+    await Project.createAndSwitchOnPaidPlan();
+    const serviceId = uniqueServiceId("sized");
+    const { syncId, sourceId } = await syncServices({
+      [serviceId]: { type: "serverless", ports: { 80: { protocol: "http" } }, image: "nginx:1.27", memory: "4GB", env: {} },
+    });
+    const response = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect(response.body).toMatchObject({ memory: "4GB", cpu: { count: 2, shared: true } });
+    const deploymentId = await startDeploy({ sourceId, definitionSyncId: syncId, levels: [[serviceId]] });
+    await pollDeploymentToStatus(deploymentId, "deployed");
+    const app = await findMockApp(serviceId);
+    expect(app.machines.length).toBe(1);
+  });
+});
+
+describe("CI variables", () => {
+  it("injects the deploy request's CI variables into built services only", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await InternalApiKey.createAndSetProjectKeys();
+    const serviceId = uniqueServiceId("ci-env");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId, {
+      // A service that declares one of these names has said what it means, so its own
+      // value must survive the injection.
+      env: { CI_COMMIT_REF_NAME: { value: "declared-in-the-deploy-file" } },
+    });
+    const deploymentId = await startDeploy({
+      sourceId,
+      uploadId,
+      definitionSyncId,
+      levels: [[serviceId]],
+      extraBody: { ci_env: { CI_COMMIT_SHA: "0123456789abcdef", CI_COMMIT_REF_NAME: "from-the-deploy-request" } },
+    });
+    await pollDeploymentToStatus(deploymentId, "deployed");
+    const app = await findMockApp(serviceId);
+    expect(app.machines[0].env).toMatchObject({ CI_COMMIT_SHA: "0123456789abcdef", CI_COMMIT_REF_NAME: "declared-in-the-deploy-file" });
+    // CI=true belongs to the BUILD, not to the service.
+    expect(app.machines[0].env).not.toHaveProperty("CI");
+    // Not stored: the definition still names only what the deploy file wrote.
+    const serviceResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}`, { accessType: "admin" });
+    expect((serviceResponse.body as any).env.map((entry: any) => entry.key)).toEqual(["CI_COMMIT_REF_NAME"]);
+
+    // A prebuilt image gets NO CI variables: they change on every commit and the runtime
+    // hashes env into the revision, so injecting them would re-roll an untouched image on
+    // every deploy of its neighbours.
+    const prebuiltId = uniqueServiceId("ci-env-prebuilt");
+    const { syncId: prebuiltSyncId, sourceId: prebuiltSourceId } = await syncServices({
+      [prebuiltId]: { type: "serverless", ports: { 80: { protocol: "http" } }, image: "nginx:1.27", env: {} },
+    });
+    const prebuiltDeploymentId = await startDeploy({
+      sourceId: prebuiltSourceId,
+      definitionSyncId: prebuiltSyncId,
+      levels: [[prebuiltId]],
+      extraBody: { ci_env: { CI_COMMIT_SHA: "0123456789abcdef" } },
+    });
+    await pollDeploymentToStatus(prebuiltDeploymentId, "deployed");
+    expect((await findMockApp(prebuiltId)).machines[0].env).not.toHaveProperty("CI_COMMIT_SHA");
+
+    // The namespace is the guard: without it this field could overwrite the injected
+    // Hexclave credentials, which are not the caller's to set.
+    const badResponse = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: (await createUpload()).uploadId, definition_sync_id: definitionSyncId, levels: [[serviceId]], ci_env: { HEXCLAVE_SECRET_SERVER_KEY: "ssk_not_yours" } },
+    });
+    expect(badResponse.status).toBe(400);
+    expect(JSON.stringify(badResponse.body)).toContain("CI variable names");
   });
 });

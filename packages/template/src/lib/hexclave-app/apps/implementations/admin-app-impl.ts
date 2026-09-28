@@ -5,7 +5,6 @@ import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClic
 import { EmailTemplateCrud } from "@hexclave/shared/dist/interface/crud/email-templates";
 import { InternalApiKeysCrud } from "@hexclave/shared/dist/interface/crud/internal-api-keys";
 import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
-import type { AdminGetSessionReplayChunkEventsResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
 import type { Transaction, TransactionType } from "@hexclave/shared/dist/interface/crud/transactions";
 import type { RestrictedReason } from "@hexclave/shared/dist/schema-fields";
 import type { MoneyAmount } from "@hexclave/shared/dist/utils/currency-constants";
@@ -21,7 +20,6 @@ import { InternalApiKey, InternalApiKeyBase, InternalApiKeyBaseCrudRead, Interna
 import { AdminProjectPermission, AdminProjectPermissionDefinition, AdminProjectPermissionDefinitionCreateOptions, AdminProjectPermissionDefinitionUpdateOptions, AdminTeamPermission, AdminTeamPermissionDefinition, AdminTeamPermissionDefinitionCreateOptions, AdminTeamPermissionDefinitionUpdateOptions, adminProjectPermissionDefinitionCreateOptionsToCrud, adminProjectPermissionDefinitionUpdateOptionsToCrud, adminTeamPermissionDefinitionCreateOptionsToCrud, adminTeamPermissionDefinitionUpdateOptionsToCrud } from "../../permissions";
 import type { PlanUsage } from "../../plan-usage";
 import { AdminOwnedProject, AdminProject, AdminProjectUpdateOptions, PushConfigOptions, adminProjectUpdateOptionsToCrud } from "../../projects";
-import type { AdminSessionReplay, AdminSessionReplayChunk, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, SessionReplayAllEventsResult } from "../../session-replays";
 import { AdminWorkflow, AdminWorkflowRun, AdminWorkflowRunDetails, AdminWorkflowRunsFilter, AdminWorkflowSyncResult, AdminWorkflowUpgradeResult, AdminWorkflowVersion, adminWorkflowFromCrud, adminWorkflowRunDetailsFromCrud, adminWorkflowRunFromCrud, adminWorkflowSyncResultFromCrud, adminWorkflowVersionFromCrud, isWorkflowRunDetailsJson } from "../../workflows";
 import { ManagedEmailProviderListItem, ManagedEmailProviderSetupResult, ManagedEmailProviderStatus, EmailOutboxUpdateOptions, StackAdminApp, StackAdminAppConstructorOptions } from "../interfaces/admin-app";
 import { clientVersion, createCache, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getDefaultSecretServerKey, getDefaultSuperSecretAdminKey, resolveApiUrls, resolveConstructorOptions } from "./common";
@@ -294,25 +292,26 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
       async listDeploymentServices() {
         return await app._interface.listDeploymentServices();
       },
-      async createDeploymentService(id, build) {
-        const created = await app._interface.createDeploymentService(id, build);
-        await app._refreshProjectConfig();
-        return created;
+      async listProjectSecrets() {
+        return await app._interface.listProjectSecrets();
       },
-      async updateDeploymentService(serviceId, update) {
-        const updated = await app._interface.updateDeploymentService(serviceId, update);
-        await app._refreshProjectConfig();
-        return updated;
+      async setProjectSecret(key, value) {
+        await app._interface.setProjectSecret(key, value);
       },
-      async deleteDeploymentService(serviceId) {
-        await app._interface.deleteDeploymentService(serviceId);
-        await app._refreshProjectConfig();
+      async deleteProjectSecret(key) {
+        await app._interface.deleteProjectSecret(key);
       },
-      async listDeploymentRuns(serviceId, options) {
-        return await app._interface.listDeploymentRuns(serviceId, options);
+      async listDeployments(options) {
+        return await app._interface.listDeployments(options);
       },
-      async getDeploymentRunLogs(runId, options) {
-        return await app._interface.getDeploymentRunLogs(runId, options);
+      async getDeployment(deploymentId) {
+        return await app._interface.getDeployment(deploymentId);
+      },
+      async getDeploymentBuildLogs(deploymentId, options) {
+        return await app._interface.getDeploymentBuildLogs(deploymentId, options);
+      },
+      async getDeploymentServiceLogs(serviceId, options) {
+        return await app._interface.getDeploymentServiceLogs(serviceId, options);
       },
       async addDeploymentServiceDomain(serviceId, hostname, options) {
         await app._interface.addDeploymentServiceDomain(serviceId, hostname, options);
@@ -582,6 +581,11 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
     await this._adminWorkflowsCache.refresh([]);
   }
 
+  async setWorkflowPaused(workflowId: string, isPaused: boolean): Promise<void> {
+    await this._interface.setWorkflowPaused(workflowId, isPaused);
+    await this._adminWorkflowsCache.refresh([]);
+  }
+
   async listWorkflowVersions(workflowId: string): Promise<AdminWorkflowVersion[]> {
     return (await this._interface.listWorkflowVersions(workflowId)).map(adminWorkflowVersionFromCrud);
   }
@@ -666,6 +670,10 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
 
   async sendWorkflowEvent(name: string, data?: unknown): Promise<{ eventId: string }> {
     const result = await this._interface.sendWorkflowEvent(name, data ?? null);
+    // Sending an event can create a run asynchronously. Refresh the summary
+    // cache so the workflow page does not keep showing the pre-event counts
+    // after the runs grid has been explicitly reloaded.
+    await this._adminWorkflowsCache.refresh([]);
     return { eventId: result.event_id };
   }
 
@@ -1413,104 +1421,6 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
 
   async createAnalyticsClickmapToken(options: { origin: string }): Promise<AnalyticsClickmapTokenResponse> {
     return await this._interface.createAnalyticsClickmapToken(options);
-  }
-
-  async listSessionReplays(options?: ListSessionReplaysOptions): Promise<ListSessionReplaysResult> {
-    const response = await this._interface.listSessionReplays({
-      cursor: options?.cursor,
-      limit: options?.limit,
-      user_ids: options?.userIds,
-      team_ids: options?.teamIds,
-      duration_ms_min: options?.durationMsMin,
-      duration_ms_max: options?.durationMsMax,
-      last_event_at_from_millis: options?.lastEventAtFromMillis,
-      last_event_at_to_millis: options?.lastEventAtToMillis,
-      click_count_min: options?.clickCountMin,
-    });
-
-    const items: AdminSessionReplay[] = response.items.map((r) => ({
-      id: r.id,
-      refreshTokenId: r.refresh_token_id,
-      projectUser: {
-        id: r.project_user.id,
-        displayName: r.project_user.display_name,
-        primaryEmail: r.project_user.primary_email,
-      },
-      startedAt: new Date(r.started_at_millis),
-      lastEventAt: new Date(r.last_event_at_millis),
-      chunkCount: r.chunk_count,
-      eventCount: r.event_count,
-    }));
-
-    return {
-      items,
-      nextCursor: response.pagination.next_cursor,
-    };
-  }
-
-  async getSessionReplay(sessionReplayId: string): Promise<AdminSessionReplay> {
-    const response = await this._interface.getSessionReplay(sessionReplayId);
-    return {
-      id: response.id,
-      refreshTokenId: response.refresh_token_id,
-      projectUser: {
-        id: response.project_user.id,
-        displayName: response.project_user.display_name,
-        primaryEmail: response.project_user.primary_email,
-      },
-      startedAt: new Date(response.started_at_millis),
-      lastEventAt: new Date(response.last_event_at_millis),
-      chunkCount: response.chunk_count,
-      eventCount: response.event_count,
-    };
-  }
-
-  async listSessionReplayChunks(sessionReplayId: string, options?: ListSessionReplayChunksOptions): Promise<ListSessionReplayChunksResult> {
-    const response = await this._interface.listSessionReplayChunks(sessionReplayId, {
-      cursor: options?.cursor,
-      limit: options?.limit,
-    });
-
-    const items: AdminSessionReplayChunk[] = response.items.map((c) => ({
-      id: c.id,
-      batchId: c.batch_id,
-      sessionReplaySegmentId: c.session_replay_segment_id,
-      browserSessionId: c.browser_session_id,
-      eventCount: c.event_count,
-      byteLength: c.byte_length,
-      firstEventAt: new Date(c.first_event_at_millis),
-      lastEventAt: new Date(c.last_event_at_millis),
-      createdAt: new Date(c.created_at_millis),
-    }));
-
-    return {
-      items,
-      nextCursor: response.pagination.next_cursor,
-    };
-  }
-
-  async getSessionReplayChunkEvents(sessionReplayId: string, chunkId: string): Promise<AdminGetSessionReplayChunkEventsResponse> {
-    return await this._interface.getSessionReplayChunkEvents(sessionReplayId, chunkId);
-  }
-
-  async getSessionReplayEvents(sessionReplayId: string, options?: { offset?: number, limit?: number }): Promise<SessionReplayAllEventsResult> {
-    const response = await this._interface.getSessionReplayEvents(sessionReplayId, options);
-    return {
-      chunks: response.chunks.map((c) => ({
-        id: c.id,
-        batchId: c.batch_id,
-        sessionReplaySegmentId: c.session_replay_segment_id,
-        eventCount: c.event_count,
-        byteLength: c.byte_length,
-        firstEventAt: new Date(c.first_event_at_millis),
-        lastEventAt: new Date(c.last_event_at_millis),
-        createdAt: new Date(c.created_at_millis),
-      })),
-      chunkEvents: response.chunk_events.map((ce) => ({
-        chunkId: ce.chunk_id,
-        events: ce.events,
-      })),
-    };
   }
 
   async previewAffectedUsersByOnboardingChange(

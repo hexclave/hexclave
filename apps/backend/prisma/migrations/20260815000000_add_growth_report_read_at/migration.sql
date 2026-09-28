@@ -1,0 +1,1 @@
+ALTER TABLE "GrowthReport" ADD COLUMN "readAt" TIMESTAMP(3);

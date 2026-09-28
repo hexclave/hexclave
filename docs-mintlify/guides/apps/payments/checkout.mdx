@@ -1,0 +1,118 @@
+---
+title: "Checkout & Purchases"
+description: "Sell a product with a checkout URL and read what a customer owns"
+---
+
+To sell a product, generate a checkout URL and redirect the customer to it. Hexclave runs the hosted checkout, receives the payment confirmation, and grants the product - you never write a webhook handler.
+
+## Selling a product
+
+The `createCheckoutUrl` method is available on both user and team objects.
+
+<Tabs>
+  <Tab title="Client Component">
+    ```typescript title="app/components/purchase-button.tsx"
+    "use client";
+    import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+    export default function PurchaseButton({ productId }: { productId: string }) {
+      const user = useUser({ or: 'redirect' });
+
+      const handlePurchase = async () => {
+        const checkoutUrl = await user.createCheckoutUrl({
+          productId,
+          returnUrl: window.location.href,
+        });
+        window.location.href = checkoutUrl;
+      };
+
+      return <button onClick={handlePurchase}>Purchase</button>;
+    }
+    ```
+  </Tab>
+  <Tab title="Server Component">
+    ```typescript title="app/purchase/page.tsx"
+    import { hexclaveServerApp } from "@/hexclave/server";
+
+    export default async function PurchasePage() {
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
+
+      const checkoutUrl = await user.createCheckoutUrl({
+        productId: "prod_premium_monthly",
+      });
+
+      return <a href={checkoutUrl}>Upgrade to Premium</a>;
+    }
+    ```
+  </Tab>
+</Tabs>
+
+For team purchases, call `createCheckoutUrl` on the team object instead:
+
+```typescript
+const team = user.useTeam(teamId);
+const checkoutUrl = await team.createCheckoutUrl({ productId });
+```
+
+<Info>
+  If you're using a non-JS backend (Python, Go, etc.), call the REST API directly: `POST /api/v1/payments/purchases/create-purchase-url` with `customer_type`, `customer_id`, and `product_id`. See the [REST API overview](/api/overview) for details.
+</Info>
+
+On the **server**, you can also pass an inline product definition instead of `productId`, or create a URL for a [custom customer](./customers):
+
+```typescript
+import { hexclaveServerApp } from "@/hexclave/server";
+
+const checkoutUrl = await hexclaveServerApp.createCheckoutUrl({
+  customCustomerId: "external-org-123",
+  productId: "prod_enterprise",
+  returnUrl: "https://example.com/billing",
+});
+```
+
+## Hosted checkout
+
+`createCheckoutUrl` returns a hosted Hexclave page (`/purchase/{code}`). Price and quantity are chosen **on that page**, not in the URL. Stackable products show a quantity selector.
+
+Checkout URLs expire after **24 hours**. If **Block new purchases** is on in **Payments -> Settings**, creating a URL and completing checkout both fail; existing subscriptions keep renewing.
+
+A **$0 recurring** price activates without collecting a card. One-time $0 prices cannot go through checkout.
+
+[Free trials](./products-and-pricing#free-trials) collect a card up front and charge it when the trial ends. In **test mode**, checkout grants the product immediately and skips the trial.
+
+## Creating a checkout URL from the dashboard
+
+You don't have to generate URLs in code. **Create checkout** is available from:
+
+- **Payments -> Customers** (user, team, or custom)
+- A product's detail page, and product cards in **Payments -> Product Lines**
+- The **Users** and **Teams** tables
+
+The URL still expires in 24 hours. Send it to the customer, or open it yourself while testing.
+
+## Checking what a customer owns
+
+After a purchase, you'll want to know what the customer has. Check their product list, or check a specific [item balance](./items-and-entitlements).
+
+```typescript
+// Client component (hook - re-renders on changes)
+const products = user.useProducts();
+
+// Server component
+const products = await user.listProducts();
+```
+
+Each product in the list includes:
+
+- `id` - The product ID (or `null` for inline products)
+- `displayName` - The product name
+- `quantity` - How many the customer owns (relevant for stackable products)
+- `subscription` - `null` for one-time products, or an object with `subscriptionId`, `currentPeriodEnd`, `cancelAtPeriodEnd`, and `isCancelable` for subscriptions
+- `switchOptions` - Other products in the same product line the customer could switch to
+
+## Related
+
+- [Items & Entitlements](./items-and-entitlements) - read and consume credits, seats, and quota
+- [Subscriptions](./subscriptions) - manage recurring plans after purchase
+- [Refunds](./refunds) - reverse a purchase from the dashboard
+- [Granting Products](./granting-products) - give access without checkout

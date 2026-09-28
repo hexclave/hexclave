@@ -254,8 +254,8 @@ export async function planRedirectToHandler(options: {
   rawHandlerUrl: string,
   noRedirectBack: boolean,
   currentUrl: URL | null,
-  localOAuthCallbackUrl: string,
-  rawHomeUrl: string,
+  getLocalOAuthCallbackUrl: () => string,
+  rawAfterSignInUrl: string,
   getCrossDomainHandoffParams: (currentUrl: URL) => Promise<CrossDomainHandoffParams>,
 }): Promise<RedirectToHandlerPlan> {
   if (options.currentUrl == null) {
@@ -264,13 +264,15 @@ export async function planRedirectToHandler(options: {
 
   const policy = getHandlerRedirectPolicy(options.handlerName);
   if (options.noRedirectBack) {
-    // Sign-in uses noRedirectBack from password-reset pages to avoid capturing the reset page.
-    // Same-domain sign-in must still carry an already-inherited continuation. Cross-domain
-    // sign-in falls through to the redirect-back-aware planner below because it needs to return
-    // through the source app's callback before continuing to home.
-    if (options.handlerName === "signIn") {
-      const signInTarget = new URL(options.rawHandlerUrl, options.currentUrl);
-      if (signInTarget.origin === options.currentUrl.origin) {
+    // noRedirectBack suppresses the current deep link, but hosted auth still has to return through
+    // the source app so it can finish the cross-domain token handoff. Once that finishes, continue
+    // to afterSignIn instead.
+    if (policy === "redirect-back-aware" && options.handlerName !== "signOut") {
+      const authTarget = new URL(options.rawHandlerUrl, options.currentUrl);
+      if (authTarget.origin === options.currentUrl.origin) {
+        if (options.handlerName !== "signIn") {
+          return { type: "redirect", url: options.rawHandlerUrl };
+        }
         return {
           type: "redirect",
           url: buildContinuationAwareHandlerUrl({
@@ -348,9 +350,10 @@ export async function planRedirectToHandler(options: {
   }
 
   // noRedirectBack suppresses the initiating deep link, not the return journey. Cross-domain auth
-  // still needs to return through the source app's callback, but its final destination is home.
+  // still needs to return through the source app's callback, but its final destination is the
+  // configured post-sign-in page.
   const afterCallbackRedirectUrlOverride = options.noRedirectBack
-    ? new URL(options.rawHomeUrl, options.currentUrl).toString()
+    ? new URL(options.rawAfterSignInUrl, options.currentUrl).toString()
     : null;
 
   return {
@@ -359,7 +362,7 @@ export async function planRedirectToHandler(options: {
       handlerName: options.handlerName,
       rawHandlerUrl: options.rawHandlerUrl,
       currentUrl: options.currentUrl,
-      localOAuthCallbackUrl: options.localOAuthCallbackUrl,
+      localOAuthCallbackUrl: options.getLocalOAuthCallbackUrl(),
       getCrossDomainHandoffParams: options.getCrossDomainHandoffParams,
       noRedirectBack: options.noRedirectBack,
       afterCallbackRedirectUrlOverride,

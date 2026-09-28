@@ -94,6 +94,12 @@ const stripFields = [
   "cpu_time",
   "hourly_counts",
   "live_users",
+  // Hourly series are keyed to wall-clock UTC hour boundaries, so a test that
+  // straddles a boundary can redistribute counts between the final buckets.
+  "hourly_users",
+  "hourly_active_users",
+  "hourly_page_views",
+  "hourly_visitors",
 ] as const;
 
 const stripFieldsIfString = [

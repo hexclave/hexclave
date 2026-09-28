@@ -21,8 +21,7 @@ import {
 } from "@/components/ui";
 import { WalkthroughProvider } from "@/components/walkthrough/walkthrough-provider";
 import { ALL_APPS_FRONTEND, DUMMY_ORIGIN, getAppPath, getItemPath, hasNavigationItems, testAppPath, testItemPath, type NavigableAppFrontend } from "@/lib/apps-frontend";
-import { getEnabledAppIds, getEnabledNavigableAppIds } from "@/lib/apps-utils";
-import { isAppNavigationItemVisible } from "@/lib/app-navigation-visibility";
+import { getAppEnableConfigUpdate, getEnabledAppIds, getEnabledNavigableAppIds } from "@/lib/apps-utils";
 import { useUpdateConfig } from "@/components/config-update";
 import { cn } from "@/lib/utils";
 import {
@@ -131,6 +130,16 @@ const internalToolsItem: AppSection = {
       href: "/newly-created-projects",
       match: (fullUrl: URL) => /^\/projects\/[^\/]+\/newly-created-projects(\/.*)?$/.test(fullUrl.pathname),
     },
+    {
+      name: "Ask Hexclave History",
+      href: "/ask-hexclave-history",
+      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/ask-hexclave-history(\/.*)?$/.test(fullUrl.pathname),
+    },
+    {
+      name: "Deploy Admin",
+      href: "/deploy-admin",
+      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/deploy-admin(\/.*)?$/.test(fullUrl.pathname),
+    },
   ],
 };
 
@@ -148,6 +157,11 @@ const projectSettingsItem: AppSection = {
       name: "Billing & Usage",
       href: "/project-settings/usage",
       match: (fullUrl: URL) => /^\/projects\/[^\/]+\/project-settings\/usage(\/.*)?$/.test(fullUrl.pathname),
+    },
+    {
+      name: "Secrets",
+      href: "/project-settings/secrets",
+      match: (fullUrl: URL) => /^\/projects\/[^\/]+\/project-settings\/secrets(\/.*)?$/.test(fullUrl.pathname),
     },
     {
       name: "Project Keys",
@@ -437,7 +451,6 @@ function AppNavItem({
     }
     const navigableFrontend: NavigableAppFrontend = appFrontend;
     const items = navigableFrontend.navigationItems
-      .filter((navItem) => isAppNavigationItemVisible(projectId, navItem))
       .map((navItem) => ({
         name: navItem.displayName,
         href: getItemPath(projectId, navigableFrontend, navItem),
@@ -515,7 +528,7 @@ function SidebarContent({
     /^\/projects\/[^\/]+\/(project-settings|project-keys|domains)(\/.*)?$/.test(pathname)
   );
   const [isInternalToolsExpanded, setIsInternalToolsExpanded] = useState(() =>
-    /^\/projects\/[^\/]+\/(platform-analytics|external-db-sync|newly-created-projects)(\/.*)?$/.test(pathname)
+    /^\/projects\/[^\/]+\/(platform-analytics|external-db-sync|newly-created-projects|ask-hexclave-history|deploy-admin)(\/.*)?$/.test(pathname)
   );
   const internalToolsSection = useMemo<AppSection>(() => ({
     ...internalToolsItem,
@@ -702,7 +715,7 @@ function SpotlightSearchWrapper({ projectId }: { projectId: string }) {
   const handleEnableApp = useCallback(async (appId: AppId) => {
     await updateConfig({
       adminApp: hexclaveAdminApp,
-      configUpdate: { [`apps.installed.${appId}.enabled`]: true },
+      configUpdate: getAppEnableConfigUpdate(appId),
       pushable: true,
     });
   }, [hexclaveAdminApp, updateConfig]);
@@ -816,7 +829,7 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
               <div className={cn(
               "relative flex min-w-0 flex-col overflow-visible has-[[data-full-bleed]]:h-full",
               // Light mode card styling (companion gutter is on <main>, not here — avoids empty card chrome behind Stack Companion)
-              "min-h-[calc(100vh-4.5rem)] bg-white/80 backdrop-blur-xl shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.04)] rounded-2xl border border-black/[0.06]",
+              "min-h-[calc(100vh-4.5rem)] dark:min-h-[calc(100vh-5.75rem)] bg-white/80 backdrop-blur-xl shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.04)] rounded-2xl border border-black/[0.06]",
               // Dark mode: remove card styling
               "dark:bg-transparent dark:backdrop-blur-none dark:shadow-none dark:rounded-none dark:border-0",
               // Contained pages own their internal scroll regions, so the shell must pass down a finite flex height instead of sizing to content.

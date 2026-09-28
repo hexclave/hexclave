@@ -1115,6 +1115,8 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
   ];
 
   for (const purchase of oneTimePurchaseSeeds) {
+    // Forward-compatibility seeds current code against the base schema before
+    // this branch's payment columns have been migrated, so avoid selecting them.
     await prisma.oneTimePurchase.upsert({
       where: {
         tenancyId_id: {
@@ -1144,6 +1146,9 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
         creationSource: purchase.creationSource,
         stripePaymentIntentId: purchase.stripePaymentIntentId ?? null,
         createdAt: purchase.createdAt,
+      },
+      select: {
+        id: true,
       },
     });
   }
@@ -1216,6 +1221,8 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
   ];
 
   for (const invoice of invoiceSeeds) {
+    // Keep this seed compatible with the base schema before the new payment
+    // outcome columns are migrated.
     await prisma.subscriptionInvoice.upsert({
       where: {
         tenancyId_id: {
@@ -1236,6 +1243,9 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
         status: invoice.status,
         amountTotal: invoice.amountTotal,
         createdAt: invoice.createdAt,
+      },
+      select: {
+        id: true,
       },
     });
   }
@@ -2198,6 +2208,10 @@ export async function seedDummyProject(options: SeedDummyProjectOptions): Promis
       tenancyId: dummyTenancy.id,
       userEmailToId,
     }),
+    seedDummyDeployments({
+      prisma: dummyPrisma,
+      tenancyId: dummyTenancy.id,
+    }),
     seedDummySessionActivityEvents({
       tenancyId: dummyTenancy.id,
       projectId,
@@ -2622,4 +2636,266 @@ async function seedDummySessionReplays({
   }
 
   console.log(`Seeded ${targetSessionReplayCount} session replays (${shouldSeedClickhouse ? clickhouseRows.length : 0} analytics events)`);
+}
+
+// Services for the demo project's Deployments app, across TWO deployment
+// sources — the shape a project deployed from two repositories has, which is
+// what the board's per-source colouring and its cross-source connections exist
+// for. `storefront` is one repo holding a public serverless frontend;
+// `platform` is another holding the private API it calls and the stateful
+// `server` database behind that (only a `server` may hold a persistent volume).
+//
+// The interesting part is `web`'s API_URL: a connection into a service that
+// another deploy file declares. Service ids are unique per PROJECT, so the
+// reference names no source — and a map scoped to one source could not draw it.
+const DUMMY_DEPLOYMENT_SOURCE_IDS = { storefront: 'storefront', platform: 'platform' } as const;
+
+const DUMMY_DEPLOYMENT_SERVICES = [
+  {
+    sourceId: DUMMY_DEPLOYMENT_SOURCE_IDS.storefront,
+    serviceId: 'web',
+    type: 'serverless',
+    isPublic: true,
+    ports: { '3000': { protocol: 'http' } },
+    minInstances: 0,
+    maxInstances: 3,
+    rootDirectory: './apps/web',
+    dockerfilePath: null,
+    volume: null,
+    url: 'https://demo-web.hexclave.app',
+    env: [
+      ['NEXT_PUBLIC_SITE_NAME', { value: 'Demo' }],
+      ['API_URL', { type: 'connection', value: 'api.url:8080' }],
+    ],
+  },
+  {
+    sourceId: DUMMY_DEPLOYMENT_SOURCE_IDS.platform,
+    serviceId: 'api',
+    type: 'serverless',
+    isPublic: false,
+    ports: { '8080': { protocol: 'http' } },
+    minInstances: 0,
+    maxInstances: 2,
+    rootDirectory: './apps/api',
+    dockerfilePath: 'Dockerfile',
+    volume: null,
+    url: null,
+    env: [
+      ['DATABASE_HOST', { type: 'connection', value: 'db.hostname' }],
+      ['DATABASE_PORT', { value: '5432' }],
+      ['OPENAI_API_KEY', { type: 'secret', key: 'OPENAI_API_KEY' }],
+    ],
+  },
+  {
+    sourceId: DUMMY_DEPLOYMENT_SOURCE_IDS.platform,
+    serviceId: 'db',
+    type: 'server',
+    isPublic: false,
+    ports: { '5432': { protocol: 'tcp' } },
+    // A database is the case for an always-on server: suspended, nothing could
+    // wake it, since its clients reach it over a raw TCP port.
+    minInstances: 1,
+    maxInstances: 1,
+    rootDirectory: './database',
+    dockerfilePath: 'Dockerfile',
+    volume: { id: 'pgdata', path: '/data', sizeGb: 10 },
+    url: null,
+    env: [['POSTGRES_PASSWORD', { type: 'secret', key: 'POSTGRES_PASSWORD' }]],
+  },
+] as const;
+
+// What each source's `hexclave deploy` PACKAGED, per deployment source. A deploy
+// uploads one tree and every source-built service is built from it, so a
+// manifest belongs to the source rather than to any one service — the Source tab
+// slices it by each service's `rootDirectory`.
+//
+// Sized to demonstrate what the tab is FOR: `storefront`'s upload is dominated
+// by one video and one image under `apps/web/public`, which is the shape of
+// every "why is my deploy slow" question, and the answer is visible at a glance.
+// Only files that survive .gitignore/.dockerignore are listed, because that is
+// all a real manifest contains — which is what lets a reader use it to check
+// that an ignore rule worked.
+const DUMMY_DEPLOYMENT_SOURCE_FILES: Record<string, { path: string, bytes: number }[]> = {
+  storefront: [
+    { path: 'apps/web/public/hero.mp4', bytes: 5_412_880 },
+    { path: 'apps/web/public/og-image.png', bytes: 842_190 },
+    { path: 'apps/web/public/logo.svg', bytes: 11_204 },
+    { path: 'apps/web/app/page.tsx', bytes: 6_118 },
+    { path: 'apps/web/app/layout.tsx', bytes: 2_940 },
+    { path: 'apps/web/app/globals.css', bytes: 2_301 },
+    { path: 'apps/web/lib/api-client.ts', bytes: 1_884 },
+    { path: 'apps/web/next.config.mjs', bytes: 612 },
+    { path: 'apps/web/package.json', bytes: 918 },
+    { path: 'hexclave.deploy.ts', bytes: 744 },
+    { path: 'pnpm-workspace.yaml', bytes: 96 },
+    { path: '.gitignore', bytes: 128 },
+  ],
+  platform: [
+    { path: 'apps/api/vendor/geoip-city.mmdb', bytes: 2_180_640 },
+    { path: 'apps/api/src/server.ts', bytes: 14_402 },
+    { path: 'apps/api/src/routes/orders.ts', bytes: 8_770 },
+    { path: 'apps/api/src/routes/catalog.ts', bytes: 6_205 },
+    { path: 'apps/api/src/db/pool.ts', bytes: 1_540 },
+    { path: 'apps/api/Dockerfile', bytes: 486 },
+    { path: 'apps/api/package.json', bytes: 1_102 },
+    { path: 'database/Dockerfile', bytes: 214 },
+    { path: 'database/init/01-schema.sql', bytes: 4_860 },
+    { path: 'database/init/02-seed.sql', bytes: 1_733 },
+    { path: 'hexclave.deploy.ts', bytes: 1_026 },
+    { path: '.dockerignore', bytes: 74 },
+  ],
+};
+
+/**
+ * The manifest a deploy of `sourceId` would have reported.
+ *
+ * Totals are DERIVED from the listing rather than written beside it, so the
+ * fixture cannot drift into claiming a file count or a size its own files
+ * contradict. The compression ratio is a plausible constant: these trees are
+ * mostly already-compressed media, which barely shrinks.
+ */
+function dummySourceManifest(sourceId: string): Prisma.InputJsonValue {
+  const files = DUMMY_DEPLOYMENT_SOURCE_FILES[sourceId] ?? throwErr(`no dummy source files for ${sourceId}`);
+  const totalBytes = files.reduce((total, file) => total + file.bytes, 0);
+  return {
+    file_count: files.length,
+    total_bytes: totalBytes,
+    compressed_bytes: Math.round(totalBytes * 0.82),
+    entries: [...files].sort((a, b) => b.bytes - a.bytes),
+  };
+}
+
+// Deployments, newest last. Each entry is one `hexclave deploy` of ONE source:
+// the services it planned, in dependency order, and the outcome of each. A
+// service marked `skipped` was planned but never reached — that is what a
+// dependency failure looks like, and the dashboard renders it as such.
+//
+// The two sources deploy INDEPENDENTLY and interleaved, which is the point of
+// the fixture: opening a deployment shows everything running at that moment, so
+// each entry below is a different answer. Opening #1 (the first `platform`
+// deploy) predates `storefront` entirely, so `web` is absent — it had not been
+// deployed yet. Opening #4 shows `web` as that deploy shipped it alongside the
+// FAILED `api` from #3, which is what was actually running underneath it.
+//
+// Every deployment is TERMINAL on purpose. The list refreshes non-terminal
+// deployments from the runtime on read, which a demo project has no runtime for;
+// a seeded "building" deployment would poll forever and log an error each time.
+const DUMMY_DEPLOYMENTS = [
+  { minutesAgo: 60 * 26, sourceId: DUMMY_DEPLOYMENT_SOURCE_IDS.platform, status: 'SUCCEEDED', services: { db: 'deployed', api: 'deployed' } },
+  { minutesAgo: 60 * 25, sourceId: DUMMY_DEPLOYMENT_SOURCE_IDS.storefront, status: 'SUCCEEDED', services: { web: 'deployed' } },
+  { minutesAgo: 60 * 6, sourceId: DUMMY_DEPLOYMENT_SOURCE_IDS.platform, status: 'FAILED', services: { db: 'deployed', api: 'failed' } },
+  { minutesAgo: 42, sourceId: DUMMY_DEPLOYMENT_SOURCE_IDS.storefront, status: 'SUCCEEDED', services: { web: 'deployed' } },
+] as const;
+
+/**
+ * Seeds the Deployments app: two deployment sources, their service definitions,
+ * and a short deploy history that interleaves them.
+ *
+ * Without this the app renders its empty state, which shows none of the states
+ * the page exists to display — a partially failed deploy, a skipped service, a
+ * service with a persistent volume, and a connection that crosses from one
+ * repository's service into another's.
+ */
+async function seedDummyDeployments(options: {
+  prisma: PrismaClientTransaction,
+  tenancyId: string,
+}) {
+  const { prisma, tenancyId } = options;
+  const now = Date.now();
+  const firstDeployedAt = new Date(now - DUMMY_DEPLOYMENTS[0].minutesAgo * 60_000);
+
+  // An earlier version of this fixture put all three services under a single
+  // `demo-app` source. Drop it before seeding the two that replace it: the
+  // upserts below re-point the services and deployments by their deterministic
+  // ids, but the volume is keyed by (source, volumeId) and would collide with
+  // its own old row, and the emptied source would still show up as a
+  // repository the demo project no longer deploys from. Cascades to whatever
+  // of it survives.
+  await prisma.deploymentSource.deleteMany({ where: { tenancyId, sourceId: 'demo-app' } });
+
+  const sourceRowIdOf = (sourceId: string) => deterministicUuid(`deployment-source:${tenancyId}:${sourceId}`);
+  for (const sourceId of Object.values(DUMMY_DEPLOYMENT_SOURCE_IDS)) {
+    await prisma.deploymentSource.upsert({
+      where: { tenancyId_sourceId: { tenancyId, sourceId } },
+      create: { tenancyId, id: sourceRowIdOf(sourceId), sourceId },
+      update: {},
+    });
+  }
+
+  for (const service of DUMMY_DEPLOYMENT_SERVICES) {
+    const id = deterministicUuid(`deployment-service:${tenancyId}:${service.serviceId}`);
+    const sourceRowId = sourceRowIdOf(service.sourceId);
+    const definitionColumns = {
+      sourceRowId,
+      definitionSyncedAt: firstDeployedAt,
+      definitionSyncId: deterministicUuid(`deployment-sync:${tenancyId}:${service.serviceId}`),
+      type: service.type,
+      isPublic: service.isPublic,
+      ports: service.ports as unknown as Prisma.InputJsonValue,
+      minInstances: service.minInstances,
+      maxInstances: service.maxInstances,
+      rootDirectory: service.rootDirectory,
+      dockerfilePath: service.dockerfilePath,
+      env: service.env as unknown as Prisma.InputJsonValue,
+      provisionedAt: firstDeployedAt,
+    };
+    await prisma.deploymentService.upsert({
+      where: { tenancyId_serviceId: { tenancyId, serviceId: service.serviceId } },
+      create: { tenancyId, id, serviceId: service.serviceId, ...definitionColumns },
+      update: definitionColumns,
+    });
+    // The disk is owned by the deployment source and merely mounted here, so it
+    // is a row of its own rather than a column on the service.
+    if (service.volume !== null) {
+      const volumeColumns = { serviceId: service.serviceId, path: service.volume.path, sizeGb: service.volume.sizeGb };
+      await prisma.deploymentVolume.upsert({
+        where: { tenancyId_sourceRowId_volumeId: { tenancyId, sourceRowId, volumeId: service.volume.id } },
+        create: { tenancyId, id: deterministicUuid(`deployment-volume:${tenancyId}:${service.volume.id}`), sourceRowId, volumeId: service.volume.id, ...volumeColumns },
+        update: volumeColumns,
+      });
+    }
+  }
+
+  for (const [index, deployment] of DUMMY_DEPLOYMENTS.entries()) {
+    const deploymentId = deterministicUuid(`deployment:${tenancyId}:${index}`);
+    const createdAt = new Date(now - deployment.minutesAgo * 60_000);
+    // A deploy ships one SOURCE's services, in dependency order: within
+    // `platform`, the database before the API that connects to it.
+    const plannedServiceIds = ['db', 'api', 'web'].filter((serviceId) => serviceId in deployment.services);
+    const deploymentColumns = {
+      sourceRowId: sourceRowIdOf(deployment.sourceId),
+      // Monotonic per TENANCY, not per source — the number counts deploys of
+      // the whole project, which is why two sources share one sequence.
+      number: index + 1,
+      triggeredBy: 'cli',
+      status: deployment.status,
+      error: deployment.status === 'FAILED' ? 'The build of `api` failed, so nothing was rolled out.' : null,
+      marshalBuildId: `bld_${createHash('sha256').update(deploymentId).digest('hex').slice(0, 16)}`,
+      plannedServiceIds,
+      // Every seeded deploy builds from source, so every one has a manifest —
+      // an all-prebuilt deploy would have none, which is a state the fixture
+      // does not currently cover.
+      sourceManifest: dummySourceManifest(deployment.sourceId),
+      services: Object.fromEntries(plannedServiceIds.map((serviceId) => {
+        // The per-entry `services` records have different keys, so the union's
+        // index type is narrower than the ids being looked up here.
+        const status = (deployment.services as Record<string, string>)[serviceId];
+        const service = DUMMY_DEPLOYMENT_SERVICES.find((candidate) => candidate.serviceId === serviceId) ?? throwErr(`unknown dummy service ${serviceId}`);
+        return [serviceId, {
+          status,
+          url: status === 'deployed' ? service.url : null,
+          revision: createHash('sha256').update(`${deploymentId}:${serviceId}`).digest('hex').slice(0, 12),
+          error: status === 'failed' ? 'Build failed: `pnpm build` exited with code 1' : null,
+        }];
+      })) as unknown as Prisma.InputJsonValue,
+      createdAt,
+      finishedAt: new Date(createdAt.getTime() + 140_000),
+    };
+    await prisma.deployment.upsert({
+      where: { tenancyId_id: { tenancyId, id: deploymentId } },
+      create: { tenancyId, id: deploymentId, ...deploymentColumns },
+      update: deploymentColumns,
+    });
+  }
+
 }

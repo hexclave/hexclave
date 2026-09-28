@@ -35,6 +35,14 @@ function createAccessTokenString(refreshTokenId: string, options?: { iatOffsetSe
   ].join(".");
 }
 
+function createAccessToken(refreshTokenId: string, options?: { iatOffsetSeconds?: number, sub?: string }): AccessToken {
+  const accessToken = AccessToken.createIfValid(createAccessTokenString(refreshTokenId, options));
+  if (accessToken === null) {
+    throw new Error("The test access token should satisfy the access token schema");
+  }
+  return accessToken;
+}
+
 function createAccessOnlySession(accessToken: string): InternalSession {
   return new InternalSession({
     refreshAccessTokenCallback: async () => null,
@@ -221,6 +229,59 @@ describe("InternalSession delegated access-token refresh", () => {
 
     await expect(session.getOrFetchLikelyValidTokens(20_000, null)).rejects.toThrow("Temporary provider failure");
     expect((await session.getOrFetchLikelyValidTokens(20_000, null))?.accessToken.token).toBe(accessToken);
+  });
+});
+
+
+describe("InternalSession#getOrFetchLikelyValidTokens", () => {
+  it("starts a new refresh after an earlier refresh rejects", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          throw new Error("Temporary refresh failure");
+        }
+        return createAccessToken("rtid-1");
+      },
+      refreshToken: "rt-abc",
+    });
+
+    await expect(session.getOrFetchLikelyValidTokens(20_000, null))
+      .rejects.toThrow("Temporary refresh failure");
+    await expect(session.getOrFetchLikelyValidTokens(20_000, null))
+      .resolves.toMatchObject({ accessToken: { token: expect.any(String) } });
+    expect(refreshCount).toBe(2);
+  });
+
+  it("retries once when a newly fetched access token is already too old", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        return createAccessToken("rtid-1", { iatOffsetSeconds: refreshCount === 1 ? -20 : 0 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    const tokens = await session.getOrFetchLikelyValidTokens(20_000, 15_000);
+
+    expect(refreshCount).toBe(2);
+    expect(tokens?.accessToken.issuedMillisAgo).toBeLessThan(15_000);
+  });
+
+  it("throws after one retry when the newly fetched access token is still too old", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        return createAccessToken("rtid-1", { iatOffsetSeconds: -20 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    await expect(session.getOrFetchLikelyValidTokens(20_000, 15_000))
+      .rejects.toThrow("access token issuance is too slow");
     expect(refreshCount).toBe(2);
   });
 });

@@ -1,29 +1,42 @@
 /**
- * One-way backfill of the four payment tables from Postgres into bulldozer-js.
+ * One-way backfill of the payment tables from Postgres into bulldozer-js.
  *
  * It pages each table out of Postgres (via the read replica) and POSTs each
  * page into bulldozer-js through the batch ingress routes, which apply the whole
  * page in one snapshot write + one downstream cascade (far cheaper than one
  * cascade per row). There is no read-back / compare / fingerprint: bulldozer-js
- * stores each row under its `id` and the write is idempotent, so overwriting
- * unconditionally is correct and the whole script is safe to re-run (it just
- * re-converges).
+ * stores each row under its `id` (or `txnId` for ManualTransaction) and the
+ * write is idempotent, so overwriting unconditionally is correct and the whole
+ * script is safe to re-run (it just re-converges).
  *
- * Resume: there is no persistent checkpoint (it wouldn't survive an ephemeral
- * cloud instance, and isn't needed for correctness — a crash is recovered by
- * just re-running). Progress is logged per batch with the end cursor; for a very
- * large table you can skip ahead with --resume-table / --resume-cursor sourced
- * from those logs. Because the cursor only advances after every row in a batch
- * is confirmed written, the last logged cursor is always at-or-before the true
- * high-water mark, so resuming there can only re-do safe work, never skip.
+ * Resume (only needed for huge tables that crashed mid-way):
+ *   Rows are walked in ascending sort order — Postgres
+ *   `ORDER BY "tenancyId" ASC, "id" ASC` (for ManualTransaction, `"txnId"`
+ *   instead of `"id"`). For UUIDs/text that means dictionary order
+ *   (0-9 then a-f…), not “smallest by size.”
+ *   Each batch log prints `cursor=<tenancyId>,<id>` for the LAST row that
+ *   batch finished. Everything at-or-before that cursor (in that same order,
+ *   under the same tenancy filters) has already been written. To continue,
+ *   copy that exact cursor from the log — do not invent one. Use the same
+ *   --only-tenancy-ids / --exclude-tenancy-ids as the run that printed it.
+ *   The cursor only advances after the batch write succeeds, so resuming from
+ *   the last logged cursor may re-do that last batch (safe) but will not skip
+ *   unwritten rows.
+ *
+ * Tenancy filters (optional; pick at most one):
+ *   (omit both)                   copy every tenancy
+ *   --only-tenancy-ids=...        copy JUST these tenancies
+ *   --exclude-tenancy-ids=...     copy everyone EXCEPT these
  */
 
+import { Prisma } from "@/generated/prisma/client";
 import {
   bulldozerWriteItemQuantityChanges,
   bulldozerWriteManualTransactions,
   bulldozerWriteOneTimePurchases,
   bulldozerWriteSubscriptionInvoices,
   bulldozerWriteSubscriptions,
+  prismaManualTransactionToBulldozerRow,
 } from "@/lib/payments/bulldozer-dual-write";
 import type { CustomerType, ManualTransactionRow } from "@/lib/payments/schema/types";
 import {
@@ -35,22 +48,53 @@ import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 
 const DEFAULT_BATCH_SIZE = 50;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type PrismaReplica = ReturnType<typeof globalPrismaClient.$replica>;
 type SubscriptionBackfillRow = Parameters<typeof bulldozerWriteSubscriptions>[0][number];
 type SubscriptionInvoiceBackfillRow = Parameters<typeof bulldozerWriteSubscriptionInvoices>[0][number];
 type OneTimePurchaseBackfillRow = Parameters<typeof bulldozerWriteOneTimePurchases>[0][number];
 type ItemQuantityChangeBackfillRow = Parameters<typeof bulldozerWriteItemQuantityChanges>[0][number];
+type ManualTransactionPrismaRow = {
+  tenancyId: string,
+  txnId: string,
+  type: string,
+  customerId: string,
+  customerType: string,
+  paymentProvider: string | null,
+  effectiveAt: Date,
+  createdAt: Date,
+  entries: unknown,
+};
+/** Cursor uses `id` = txnId so the shared pagination loop stays homogeneous. */
+type ManualTransactionBackfillRow = ManualTransactionPrismaRow & { id: string };
 
 // Fixed processing order. Resume positions are interpreted against this list.
+// ManualTransaction is last so refund targets (subs/OTPs) exist before refunds land.
 export const BACKFILL_TABLES = [
   "Subscription",
   "SubscriptionInvoice",
   "OneTimePurchase",
   "ItemQuantityChange",
+  "ManualTransaction",
 ] as const;
 export type BackfillTableName = (typeof BACKFILL_TABLES)[number];
 
 type Cursor = { tenancyId: string, id: string };
+
+export type TenancyIdFilter =
+  | { mode: "exclude", tenancyIds: string[] }
+  | { mode: "only", tenancyIds: string[] };
+
+type PaymentOutcomeColumnPresence = {
+  subscriptionInvoicePaidAt: boolean,
+  subscriptionInvoiceMarkedUncollectibleAt: boolean,
+  subscriptionInvoiceVoidedAt: boolean,
+  subscriptionInvoiceCurrency: boolean,
+  subscriptionInvoiceAmountPaid: boolean,
+  oneTimePurchaseAmountReceived: boolean,
+  oneTimePurchaseCurrency: boolean,
+  oneTimePurchasePaidAt: boolean,
+};
 
 export type BackfillResumeOptions = {
   resumeTable?: BackfillTableName,
@@ -65,6 +109,7 @@ export type BackfillResumeOptions = {
   // the amount of work redone if a batch fails mid-run. Defaults to
   // DEFAULT_BATCH_SIZE when omitted.
   batchSize?: number,
+  tenancyFilter?: TenancyIdFilter,
 };
 
 /** A row bulldozer-js refused, captured under --continue-on-error. */
@@ -163,6 +208,7 @@ function buildBackfilledRefundManualTransaction(options: {
       customerId: options.row.customerId,
       paymentProvider: options.row.creationSource === "TEST_MODE" ? "test_mode" : "stripe",
       createdAtMillis: refundedAtMillis,
+      renewalTargetSubscriptionId: null,
     },
   };
 }
@@ -274,172 +320,293 @@ async function backfillTable<T extends Cursor>(
   log(`[${label}] done total=${total}${failed > 0 ? ` failed=${failed}` : ""} elapsed=${formatDuration(tableElapsedMs)} bulldozerReqTotal=${formatDuration(totalReqMs)} avgReq/batch=${formatDuration(avgReqMs)}`);
 }
 
-async function fetchSubscriptionBatch(replica: PrismaReplica, cursor: Cursor | null, batchSize: number): Promise<SubscriptionBackfillRow[]> {
-  return cursor === null
-    ? await replica.$queryRaw<SubscriptionBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "customerId",
-        "customerType",
-        "productId",
-        "priceId",
-        "product",
-        "quantity",
-        "stripeSubscriptionId",
-        "status",
-        "currentPeriodEnd",
-        "currentPeriodStart",
-        "cancelAtPeriodEnd",
-        "canceledAt",
-        "endedAt",
-        "refundedAt",
-        "productRevokedAt",
-        "creationSource",
-        "createdAt"
-      FROM "Subscription"
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `
-    : await replica.$queryRaw<SubscriptionBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "customerId",
-        "customerType",
-        "productId",
-        "priceId",
-        "product",
-        "quantity",
-        "stripeSubscriptionId",
-        "status",
-        "currentPeriodEnd",
-        "currentPeriodStart",
-        "cancelAtPeriodEnd",
-        "canceledAt",
-        "endedAt",
-        "refundedAt",
-        "productRevokedAt",
-        "creationSource",
-        "createdAt"
-      FROM "Subscription"
-      WHERE ("tenancyId", "id") > (${cursor.tenancyId}::uuid, ${cursor.id}::uuid)
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `;
+/** SQL fragment for tenancy filters. Empty when copying all tenancies. */
+function tenancyFilterSql(filter: TenancyIdFilter | undefined): Prisma.Sql {
+  if (filter === undefined) return Prisma.empty;
+  const list = Prisma.join(filter.tenancyIds.map((id) => Prisma.sql`${id}::uuid`));
+  // "only" = JUST these tenancies. "exclude" = everyone except these.
+  return filter.mode === "exclude"
+    ? Prisma.sql`AND "tenancyId" NOT IN (${list})`
+    : Prisma.sql`AND "tenancyId" IN (${list})`;
 }
 
-async function fetchSubscriptionInvoiceBatch(replica: PrismaReplica, cursor: Cursor | null, batchSize: number): Promise<SubscriptionInvoiceBackfillRow[]> {
-  return cursor === null
-    ? await replica.$queryRaw<SubscriptionInvoiceBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "stripeSubscriptionId",
-        "stripeInvoiceId",
-        "isSubscriptionCreationInvoice",
-        "status",
-        "amountTotal",
-        "hostedInvoiceUrl",
-        "createdAt"
-      FROM "SubscriptionInvoice"
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `
-    : await replica.$queryRaw<SubscriptionInvoiceBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "stripeSubscriptionId",
-        "stripeInvoiceId",
-        "isSubscriptionCreationInvoice",
-        "status",
-        "amountTotal",
-        "hostedInvoiceUrl",
-        "createdAt"
-      FROM "SubscriptionInvoice"
-      WHERE ("tenancyId", "id") > (${cursor.tenancyId}::uuid, ${cursor.id}::uuid)
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `;
+/** Keyset predicate for UUID primary-key tables ordered by (tenancyId, id). */
+function uuidIdCursorSql(cursor: Cursor | null): Prisma.Sql {
+  if (cursor === null) return Prisma.empty;
+  return Prisma.sql`AND ("tenancyId", "id") > (${cursor.tenancyId}::uuid, ${cursor.id}::uuid)`;
 }
 
-async function fetchOneTimePurchaseBatch(replica: PrismaReplica, cursor: Cursor | null, batchSize: number): Promise<OneTimePurchaseBackfillRow[]> {
-  return cursor === null
-    ? await replica.$queryRaw<OneTimePurchaseBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "customerId",
-        "customerType",
-        "productId",
-        "priceId",
-        "product",
-        "quantity",
-        "stripePaymentIntentId",
-        "revokedAt",
-        "refundedAt",
-        "creationSource",
-        "createdAt"
-      FROM "OneTimePurchase"
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `
-    : await replica.$queryRaw<OneTimePurchaseBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "customerId",
-        "customerType",
-        "productId",
-        "priceId",
-        "product",
-        "quantity",
-        "stripePaymentIntentId",
-        "revokedAt",
-        "refundedAt",
-        "creationSource",
-        "createdAt"
-      FROM "OneTimePurchase"
-      WHERE ("tenancyId", "id") > (${cursor.tenancyId}::uuid, ${cursor.id}::uuid)
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `;
+/**
+ * Keyset predicate for ManualTransaction. That table's primary key is
+ * (tenancyId, txnId) — there is no UUID `id` column — so Cursor.id holds txnId
+ * and we compare against "txnId" in SQL. Same resume flag shape as other tables
+ * (`--resume-cursor=<tenancyId>,<id>`), just with id meaning txnId here.
+ */
+function txnIdCursorSql(cursor: Cursor | null): Prisma.Sql {
+  if (cursor === null) return Prisma.empty;
+  return Prisma.sql`AND ("tenancyId", "txnId") > (${cursor.tenancyId}::uuid, ${cursor.id})`;
 }
 
-async function fetchItemQuantityChangeBatch(replica: PrismaReplica, cursor: Cursor | null, batchSize: number): Promise<ItemQuantityChangeBackfillRow[]> {
-  return cursor === null
-    ? await replica.$queryRaw<ItemQuantityChangeBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "customerId",
-        "customerType",
-        "itemId",
-        "quantity",
-        "description",
-        "expiresAt",
-        "createdAt"
-      FROM "ItemQuantityChange"
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `
-    : await replica.$queryRaw<ItemQuantityChangeBackfillRow[]>`
-      SELECT
-        "id",
-        "tenancyId",
-        "customerId",
-        "customerType",
-        "itemId",
-        "quantity",
-        "description",
-        "expiresAt",
-        "createdAt"
-      FROM "ItemQuantityChange"
-      WHERE ("tenancyId", "id") > (${cursor.tenancyId}::uuid, ${cursor.id}::uuid)
-      ORDER BY "tenancyId" ASC, "id" ASC
-      LIMIT ${batchSize}
-    `;
+async function getPaymentOutcomeColumnPresence(replica: PrismaReplica): Promise<PaymentOutcomeColumnPresence> {
+  const rows = await replica.$queryRaw<PaymentOutcomeColumnPresence[]>`
+    -- Code can run during the deploy window before payment-outcome migrations are applied.
+    SELECT
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'paidAt'
+      ) AS "subscriptionInvoicePaidAt",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'markedUncollectibleAt'
+      ) AS "subscriptionInvoiceMarkedUncollectibleAt",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'voidedAt'
+      ) AS "subscriptionInvoiceVoidedAt",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'currency'
+      ) AS "subscriptionInvoiceCurrency",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'amountPaid'
+      ) AS "subscriptionInvoiceAmountPaid",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'OneTimePurchase'
+          AND column_name = 'amountReceived'
+      ) AS "oneTimePurchaseAmountReceived",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'OneTimePurchase'
+          AND column_name = 'currency'
+      ) AS "oneTimePurchaseCurrency",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'OneTimePurchase'
+          AND column_name = 'paidAt'
+      ) AS "oneTimePurchasePaidAt"
+  `;
+  if (rows.length !== 1) {
+    throw new Error(`Expected payment outcome column presence query to return one row, got ${rows.length}`);
+  }
+  return rows[0];
+}
+
+function subscriptionInvoicePaymentColumnsSql(presence: PaymentOutcomeColumnPresence): Prisma.Sql {
+  return Prisma.sql`
+    ${presence.subscriptionInvoicePaidAt ? Prisma.sql`"paidAt"` : Prisma.sql`NULL::timestamp AS "paidAt"`},
+    ${presence.subscriptionInvoiceMarkedUncollectibleAt ? Prisma.sql`"markedUncollectibleAt"` : Prisma.sql`NULL::timestamp AS "markedUncollectibleAt"`},
+    ${presence.subscriptionInvoiceVoidedAt ? Prisma.sql`"voidedAt"` : Prisma.sql`NULL::timestamp AS "voidedAt"`},
+    ${presence.subscriptionInvoiceCurrency ? Prisma.sql`"currency"` : Prisma.sql`NULL::text AS "currency"`},
+    ${presence.subscriptionInvoiceAmountPaid ? Prisma.sql`"amountPaid"` : Prisma.sql`NULL::integer AS "amountPaid"`}
+  `;
+}
+
+function oneTimePurchasePaymentColumnsSql(presence: PaymentOutcomeColumnPresence): Prisma.Sql {
+  return Prisma.sql`
+    ${presence.oneTimePurchaseAmountReceived ? Prisma.sql`"amountReceived"` : Prisma.sql`NULL::integer AS "amountReceived"`},
+    ${presence.oneTimePurchaseCurrency ? Prisma.sql`"currency"` : Prisma.sql`NULL::text AS "currency"`},
+    ${presence.oneTimePurchasePaidAt ? Prisma.sql`"paidAt"` : Prisma.sql`NULL::timestamp AS "paidAt"`}
+  `;
+}
+
+function missingPaymentOutcomeColumns(presence: PaymentOutcomeColumnPresence): string[] {
+  const missing: string[] = [];
+  if (!presence.subscriptionInvoicePaidAt) missing.push("SubscriptionInvoice.paidAt");
+  if (!presence.subscriptionInvoiceMarkedUncollectibleAt) missing.push("SubscriptionInvoice.markedUncollectibleAt");
+  if (!presence.subscriptionInvoiceVoidedAt) missing.push("SubscriptionInvoice.voidedAt");
+  if (!presence.subscriptionInvoiceCurrency) missing.push("SubscriptionInvoice.currency");
+  if (!presence.subscriptionInvoiceAmountPaid) missing.push("SubscriptionInvoice.amountPaid");
+  if (!presence.oneTimePurchaseAmountReceived) missing.push("OneTimePurchase.amountReceived");
+  if (!presence.oneTimePurchaseCurrency) missing.push("OneTimePurchase.currency");
+  if (!presence.oneTimePurchasePaidAt) missing.push("OneTimePurchase.paidAt");
+  return missing;
+}
+
+function paymentOutcomeColumnPresenceChanged(
+  previous: PaymentOutcomeColumnPresence,
+  next: PaymentOutcomeColumnPresence,
+): boolean {
+  return previous.subscriptionInvoicePaidAt !== next.subscriptionInvoicePaidAt
+    || previous.subscriptionInvoiceMarkedUncollectibleAt !== next.subscriptionInvoiceMarkedUncollectibleAt
+    || previous.subscriptionInvoiceVoidedAt !== next.subscriptionInvoiceVoidedAt
+    || previous.subscriptionInvoiceCurrency !== next.subscriptionInvoiceCurrency
+    || previous.subscriptionInvoiceAmountPaid !== next.subscriptionInvoiceAmountPaid
+    || previous.oneTimePurchaseAmountReceived !== next.oneTimePurchaseAmountReceived
+    || previous.oneTimePurchaseCurrency !== next.oneTimePurchaseCurrency
+    || previous.oneTimePurchasePaidAt !== next.oneTimePurchasePaidAt;
+}
+
+async function fetchSubscriptionBatch(
+  replica: PrismaReplica,
+  cursor: Cursor | null,
+  batchSize: number,
+  tenancyFilter: TenancyIdFilter | undefined,
+): Promise<SubscriptionBackfillRow[]> {
+  return await replica.$queryRaw<SubscriptionBackfillRow[]>`
+    SELECT
+      "id",
+      "tenancyId",
+      "customerId",
+      "customerType",
+      "productId",
+      "priceId",
+      "product",
+      "quantity",
+      "stripeSubscriptionId",
+      "status",
+      "currentPeriodEnd",
+      "currentPeriodStart",
+      "cancelAtPeriodEnd",
+      "canceledAt",
+      "endedAt",
+      "refundedAt",
+      "productRevokedAt",
+      "creationSource",
+      "createdAt"
+    FROM "Subscription"
+    WHERE TRUE
+    ${tenancyFilterSql(tenancyFilter)}
+    ${uuidIdCursorSql(cursor)}
+    ORDER BY "tenancyId" ASC, "id" ASC
+    LIMIT ${batchSize}
+  `;
+}
+
+async function fetchSubscriptionInvoiceBatch(
+  replica: PrismaReplica,
+  cursor: Cursor | null,
+  batchSize: number,
+  tenancyFilter: TenancyIdFilter | undefined,
+  paymentColumns: Prisma.Sql,
+): Promise<SubscriptionInvoiceBackfillRow[]> {
+  return await replica.$queryRaw<SubscriptionInvoiceBackfillRow[]>`
+    SELECT
+      "id",
+      "tenancyId",
+      "stripeSubscriptionId",
+      "stripeInvoiceId",
+      "isSubscriptionCreationInvoice",
+      "status",
+      "amountTotal",
+      ${paymentColumns},
+      "hostedInvoiceUrl",
+      "createdAt"
+    FROM "SubscriptionInvoice"
+    WHERE TRUE
+    ${tenancyFilterSql(tenancyFilter)}
+    ${uuidIdCursorSql(cursor)}
+    ORDER BY "tenancyId" ASC, "id" ASC
+    LIMIT ${batchSize}
+  `;
+}
+
+async function fetchOneTimePurchaseBatch(
+  replica: PrismaReplica,
+  cursor: Cursor | null,
+  batchSize: number,
+  tenancyFilter: TenancyIdFilter | undefined,
+  paymentColumns: Prisma.Sql,
+): Promise<OneTimePurchaseBackfillRow[]> {
+  return await replica.$queryRaw<OneTimePurchaseBackfillRow[]>`
+    SELECT
+      "id",
+      "tenancyId",
+      "customerId",
+      "customerType",
+      "productId",
+      "priceId",
+      "product",
+      "quantity",
+      "stripePaymentIntentId",
+      "revokedAt",
+      "refundedAt",
+      "creationSource",
+      ${paymentColumns},
+      "createdAt"
+    FROM "OneTimePurchase"
+    WHERE TRUE
+    ${tenancyFilterSql(tenancyFilter)}
+    ${uuidIdCursorSql(cursor)}
+    ORDER BY "tenancyId" ASC, "id" ASC
+    LIMIT ${batchSize}
+  `;
+}
+
+async function fetchItemQuantityChangeBatch(
+  replica: PrismaReplica,
+  cursor: Cursor | null,
+  batchSize: number,
+  tenancyFilter: TenancyIdFilter | undefined,
+): Promise<ItemQuantityChangeBackfillRow[]> {
+  return await replica.$queryRaw<ItemQuantityChangeBackfillRow[]>`
+    SELECT
+      "id",
+      "tenancyId",
+      "customerId",
+      "customerType",
+      "itemId",
+      "quantity",
+      "description",
+      "expiresAt",
+      "createdAt"
+    FROM "ItemQuantityChange"
+    WHERE TRUE
+    ${tenancyFilterSql(tenancyFilter)}
+    ${uuidIdCursorSql(cursor)}
+    ORDER BY "tenancyId" ASC, "id" ASC
+    LIMIT ${batchSize}
+  `;
+}
+
+async function fetchManualTransactionBatch(
+  replica: PrismaReplica,
+  cursor: Cursor | null,
+  batchSize: number,
+  tenancyFilter: TenancyIdFilter | undefined,
+): Promise<ManualTransactionBackfillRow[]> {
+  const rows = await replica.$queryRaw<ManualTransactionPrismaRow[]>`
+    SELECT
+      "tenancyId",
+      "txnId",
+      "type",
+      "customerId",
+      "customerType",
+      "paymentProvider",
+      "effectiveAt",
+      "createdAt",
+      "entries"
+    FROM "ManualTransaction"
+    WHERE TRUE
+    ${tenancyFilterSql(tenancyFilter)}
+    ${txnIdCursorSql(cursor)}
+    ORDER BY "tenancyId" ASC, "txnId" ASC
+    LIMIT ${batchSize}
+  `;
+  // Homogenize with other tables: Cursor.id is txnId for resume logs / keyset.
+  return rows.map((row) => ({ ...row, id: row.txnId }));
 }
 
 /** Tables before `resumeTable` are treated as already done; the rest run. */
@@ -454,25 +621,85 @@ function startCursorFor(table: BackfillTableName, options: BackfillResumeOptions
 }
 
 /**
- * Parses the optional resume flags from a raw argv list:
+ * Resume cursors are "everything after this (tenancyId, id) in sort order".
+ * If that tenancy is outside the active filter, continuing would quietly skip
+ * (or empty-out) rows the user still wanted — fail loud instead.
+ */
+function assertResumeCursorMatchesTenancyFilter(
+  cursor: Cursor | undefined,
+  filter: TenancyIdFilter | undefined,
+): void {
+  if (cursor === undefined || filter === undefined) return;
+  if (filter.mode === "exclude" && filter.tenancyIds.includes(cursor.tenancyId)) {
+    throw new Error(
+      `--resume-cursor tenancy ${cursor.tenancyId} is on --exclude-tenancy-ids. `
+      + `Paste a cursor from a run that used the same filters (or drop the exclude). `
+      + `Otherwise rows before that cursor in sort order can be skipped.`,
+    );
+  }
+  if (filter.mode === "only" && !filter.tenancyIds.includes(cursor.tenancyId)) {
+    throw new Error(
+      `--resume-cursor tenancy ${cursor.tenancyId} is not on --only-tenancy-ids. `
+      + `Paste a cursor from a run that used the same filters (or fix the only-list). `
+      + `Otherwise this run can finish with nothing left to copy.`,
+    );
+  }
+}
+
+function parseTenancyIdList(raw: string, flagName: string): string[] {
+  const ids = raw.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+  if (ids.length === 0) {
+    throw new Error(`${flagName} requires at least one tenancy UUID`);
+  }
+  for (const id of ids) {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`${flagName}: invalid tenancy UUID "${id}"`);
+    }
+  }
+  // Postgres uuid + logged cursors are lowercase; keep membership checks case-stable.
+  return ids.map((id) => id.toLowerCase());
+}
+
+/**
+ * Reads `--name=value` or `--name value`. Missing value fails loud so we never
+ * silently fall back to a default.
+ */
+function readFlag(args: string[], name: string): string | undefined {
+  const prefix = `--${name}=`;
+  const eq = args.find((arg) => arg.startsWith(prefix));
+  if (eq !== undefined) return eq.slice(prefix.length);
+  const bareIndex = args.indexOf(`--${name}`);
+  if (bareIndex === -1) return undefined;
+  if (bareIndex + 1 >= args.length || args[bareIndex + 1]!.startsWith("--")) {
+    throw new Error(`--${name} requires a value, e.g. --${name}=... or --${name} ...`);
+  }
+  return args[bareIndex + 1];
+}
+
+/** Plain-English description of which tenancies this run will touch. */
+function describeTenancyFilter(filter: TenancyIdFilter | undefined): string {
+  if (filter === undefined) return "all tenancies";
+  const ids = filter.tenancyIds.join(", ");
+  if (filter.mode === "only") {
+    // --only-tenancy-ids means: copy JUST these tenancies, skip everyone else.
+    return `just these tenancies: ${ids}`;
+  }
+  // --exclude-tenancy-ids means: copy everyone EXCEPT these.
+  return `all tenancies except: ${ids}`;
+}
+
+/**
+ * Parses the optional flags from a raw argv list:
  *   --resume-table=<TableName>  --resume-cursor=<tenancyId>,<id>
+ *   --exclude-tenancy-ids=<uuid,uuid> | --only-tenancy-ids=<uuid,uuid>
+ * All value flags accept both `--flag=value` and `--flag value`.
  * Lives here (not in the CLI entrypoint) so it's testable without importing the
  * db-migrations entrypoint, which runs `main()` on import.
  */
 export function parseBackfillResumeOptions(args: string[]): BackfillResumeOptions {
-  const prefix = (name: string) => `--${name}=`;
-  const readArg = (name: string) =>
-    args.find((arg) => arg.startsWith(prefix(name)))?.slice(prefix(name).length);
-
   const continueOnError = args.includes("--continue-on-error");
 
-  // Accept both `--batch-size=500` and the space form `--batch-size 500`. The
-  // space form arrives as two separate argv tokens, so `readArg` (which only
-  // matches the `name=` prefix) would miss it and we'd silently fall back to the
-  // default — a nasty footgun. Read the following token in that case, and fail
-  // loudly if `--batch-size` is present but has no usable value.
-  const bareBatchSizeIndex = args.indexOf("--batch-size");
-  const batchSizeArg = readArg("batch-size") ?? (bareBatchSizeIndex === -1 ? undefined : args[bareBatchSizeIndex + 1]);
+  const batchSizeArg = readFlag(args, "batch-size");
   let batchSize: number | undefined = undefined;
   if (batchSizeArg !== undefined) {
     const parsed = Number(batchSizeArg);
@@ -480,14 +707,29 @@ export function parseBackfillResumeOptions(args: string[]): BackfillResumeOption
       throw new Error(`--batch-size must be a positive integer (got "${batchSizeArg}")`);
     }
     batchSize = parsed;
-  } else if (bareBatchSizeIndex !== -1) {
-    throw new Error("--batch-size requires a value, e.g. --batch-size=500 or --batch-size 500");
   }
-  // Common options that apply regardless of whether a resume cursor was passed.
-  const base: BackfillResumeOptions = { continueOnError, ...(batchSize !== undefined ? { batchSize } : {}) };
 
-  const resumeTableArg = readArg("resume-table");
-  const resumeCursorArg = readArg("resume-cursor");
+  const excludeTenancyIdsRaw = readFlag(args, "exclude-tenancy-ids");
+  const onlyTenancyIdsRaw = readFlag(args, "only-tenancy-ids");
+  if (excludeTenancyIdsRaw !== undefined && onlyTenancyIdsRaw !== undefined) {
+    throw new Error("cannot combine --exclude-tenancy-ids and --only-tenancy-ids");
+  }
+  let tenancyFilter: TenancyIdFilter | undefined = undefined;
+  if (excludeTenancyIdsRaw !== undefined) {
+    tenancyFilter = { mode: "exclude", tenancyIds: parseTenancyIdList(excludeTenancyIdsRaw, "--exclude-tenancy-ids") };
+  } else if (onlyTenancyIdsRaw !== undefined) {
+    tenancyFilter = { mode: "only", tenancyIds: parseTenancyIdList(onlyTenancyIdsRaw, "--only-tenancy-ids") };
+  }
+
+  // Common options that apply regardless of whether a resume cursor was passed.
+  const base: BackfillResumeOptions = {
+    continueOnError,
+    ...(batchSize !== undefined ? { batchSize } : {}),
+    ...(tenancyFilter !== undefined ? { tenancyFilter } : {}),
+  };
+
+  const resumeTableArg = readFlag(args, "resume-table");
+  const resumeCursorArg = readFlag(args, "resume-cursor");
   if (resumeTableArg === undefined && resumeCursorArg === undefined) {
     return base;
   }
@@ -507,7 +749,10 @@ export function parseBackfillResumeOptions(args: string[]): BackfillResumeOption
   if (tenancyId.length === 0 || id.length === 0) {
     throw new Error("--resume-cursor must be in the form <tenancyId>,<id>");
   }
-  return { ...base, resumeTable, resumeCursor: { tenancyId, id } };
+  // Normalize tenancy UUID casing to match --only/--exclude parsing.
+  const resumeCursor = { tenancyId: tenancyId.toLowerCase(), id };
+  assertResumeCursorMatchesTenancyFilter(resumeCursor, tenancyFilter);
+  return { ...base, resumeTable, resumeCursor };
 }
 
 const MAX_FAILURE_PREVIEW = 50;
@@ -527,14 +772,39 @@ function formatBackfillFailures(failures: BackfillFailure[]): string {
 
 export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = {}) {
   const replica = globalPrismaClient.$replica();
+  let paymentOutcomeColumnPresence = await getPaymentOutcomeColumnPresence(replica);
+  let subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(paymentOutcomeColumnPresence);
+  let oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(paymentOutcomeColumnPresence);
+  const allPaymentOutcomeColumnsPresent = (presence: PaymentOutcomeColumnPresence) => Object.values(presence).every(Boolean);
+  const missingColumns = missingPaymentOutcomeColumns(paymentOutcomeColumnPresence);
+  if (missingColumns.length > 0) {
+    log(`WARNING: Payment outcome columns are missing: ${missingColumns.join(", ")}. This run mirrors NULL outcome values for those columns. Repeat this run after the payment outcome migrations are applied. Writes are idempotent.`);
+  }
+  let paymentOutcomeColumnPresenceChangedLogged = false;
+  const refreshPaymentOutcomeColumns = async () => {
+    if (allPaymentOutcomeColumnsPresent(paymentOutcomeColumnPresence)) return;
+    const nextPresence = await getPaymentOutcomeColumnPresence(replica);
+    const changed = paymentOutcomeColumnPresenceChanged(paymentOutcomeColumnPresence, nextPresence);
+    if (changed) {
+      paymentOutcomeColumnPresence = nextPresence;
+      subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(nextPresence);
+      oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(nextPresence);
+      if (!paymentOutcomeColumnPresenceChangedLogged) {
+        log("Payment outcome columns changed during the run; subsequent pages will include the newly available columns.");
+        paymentOutcomeColumnPresenceChangedLogged = true;
+      }
+    }
+  };
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
+  const tenancyFilter = options.tenancyFilter;
+  assertResumeCursorMatchesTenancyFilter(options.resumeCursor, tenancyFilter);
   const runStartedAt = performance.now();
-  log(`Backfilling bulldozer-js from Prisma... (batchSize=${batchSize})`);
+  log(`Backfilling bulldozer-js from Prisma... (batchSize=${batchSize}, ${describeTenancyFilter(tenancyFilter)})`);
 
   const tables: BackfillTable[] = [
     makeTable(
       "Subscription",
-      (cursor) => fetchSubscriptionBatch(replica, cursor, batchSize),
+      (cursor) => fetchSubscriptionBatch(replica, cursor, batchSize, tenancyFilter),
       async (subs) => {
         await bulldozerWriteSubscriptions(subs);
         // Synthesize refund transactions for the refunded rows in this page and
@@ -547,12 +817,18 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
     ),
     makeTable(
       "SubscriptionInvoice",
-      (cursor) => fetchSubscriptionInvoiceBatch(replica, cursor, batchSize),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchSubscriptionInvoiceBatch(replica, cursor, batchSize, tenancyFilter, subscriptionInvoicePaymentColumns);
+      },
       (invoices) => bulldozerWriteSubscriptionInvoices(invoices),
     ),
     makeTable(
       "OneTimePurchase",
-      (cursor) => fetchOneTimePurchaseBatch(replica, cursor, batchSize),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchOneTimePurchaseBatch(replica, cursor, batchSize, tenancyFilter, oneTimePurchasePaymentColumns);
+      },
       async (purchases) => {
         await bulldozerWriteOneTimePurchases(purchases);
         const refunds = purchases
@@ -563,8 +839,13 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
     ),
     makeTable(
       "ItemQuantityChange",
-      (cursor) => fetchItemQuantityChangeBatch(replica, cursor, batchSize),
+      (cursor) => fetchItemQuantityChangeBatch(replica, cursor, batchSize, tenancyFilter),
       (changes) => bulldozerWriteItemQuantityChanges(changes),
+    ),
+    makeTable(
+      "ManualTransaction",
+      (cursor) => fetchManualTransactionBatch(replica, cursor, batchSize, tenancyFilter),
+      (rows) => bulldozerWriteManualTransactions(rows.map(prismaManualTransactionToBulldozerRow)),
     ),
   ];
 
@@ -667,9 +948,9 @@ import.meta.vitest?.describe("parseBackfillResumeOptions", (test) => {
   test("throws (never silently defaults) when --batch-size has no value", ({ expect }) => {
     expect(() => parseBackfillResumeOptions(["--batch-size"]))
       .toThrow("--batch-size requires a value");
-    // A following flag is not a value → still a positive-integer failure, loud.
+    // A following flag is not a value → still fail loud.
     expect(() => parseBackfillResumeOptions(["--batch-size", "--continue-on-error"]))
-      .toThrow("--batch-size must be a positive integer");
+      .toThrow("--batch-size requires a value");
   });
 
   test("parses --batch-size alongside resume flags", ({ expect }) => {
@@ -691,6 +972,117 @@ import.meta.vitest?.describe("parseBackfillResumeOptions", (test) => {
       .toThrow("--batch-size must be a positive integer");
     expect(() => parseBackfillResumeOptions(["--batch-size=1.5"]))
       .toThrow("--batch-size must be a positive integer");
+  });
+
+  test("parses --exclude-tenancy-ids", ({ expect }) => {
+    expect(parseBackfillResumeOptions([
+      "--exclude-tenancy-ids=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    ])).toEqual({
+      continueOnError: false,
+      tenancyFilter: {
+        mode: "exclude",
+        tenancyIds: [
+          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ],
+      },
+    });
+  });
+
+  test("parses space-form --exclude-tenancy-ids / --only-tenancy-ids", ({ expect }) => {
+    const tenA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const tenB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    expect(parseBackfillResumeOptions([
+      "--exclude-tenancy-ids",
+      `${tenA}, ${tenB}`,
+    ])).toEqual({
+      continueOnError: false,
+      tenancyFilter: { mode: "exclude", tenancyIds: [tenA, tenB] },
+    });
+    expect(parseBackfillResumeOptions([
+      "--only-tenancy-ids",
+      tenA,
+      "--batch-size",
+      "20",
+    ])).toEqual({
+      continueOnError: false,
+      batchSize: 20,
+      tenancyFilter: { mode: "only", tenancyIds: [tenA] },
+    });
+  });
+
+  test("parses --only-tenancy-ids", ({ expect }) => {
+    expect(parseBackfillResumeOptions([
+      "--only-tenancy-ids=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    ])).toEqual({
+      continueOnError: false,
+      tenancyFilter: {
+        mode: "only",
+        tenancyIds: ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+      },
+    });
+  });
+
+  test("rejects combining --exclude-tenancy-ids and --only-tenancy-ids", ({ expect }) => {
+    expect(() => parseBackfillResumeOptions([
+      "--exclude-tenancy-ids=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "--only-tenancy-ids=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    ])).toThrow("cannot combine --exclude-tenancy-ids and --only-tenancy-ids");
+  });
+
+  test("rejects empty --exclude-tenancy-ids / --only-tenancy-ids", ({ expect }) => {
+    expect(() => parseBackfillResumeOptions(["--exclude-tenancy-ids="]))
+      .toThrow("--exclude-tenancy-ids requires at least one tenancy UUID");
+    expect(() => parseBackfillResumeOptions(["--only-tenancy-ids="]))
+      .toThrow("--only-tenancy-ids requires at least one tenancy UUID");
+    expect(() => parseBackfillResumeOptions(["--exclude-tenancy-ids"]))
+      .toThrow("--exclude-tenancy-ids requires a value");
+    expect(() => parseBackfillResumeOptions(["--only-tenancy-ids"]))
+      .toThrow("--only-tenancy-ids requires a value");
+  });
+
+  test("rejects invalid tenancy UUID shapes", ({ expect }) => {
+    expect(() => parseBackfillResumeOptions(["--exclude-tenancy-ids=not-a-uuid"]))
+      .toThrow('invalid tenancy UUID "not-a-uuid"');
+    expect(() => parseBackfillResumeOptions(["--only-tenancy-ids=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,nope"]))
+      .toThrow('invalid tenancy UUID "nope"');
+  });
+
+  test("accepts ManualTransaction as a --resume-table", ({ expect }) => {
+    expect(parseBackfillResumeOptions([
+      "--resume-table=ManualTransaction",
+      "--resume-cursor=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,txn-9",
+    ])).toEqual({
+      resumeTable: "ManualTransaction",
+      resumeCursor: { tenancyId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", id: "txn-9" },
+      continueOnError: false,
+    });
+  });
+
+  test("rejects resume cursor tenancy that conflicts with tenancy filters", ({ expect }) => {
+    const tenA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const tenB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    expect(() => parseBackfillResumeOptions([
+      `--exclude-tenancy-ids=${tenA}`,
+      "--resume-table=Subscription",
+      `--resume-cursor=${tenA},sub-1`,
+    ])).toThrow(/exclude-tenancy-ids/);
+    expect(() => parseBackfillResumeOptions([
+      `--only-tenancy-ids=${tenA}`,
+      "--resume-table=Subscription",
+      `--resume-cursor=${tenB},sub-1`,
+    ])).toThrow(/only-tenancy-ids/);
+    // Matching tenancy is fine (including uppercase filter + lowercase cursor).
+    expect(parseBackfillResumeOptions([
+      `--only-tenancy-ids=${tenA}`,
+      "--resume-table=Subscription",
+      `--resume-cursor=${tenA},sub-1`,
+    ]).resumeCursor).toEqual({ tenancyId: tenA, id: "sub-1" });
+    expect(parseBackfillResumeOptions([
+      `--only-tenancy-ids=${tenA.toUpperCase()}`,
+      "--resume-table=Subscription",
+      `--resume-cursor=${tenA},sub-1`,
+    ]).resumeCursor).toEqual({ tenancyId: tenA, id: "sub-1" });
   });
 
 });
@@ -783,6 +1175,9 @@ import.meta.vitest?.describe("shouldRunTable / startCursorFor", (test) => {
     expect(shouldRunTable("SubscriptionInvoice", "OneTimePurchase")).toBe(false);
     expect(shouldRunTable("OneTimePurchase", "OneTimePurchase")).toBe(true);
     expect(shouldRunTable("ItemQuantityChange", "OneTimePurchase")).toBe(true);
+    expect(shouldRunTable("ManualTransaction", "OneTimePurchase")).toBe(true);
+    expect(shouldRunTable("ItemQuantityChange", "ManualTransaction")).toBe(false);
+    expect(shouldRunTable("ManualTransaction", "ManualTransaction")).toBe(true);
   });
 
   test("applies the resume cursor only to the resume table", ({ expect }) => {

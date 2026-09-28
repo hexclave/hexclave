@@ -1,5 +1,5 @@
-import { computeDnsRecords, getServiceDefinitionOrThrow } from "@/lib/deployments";
-import { VercelApiError, getVercelDeploymentsClientOrThrow, sanitizeVercelError } from "@/lib/deployments/vercel-client";
+import { getServiceRowOrThrow, marshalNamespaceForTenancy } from "@/lib/deployments";
+import { MarshalApiError, getMarshalClientOrThrow, getMarshalDeploymentsConfigOrNull, sanitizeMarshalError } from "@/lib/deployments/marshal-client";
 import { Tenancy } from "@/lib/tenancies";
 import { PrismaClientTransaction, getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -27,13 +27,14 @@ async function findDomainRowOrThrow(prisma: PrismaClientTransaction, tenancy: Te
       },
     },
   });
-  const domain = service == null ? null : await prisma.deploymentServiceDomain.findUnique({
+  // Hostnames are unique per tenancy, so the lookup is by (tenancy, hostname) and the row
+  // must additionally belong to THIS service — a hostname held by a sibling service is a 404
+  // here, not someone else's row to read or delete.
+  const domain = service == null ? null : await prisma.deploymentDomain.findFirst({
     where: {
-      tenancyId_deploymentServiceId_hostname: {
-        tenancyId: tenancy.id,
-        deploymentServiceId: service.id,
-        hostname,
-      },
+      tenancyId: tenancy.id,
+      serviceId,
+      hostname,
     },
   });
   if (service == null || domain == null) {
@@ -45,8 +46,8 @@ async function findDomainRowOrThrow(prisma: PrismaClientTransaction, tenancy: Te
 export const GET = createSmartRouteHandler({
   metadata: {
     summary: "Get deployment service domain",
-    description: "Returns the verification state of a domain and the DNS records the user must create. Re-checks verification with the deployment target on every read, so polling this endpoint picks up DNS changes.",
-    tags: ["Deployments"],
+    description: "Returns the verification state of a domain and the DNS records the user must create. Re-checks verification with the runtime on every read, so polling this endpoint picks up DNS changes.",
+    tags: ["Deploy"],
     hidden: true,
   },
   request: yupObject({
@@ -60,8 +61,13 @@ export const GET = createSmartRouteHandler({
       hostname: yupString().defined(),
       is_primary: yupBoolean().defined(),
       verified: yupBoolean().defined(),
-      // True while the service has never been deployed: Vercel hasn't been
-      // told about the domain yet, so only the generic records are shown.
+      // Finer-grained than `verified`: "issuing" is the window where the runtime has
+      // accepted the DNS but the certificate authority has not finished, which without this
+      // field is indistinguishable from the user having created no records at all.
+      status: yupString().oneOf(["awaiting_dns", "issuing", "verified"]).defined(),
+      // True while the service has never been deployed: the runtime hasn't
+      // been told about the domain yet, and the DNS targets (the app's IPs)
+      // only exist once it has, so no records can be shown.
       pending_first_deploy: yupBoolean().defined(),
       dns_records: yupArray(yupObject({
         type: yupString().defined(),
@@ -71,13 +77,13 @@ export const GET = createSmartRouteHandler({
     }).defined(),
   }),
   handler: async ({ auth, params }) => {
-    getServiceDefinitionOrThrow(auth.tenancy, params.service_id);
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
+    await getServiceRowOrThrow(prisma, auth.tenancy, params.service_id);
     const { service, domain } = await findDomainRowOrThrow(prisma, auth.tenancy, params.service_id, params.hostname);
 
-    if (service.vercelProjectId == null) {
-      // Not provisioned yet: Vercel doesn't know the domain, but the A/CNAME
-      // guidance is static, so the user can already set up their DNS.
+    if (service.provisionedAt == null || getMarshalDeploymentsConfigOrNull() == null) {
+      // Not provisioned yet: the runtime doesn't know the domain and its DNS
+      // targets don't exist yet — deploy first.
       return {
         statusCode: 200,
         bodyType: "json",
@@ -85,43 +91,76 @@ export const GET = createSmartRouteHandler({
           hostname: params.hostname,
           is_primary: domain.isPrimary,
           verified: false,
+          status: "awaiting_dns",
           pending_first_deploy: true,
-          dns_records: computeDnsRecords(params.hostname, guessApexName(params.hostname), undefined),
+          dns_records: [],
         },
       } as const;
     }
 
-    const client = getVercelDeploymentsClientOrThrow();
-    let vercelDomain;
-    let misconfigured;
+    const client = getMarshalClientOrThrow();
+    let result;
     try {
-      // verify re-checks the ownership challenge on Vercel's side; the domain
-      // config check covers the actual DNS records (A/CNAME). Both are
-      // re-checked on every read, so polling this endpoint is what eventually
-      // flips the domain to live. They are independent: an unclaimed domain is
-      // "verified" (no ownership challenge needed) while its DNS still points
-      // nowhere.
-      try {
-        vercelDomain = await client.verifyProjectDomain(service.vercelProjectId, params.hostname);
-      } catch (e) {
-        // Vercel's verify endpoint answers 4xx (e.g. missing_txt_record) when
-        // the ownership challenge simply isn't satisfied yet. That's not an
-        // error for us — it's the normal "pending" state, so fall back to a
-        // plain read, which includes the outstanding challenges.
-        if (!(e instanceof VercelApiError && e.status >= 400 && e.status < 500)) {
-          throw e;
-        }
-        vercelDomain = await client.getProjectDomain(service.vercelProjectId, params.hostname);
-      }
-      misconfigured = await client.isDomainMisconfigured(params.hostname);
+      // Safe for polling: Marshal may promote this tenancy's pending TXT proof, but it cannot
+      // repoint an already claimed hostname. A PUT can repoint, so it must not be used here.
+      result = await client.getDomain(marshalNamespaceForTenancy(auth.tenancy), params.hostname);
     } catch (e) {
-      sanitizeVercelError(e, "Checking the domain failed");
+      if (e instanceof MarshalApiError && e.status === 404) {
+        // The runtime doesn't have this hostname attached (spec reset, or it is
+        // attached to a different service); treat like pre-first-deploy so the
+        // UI shows "deploy first" rather than a stale verified state.
+        //
+        // The CACHED flag has to be cleared too, not just the response: the service list and
+        // detail endpoints read `verified` from the row, so leaving it true would keep them
+        // advertising a custom URL that the runtime no longer routes.
+        if (domain.verified) {
+          await prisma.deploymentDomain.update({
+            where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domain.id } },
+            data: { verified: false },
+          });
+        }
+        return {
+          statusCode: 200,
+          bodyType: "json",
+          body: {
+            hostname: params.hostname,
+            is_primary: domain.isPrimary,
+            verified: false,
+            status: "awaiting_dns",
+            pending_first_deploy: true,
+            dns_records: [],
+          },
+        } as const;
+      }
+      sanitizeMarshalError(e, "Checking the domain failed");
     }
-    const isLive = vercelDomain.verified && !misconfigured;
 
-    await prisma.deploymentServiceDomain.update({
+    // The runtime holds one claim per hostname, so it can legitimately answer with a
+    // DIFFERENT service than the one being read (a repoint, or a duplicate row predating the
+    // per-tenancy uniqueness constraint). This service does not own the certificate in that
+    // case, so it must not report the other service's verification state as its own.
+    if (result.service_key !== params.service_id) {
+      await prisma.deploymentDomain.update({
+        where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domain.id } },
+        data: { verified: false },
+      });
+      return {
+        statusCode: 200,
+        bodyType: "json",
+        body: {
+          hostname: params.hostname,
+          is_primary: domain.isPrimary,
+          verified: false,
+          status: "awaiting_dns",
+          pending_first_deploy: true,
+          dns_records: [],
+        },
+      } as const;
+    }
+
+    await prisma.deploymentDomain.update({
       where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domain.id } },
-      data: { verified: isLive },
+      data: { verified: result.verified },
     });
 
     return {
@@ -130,11 +169,12 @@ export const GET = createSmartRouteHandler({
       body: {
         hostname: params.hostname,
         is_primary: domain.isPrimary,
-        verified: isLive,
+        verified: result.verified,
+        status: result.status,
         pending_first_deploy: false,
-        // TXT ownership challenges only apply while the ownership check is
-        // pending; the A/CNAME guidance applies while DNS is misconfigured.
-        dns_records: isLive ? [] : computeDnsRecords(params.hostname, vercelDomain.apexName, vercelDomain.verified ? undefined : vercelDomain.verification),
+        // Once verified there is nothing left for the user to create; while pending, the records
+        // include both Hexclave's ownership TXT proof and the shared frontend routing record.
+        dns_records: result.verified ? [] : result.dns_records,
       },
     };
   },
@@ -143,8 +183,8 @@ export const GET = createSmartRouteHandler({
 export const DELETE = createSmartRouteHandler({
   metadata: {
     summary: "Remove domain from deployment service",
-    description: "Removes a domain from a deployment service (deployment target and operational state).",
-    tags: ["Deployments"],
+    description: "Removes a domain from a deployment service (runtime and operational state). The service stays running and internally reachable; its public IPs are released when the last domain is removed.",
+    tags: ["Deploy"],
     hidden: true,
   },
   request: yupObject({
@@ -160,18 +200,34 @@ export const DELETE = createSmartRouteHandler({
     }).defined(),
   }),
   handler: async ({ auth, params }) => {
-    getServiceDefinitionOrThrow(auth.tenancy, params.service_id);
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
+    await getServiceRowOrThrow(prisma, auth.tenancy, params.service_id);
     const { service, domain } = await findDomainRowOrThrow(prisma, auth.tenancy, params.service_id, params.hostname);
 
-    if (service.vercelProjectId != null) {
+    // A provisioned service may hold a GLOBAL hostname claim in the runtime, and
+    // this row is the only record that this project owns it. Deleting the row
+    // while the claim survives strands the hostname: it blocks every future
+    // attachment, and the API that could release it only reaches claims it can
+    // still find a row for. So refuse rather than delete a row we cannot back
+    // with cleanup — the claim outlives the request, the row must too.
+    if (service.provisionedAt != null && getMarshalDeploymentsConfigOrNull() == null) {
+      throw new StatusError(400, `The domain ${JSON.stringify(params.hostname)} cannot be removed right now: deployments are not configured on this Hexclave instance, so its certificate and hostname claim in the deployment runtime cannot be released. Configure HEXCLAVE_MARSHAL_API_KEY (and HEXCLAVE_MARSHAL_URL) and try again.`);
+    }
+    if (service.provisionedAt != null) {
       try {
-        await getVercelDeploymentsClientOrThrow().removeProjectDomain(service.vercelProjectId, params.hostname);
+        // Scoped to this service on purpose: the runtime's hostname claim is global, so an
+        // unscoped delete would tear down the certificate of whichever service currently owns
+        // the hostname — which is not necessarily this one.
+        await getMarshalClientOrThrow().deleteDomain(marshalNamespaceForTenancy(auth.tenancy), params.hostname, params.service_id);
       } catch (e) {
-        sanitizeVercelError(e, "Removing the domain failed");
+        // Already detached on the runtime, never attached, or held by another
+        // service — deleting this service's row is still correct.
+        if (!(e instanceof MarshalApiError && e.status === 404)) {
+          sanitizeMarshalError(e, "Removing the domain failed");
+        }
       }
     }
-    await prisma.deploymentServiceDomain.deleteMany({
+    await prisma.deploymentDomain.deleteMany({
       where: {
         tenancyId: auth.tenancy.id,
         id: domain.id,
@@ -184,13 +240,3 @@ export const DELETE = createSmartRouteHandler({
     };
   },
 });
-
-// Best-effort apex guess for the not-yet-provisioned case (Vercel would tell
-// us the real apexName). "app.example.com" -> "example.com"; two-label
-// hostnames are treated as already-apex. Multi-part TLDs (e.g. .co.uk) are
-// mis-guessed here, which only affects the provisional A-vs-CNAME hint shown
-// before the first deploy — the post-deploy records come from Vercel.
-function guessApexName(hostname: string): string {
-  const parts = hostname.split(".");
-  return parts.length <= 2 ? hostname : parts.slice(-2).join(".");
-}

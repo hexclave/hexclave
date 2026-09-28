@@ -61,6 +61,7 @@ describe("payments schema", () => {
     const group = customerGroup("customer-sub-stripe-start");
     const txns = (await rowDatas(snapshot, schema.transactions, group)) as unknown as TransactionRow[];
     const startTxn = txns.find(txn => txn.txnId === "sub-start:sub-stripe-start");
+    expect(startTxn?.renewalTargetSubscriptionId).toBeNull();
     expect(startTxn?.entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "product-grant" }),
       expect.objectContaining({ type: "money-transfer", chargedAmount: { USD: "10.00" } }),
@@ -109,6 +110,7 @@ describe("payments schema", () => {
     const txns = (await rowDatas(snapshot, schema.transactions, group)) as unknown as TransactionRow[];
     const startTxn = txns.find(txn => txn.txnId === "sub-start:sub-trial-start");
     expect(startTxn?.entries.some(entry => entry.type === "money-transfer")).toBe(false);
+    expect(startTxn?.renewalTargetSubscriptionId).toBeNull();
 
     const renewalEvents = await rowDatas(snapshot, schema.subscriptionRenewalEvents);
     expect(renewalEvents).toHaveLength(1);
@@ -116,7 +118,9 @@ describe("payments schema", () => {
       invoiceId: "inv-trial-convert",
       chargedAmount: { USD: "19.00" },
     });
-    expect(txns.find(txn => txn.txnId === "sub-renewal:inv-trial-convert")?.entries).toMatchObject([
+    const renewalTxn = txns.find(txn => txn.txnId === "sub-renewal:inv-trial-convert");
+    expect(renewalTxn?.renewalTargetSubscriptionId).toBe("sub-trial-start");
+    expect(renewalTxn?.entries).toMatchObject([
       { type: "money-transfer", chargedAmount: { USD: "19.00" } },
     ]);
   });
@@ -515,7 +519,6 @@ describe("payments schema", () => {
     });
 
     const group = customerGroup("u-past");
-    expect(await rowDatas(snapshot, schema.splitChanges, group)).toEqual([]);
     const quantities = (await rowsBySortKey(snapshot, schema.itemQuantities, group)).map(row => asRecord(row.rowData));
     const latest = quantities.at(-1);
     expect(latest === undefined ? 0 : Number(asRecord(latest.itemQuantities).boosts ?? 0)).toBe(0);
@@ -537,20 +540,12 @@ describe("payments schema", () => {
     });
 
     const group = customerGroup("u-manual");
-    const splits = (await rowDatas(snapshot, schema.splitChanges, group)).map(asRecord);
-    // The grant is emitted with its expiry, plus a zero-quantity expire marker at the expiry time
-    // that references the grant's id (so expiry drops that grant's remaining, not a blind -5).
-    expect(splits.map(row => ({ quantity: row.quantity, at: row.txnEffectiveAtMillis }))).toEqual([
-      { quantity: 5, at: 4000 },
-      { quantity: 0, at: 5000 },
-    ]);
-    expect(splits[1].expireGrantId).toBe("miqc:manual-1:0");
     const quantities = (await rowDatas(snapshot, schema.itemQuantities, group)).map(asRecord);
     expect(asRecord(quantities[0].itemQuantities).boosts).toBe(5);
     expect(asRecord(quantities[1].itemQuantities).boosts).toBe(0);
   });
 
-  it("compacts non-expiring item quantity changes by item", async () => {
+  it("applies compacted non-expiring item quantity changes by item", async () => {
     const schema = createPaymentsSchema();
     let snapshot = await initializedSnapshot();
     snapshot = await set(snapshot, schema.manualItemQuantityChanges, "compact-a", {
@@ -577,16 +572,6 @@ describe("payments schema", () => {
     });
 
     const group = customerGroup("u-compact");
-    const compacted = (await rowDatas(snapshot, schema.compactedItemQuantityChangeEntries, group)).map(asRecord);
-    expect(compacted).toHaveLength(1);
-    expect(compacted[0]).toMatchObject({
-      type: "compacted-item-quantity-change",
-      itemId: "credits",
-      quantity: 12,
-      expiresWhen: null,
-    });
-    expect(await rowDatas(snapshot, schema.nonCompactableItemQuantityChangeEntries, group)).toEqual([]);
-
     const quantities = asRecord((await rowsBySortKey(snapshot, schema.itemQuantities, group)).at(-1)?.rowData ?? null);
     expect(asRecord(quantities.itemQuantities).credits).toBe(12);
   });
@@ -650,6 +635,7 @@ describe("payments schema", () => {
       customerId: "u-refund",
       paymentProvider: "stripe",
       createdAtMillis: 8000,
+      renewalTargetSubscriptionId: null,
     });
 
     const group = customerGroup("u-refund");
@@ -688,6 +674,7 @@ describe("transactions-by-tenancy date index", () => {
     customerId: opts.customerId,
     paymentProvider: "stripe" as const,
     createdAtMillis: opts.createdAtMillis,
+    renewalTargetSubscriptionId: null,
   });
   const setRefund = async (snapshot: Snapshot, opts: Parameters<typeof refundTxn>[0]) =>
     await set(snapshot, "payments-manual-transactions", opts.txnId, refundTxn(opts) as unknown as PiledriverObject);

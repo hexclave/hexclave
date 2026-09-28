@@ -6,7 +6,8 @@
  *   emit  <file>   build the deterministic example database, persist it, and write a self-describing
  *                  whole-database dump (KV contents + the read model the writer observed)
  *   verify <file>  load a dump written by (possibly) another code version and assert it reproduces the
- *                  exact read model (every table, group and row) its writer observed
+ *                  exact read model (every table, group and row) its writer observed, for every table
+ *                  whose rows the reading code can list
  *
  * The workflow runs `emit` under one checkout and `verify` under the other, in both directions:
  *   - new code reads a database written by base code  (backward compat: prod upgrade)
@@ -31,13 +32,19 @@ async function emit(path: string) {
 async function verify(path: string) {
   // Boundary parse of a dump written by this or another code version; mismatches surface below.
   const dump = JSON.parse(readFileSync(path, "utf8")) as BulldozerDbDump;
-  const actual = await computeReadModel(restoreBulldozerDatabase(dump));
-  const expected = JSON.stringify(dump.readModel);
-  if (JSON.stringify(actual) !== expected) {
+  const { readModel: actual, unlistableTableIds } = await computeReadModel(await restoreBulldozerDatabase(dump));
+  // The writer may have observed tables that the reading code cannot list: a dump written while
+  // Sort/GroupBy were still materialized contains their row read models, which the current stateless
+  // implementations intentionally reject. Exempt exactly the tables the reader *explicitly rejected*
+  // (rather than whatever happens to be missing from the result), so a table that disappears for any
+  // other reason still fails the comparison.
+  const expected = dump.readModel.filter(table => !unlistableTableIds.includes(table.tableId));
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     process.stderr.write(`bulldozer whole-database cross-version MISMATCH reading ${path}\n`);
     process.exit(1);
   }
-  process.stdout.write(`verified whole-database dump ${path} (read model reproduced exactly)\n`);
+  const skippedSuffix = unlistableTableIds.length === 0 ? "" : `; skipped unlistable tables: ${unlistableTableIds.join(", ")}`;
+  process.stdout.write(`verified whole-database dump ${path} (read model reproduced exactly${skippedSuffix})\n`);
 }
 
 async function main() {

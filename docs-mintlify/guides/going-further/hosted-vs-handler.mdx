@@ -1,0 +1,82 @@
+---
+title: "Hosted Components vs. Handler"
+description: "Choose where Hexclave auth pages live — hosted by Hexclave, or on your own domain with HexclaveHandler."
+sidebarTitle: "Hosted vs. Handler"
+---
+
+Hexclave can render sign-in, sign-up, password reset, and the other auth pages in two ways. You pick the mode with the SDK `urls` option.
+
+| Mode | Config | Where pages live | Best for |
+| --- | --- | --- | --- |
+| **Hosted components** (recommended) | `urls: { default: { type: "hosted" } }` | Hexclave-hosted URLs for your project | New projects, least maintenance |
+| **Own handler** | `urls: { default: { type: "handler-component" } }` plus `<HexclaveHandler />` | Routes on your domain (typically `/handler/...`) | Same-domain auth UI, frameworks that need a local catch-all |
+
+You can also point individual keys (`signIn`, `accountSettings`, …) at a custom path or mix hosted and handler targets. See [Setup](/guides/getting-started/setup) for framework-specific wiring.
+
+## Prefer hosted components
+
+For new projects, set:
+
+```ts
+export const hexclaveClientApp = new HexclaveClientApp({
+  tokenStore: "cookie", // or "nextjs-cookie" on Next.js
+  urls: {
+    default: {
+      type: "hosted",
+    },
+  },
+});
+```
+
+With hosted components:
+
+- Users land on Hexclave-hosted auth pages that stay up to date automatically.
+- You do **not** need a `/handler/[...]` catch-all in your app for the default sign-in flow.
+- Redirect helpers such as `redirectToSignIn()` send people to those hosted pages, then back to your app.
+
+This is the path Setup and the CLI onboarding flow recommend.
+
+## Own handler on your domain
+
+Use a local handler when you want auth UI on your own origin (same cookies / branding constraints, or an older integration).
+
+1. Point `urls.default` at the handler component (this is also the SDK default if you omit `urls.default`):
+
+```ts
+urls: {
+  default: {
+    type: "handler-component",
+  },
+},
+```
+
+2. Mount the catch-all route your framework SDK documents — for Next.js:
+
+```tsx title="app/handler/[...hexclave]/page.tsx"
+import { HexclaveHandler } from "@hexclave/next";
+
+export default function Handler() {
+  return <HexclaveHandler fullPage />;
+}
+```
+
+Auth URLs then look like `/handler/sign-in`, `/handler/sign-up`, and so on on **your** domain. The handler component is only available in some framework SDKs; hosted works everywhere the client SDK can redirect.
+
+<Note>
+  Older docs and reminders may say `type: "handler"`. The current target is `{ type: "handler-component" }`. Prefer `type: "hosted"` for new work.
+</Note>
+
+## Mixing and custom pages
+
+You do not have to pick one mode for every page. Examples:
+
+- Keep `default: { type: "hosted" }`, but set `accountSettings: "/settings"` (or `{ type: "custom", url: "/settings", version: 0 }`) for a page you own.
+- Keep most pages on the handler, but send `signIn: { type: "hosted" }` if you want only sign-in hosted.
+
+Whenever you add a custom auth page, update the matching `urls` key and any post-auth redirects (`afterSignIn`, `afterSignUp`, `afterSignOut`, `home`). Those keys are the source of truth for `redirectToSignIn()` and related helpers — if they still point at defaults after you customize routes, users can hit extra redirects or land on the wrong page.
+
+## Related
+
+- [Setup](/guides/getting-started/setup) — framework setup, including the hosted `urls` default.
+- [Authentication overview](/guides/apps/authentication/overview) — what the Authentication app covers.
+- [Local vs. Cloud Dashboard](/guides/going-further/local-vs-cloud-dashboard) — development environment vs cloud project.

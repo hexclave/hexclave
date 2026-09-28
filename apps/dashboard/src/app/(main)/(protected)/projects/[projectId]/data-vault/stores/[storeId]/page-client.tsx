@@ -137,7 +137,7 @@ export default function PageClient({ storeId }: PageClientProps) {
 
   const serverExample = deindent`
     // In your .env file or environment variables:
-    // STACK_DATA_VAULT_SECRET=insert-a-randomly-generated-secret-here
+    // HEXCLAVE_DATA_VAULT_SECRET=insert-a-randomly-generated-secret-here
 
     const store = await hexclaveServerApp.getDataVaultStore(${JSON.stringify(storeId)});
 
@@ -146,12 +146,12 @@ export default function PageClient({ storeId }: PageClientProps) {
 
     // Get a value for a specific key
     const value = await store.getValue(key, {
-      secret: process.env.STACK_DATA_VAULT_SECRET,
+      secret: process.env.HEXCLAVE_DATA_VAULT_SECRET,
     });
 
     // Set a value for a specific key
     await store.setValue(key, "my-value", {
-      secret: process.env.STACK_DATA_VAULT_SECRET,
+      secret: process.env.HEXCLAVE_DATA_VAULT_SECRET,
     });
   `;
 

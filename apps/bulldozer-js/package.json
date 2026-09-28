@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/bulldozer-js",
-  "version": "1.0.83",
+  "version": "1.0.124",
   "repository": "https://github.com/hexclave/hexclave",
   "private": true,
   "type": "module",
@@ -8,6 +8,7 @@
     "start": "tsx --expose-gc src/index.ts",
     "dev": "NODE_ENV=development tsx watch --clear-screen=false --expose-gc src/index.ts",
     "run-bulldozer-studio": "NODE_ENV=development tsx watch --clear-screen=false scripts/run-bulldozer-studio.ts",
+    "gc:piledriver": "tsx scripts/run-piledriver-gc.ts",
     "profile:performance": "tsx scripts/profile-bulldozer-performance.ts",
     "test": "vitest run",
     "test:watch": "vitest watch",

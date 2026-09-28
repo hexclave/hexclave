@@ -5,12 +5,14 @@
 // output) into the service that owns the env var (the target), so a
 // connection line is drawn source → target.
 
-import { DEPLOYMENT_CONNECTION_VALUE_REGEX } from "@hexclave/shared/dist/config/schema";
+import { parseConnectionValue } from "@hexclave/shared/dist/deployments";
 import { NODE_HEIGHT, NODE_WIDTH, type BoardService, type EnvVar } from "./board-model";
 
 export type ParsedConnection = {
   serviceId: string,
   outputKey: string,
+  /** The port named by an `internalUrl:<port>` reference, or null. */
+  port: number | null,
   raw: string,
 };
 
@@ -19,14 +21,13 @@ export type ParsedConnection = {
 // the deploy would reject (e.g. dots in the output key, stored via a raw
 // config edit) never draws a connection line.
 export function parseConnection(envVar: EnvVar): ParsedConnection | null {
-  if (envVar.type !== "connection" || envVar.value == null || !DEPLOYMENT_CONNECTION_VALUE_REGEX.test(envVar.value)) return null;
-  // The regex guarantees exactly one dot.
-  const dotIndex = envVar.value.indexOf(".");
-  return {
-    serviceId: envVar.value.slice(0, dotIndex),
-    outputKey: envVar.value.slice(dotIndex + 1),
-    raw: envVar.value,
-  };
+  if (envVar.type !== "connection" || envVar.value == null) return null;
+  // The SHARED parser, not a local split: a reference may carry a `:<port>`
+  // suffix (`api.internalUrl:9090`), and splitting on the dot alone would put
+  // "internalUrl:9090" in outputKey and fail every known-output lookup.
+  const parsed = parseConnectionValue(envVar.value);
+  if (parsed === null) return null;
+  return { serviceId: parsed.serviceId, outputKey: parsed.outputKey, port: parsed.port, raw: envVar.value };
 }
 
 export type Connection = {

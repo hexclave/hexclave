@@ -1,0 +1,263 @@
+---
+title: "Emails"
+description: "Implement Hexclave emails from start to finish — server, templates, sending, and delivery."
+sidebarTitle: "Guide"
+---
+
+This guide walks through implementing emails in your app end to end: connect a server, brand your mail, create a template, send from your backend, then watch delivery. For a quick "can I do this?" checklist, see the [Emails overview](./overview).
+
+You'll need Hexclave set up with a server app (`hexclaveServerApp`). If you don't have that yet, follow [Setup](/guides/getting-started/setup) first, then enable **Emails** in the dashboard.
+
+## 1. Connect an email server
+
+Open **Emails → Email Settings** in the dashboard. Hexclave needs somewhere to send from.
+
+**While developing**, leave **Shared** selected. Built-in auth mail (verification, password reset, magic link) already works. Custom `sendEmail` calls also go out on shared — Hexclave wraps them as "dev emails" so recipients know they aren't from your domain yet.
+
+A [development environment](/guides/going-further/local-vs-cloud-dashboard) can only use Shared. Configure the other providers in the [cloud dashboard](https://app.hexclave.com).
+
+**Before production**, switch to one of:
+
+| Provider | What you do |
+|---|---|
+| **Custom SMTP** | Enter host, port, username, password, sender name, and sender email (SendGrid, Postmark, SES, etc.). |
+| **Resend** | Paste your [Resend](https://resend.com) API key. |
+| **Managed** | Pick a subdomain (e.g. `mail.yourapp.com`) and sender local part. Hexclave shows DNS records during onboarding — you add them at your DNS provider, then verify. Hexclave handles signing and deliverability. |
+
+Saving a custom provider triggers a test email from the dashboard so you know the config works.
+
+## 2. Pick transactional vs marketing
+
+Every send is one of two categories:
+
+- **Transactional** — required for the product (verification, receipts, password reset). Users cannot opt out.
+- **Marketing** — promotional or informational. Users can unsubscribe; Hexclave appends an unsubscribe link.
+
+<Warning>
+  Never send marketing content as transactional mail. That can get your domain blacklisted.
+</Warning>
+
+Set the category when you send (`notificationCategoryName`) or inside the template / draft with `<NotificationCategory>`. If you omit it everywhere, the category stays undefined and **unsubscribe preferences are not applied** — prefer setting it explicitly.
+
+## 3. Brand with a theme
+
+Themes wrap every email (header, footer, logo, background). Hexclave ships **Default Light**, **Default Dark**, and **Default Colorful**. Set a project default under **Emails → Email Settings → Themes**, or skip this step and use the default.
+
+To author your own theme as TSX:
+
+```tsx
+import { Html, Head, Tailwind, Body, Container } from "@react-email/components";
+import { ThemeProps, ProjectLogo } from "@hexclave/emails";
+
+export function EmailTheme({ children, unsubscribeLink, projectLogos }: ThemeProps) {
+  return (
+    <Html>
+      <Head />
+      <Tailwind>
+        <Body className="bg-white font-sans m-0 p-0">
+          <Container className="max-w-[600px] mx-auto p-8">
+            <ProjectLogo data={projectLogos} mode="light" />
+            {children}
+          </Container>
+          {unsubscribeLink && (
+            <p className="text-center text-xs opacity-60">
+              <a href={unsubscribeLink}>Unsubscribe</a>
+            </p>
+          )}
+        </Body>
+      </Tailwind>
+    </Html>
+  );
+}
+```
+
+Per-send overrides: `themeId: "your-theme-id"`, `themeId: null` for the project default, or `themeId: false` for no theme. Full theme API: [Templates & themes](./templates-and-themes).
+
+## 4. Create a template
+
+Built-in templates already cover verification, password reset, magic link, invitations, payment receipts, payment failures, and trial-ending notices — Hexclave sends those automatically when those flows run. Customize them under **Emails → Templates**.
+
+For your own product email, create a React Email template in the dashboard (or start from a clone). A minimal template looks like this:
+
+```tsx
+import { type } from "arktype";
+import { Container } from "@react-email/components";
+import { Subject, NotificationCategory, Props } from "@hexclave/emails";
+
+export const variablesSchema = type({
+  featureName: "string",
+});
+
+export function EmailTemplate({
+  user,
+  variables,
+}: Props<typeof variablesSchema.infer>) {
+  return (
+    <Container>
+      <Subject value={`New feature: ${variables.featureName}`} />
+      <NotificationCategory value="Transactional" />
+      <p>Hi {user.displayName}, check out {variables.featureName}!</p>
+    </Container>
+  );
+}
+
+EmailTemplate.PreviewVariables = {
+  featureName: "Dark mode",
+} satisfies typeof variablesSchema.infer;
+```
+
+- `variablesSchema` validates the variables you pass at send time.
+- `<Subject>` and `<NotificationCategory>` live in the template so the content owns its subject and category.
+- Saving custom templates on Shared requires a custom email server; you can still edit and preview.
+
+Don't want a reusable template yet? You can send raw `html` in the next step, or compose a [Draft](./drafts) in the dashboard instead.
+
+## 5. Send your first email
+
+From your server, call `hexclaveServerApp.sendEmail()`. Exactly one recipient selector and exactly one content source are required.
+
+**HTML (fastest smoke test):**
+
+```typescript
+import { hexclaveServerApp } from "@hexclave/next"; // replace `next` with your framework SDK
+
+await hexclaveServerApp.sendEmail({
+  userIds: ["user-id"],
+  subject: "Welcome aboard!",
+  html: "<h1>Welcome!</h1><p>Thanks for joining us.</p>",
+  notificationCategoryName: "Transactional",
+});
+```
+
+**Template with variables:**
+
+```typescript
+await hexclaveServerApp.sendEmail({
+  userIds: ["user-id"],
+  templateId: "your-template-id",
+  variables: { featureName: "Dark mode" },
+  // subject / category can come from the template; override here if needed
+});
+```
+
+**Everyone in the project:**
+
+```typescript
+await hexclaveServerApp.sendEmail({
+  allUsers: true,
+  templateId: "your-template-id",
+  subject: "We just shipped a big update",
+  variables: { featureName: "Dark mode" },
+  notificationCategoryName: "Marketing",
+});
+```
+
+**Dashboard draft:**
+
+```typescript
+await hexclaveServerApp.sendEmail({
+  userIds: ["user-id"],
+  draftId: "your-draft-id",
+});
+```
+
+### Options reference
+
+```typescript
+type SendEmailOptions =
+  & {
+      subject?: string;
+      themeId?: string | null | false;
+      notificationCategoryName?: string;
+      variables?: Record<string, unknown>;
+      scheduledAt?: Date;
+    }
+  & ({ userIds: string[] } | { allUsers: true })
+  & ({ html: string } | { templateId: string } | { draftId: string });
+```
+
+`sendEmail` resolves to `void` and **throws** on failure. Branch on stable `errorCode` values when present:
+
+```typescript
+try {
+  await hexclaveServerApp.sendEmail({
+    userIds: ["user-id"],
+    html: "<p>Hello!</p>",
+    subject: "Test Email",
+    notificationCategoryName: "Transactional",
+  });
+} catch (error) {
+  const errorCode = (error as { errorCode?: string }).errorCode;
+  switch (errorCode) {
+    case "USER_ID_DOES_NOT_EXIST":
+      // One or more user IDs do not exist
+      break;
+    case "SCHEMA_ERROR":
+      // Invalid email data provided
+      break;
+    default:
+      throw error; // rethrow anything you didn't explicitly handle
+  }
+}
+```
+
+Unknown `templateId` or `draftId` values fail the request immediately (HTTP 400) — nothing is enqueued. Those errors typically have no `errorCode` in the switch above, so they fall through to `default`.
+
+## 6. Schedule a send (optional)
+
+Pass `scheduledAt` to enqueue now and deliver later. Omit it to send as soon as the pipeline allows.
+
+```typescript
+await hexclaveServerApp.sendEmail({
+  userIds: ["user-id"],
+  html: "<p>Happy New Year!</p>",
+  subject: "Happy New Year!",
+  notificationCategoryName: "Marketing",
+  scheduledAt: new Date("2027-01-01T00:00:00Z"),
+});
+```
+
+## 7. Watch delivery
+
+After `sendEmail` returns, the message shows up under **Emails → Sent** with a status such as Preparing, Rendering, Scheduled, Queued, Sending, Sent, Skipped, Render Error, or Server Error. Under the hood, Hexclave enqueues, renders, queues (respecting capacity and `scheduledAt`), sends (honoring unsubscribes), and tracks delivery.
+
+From code:
+
+```typescript
+const info = await hexclaveServerApp.getEmailDeliveryStats();
+// info.stats.day.sent, info.stats.day.bounced, info.stats.day.marked_as_spam
+// info.capacity.rate_per_second, info.capacity.is_boost_active, ...
+```
+
+Stats cover hour, day, week, and month windows for **sent**, **bounced**, and **marked as spam**.
+
+If you need a short-term throughput increase, call it from your server:
+
+```typescript
+await hexclaveServerApp.activateEmailCapacityBoost();
+```
+
+Or increase capacity from the dashboard: open **Emails → Sent**, find the **Domain Reputation** card, and click **Temporarily increase capacity**.
+
+A boost raises hourly capacity for a limited time (about 4× for 4 hours). It still counts against your overall monthly sending capacity.
+
+## 8. Optional: compose without a code template
+
+For one-off or campaign mail, open **Emails → Drafts**, create a blank draft or clone a template, edit with live preview, pick a theme and recipients, then send from the UI or with `draftId`. Details: [Drafts](./drafts).
+
+## What you should have now
+
+1. An email server (Shared for development, custom for production)
+2. A theme (built-in or your own)
+3. A template, HTML body, or draft
+4. At least one successful `sendEmail` from your backend
+5. Visibility into delivery in **Emails → Sent** / `getEmailDeliveryStats`
+
+Built-in auth and payment emails continue to send automatically when those flows run — you only call `sendEmail` for your own product mail.
+
+## Related
+
+- [Emails overview](./overview) — capability FAQ
+- [Templates & themes](./templates-and-themes) — full template and theme APIs
+- [Drafts](./drafts) — dashboard composition and `draftId`
+- [Local vs cloud dashboard](/guides/going-further/local-vs-cloud-dashboard) — where Shared vs custom providers apply

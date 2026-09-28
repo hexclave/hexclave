@@ -1,9 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { Prisma } from "@/generated/prisma/client";
 import { fetchBulldozerServerJson } from "@/lib/bulldozer-server-client";
-import { bulldozerWriteManualTransaction, bulldozerWriteOneTimePurchase, bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
+import { bulldozerWriteOneTimePurchase, bulldozerWriteSubscription, persistRefundManualTransaction } from "@/lib/payments/bulldozer-dual-write";
 import { ensureFreePlanForBillingTeam } from "@/lib/payments/ensure-free-plan";
-import { REFUND_TXN_PREFIX } from "@/lib/payments/refund-txn-id";
+import { makeRefundTxnId } from "@/lib/payments/refund-txn-id";
 import { resolveSelectedPriceFromProduct } from "@/app/api/latest/internal/payments/transactions/transaction-builder";
 import { ONE_TIME_PURCHASE_PRODUCT_GRANT_ENTRY_INDEX, SUBSCRIPTION_START_PRODUCT_GRANT_ENTRY_INDEX } from "@/lib/payments/transaction-entry-indexes";
 import type { ManualTransactionRow, TransactionEntryData } from "@/lib/payments/schema/types";
@@ -63,10 +63,6 @@ function getTotalUsdStripeUnits(options: {
 
 // ── Refund row construction ────────────────────────────────────────────────
 
-function makeRefundTxnId(sourceTxnId: string): string {
-  return `${REFUND_TXN_PREFIX}${sourceTxnId}:${randomUUID()}`;
-}
-
 /**
  * Derive a deterministic Stripe idempotency key from the tenancy, source
  * transaction, refund amount, and the cumulative amount already refunded
@@ -74,6 +70,10 @@ function makeRefundTxnId(sourceTxnId: string): string {
  * three identical inputs and dedupes at Stripe. Two intentional partials of
  * the same amount get distinct keys because `priorRefundedStripeUnits`
  * advances after the first one commits.
+ *
+ * Deliberately does NOT include `endAction` — changing this fingerprint would
+ * break in-flight Stripe retries. Refund-row idempotency across Prisma /
+ * Bulldozer dual-write retries is handled by `makeRefundTxnId` instead.
  */
 function makeStripeIdempotencyKey(args: {
   tenancyId: string,
@@ -415,9 +415,9 @@ export const POST = createSmartRouteHandler({
 // 1. **Race on cap check.** Two concurrent refund requests for the same
 //    source can both call `readPriorRefundSummary` before either commits its
 //    refund row, so both pass the cap check and over-refund. Wrapping this
-//    flow in a Prisma `$transaction` does NOT fix it — `bulldozerWriteManualTransaction`
-//    embeds its own `BEGIN; ... COMMIT;` (see `lib/bulldozer/db/index.ts:162`),
-//    so its writes commit independently of any outer Prisma tx. A real fix
+//    flow in a Prisma `$transaction` does NOT fix it — the Bulldozer
+//    manual-transaction write embeds its own `BEGIN; ... COMMIT;` (see
+//    `lib/bulldozer/db/index.ts:162`), so its writes commit independently of any outer Prisma tx. A real fix
 //    needs either a bulldozer-aware mutex (writes-table sentinel row, advisory
 //    lock taken on a long-lived dedicated connection, etc.) or a "pending
 //    refund intent" pattern that participates in the cap calc before Stripe is
@@ -429,13 +429,18 @@ export const POST = createSmartRouteHandler({
 //    row. The Stripe idempotency key is derived from
 //    `(tenancyId, sourceTxnId, amountStripeUnits, priorRefundedStripeUnits)`
 //    — *not* from `refundTxnId` — so:
-//      - Stripe-success → DB-fail → caller retries: `prior` is unchanged
-//        (no row committed), the key matches, Stripe dedupes, and the
-//        second attempt's bulldozer write recovers the state. Self-heals.
-//      - DB-success → response lost → caller retries: `prior` now includes
-//        the just-committed amount, so a fresh key is generated and Stripe
-//        issues a second real refund. This is the open hole — no
-//        out-of-band reconciliation today. Tracked alongside (1).
+//      - Stripe-success → both-stores-fail → caller retries: `prior` is
+//        unchanged (no Bulldozer row), the Stripe key matches, Stripe
+//        dedupes, and the second attempt's dual-write recovers. Self-heals.
+//      - Stripe-success → Prisma-ok / Bulldozer-fail → caller retries with
+//        the same payload: `makeRefundTxnId` reuses the same `txnId`
+//        (fingerprint includes Bulldozer prior, which did not advance), so
+//        Prisma upserts and Bulldozer setRows converge. Self-heals.
+//      - Both stores succeed → response lost → caller retries: `prior` now
+//        includes the just-committed amount, so a fresh Stripe key and a
+//        fresh refund txn id are generated and Stripe issues a second real
+//        refund. This is the open hole — no out-of-band reconciliation
+//        today. Tracked alongside (1).
 async function handleSubscriptionRefund(options: {
   prisma: Awaited<ReturnType<typeof getPrismaClientForTenancy>>,
   tenancy: Tenancy,
@@ -612,7 +617,17 @@ async function handleSubscriptionRefund(options: {
     throw new KnownErrors.SchemaError("This subscription's product has already been revoked.");
   }
 
-  const refundTxnId = makeRefundTxnId(sourceTxnId);
+  // amountStripeUnits / prior.refundedStripeUnits are already integer cents:
+  // the handler entrypoint ran moneyAmountToStripeUnits, and prior is summed
+  // the same way in bulldozer. makeRefundTxnId asserts that invariant
+  // (HexclaveAssertionError → sanitized 500 if violated).
+  const refundTxnId = makeRefundTxnId(
+    tenancy.id,
+    sourceTxnId,
+    options.amountStripeUnits,
+    prior.refundedStripeUnits,
+    options.endAction ?? "none",
+  );
 
   // ── Stripe side ───────────────────────────────────────────────────────
   if (options.amountStripeUnits > 0 && !isTestMode) {
@@ -693,8 +708,8 @@ async function handleSubscriptionRefund(options: {
       // ending/ended, so this catch is defence-in-depth: it only fires if the
       // sub became terminal between that check and here (e.g. a concurrent
       // cancel). The Stripe money refund has already been issued at this
-      // point, so an unhandled error would propagate before
-      // `bulldozerWriteManualTransaction` commits the ledger row, leaving the
+      // point, so an unhandled error would propagate before the Prisma +
+      // Bulldozer dual-write commits the ledger row, leaving the
       // customer refunded with no record.
       try {
         await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
@@ -808,8 +823,10 @@ async function handleSubscriptionRefund(options: {
     // payment provider (the listing route derives `test_mode: false` from it).
     paymentProvider: isTestMode ? "test_mode" : (hasStripeInvoice ? "stripe" : null),
     createdAtMillis: nowMillis,
+    renewalTargetSubscriptionId: null,
   };
-  await bulldozerWriteManualTransaction(refundTxnId, refundRow);
+  // Same dual-write shape as subscriptions/OTPs: Prisma first, then Bulldozer.
+  await persistRefundManualTransaction(prisma, refundRow);
 
   return {
     statusCode: 200 as const,
@@ -878,7 +895,17 @@ async function handleOneTimePurchaseRefund(options: {
     throw new KnownErrors.SchemaError("This purchase's product has already been revoked.");
   }
 
-  const refundTxnId = makeRefundTxnId(sourceTxnId);
+  // amountStripeUnits / prior.refundedStripeUnits are already integer cents:
+  // the handler entrypoint ran moneyAmountToStripeUnits, and prior is summed
+  // the same way in bulldozer. makeRefundTxnId asserts that invariant
+  // (HexclaveAssertionError → sanitized 500 if violated).
+  const refundTxnId = makeRefundTxnId(
+    tenancy.id,
+    sourceTxnId,
+    options.amountStripeUnits,
+    prior.refundedStripeUnits,
+    options.endNow ? "now" : "none",
+  );
 
   // ── Stripe side ───────────────────────────────────────────────────────
   if (options.amountStripeUnits > 0 && !isTestMode) {
@@ -966,8 +993,10 @@ async function handleOneTimePurchaseRefund(options: {
     customerId: purchase.customerId,
     paymentProvider: isTestMode ? "test_mode" : "stripe",
     createdAtMillis: nowMillis,
+    renewalTargetSubscriptionId: null,
   };
-  await bulldozerWriteManualTransaction(refundTxnId, refundRow);
+  // Same dual-write shape as subscriptions/OTPs: Prisma first, then Bulldozer.
+  await persistRefundManualTransaction(prisma, refundRow);
 
   return {
     statusCode: 200 as const,

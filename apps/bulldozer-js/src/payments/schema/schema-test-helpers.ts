@@ -1,7 +1,8 @@
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import { declareInMemoryLowLevelDatabase } from "../../databases/low-level/implementations/in-memory.js";
 import { declareBulldozerDatabase } from "../../databases/bulldozer/index.js";
-import { declarePiledriverDatabase, type PiledriverObject } from "../../databases/piledriver/index.js";
+import { declareBasePiledriverDatabase } from "../../databases/piledriver/implementations/base.js";
+import type { PiledriverObject } from "../../databases/piledriver/index.js";
 import { createPaymentsSchema } from "./index.js";
 import type { CustomerType, ProductSnapshot, SubscriptionRow } from "./types.js";
 
@@ -24,7 +25,7 @@ export const collect = async <T>(iterable: AsyncIterable<T>) => {
 
 export const initializedSnapshot = async () => {
   const schema = createPaymentsSchema();
-  const db = declareBulldozerDatabase(declarePiledriverDatabase(declareInMemoryLowLevelDatabase(crypto.randomUUID())), { migrations: schema.migrations });
+  const db = declareBulldozerDatabase(declareBasePiledriverDatabase(declareInMemoryLowLevelDatabase(crypto.randomUUID())), { migrations: schema.migrations });
   await db.applyRemainingMigrations();
   return (await db.getSnapshot()).snapshot;
 };

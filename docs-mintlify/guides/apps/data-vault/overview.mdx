@@ -21,16 +21,44 @@ Because keys are hashed before storage, **you cannot list or enumerate keys** in
 
 ## Setup
 
+### 0. Enable the Data Vault app
+
+Before you can create stores, you need to enable the Data Vault app for your project:
+
+1. Open your Hexclave dashboard
+2. Go to **Apps**
+3. Find and open **Data Vault**
+4. Click **Enable**
+
 ### 1. Create a store
 
-Go to your project's **Data Vault** page in the [Hexclave dashboard](https://app.hexclave.com) and create a new store. Each store has a unique ID that you'll reference in your code.
+Go to your project's **Data Vault → Stores** page in the [Hexclave dashboard](https://app.hexclave.com) and click **Create Store**. Each project can have **multiple stores**, and each store is fully isolated from the others.
+
+When creating a store you'll be asked for:
+
+- **Store ID** (required) — the identifier you'll reference in your code. Must contain only letters, numbers, underscores, and hyphens, and cannot start with a hyphen. Store IDs are immutable once created.
+- **Display Name** (optional) — a human-readable label shown in the dashboard. Defaults to `Store <id>` if left blank. Unlike the ID, the display name can be edited later from the store detail page.
+
+Stores are stored in your project config under `dataVault.stores.<storeId>` and are part of your pushable configuration, so they propagate across branches like any other config setting.
+
+### Managing a store
+
+Click any store in the **Stores** list to open its detail page. From there you can:
+
+- **Copy the Store ID** — useful when wiring it into your code or environment
+- **Rename the store** — edit the Display Name and click **Save** to persist
+- **Delete the store** — click **Delete Store**, then type the store ID into the confirmation dialog to confirm. **Deletion is irreversible**: all encrypted data in the store is permanently deleted, and Hexclave cannot recover it.
+
+<Warning>
+  Deleting a store cannot be undone. Make sure no production traffic references the store ID before removing it.
+</Warning>
 
 ### 2. Generate a secret
 
 Your secret can be any string, but for strong security it should be at least 32 characters long and provide 256 bits of entropy. Store it as an environment variable:
 
 ```bash title=".env"
-STACK_DATA_VAULT_SECRET=your-randomly-generated-secret-here
+HEXCLAVE_DATA_VAULT_SECRET=your-randomly-generated-secret-here
 ```
 
 ### 3. Use the SDK
@@ -38,18 +66,20 @@ STACK_DATA_VAULT_SECRET=your-randomly-generated-secret-here
 Data Vault is accessed through the **server app** only — it requires your secret server key.
 
 ```typescript title="server-example.ts"
+import { hexclaveServerApp } from "@/hexclave/server";
+
 const store = await hexclaveServerApp.getDataVaultStore("my-store-id");
 
 const key = user.id;
 
 // Store a value
 await store.setValue(key, "my-sensitive-value", {
-  secret: process.env.STACK_DATA_VAULT_SECRET,
+  secret: process.env.HEXCLAVE_DATA_VAULT_SECRET,
 });
 
 // Retrieve a value
 const value = await store.getValue(key, {
-  secret: process.env.STACK_DATA_VAULT_SECRET,
+  secret: process.env.HEXCLAVE_DATA_VAULT_SECRET,
 });
 // value is the decrypted string, or null if the key doesn't exist
 ```
@@ -70,7 +100,7 @@ Retrieves the decrypted value for the given key, or `null` if the key doesn't ex
 
 ```typescript
 const value = await store.getValue("some-key", {
-  secret: process.env.STACK_DATA_VAULT_SECRET,
+  secret: process.env.HEXCLAVE_DATA_VAULT_SECRET,
 });
 ```
 
@@ -80,7 +110,7 @@ Stores an encrypted value for the given key. If the key already exists, it is ov
 
 ```typescript
 await store.setValue("some-key", "some-value", {
-  secret: process.env.STACK_DATA_VAULT_SECRET,
+  secret: process.env.HEXCLAVE_DATA_VAULT_SECRET,
 });
 ```
 

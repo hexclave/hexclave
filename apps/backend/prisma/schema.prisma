@@ -48,111 +48,10 @@ model Project {
   environmentConfigOverrides EnvironmentConfigOverride[]
   configAgentRuns            ConfigAgentRun[]
   aiConversations            AiConversation[]
-  gtmInsights                GtmInsight[]
-  gtmActions                 GtmAction[]
-  gtmNotes                   GtmNote[]
-  gtmOnboardings             GtmOnboarding[]
+  
+  projectSecrets             ProjectSecret[]
 
   @@index([ownerTeamId], map: "Project_ownerTeamId_idx")
-}
-
-// Manually curated records for the internal GTM dashboard. These are inert
-// dashboard content; they do not run an agent or perform external actions.
-model GtmInsight {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  projectId String
-  branchId  String
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  domain      String
-  title       String
-  body        String @db.Text
-  impactScore Int    @default(0)
-  timesSeen   Int    @default(1)
-  lastSeenAt DateTime @default(now())
-
-  // A curated, ordered list of free-text timeline entries that replaces the timeline the dashboard otherwise
-  // generates from the fields above. NULL means "nobody has curated this one", which keeps every pre-existing
-  // suggestion rendering exactly as before. Stored as JSON rather than rows because entries are only ever read
-  // and written as a whole ordered list together with their suggestion, and are never queried on their own.
-  timelineEntries Json?
-
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  @@index([projectId, branchId, createdAt(sort: Desc), id(sort: Desc)])
-}
-
-model GtmAction {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  projectId String
-  branchId  String
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  domain            String
-  type              String
-  status            String @default("proposed")
-  title             String
-  summary           String @db.Text
-  verdict           String?
-  retrospectiveText String? @db.Text
-  expiresAt         DateTime
-  executedAt        DateTime?
-
-  // See GtmInsight.timelineEntries — same curated-timeline override, same NULL-means-generated semantics.
-  timelineEntries Json?
-
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  @@index([projectId, branchId, createdAt(sort: Desc), id(sort: Desc)])
-}
-
-model GtmNote {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  projectId String
-  branchId  String
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  domain          String
-  category        String
-  title           String? @db.VarChar(120)
-  body            String @db.VarChar(500)
-  source          String @default("user")
-  lastConfirmedAt DateTime @default(now())
-
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  @@index([projectId, branchId, createdAt(sort: Desc), id(sort: Desc)])
-}
-
-// A single intake is kept for each GTM project branch. It is deliberately
-// separate from editorial notes because it contains contact information that
-// the GTM team uses to start the engagement.
-model GtmOnboarding {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  projectId String
-  branchId  String
-
-  domain String? @db.VarChar(253)
-  phone  String @db.VarChar(50)
-  notes  String @default("")
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  completedAt DateTime @default(now())
-
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  @@unique([projectId, branchId])
 }
 
 model Tenancy {
@@ -176,7 +75,16 @@ model Tenancy {
   conversations       Conversation[]
   conversationEntryPoints ConversationEntryPoint[]
   conversationMessages ConversationMessage[]
+  tvPresentationProfiles TvPresentationProfile[]
+  tvEventOccurrences TvEventOccurrence[]
+  tvEventEvaluatorStates TvEventEvaluatorState[]
+  tvProfileEventPresentations TvProfileEventPresentation[]
+  tvDisplays TvDisplay[]
+  deploymentSources   DeploymentSource[]
   deploymentServices  DeploymentService[]
+  deploymentVolumes   DeploymentVolume[]
+  deploymentDomains   DeploymentDomain[]
+  deployments         Deployment[]
   deploymentSourceUploads DeploymentSourceUpload[]
   workflowDefinitions WorkflowDefinition[]
   workflowVersions WorkflowVersion[]
@@ -189,6 +97,231 @@ model Tenancy {
 
   @@unique([projectId, branchId, organizationId])
   @@unique([projectId, branchId, hasNoOrganization])
+}
+
+enum TvPresentationMode {
+  GENERAL
+}
+
+enum TvFinancialVisibility {
+  REDACTED
+  EXACT
+}
+
+model TvPresentationProfile {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String  @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  displayName           String @db.VarChar(80)
+  normalizedDisplayName String @db.VarChar(80)
+  description           String @default("") @db.VarChar(240)
+  mode                  TvPresentationMode @default(GENERAL)
+
+  defaultDurationSeconds  Int
+  playlist                Json
+  interruptionPreferences Json
+  financialVisibility     TvFinancialVisibility @default(REDACTED)
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenancyId, normalizedDisplayName], map: "TvPresentationProfile_tenancy_name_key")
+  @@index([tenancyId, updatedAt(sort: Desc), id], name: "TvPresentationProfile_tenancy_updatedAt_id_idx")
+}
+
+enum TvDisplayPairingState {
+  PENDING
+  APPROVED
+  CONSUMED
+  REJECTED
+}
+
+model TvDisplay {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String  @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  profileId            String @db.VarChar(128)
+  displayName          String @db.VarChar(80)
+
+  pairedByAdminUserId String @db.Uuid
+  pairedAt             DateTime @default(now())
+  lastSeenAt           DateTime?
+  credentialVersion    Int @default(1)
+
+  financialVisibilityAcknowledgedAt DateTime?
+  financialVisibilityAcknowledgedByAdminUserId String? @db.Uuid
+
+  credentials TvDisplayCredential[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenancyId, updatedAt(sort: Desc), id], name: "TvDisplay_tenancy_updatedAt_id_idx")
+  @@index([tenancyId, profileId], name: "TvDisplay_profile_assignment_idx")
+}
+
+model TvDisplayPairingChallenge {
+  id               String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pairingCode      String @unique @db.VarChar(8)
+  deviceSecretHash String @unique @db.VarChar(64)
+  state            TvDisplayPairingState @default(PENDING)
+
+  expiresAt       DateTime
+  lastPolledAt    DateTime?
+  invalidAttempts Int @default(0)
+
+  approvedTenancyId String? @db.Uuid
+  approvedProfileId String? @db.VarChar(128)
+  approvedDisplayName String? @db.VarChar(80)
+  approvedByAdminUserId String? @db.Uuid
+  approvedAt DateTime?
+  financialVisibilityAcknowledgedAt DateTime?
+  consumedAt DateTime?
+  rejectedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt], name: "TvDisplayPairingChallenge_expiresAt_idx")
+}
+
+model TvDisplayCredential {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  displayId String @db.Uuid
+  display   TvDisplay @relation(fields: [displayId], references: [id], onDelete: Cascade)
+
+  familyId        String @db.Uuid
+  tokenHash       String @unique @db.VarChar(64)
+  parentId        String? @db.Uuid
+  issuedAt        DateTime @default(now())
+  expiresAt       DateTime
+  usedAt          DateTime?
+  revokedAt       DateTime?
+  replacementId  String? @db.Uuid
+
+  @@index([displayId, familyId, revokedAt], name: "TvDisplayCredential_family_idx")
+}
+
+model TvDisplayPairingRateLimitBucket {
+  keyHash   String @db.VarChar(64)
+  operation String @db.VarChar(40)
+  windowStart DateTime
+  attempts  Int @default(0)
+  expiresAt DateTime
+
+  @@id([keyHash, operation, windowStart])
+  @@index([expiresAt], name: "TvDisplayPairingRateLimitBucket_expiresAt_idx")
+}
+
+enum TvEventType {
+  EMAIL_DELIVERY_DEGRADATION
+  USER_MILESTONE
+  SUBSCRIPTION_COLLECTION_DEGRADATION
+}
+
+enum TvEventPresentationClass {
+  CELEBRATION
+  INCIDENT
+  CRITICAL_INCIDENT
+}
+
+enum TvEventOccurrenceLifecycle {
+  OCCURRED
+  ACTIVE
+  RESOLVED
+}
+
+enum TvPresentationSupersededReason {
+  NEWER_CELEBRATION
+  EXPIRED_BEFORE_PRESENTATION
+  POLICY_DISABLED
+  OCCURRENCE_REPLACED
+}
+
+model TvEventOccurrence {
+  id        String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  eventType         TvEventType
+  presentationClass TvEventPresentationClass
+  lifecycle         TvEventOccurrenceLifecycle
+  deduplicationKey  String @db.VarChar(200)
+
+  title         String @db.VarChar(160)
+  summary       String @db.VarChar(480)
+  metricLabel   String @db.VarChar(80)
+  metricValue   String @db.VarChar(120)
+  expectedRange String? @db.VarChar(160)
+  sourceLabel   String @db.VarChar(120)
+
+  aggregateEvidence Json
+
+  occurredAt  DateTime
+  detectedAt  DateTime
+  activatedAt DateTime?
+  escalatedAt DateTime?
+  resolvedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  evaluatorStates TvEventEvaluatorState[] @relation("TvEvaluatorActiveOccurrence")
+  profilePresentations TvProfileEventPresentation[]
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, deduplicationKey], map: "TvEventOccurrence_tenancy_deduplication_key")
+  @@index([tenancyId, lifecycle, presentationClass, activatedAt(sort: Desc), id], name: "TvEventOccurrence_active_lookup_idx")
+  @@index([tenancyId, occurredAt(sort: Desc), id], name: "TvEventOccurrence_occurred_lookup_idx")
+  @@index([tenancyId, resolvedAt(sort: Desc), id], name: "TvEventOccurrence_resolved_lookup_idx")
+}
+
+model TvEventEvaluatorState {
+  tenancyId    String @db.Uuid
+  evaluatorKey String @db.VarChar(100)
+  tenancy      Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  nextEvaluationAt    DateTime
+  breachCount         Int @default(0)
+  criticalBreachCount Int @default(0)
+  recoveryCount       Int @default(0)
+  milestoneBaseline   BigInt?
+  typedState          Json
+
+  activeOccurrenceId String? @db.Uuid
+  // The migration's composite foreign key narrows SET NULL to activeOccurrenceId;
+  // tenancyId remains required and continues to own this evaluator state.
+  activeOccurrence   TvEventOccurrence? @relation("TvEvaluatorActiveOccurrence", fields: [tenancyId, activeOccurrenceId], references: [tenancyId, id], onDelete: SetNull, onUpdate: Cascade, map: "TvEventEvaluatorState_activeOccurrence_fkey")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([tenancyId, evaluatorKey])
+}
+
+model TvProfileEventPresentation {
+  tenancyId    String @db.Uuid
+  profileId    String @db.VarChar(128)
+  occurrenceId String @db.Uuid
+  tenancy      Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  occurrence   TvEventOccurrence @relation(fields: [tenancyId, occurrenceId], references: [tenancyId, id], onDelete: Cascade, onUpdate: Cascade, map: "TvProfileEventPresentation_occurrence_fkey")
+
+  takeoverStartedAt  DateTime?
+  takeoverEndsAt     DateTime?
+  recoveryEndsAt     DateTime?
+  highlightExpiresAt DateTime?
+  animationExpiresAt DateTime?
+  supersededAt       DateTime?
+  supersededReason   TvPresentationSupersededReason?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([tenancyId, profileId, occurrenceId])
+  @@index([tenancyId, profileId, supersededAt, highlightExpiresAt], name: "TvProfileEventPresentation_active_lookup_idx")
 }
 
 enum ManagedEmailDomainStatus {
@@ -1236,6 +1369,7 @@ model EmailOutbox {
   tenancy Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
 
   @@id([tenancyId, id])
+  @@index([tenancyId, createdAt], name: "EmailOutbox_tenancyId_createdAt_idx")
   @@index([tenancyId, finishedSendingAt(sort: Desc), scheduledAtIfNotYetQueued(sort: Desc), priority, id], map: "EmailOutbox_ordering_idx")
   @@index([tenancyId, startedSendingAt], name: "EmailOutbox_tenancyId_startedSendingAt_idx")
   @@index([tenancyId, simpleStatus], map: "EmailOutbox_simple_status_tenancy_idx")
@@ -1432,6 +1566,40 @@ model AiMessage {
   @@index([conversationId, position])
 }
 
+// Durable, internal-only history for the public skill /ask endpoint and the
+// ask_hexclave MCP tool. Request metadata is deliberately allowlisted at the
+// transport boundary so credentials and arbitrary headers never reach this table.
+model AskHexclaveCall {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  transport     String
+  conversationId String
+  question      String @db.Text
+  response      String @db.Text
+  reason        String @db.Text
+  userPrompt    String @db.Text
+  context       String? @db.Text
+  user          String? @db.Text
+  project       String? @db.Text
+
+  requestIp         String?
+  requestIpSource   String?
+  userAgent         String? @db.Text
+  requestHost       String?
+  mcpProtocolVersion String?
+
+  modelId       String
+  stepCount     Int
+  durationMs    Int
+  innerToolCalls Json
+
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@index([transport, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([conversationId, createdAt(sort: Asc), id(sort: Asc)])
+}
+
 enum CustomerType {
   USER
   TEAM
@@ -1491,6 +1659,7 @@ model Subscription {
 
   @@id([tenancyId, id])
   @@unique([tenancyId, stripeSubscriptionId])
+  @@index([tenancyId, createdAt], name: "Subscription_tenancyId_createdAt_idx")
 }
 
 model ProductVersion {
@@ -1528,6 +1697,9 @@ model OneTimePurchase {
   product               Json
   quantity              Int
   stripePaymentIntentId String?
+  amountReceived        Int?
+  currency              String?
+  paidAt                DateTime?
   createdAt             DateTime               @default(now())
   revokedAt             DateTime?
   refundedAt            DateTime?
@@ -1572,6 +1744,13 @@ model SubscriptionInvoice {
   status                        String?
   amountTotal                   Int?
   hostedInvoiceUrl              String?
+  paidAt                        DateTime?
+  // Event time of the newest exact invoice outcome applied; NULL means no exact outcome has been applied.
+  paymentOutcomeEventAt         DateTime?
+  markedUncollectibleAt         DateTime?
+  voidedAt                      DateTime?
+  currency                      String?
+  amountPaid                    Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1580,6 +1759,25 @@ model SubscriptionInvoice {
 
   @@id([tenancyId, id])
   @@unique([tenancyId, stripeInvoiceId])
+  @@index([tenancyId, createdAt], name: "SubscriptionInvoice_tenancyId_createdAt_idx")
+}
+
+// Durable backup of Bulldozer `payments-manual-transactions` (refunds today).
+// Dual-written from the refund routes; also filled by a one-off HTTP export from
+// Bulldozer so history survives an LMDB rebuild/backfill.
+model ManualTransaction {
+  tenancyId       String       @db.Uuid
+  txnId           String
+  type            String
+  customerId      String
+  customerType    CustomerType
+  paymentProvider String?
+  effectiveAt     DateTime
+  createdAt       DateTime
+  entries         Json
+
+  @@id([tenancyId, txnId])
+  @@index([tenancyId, createdAt])
 }
 
 model OutgoingRequest {
@@ -1681,15 +1879,106 @@ model DeletedRow {
   @@index([shouldUpdateSequenceId, tenancyId], name: "DeletedRow_shouldUpdateSequenceId_idx")
 }
 
+// ================== Project secrets ==================
+// Per-project credential values, write-only through the API
+// (set/overwrite/delete, never read back) and envelope-encrypted with the same
+// KMS flow as the data vault's server-side layer (`encryptWithKms`), so
+// plaintext never touches this table. Only the feature consuming a secret
+// decrypts it, server-side.
+//
+// Deployments are the only consumer today (`secret()` env vars in the deploy
+// file's `deploy` export name a key here), but the store deliberately isn't
+// deployments-specific — see @/lib/project-secrets.
+//
+// Keyed by project, not tenancy: these are infrastructure credentials that
+// branches share by design, and a per-organization copy of an API key would be
+// meaningless. If a consumer ever needs per-branch values, the intended shape is
+// a nullable `branchId` (null = every branch) resolved
+// exact-match-then-project-wide; that needs a partial unique index for the NULL
+// case, which Prisma can't express, so it wants a hand-written migration.
+model ProjectSecret {
+  projectId String
+
+  id String @default(uuid()) @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  key String
+  // { edkBase64, ciphertextBase64 } from encryptWithKms()
+  encrypted Json
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, id])
+  @@unique([projectId, key])
+}
+
 // ================== Deployments ==================
-// Operational state for the Deployments app. The service DEFINITIONS
-// (type, framework, build config, env vars) live in the environment config
-// under `deployments.services.<serviceId>` so they follow the project's config
-// source (dashboard / config file / GitHub); these tables only hold what the
-// config cannot: the lazily-provisioned Vercel project id, custom domains and
-// their verification state as reported by Vercel, and the deployment runs
-// themselves. Note that env vars are NOT stored here: their definitions live
-// in the config, and secret values only ever pass through at deploy time.
+// State for the Deployments app.
+//
+// A project owns DEPLOYMENT SOURCES; a source is deployed one or more times;
+// each deployment ships a set of SERVICES. A source is one deploy file
+// (hexclave.deploy.ts, named by its own `deploymentGroupId` export) and what one
+// `hexclave deploy` ships — one upload, one build — so a project deployed from
+// several repositories gives each of them a source of its own. Service ids stay
+// unique per PROJECT, so a reference never has to name a source.
+//
+// Service definitions come from the `services` export of the deploy file:
+// `hexclave deploy` evaluates it and syncs the parts the server needs (build
+// config, env var definitions) into DeploymentService rows, which are the
+// authoritative server-side copy — the dashboard renders services from these
+// rows and cannot edit them. Secret VALUES are never part of a definition: env
+// vars of type "secret" only name a key in the ProjectSecret store above.
+//
+// Two things deliberately OUTLIVE the service that uses them, because the
+// resource behind them does: a persistent volume (a disk with tenant data) is
+// owned by the CLUSTER and merely mounted by a service, and a custom domain (a
+// hostname with a certificate) is owned by the PROJECT and merely pointed at a
+// service. Dropping a service from a deploy file tears the service down and
+// leaves both behind, unattached, until someone deletes them explicitly.
+
+model DeploymentSource {
+  tenancyId String @db.Uuid
+
+  id String @default(uuid()) @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The deploy file's own `deploymentGroupId` export — which deploy file (and so
+  // which repository) these services were deployed from. Created implicitly by
+  // the first deploy that names it. Projects deployed before services moved out
+  // of hexclave.config.ts still have a source named after that file; nothing
+  // writes one any more.
+  sourceId String
+
+  // How much memory this source's BUILDER machine gets, in megabytes. Null = the
+  // deployment picks the floor its build shape needs.
+  //
+  // On the source rather than on a service because one `hexclave deploy` builds
+  // every service of the source on ONE machine: there is a single builder to
+  // size, and a per-service column could only ever record a request that another
+  // service's request overrode. Written by the same sync that stores the service
+  // definitions, so it rides that sync's fence rather than needing one of its own.
+  builderMemoryMb Int?
+
+  // Which infrastructure runtime this source's services run on: "fly" (the
+  // default, and what an absent `version` export in the deploy file means) or
+  // "gcp" (opted into with an internal `version` token). Written by the same
+  // sync that stores the definitions. Every source of one project must agree —
+  // services share a private network, which cannot span providers — and the
+  // sync route refuses one that does not; see syncSourceServices.
+  runtime String @default("fly")
+
+  tenancy     Tenancy             @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  services    DeploymentService[]
+  deployments Deployment[]
+  volumes     DeploymentVolume[]
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, sourceId])
+}
 
 model DeploymentService {
   tenancyId String @db.Uuid
@@ -1699,30 +1988,157 @@ model DeploymentService {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // The user-facing service id — the key under `deployments.services` in the
-  // environment config (e.g. "api").
+  // Which deployment source last declared this service. A service belongs to
+  // exactly one: the deploy file that declares it owns it, and a sync from
+  // another source claiming the same id is refused rather than silently taking
+  // it over.
+  sourceRowId String @db.Uuid
+
+  // The user-facing service id — the key of the record returned by the deploy
+  // file's `services` export (e.g. "api"). Unique across the whole PROJECT, not
+  // per source, which is what lets a reference name a service without naming
+  // its source. It doubles as the Marshal service key.
   serviceId String
 
-  // Set when the Vercel project is lazily provisioned on first deploy.
-  vercelProjectId String?
+  // Set when the service's spec was first successfully applied to Marshal
+  // (the Fly-backed runtime). Marshal apps have deterministic names, so there
+  // is no foreign id to store, only the fact that provisioning happened.
+  provisionedAt DateTime?
 
-  // Build configuration as last sent to Vercel (operational cache — the
-  // authoritative definition lives in the environment config).
-  framework       String?
-  installCommand  String?
-  buildCommand    String?
-  outputDirectory String?
-  rootDirectory   String?
+  // When this service last STARTED running the tenant's own image, which is what
+  // the Free plan's 24-hour limit is measured from. Set on every successful
+  // deploy, so a redeploy buys another 24 hours.
+  //
+  // NULL MEANS NO LIMIT, not "unknown". Every row that existed before this column
+  // shipped has null here and is grandfathered: the limit applies to deployments
+  // made after it, not retroactively to work whose authors were never told about
+  // a window. The first redeploy writes this and opts that service in, so the
+  // exempt set only ever shrinks. See windowStartedAt in
+  // apps/backend/src/lib/deployments/parking.tsx.
+  //
+  // A column of its own rather than `updatedAt`, which any edit to the row bumps
+  // (a definition sync, a domain change), and rather than the newest Deployment
+  // row, which would make the sweeper's candidate query a join over a table it
+  // otherwise never touches.
+  runningSince DateTime?
 
-  tenancy Tenancy                   @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
-  domains DeploymentServiceDomain[]
-  runs    DeploymentRun[]
+  // Set while the service is PARKED: stopped, with the platform's parked page
+  // served in its place on every hostname it holds. See parkService in
+  // apps/marshal/src/services.ts for what parking does to the runtime, and
+  // apps/backend/src/lib/deployments/parking.tsx for what decides it.
+  //
+  // Two columns rather than one enum: `parkedReason` is passed through to Marshal
+  // (which passes it to the parked page, which picks its copy from it) and is
+  // expected to grow values that have nothing to do with plans — a platform
+  // pause, an abuse suspension — while `parkedAt` is what every query filters on.
+  parkedAt     DateTime?
+  parkedReason String?
+
+  // The definition as last synced from the deploy file's `services` export.
+  // `definitionSyncId` is regenerated once per source sync and fenced by the
+  // deploy that follows it, so two CLIs cannot silently combine one checkout's
+  // source with another checkout's stored build settings and env definition.
+  definitionSyncedAt DateTime?
+  definitionSyncId   String?   @db.Uuid
+  // How the service runs: "server" (one instance that suspends when idle, the
+  // only kind that may mount a volume) or "serverless" (scales between the
+  // bounds below, stops on scale-down).
+  type          String @default("serverless")
+  // Whether the service takes public ingress. A property of the SERVICE rather
+  // than of a port: the runtime's proxy serves every declared port on every
+  // address the app holds, so "public 3000, private 5432" is not a thing it can
+  // do, and a per-port flag could only ever misdescribe it.
+  //
+  // A public service must be all-HTTP (raw TCP carries no SNI or Host, so a
+  // shared public address cannot route it) and must declare at least one port.
+  // Both are enforced in code rather than by a CHECK: they are facts about the
+  // runtime we deploy onto, not about what these columns may contain, and are
+  // expected to move — public TCP is a dedicated IPv4 away. See the migration.
+  isPublic      Boolean @default(false)
+  // The ports the container listens on, as a JSON object keyed by port number
+  // with required `{ protocol }` values (see DeploymentPortDefinition). A "tcp" port is
+  // raw and only a private service may declare one.
+  ports         Json   @default("{}")
+  minInstances  Int?
+  maxInstances  Int?
+  // How much memory the container gets, in megabytes. Null = the type's default
+  // (see defaultDeploymentMemoryForType), which is what every service ran at
+  // before compute was configurable — so an existing row needs no backfill and
+  // deploys the machine it already had.
+  //
+  // Stored as a number rather than the "4GB" token the deploy file writes: the
+  // token is an authoring spelling with exactly one canonical form per size, and
+  // a column that stores it would have to be re-validated against that ladder on
+  // every read. A megabyte count off the ladder reads back as "unset".
+  //
+  // CPU is not stored because it is not declared: it is derived from this by the
+  // runtime, which is what keeps every size valid on both a whole-VM "server"
+  // and a "serverless" container.
+  memoryMb      Int?
+  // Where the service's code lives inside the deployment source's upload, relative to the
+  // deploy file. The build CONTEXT is the whole upload (a monorepo service
+  // usually has to reach shared code above its own directory); this only scopes
+  // where build detection starts.
+  rootDirectory String?
+  // The Dockerfile to build from, relative to the root of the uploaded source.
+  // Null = no Dockerfile: the remote builder auto-detects the build with Railpack.
+  dockerfilePath String?
+  // An image, as a canonical fully-qualified reference with an explicit tag or
+  // digest ("docker.io/library/postgres:16"). With no buildCommand it is the
+  // image to RUN and the service is not built at all; with one it is the BASE
+  // the service is built on, and rootDirectory says where in the upload the
+  // build command runs. Mutually exclusive with dockerfilePath — each of them
+  // says what the build starts from — enforced in code alongside the rest of the
+  // definition validation rather than by a CHECK, for the same reason as
+  // isPublic above.
+  //
+  // A TAG here is deliberately not resolved: this is what the author asked for,
+  // and the digest it resolved to belongs to the deployment that pinned it.
+  image String?
+  // A single command line, run through `sh -c` while the image is BUILT. Null =
+  // the base decides the build entirely. Its base is `image`, or
+  // `dockerfilePath`'s Dockerfile (where it becomes a final appended RUN), or —
+  // with neither — the Hexclave base image, which replaces Railpack
+  // auto-detection.
+  //
+  // (The Vercel-era DeploymentService had a buildCommand column too, dropped
+  // when deployments moved to containers. This one is not it: that one was a
+  // framework build setting handed to Vercel, this one is a line of a Dockerfile
+  // Marshal generates.)
+  buildCommand String?
+  // A single command line, run through `sh -c` as the container's process
+  // instead of whatever the image would have started. Null = the image decides.
+  //
+  // Applied at RUN time (the machine's init replaces the image's entrypoint and
+  // command both), never baked into an image — so it causes no build, and a
+  // service that only runs an `image` keeps its build-less deploy while still
+  // being able to say how to start.
+  startCommand String?
+  // Note there is deliberately no dev command here: `devCommand` in the deploy
+  // file's `services` export is consumed locally by `hexclave dev
+  // --service-id`, and the backend never acts on it, so storing it would only
+  // buy a display row in the dashboard at the price of a column that can drift
+  // from the deploy file.
+  //
+  // Array of [env var key, DeploymentEnvVarDefinition] entries (see
+  // @hexclave/shared/dist/deployments). An entry array, rather than a JSON object, preserves
+  // special keys such as `__proto__` through Prisma's JSON serializer:
+  // { value } for plain vars,
+  // { type: "secret", key } for secrets (never their values, and never their
+  // `secret(key, default)` fallbacks — those travel with the deploy request
+  // and are rejected by deploymentEnvVarSchema on every write path),
+  // { type: "connection", value } for service-output references.
+  env Json @default("{}")
+
+  tenancy Tenancy           @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  source DeploymentSource @relation(fields: [tenancyId, sourceRowId], references: [tenancyId, id], onDelete: Cascade)
 
   @@id([tenancyId, id])
   @@unique([tenancyId, serviceId])
+  @@index([tenancyId, sourceRowId])
 }
 
-model DeploymentServiceDomain {
+model DeploymentVolume {
   tenancyId String @db.Uuid
 
   id String @default(uuid()) @db.Uuid
@@ -1730,28 +2146,85 @@ model DeploymentServiceDomain {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  deploymentServiceId String @db.Uuid
+  sourceRowId String @db.Uuid
 
-  hostname  String
-  isPrimary Boolean @default(false)
-  // Vercel-reported verification state, refreshed whenever the domain is read.
-  verified Boolean @default(false)
+  // The author-chosen id (the key of `persistentVolumes` in the deploy file),
+  // which names the underlying Fly volume. Unique within the deployment source, which is
+  // what OWNS the disk: a service that stops being declared is torn down, and
+  // its disk survives here for a later deploy to mount again.
+  volumeId String
+  // Provisioned size in whole gigabytes. Grow-only — Fly rejects a shrink, and
+  // shrinking would mean destroying tenant data.
+  sizeGb Int
 
-  service DeploymentService @relation(fields: [tenancyId, deploymentServiceId], references: [tenancyId, id], onDelete: Cascade)
+  // The service currently mounting it, and where. Both null = unattached: the
+  // disk exists (and is still billed) but no service declares it. They are a
+  // pair and are always written together.
+  serviceId String?
+  path      String?
+
+  tenancy Tenancy           @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  source DeploymentSource @relation(fields: [tenancyId, sourceRowId], references: [tenancyId, id], onDelete: Cascade)
 
   @@id([tenancyId, id])
-  @@unique([tenancyId, deploymentServiceId, hostname])
+  @@unique([tenancyId, sourceRowId, volumeId])
+  // One disk, one holder: two services asking to mount the same volume would
+  // ask Fly to attach it to two machines. Project-wide rather than per source,
+  // because service ids are.
+  @@unique([tenancyId, serviceId])
 }
 
-enum DeploymentRunStatus {
+model DeploymentDomain {
+  tenancyId String @db.Uuid
+
+  id String @default(uuid()) @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Per-TENANCY, not per-service: the deployments runtime holds exactly one
+  // claim per hostname, so two services both holding a row for one hostname
+  // would leave the loser advertising a verified URL that routes to the winner.
+  hostname String
+
+  // What the hostname points at: a service (ids are unique across the project,
+  // so it needs no deployment source to disambiguate) and one of its ports.
+  // Both null = unattached, which is what a domain becomes when its service
+  // stops being declared — the certificate is kept rather than silently
+  // released, and the row waits for someone to re-point or delete it.
+  //
+  // The port is the target service's standard-ports holder — the one that owns
+  // 80/443, which is where a certificate terminates. Stated rather than derived
+  // because a domain names an ENDPOINT, not a machine: a public service may
+  // declare several ports, and this row has to keep saying which one it meant
+  // even after the service changes them.
+  //
+  // Deliberately NOT a foreign key to DeploymentService: a domain OUTLIVES the
+  // service it points at, which is the whole reason it is a table of its own.
+  serviceId String?
+  port      Int?
+
+  isPrimary Boolean @default(false)
+  // Runtime-reported (Marshal) verification state, refreshed whenever the domain is read.
+  verified Boolean @default(false)
+
+  tenancy Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, hostname])
+  @@index([tenancyId, serviceId])
+}
+
+enum DeploymentStatus {
   QUEUED
   BUILDING
-  READY
-  ERROR
+  DEPLOYING
+  SUCCEEDED
+  FAILED
   CANCELED
 }
 
-model DeploymentRun {
+model Deployment {
   tenancyId String @db.Uuid
 
   id String @default(uuid()) @db.Uuid
@@ -1759,31 +2232,91 @@ model DeploymentRun {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  deploymentServiceId String @db.Uuid
+  sourceRowId String @db.Uuid
 
-  vercelDeploymentId  String?
-  vercelDeploymentUrl String?
+  // Monotonic per tenancy, so the dashboard and CLI can say "deployment #47"
+  // instead of showing a uuid. Assigned inside the same transaction that
+  // creates the row (see createDeployment), which the unique constraint below
+  // makes safe against two concurrent deploys picking the same number.
+  number Int
 
-  status DeploymentRunStatus @default(QUEUED)
-  // "production" | "preview" (kept a string to match Vercel's target values)
-  target String
-  // Free-form descriptor of what triggered the run (e.g. "cli").
+  // Free-form descriptor of what triggered the deploy (e.g. "cli").
   triggeredBy String
 
-  error      String?
+  status DeploymentStatus @default(QUEUED)
+  error  String?
+
+  // The runtime's id for this deployment. Null until the runtime has accepted
+  // it.
+  //
+  // Named "build" for historical reasons: when a deployment builds anything, it
+  // builds ONCE — the source tree is uploaded once and every source-built
+  // service's image comes out of one builder machine, so the build and its log
+  // belong to the deployment rather than to any single service. A deployment
+  // whose every service runs an already-built image starts no builder at all and
+  // still has an id here; see hasBuildLogs for whether a log exists.
+  marshalBuildId String?
+
+  // Whether this deployment produced a BUILD LOG, as the runtime reported when
+  // it accepted the deployment. False when every service ran an already-built
+  // image: no builder machine started, so there is no log to offer and the
+  // dashboard must not show an empty one.
+  //
+  // Defaults true because every row written before prebuilt images existed was a
+  // source build, which is exactly what true means.
+  hasBuildLogs Boolean @default(true)
+
+  // What this deploy PACKAGED: `{ file_count, total_bytes, compressed_bytes,
+  // entries: [{ path, bytes }] }` (see DeploymentSourceManifest in
+  // packages/shared/src/deployments). A listing, never contents — the tarball
+  // itself is consumed by the build and deleted, so this is what survives it to
+  // answer "why was my upload this big, and did my .dockerignore work".
+  //
+  // Null for an all-prebuilt deploy (nothing was packaged) and for every row
+  // written before the manifest existed. Capped at MAX_SOURCE_MANIFEST_ENTRIES
+  // files, largest first, so the column stays small on a repository with tens of
+  // thousands of files.
+  sourceManifest Json?
+
+  // The service ids this deploy INTENDED to ship, in dependency order, as a
+  // JSON string array — kept separately from the outcomes below because a
+  // service can fail before it has an outcome at all.
+  plannedServiceIds Json @default("[]")
+
+  // What each service actually did in THIS deploy, as a JSON object keyed by
+  // service id: `{ status, url, revision, error }` (see DeploymentServiceOutcome).
+  // A deployment is the unit of history, so the outcomes live on it rather than
+  // in rows of their own — nothing queries a single service's timeline except
+  // through the deployments of its source.
+  services Json @default("{}")
+
+  // `{ edkBase64, ciphertextBase64 }`, encrypting a JSON string array of the
+  // exact sensitive values injected into this deploy. Build logs are fetched
+  // from the runtime (Marshal) on demand, potentially after a project secret was
+  // rotated or deleted; keeping the encrypted snapshot here lets those
+  // historical logs stay redacted without retaining the old value in ProjectSecret.
+  redactionSecretsEncrypted Json?
+
   finishedAt DateTime?
 
-  service DeploymentService @relation(fields: [tenancyId, deploymentServiceId], references: [tenancyId, id], onDelete: Cascade)
+  // Set when the client owning this deploy reports that it has stopped working
+  // on it (see the conclude route). A planned service with no outcome normally
+  // reads as "still going" — but a client can fail before reporting anything at
+  // all (packaging, upload, a crash), which leaves nothing to derive a terminal
+  // state from. This column is what says "nothing further is coming"; without it
+  // such a deployment stays queued forever and the dashboard polls it
+  // indefinitely.
+  concludedAt DateTime?
+
+  tenancy Tenancy           @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  source DeploymentSource @relation(fields: [tenancyId, sourceRowId], references: [tenancyId, id], onDelete: Cascade)
 
   @@id([tenancyId, id])
-  @@index([tenancyId, deploymentServiceId, createdAt(sort: Desc)])
+  @@unique([tenancyId, number])
+  @@index([tenancyId, createdAt(sort: Desc)])
+  @@index([tenancyId, sourceRowId, createdAt(sort: Desc)])
 }
 
-// Short-lived private-object references for `hexclave deploy`: the CLI
-// requests a presigned S3/R2 PUT URL, uploads directly to object storage, then
-// references this row in the deploy request. Rows and successfully-consumed
-// objects are deleted after use; a bucket lifecycle rule cleans up abandoned
-// objects whose clients never finish the deploy flow.
 model DeploymentSourceUpload {
   tenancyId String @db.Uuid
 
@@ -1792,14 +2325,68 @@ model DeploymentSourceUpload {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  objectKey String
-  expiresAt DateTime
+  // The upload slot id in Marshal's bucket (passed as the spec's source).
+  marshalUploadId String
+  expiresAt       DateTime
 
   tenancy Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
 
   @@id([tenancyId, id])
   @@index([expiresAt])
 }
+
+
+// Platform-wide (cross-tenant) switches for the Deployments app.
+//
+// A singleton: one row for the whole Hexclave instance, matching
+// ExternalDbSyncMetadata's shape. Not per-project and not per-tenancy — this is
+// the operator's control over the alpha as a whole, and a per-project override
+// is deliberately not modelled until something needs one.
+//
+// Its own table rather than a column on ExternalDbSyncMetadata: the two features
+// share nothing but the singleton pattern, and a deployments switch living in a
+// table named after the DB-sync pipeline is exactly the confusion an emergency
+// switch must not cause.
+//
+// Every column defaults to today's behaviour, and a MISSING row reads as those
+// defaults (see getDeploymentsPlatformConfig) — so this table needs no backfill
+// and there is no window in which deploys are off because nobody has written to
+// it yet.
+model DeploymentsPlatformConfig {
+  id String @id @default(dbgenerated("gen_random_uuid()"))
+
+  singleton BooleanTrue @unique @default(TRUE)
+
+  // The emergency fusebox. False = no NEW deployment may be created anywhere on
+  // this instance: the deploy and upload routes refuse with a 503. Deliberately
+  // narrow — deployments already in flight run to completion, status and logs
+  // stay readable, and tearing services down keeps working, because an operator
+  // flipping this during an incident needs those more than ever.
+  deploymentsEnabled Boolean @default(true)
+
+  // Whether the Free plan's time limit is enforced at all. Default TRUE: the limit
+  // is part of what the Free plan IS, so an instance that has never been
+  // configured enforces it. An operator can still pause it from the Deploy Admin
+  // page — which is the switch to reach for if parking ever misbehaves, because
+  // turning it off stops new parks immediately (already-parked services stay
+  // parked until their projects redeploy or upgrade).
+  //
+  // Note what this default means on the deploy that ships it: every Free-plan
+  // project whose services last deployed more than the window ago is parked by
+  // the first sweep, within ten minutes. That is the intended behaviour, but it
+  // is not a quiet rollout.
+  freePlanParkingEnabled Boolean @default(true)
+
+  // How long a Free-plan project's services run after each deploy before they are
+  // parked. Configurable because the right number is a pricing decision that will
+  // move, and because an operator handling an incident needs to be able to widen
+  // it without a deploy.
+  freePlanParkAfterHours Int @default(24)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 
 // ─── Workflows ──────────────────────────────────────────────────────────────
 //
@@ -1827,6 +2414,17 @@ model WorkflowDefinition {
   // is the only writer of versions, and it updates this in the same
   // transaction that inserts the version row.
   latestVersion Int
+
+  // Pause state. While `pausedAt` is set the workflow accepts no new runs:
+  // matching events are still consumed from the outbox, they just do not
+  // dispatch to this definition. In-flight runs are untouched — pausing
+  // stops the intake, it does not halt work already underway.
+  //
+  // The gate is evaluated when the engine processes an event, not against the
+  // event's own timestamp, so an event enqueued moments before a resume can
+  // still dispatch if no tick reached it while the workflow was paused. That
+  // boundary is deliberately approximate.
+  pausedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

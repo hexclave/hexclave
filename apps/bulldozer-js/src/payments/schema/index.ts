@@ -14,6 +14,7 @@ import {
   defineFilterTable,
   defineFlatMapTable,
   defineMapTable,
+  defineMaterializeTable,
   defineSortTable,
   defineStoredTable,
 } from "../../databases/bulldozer/index.js";
@@ -612,6 +613,45 @@ const compareLedgerSortKeys = (a: PiledriverObject, b: PiledriverObject) => {
     || stringCompare(left.id, right.id);
 };
 
+export const splitItemQuantityChangeWithExpiry = (rowData: PiledriverObject): PiledriverObject[] => {
+  const entry = rowObject<{ type: string, index: number, txnId: string, txnEffectiveAtMillis: number, customerType: CustomerType, customerId: string, tenancyId: string, itemId: string, quantity: number, expiresWhen?: number | string | null, stampedExpiresAtMillis?: number | null, adjustedTransactionId?: string, adjustedEntryIndex?: number }>(rowData);
+  const base = { txnId: entry.txnId, customerType: entry.customerType, customerId: entry.customerId, tenancyId: entry.tenancyId, itemId: entry.itemId };
+  // The id under which a grant entry is pushed into the ledger, and which an expiry references
+  // to drop that exact grant. It matches the granting item-quantity-change entry's identity:
+  // for absolute expiries that's this entry itself; for subscription/repeat expiries the
+  // item-quantity-expire entry carries the granting entry's (adjustedTransactionId, index).
+  const grantId = `${entry.txnId}:${entry.index}`;
+  // An expiry drops the specific grant it belongs to (clamped to whatever remains of it). We
+  // model it as an explicit expire marker carrying the target grant's id — NOT as a negative
+  // change — so the ledger never applies it as a cross-grant, debt-creating deduction.
+  if (entry.type === "item-quantity-expire") {
+    return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: 0, expiresAtMillis: null, expireGrantId: `${entry.adjustedTransactionId}:${entry.adjustedEntryIndex}` })];
+  }
+  if (entry.type === "compacted-item-quantity-change") return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: null, grantId: null })];
+  if (entry.type !== "item-quantity-change") return [];
+  // A deduction applies immediately and permanently, and never needs an id (nothing expires it).
+  if (entry.quantity < 0) {
+    return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: null, grantId: null })];
+  }
+  // A subscription/one-time-purchase grant (`expiresWhen` is a string) carries its stamped
+  // expiry so the ledger ranks it soonest-first; the id-referencing expire marker that actually
+  // drops it is emitted separately from the transaction's item-quantity-expire entries.
+  if (typeof entry.expiresWhen === "string") {
+    return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: entry.stampedExpiresAtMillis ?? null, grantId })];
+  }
+  // A grant with no expiry applies permanently. It gets an id anyway (harmless — nothing expires it).
+  if (typeof entry.expiresWhen !== "number") {
+    return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: null, grantId })];
+  }
+  // A manual grant with an absolute expiry: grant row + a synthesized expire marker for it. If
+  // the grant expires at or before the moment it's granted it's already expired — emit nothing.
+  if (entry.expiresWhen <= entry.txnEffectiveAtMillis) return [];
+  return [
+    toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: entry.expiresWhen, grantId }),
+    toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.expiresWhen, quantity: 0, expiresAtMillis: null, expireGrantId: grantId }),
+  ];
+};
+
 // Exclusive upper bound (for `range.lt`) that selects every item-quantities ledger row effective at
 // or before `asOfMillis` in a reverse seek. txnEffectiveAtMillis is the primary sort component and is
 // always a whole millisecond (Date.now(), Stripe/created timestamps, and reset boundaries are all
@@ -852,7 +892,7 @@ export function createPaymentsSchema() {
     }), { input: "payments-manual-item-quantity-changes" }),
 
     table("payments-txn-subscription-renewal", defineMapTable(row => {
-      const event = rowObject<{ invoiceId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, chargedAmount: Record<string, string>, paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
+      const event = rowObject<{ subscriptionId: string, invoiceId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, chargedAmount: Record<string, string>, paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
       return toPiledriverObject({
         txnId: `sub-renewal:${event.invoiceId}`,
         tenancyId: event.tenancyId,
@@ -863,6 +903,7 @@ export function createPaymentsSchema() {
         customerId: event.customerId,
         paymentProvider: event.paymentProvider,
         createdAtMillis: event.createdAtMillis,
+        renewalTargetSubscriptionId: event.subscriptionId,
       });
     }), { input: "payments-subscription-renewal-events" }),
     table("payments-txn-subscription-cancel", defineMapTable(row => {
@@ -877,6 +918,7 @@ export function createPaymentsSchema() {
         customerId: event.customerId,
         paymentProvider: event.paymentProvider,
         createdAtMillis: event.createdAtMillis,
+        renewalTargetSubscriptionId: null,
       });
     }), { input: "payments-subscription-cancel-events" }),
     table("payments-txn-subscription-start", defineMapTable(row => {
@@ -896,7 +938,7 @@ export function createPaymentsSchema() {
       ];
       if (event.wasMoneyBookedOnStart) entries.push({ type: "money-transfer", customerType: event.customerType, customerId: event.customerId, chargedAmount: event.chargedAmount });
       entries.push(...event.itemGrants.map(grant => ({ type: "item-quantity-change" as const, customerType: event.customerType, customerId: event.customerId, itemId: grant.itemId, quantity: grant.quantity, expiresWhen: grant.expiresWhen, stampedExpiresAtMillis: grant.expiresAtMillis })));
-      return toPiledriverObject({ txnId: `sub-start:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-start", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `sub-start:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-start", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-subscription-start-events" }),
     table("payments-subscription-end-events-natural", defineFilterTable(row => rowObject<{ productRevokedAtMillis: number | null }>(row.rowData).productRevokedAtMillis === null), { input: "payments-subscription-end-events" }),
     table("payments-txn-subscription-end", defineMapTable(row => {
@@ -906,7 +948,7 @@ export function createPaymentsSchema() {
         { type: "product-revocation", customerType: event.customerType, customerId: event.customerId, adjustedTransactionId: event.startProductGrantRef.transactionId, adjustedEntryIndex: event.startProductGrantRef.entryIndex, quantity: event.quantity, productId: event.productId, productLineId: event.productLineId },
         ...event.itemQuantityChangesToExpire.map(entry => ({ type: "item-quantity-expire" as const, customerType: event.customerType, customerId: event.customerId, adjustedTransactionId: entry.transactionId, adjustedEntryIndex: entry.entryIndex, quantity: entry.quantity, itemId: entry.itemId })),
       ];
-      return toPiledriverObject({ txnId: `sub-end:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-end", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `sub-end:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-end", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-subscription-end-events-natural" }),
     table("payments-txn-item-grant-repeat", defineMapTable(row => {
       const event = rowObject<{ sourceId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, previousGrantsToExpire: Array<{ transactionId: string, entryIndex: number, itemId: string, quantity: number }>, itemGrants: ItemGrant[], paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
@@ -914,7 +956,7 @@ export function createPaymentsSchema() {
         ...event.previousGrantsToExpire.map(entry => ({ type: "item-quantity-expire" as const, customerType: event.customerType, customerId: event.customerId, adjustedTransactionId: entry.transactionId, adjustedEntryIndex: entry.entryIndex, quantity: entry.quantity, itemId: entry.itemId })),
         ...event.itemGrants.map(grant => ({ type: "item-quantity-change" as const, customerType: event.customerType, customerId: event.customerId, itemId: grant.itemId, quantity: grant.quantity, expiresWhen: grant.expiresWhen, stampedExpiresAtMillis: grant.expiresAtMillis })),
       ];
-      return toPiledriverObject({ txnId: `igr:${event.sourceId}:${event.effectiveAtMillis}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "item-grant-repeat", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `igr:${event.sourceId}:${event.effectiveAtMillis}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "item-grant-repeat", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-item-grant-repeat-events" }),
     table("payments-txn-one-time-purchase", defineMapTable(row => {
       const event = rowObject<{ purchaseId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, productId: string | null, priceId: string | null, product: ProductSnapshot, productLineId: string | null, quantity: number, chargedAmount: Record<string, string>, itemGrants: ItemGrant[], paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
@@ -923,11 +965,11 @@ export function createPaymentsSchema() {
       const entries: TransactionEntryData[] = [{ type: "product-grant", customerType: event.customerType, customerId: event.customerId, productId: event.productId, priceId: event.priceId, product: event.product, productLineId: event.productLineId, quantity: event.quantity, oneTimePurchaseId: event.purchaseId }];
       if (event.paymentProvider !== "test_mode" && Object.keys(event.chargedAmount).length > 0) entries.push({ type: "money-transfer", customerType: event.customerType, customerId: event.customerId, chargedAmount: event.chargedAmount });
       entries.push(...event.itemGrants.map(grant => ({ type: "item-quantity-change" as const, customerType: event.customerType, customerId: event.customerId, itemId: grant.itemId, quantity: grant.quantity, expiresWhen: grant.expiresWhen, stampedExpiresAtMillis: grant.expiresAtMillis })));
-      return toPiledriverObject({ txnId: `otp:${event.purchaseId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "one-time-purchase", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `otp:${event.purchaseId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "one-time-purchase", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-one-time-purchase-events" }),
     table("payments-txn-manual-item-quantity-change", defineMapTable(row => {
       const event = rowObject<{ changeId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, itemId: string, quantity: number, expiresAtMillis: number | null, createdAtMillis: number }>(row.rowData);
-      return toPiledriverObject({ txnId: `miqc:${event.changeId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "manual-item-quantity-change", entries: [{ type: "item-quantity-change", customerType: event.customerType, customerId: event.customerId, itemId: event.itemId, quantity: event.quantity, expiresWhen: event.expiresAtMillis }], customerType: event.customerType, customerId: event.customerId, paymentProvider: null, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `miqc:${event.changeId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "manual-item-quantity-change", entries: [{ type: "item-quantity-change", customerType: event.customerType, customerId: event.customerId, itemId: event.itemId, quantity: event.quantity, expiresWhen: event.expiresAtMillis }], customerType: event.customerType, customerId: event.customerId, paymentProvider: null, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-manual-item-quantity-change-events" }),
     table("payments-txn-refund", defineFilterTable(row => rowObject<ManualTransactionRow>(row.rowData).type === "refund"), { input: "payments-manual-transactions" }),
     table("payments-transactions", defineConcatTable(), {
@@ -1089,44 +1131,7 @@ export function createPaymentsSchema() {
       },
     }), { input: "payments-product-entries-sorted" }),
 
-    table("payments-split-item-changes-with-expiry", defineFlatMapTable(row => {
-      const entry = rowObject<{ type: string, index: number, txnId: string, txnEffectiveAtMillis: number, customerType: CustomerType, customerId: string, tenancyId: string, itemId: string, quantity: number, expiresWhen?: number | string | null, stampedExpiresAtMillis?: number | null, adjustedTransactionId?: string, adjustedEntryIndex?: number }>(row.rowData);
-      const base = { txnId: entry.txnId, customerType: entry.customerType, customerId: entry.customerId, tenancyId: entry.tenancyId, itemId: entry.itemId };
-      // The id under which a grant entry is pushed into the ledger, and which an expiry references
-      // to drop that exact grant. It matches the granting item-quantity-change entry's identity:
-      // for absolute expiries that's this entry itself; for subscription/repeat expiries the
-      // item-quantity-expire entry carries the granting entry's (adjustedTransactionId, index).
-      const grantId = `${entry.txnId}:${entry.index}`;
-      // An expiry drops the specific grant it belongs to (clamped to whatever remains of it). We
-      // model it as an explicit expire marker carrying the target grant's id — NOT as a negative
-      // change — so the ledger never applies it as a cross-grant, debt-creating deduction.
-      if (entry.type === "item-quantity-expire") {
-        return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: 0, expiresAtMillis: null, expireGrantId: `${entry.adjustedTransactionId}:${entry.adjustedEntryIndex}` })];
-      }
-      if (entry.type === "compacted-item-quantity-change") return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: null, grantId: null })];
-      if (entry.type !== "item-quantity-change") return [];
-      // A deduction applies immediately and permanently, and never needs an id (nothing expires it).
-      if (entry.quantity < 0) {
-        return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: null, grantId: null })];
-      }
-      // A subscription/one-time-purchase grant (`expiresWhen` is a string) carries its stamped
-      // expiry so the ledger ranks it soonest-first; the id-referencing expire marker that actually
-      // drops it is emitted separately from the transaction's item-quantity-expire entries.
-      if (typeof entry.expiresWhen === "string") {
-        return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: entry.stampedExpiresAtMillis ?? null, grantId })];
-      }
-      // A grant with no expiry applies permanently. It gets an id anyway (harmless — nothing expires it).
-      if (typeof entry.expiresWhen !== "number") {
-        return [toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: null, grantId })];
-      }
-      // A manual grant with an absolute expiry: grant row + a synthesized expire marker for it. If
-      // the grant expires at or before the moment it's granted it's already expired — emit nothing.
-      if (entry.expiresWhen <= entry.txnEffectiveAtMillis) return [];
-      return [
-        toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.txnEffectiveAtMillis, quantity: entry.quantity, expiresAtMillis: entry.expiresWhen, grantId }),
-        toPiledriverObject({ ...base, txnEffectiveAtMillis: entry.expiresWhen, quantity: 0, expiresAtMillis: null, expireGrantId: grantId }),
-      ];
-    }), { input: "payments-compacted-transaction-entries" }),
+    table("payments-split-item-changes-with-expiry", defineFlatMapTable(row => splitItemQuantityChangeWithExpiry(row.rowData)), { input: "payments-compacted-transaction-entries" }),
     table("payments-changes-sorted-for-ledger", defineSortTable({
       sortKeyExtractor: ledgerSortKey,
       sortKeyComparator: compareLedgerSortKeys,
@@ -1187,12 +1192,29 @@ export function createPaymentsSchema() {
         return { newState: toPiledriverObject(next), newRowData: toPiledriverObject({ subscriptions: next, tenancyId: sub.tenancyId, customerType: sub.customerType, customerId: sub.customerId }) };
       },
     }), { input: "payments-subscriptions-sorted" }),
+  ], [
+    // Identifier-ordered view for keyset pagination (manual-txn export). Stored tables
+    // keep a null sort key so Range stays sort-key everywhere; page this table instead.
+    table("payments-manual-transactions-sorted", defineSortTable({
+      sortKeyExtractor: (row) => row.rowIdentifier,
+      sortKeyComparator: (a, b) => stringCompare(String(a), String(b)),
+    }), { input: "payments-manual-transactions" }),
+  ], [
+    // GroupBy and Sort intentionally retain no row payloads. These explicit read models preserve
+    // the transaction query paths that need listRowsInGroup without materializing every index.
+    table("payments-transactions-by-customer-materialized", defineMaterializeTable(), {
+      input: "payments-transactions-by-customer",
+    }),
+    table("payments-transactions-by-tenancy-sorted-materialized", defineMaterializeTable(), {
+      input: "payments-transactions-by-tenancy-sorted",
+    }),
+    table("payments-manual-transactions-sorted-materialized", defineMaterializeTable(), {
+      input: "payments-manual-transactions-sorted",
+    }),
   ]];
 
-  // Only looks at migrations[0], so this assumes one migration batch. Rebuild from all
-  // migrations if we ever add a second. Also, replacing "-" with "_" would clash if two
-  // table ids differed only by that — fine today since ids only use "-".
-  const tableIds = Object.fromEntries(migrations[0].map(step => [step.tableId.replaceAll("-", "_"), step.tableId]));
+  // Flatten all migration batches for the id map (ids only use "-").
+  const tableIds = Object.fromEntries(migrations.flatMap((batch) => batch).map(step => [step.tableId.replaceAll("-", "_"), step.tableId]));
   return {
     migrations,
     tableIds,
@@ -1201,6 +1223,7 @@ export function createPaymentsSchema() {
     oneTimePurchases: "payments-one-time-purchases",
     manualItemQuantityChanges: "payments-manual-item-quantity-changes",
     manualTransactions: "payments-manual-transactions",
+    manualTransactionsSorted: "payments-manual-transactions-sorted-materialized",
     subscriptionRenewalEvents: "payments-subscription-renewal-events",
     subscriptionCancelEvents: "payments-subscription-cancel-events",
     subscriptionStartEvents: "payments-subscription-start-events",
@@ -1208,8 +1231,8 @@ export function createPaymentsSchema() {
     itemGrantRepeatEvents: "payments-item-grant-repeat-events",
     oneTimePurchaseEvents: "payments-one-time-purchase-events",
     manualItemQuantityChangeEvents: "payments-manual-item-quantity-change-events",
-    transactions: "payments-transactions-by-customer",
-    transactionsByTenancy: "payments-transactions-by-tenancy-sorted",
+    transactions: "payments-transactions-by-customer-materialized",
+    transactionsByTenancy: "payments-transactions-by-tenancy-sorted-materialized",
     transactionEntries: "payments-transaction-entries",
     compactedTransactionEntries: "payments-compacted-transaction-entries",
     productGrantEntries: "payments-entries-product-grant",
@@ -1223,7 +1246,7 @@ export function createPaymentsSchema() {
     splitChanges: "payments-split-item-changes-with-expiry",
     itemQuantities: "payments-item-quantities",
     subscriptionMapByCustomer: "payments-subscription-map-by-customer",
-    _allTables: migrations[0], // migrations[0] only — see note above tableIds.
+    _allTables: migrations.flatMap((batch) => batch),
   };
 }
 

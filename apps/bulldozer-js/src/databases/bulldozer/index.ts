@@ -6,6 +6,7 @@ import { DatabaseSeq } from "../index.js";
 import type { LowLevelDatabaseDebugSnapshot } from "../low-level/index.js";
 import { AugmentedTreeMap, AugmentedTreeMultiMap } from "../piledriver/data-structures/augmented-tree-map.js";
 import { ConcatTreeList } from "../piledriver/data-structures/concat-tree-list.js";
+import { PiledriverGarbageCollectionResult } from "../piledriver/gc.js";
 import { isPiledriverHeapObjectSymbol, PiledriverDatabase, PiledriverDatabaseDebugSnapshot, PiledriverObject, piledriverObjectEquals } from "../piledriver/index.js";
 
 // Code-unit comparison; localeCompare would persist trees whose order depends on the runtime locale.
@@ -436,11 +437,50 @@ function createInputTables(
     const inputTables = () => createInputTables(tables, getSerializedTable, inputTableId);
     return [inputTableKey, {
       listGroups: ({ range }) => inputTable.listGroups({ serializedTable: getSerializedTable(inputTableId), inputTables: inputTables(), range }),
-      listRowsInGroup: ({ groupKey, range }) => inputTable.listRowsInGroup({ serializedTable: getSerializedTable(inputTableId), inputTables: inputTables(), groupKey, range }),
+      listRowsInGroup: ({ groupKey, range }) => inputTable.listRowsInGroup({
+        serializedTable: getSerializedTable(inputTableId),
+        inputTables: inputTables(),
+        groupKey,
+        range,
+      }),
       compareGroupKeys: ({ a, b }) => inputTable.compareGroupKeys({ serializedTable: getSerializedTable(inputTableId), inputTables: inputTables(), a, b }),
       compareSortKeys: ({ a, b }) => inputTable.compareSortKeys({ serializedTable: getSerializedTable(inputTableId), inputTables: inputTables(), groupKey: null, a, b }),
     } satisfies BulldozerTableImplementationInputTable];
   }));
+}
+
+async function reconstructTableOutputChangesForBackfill(
+  tables: Record<string, BulldozerTableState>,
+  getSerializedTable: (tableId: string) => PiledriverObject,
+  tableId: string,
+): Promise<TableChanges> {
+  const table = tables[tableId].table;
+  const inputTables = createInputTables(tables, getSerializedTable, tableId);
+  try {
+    const changes: TableChanges = { addedRows: [], modifiedRows: [], deletedRows: [], addedGroups: [], deletedGroups: [] };
+    for await (const { groupKey } of table.listGroups({ serializedTable: getSerializedTable(tableId), inputTables, range: {} })) {
+      changes.addedGroups.push({ groupKey });
+      for await (const row of table.listRowsInGroup({ serializedTable: getSerializedTable(tableId), inputTables, groupKey, range: {} })) {
+        changes.addedRows.push(row);
+      }
+    }
+    return changes;
+  } catch (error) {
+    // Lazy operators still expose listRowsInGroup, but they or their inputs may intentionally reject
+    // the read. Backfill can reconstruct that chain from change propagation instead.
+    if (!(error instanceof Error) || !error.message.includes("does not support listing rows")) throw error;
+  }
+
+  const inputChanges = Object.fromEntries(await Promise.all(
+    Object.entries(tables[tableId].inputTableIds).map(async ([inputTableKey, inputTableId]) => [
+      inputTableKey,
+      await reconstructTableOutputChangesForBackfill(tables, getSerializedTable, inputTableId),
+    ]),
+  ));
+  const { serializedTable } = table.init({ inputTables });
+  const result = await table.emitInputChanges({ serializedTable, inputTables, changes: inputChanges });
+  validateTableChanges(result.outputChanges, `Reconstructed output of ${tableId}`);
+  return result.outputChanges;
 }
 
 /**
@@ -450,6 +490,9 @@ function createInputTables(
  * would start empty and permanently diverge.
  */
 async function backfillTableFromInputs(
+  tableId: string,
+  tables: Record<string, BulldozerTableState>,
+  getSerializedTable: (tableId: string) => PiledriverObject,
   table: BulldozerTableImplementation,
   serializedTable: PiledriverObject,
   inputTables: Record<string, BulldozerTableImplementationInputTable>,
@@ -457,14 +500,8 @@ async function backfillTableFromInputs(
   if (table.isStateless) return serializedTable;
   const changes: Record<string, TableChanges> = {};
   let hasChanges = false;
-  for (const [inputTableKey, inputTable] of Object.entries(inputTables)) {
-    const inputChanges: TableChanges = { addedRows: [], modifiedRows: [], deletedRows: [], addedGroups: [], deletedGroups: [] };
-    for await (const { groupKey } of inputTable.listGroups({ range: {} })) {
-      inputChanges.addedGroups.push({ groupKey });
-      for await (const row of inputTable.listRowsInGroup({ groupKey, range: {} })) {
-        inputChanges.addedRows.push({ groupKey: row.groupKey, rowIdentifier: row.rowIdentifier, rowSortKey: row.rowSortKey, rowData: row.rowData });
-      }
-    }
+  for (const [inputTableKey, inputTableId] of Object.entries(tables[tableId].inputTableIds)) {
+    const inputChanges = await reconstructTableOutputChangesForBackfill(tables, getSerializedTable, inputTableId);
     changes[inputTableKey] = inputChanges;
     hasChanges ||= inputChanges.addedGroups.length > 0 || inputChanges.addedRows.length > 0;
   }
@@ -529,7 +566,8 @@ class BulldozerDatabaseSnapshot {
     range: Range,
   }): AsyncIterable<{ groupKey: PiledriverObject, rowIdentifier: string, rowSortKey: PiledriverObject, rowData: PiledriverObject }> {
     if (!(options.tableId in this.tablesState.tables)) throw new Error(`Table ${options.tableId} does not exist`);
-    return this.tablesState.tables[options.tableId].table.listRowsInGroup({
+    const table = this.tablesState.tables[options.tableId].table;
+    return table.listRowsInGroup({
       serializedTable: this.serialized.serializedTables[options.tableId],
       inputTables: this._getInputTables(options.tableId),
       groupKey: options.groupKey,
@@ -851,15 +889,20 @@ function createTablesStateFromMigrations(migrations: readonly BulldozerDatabaseM
 
 export type BulldozerDatabase = {
   getDebugInfo(): any,
+  getPiledriverDatabase(): PiledriverDatabase,
   listTables(): BulldozerDatabaseTableDescriptor[],
   debugPiledriverSnapshot?(): Promise<PiledriverDatabaseDebugSnapshot>,
   debugLowLevelSnapshot?(): Promise<LowLevelDatabaseDebugSnapshot>,
   getSnapshot(): Promise<{ snapshot: BulldozerDatabaseSnapshot, seq: DatabaseSeq }>,
   withSnapshot(updateSnapshot: (snapshot: BulldozerDatabaseSnapshot) => Promise<BulldozerDatabaseSnapshot | BulldozerSnapshotMutationResult>): Promise<{ snapshot: BulldozerDatabaseSnapshot, seq: DatabaseSeq }>,
-  withSnapshotReplicated(updateSnapshot: (snapshot: BulldozerDatabaseSnapshot) => Promise<BulldozerDatabaseSnapshot | BulldozerSnapshotMutationResult>): Promise<{ snapshot: BulldozerDatabaseSnapshot, seq: DatabaseSeq }>,
+  withSnapshotConsistent(updateSnapshot: (snapshot: BulldozerDatabaseSnapshot) => Promise<BulldozerDatabaseSnapshot | BulldozerSnapshotMutationResult>): Promise<{ snapshot: BulldozerDatabaseSnapshot, seq: DatabaseSeq }>,
   waitUntilCurrentStateDurable(): Promise<void>,
+  waitUntilCurrentStateConsistent(): Promise<void>,
+  getPiledriverGarbageCollectionProcessStartedAtMillis(): number,
+  collectPiledriverGarbage(cutoffTimestampMillis: number, maxObjects?: number): Promise<PiledriverGarbageCollectionResult>,
   close(): Promise<void>,
   applyRemainingMigrations(): Promise<{ seq: DatabaseSeq }>,
+  debugWriteLockStats(): { heldMs: number, waitMs: number, acquisitions: number },
 };
 
 type BulldozerDatabaseRootSerialized = {
@@ -880,16 +923,25 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
   const tablesState = createTablesStateFromMigrations(options.migrations);
   let currentOperation: Promise<unknown> | null = null;
   let closePromise: Promise<void> | null = null;
+  let writeLockHeldMs = 0;
+  let writeLockWaitMs = 0;
+  let writeLockAcquisitions = 0;
 
   const withWriteLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const waitStartedAt = performance.now();
     while (currentOperation !== null) {
       await currentOperation.catch(() => {});
     }
+    // This includes acquisition overhead; it is meaningful as contention wait only when another operation held the lock.
+    writeLockWaitMs += performance.now() - waitStartedAt;
+    writeLockAcquisitions++;
     const operationPromise = Promise.resolve().then(operation);
     currentOperation = operationPromise;
+    const heldStartedAt = performance.now();
     try {
       return await operationPromise;
     } finally {
+      writeLockHeldMs += performance.now() - heldStartedAt;
       if (currentOperation === operationPromise) currentOperation = null;
     }
   };
@@ -908,9 +960,9 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
   });
   const withSnapshot = async (
     updateSnapshot: (snapshot: BulldozerDatabaseSnapshot) => Promise<BulldozerDatabaseSnapshot | BulldozerSnapshotMutationResult>,
-    options: { replicated: boolean },
+    options: { consistent: boolean },
   ) => {
-    return await traceSpan({ description: "bulldozer-js.bulldozer.withSnapshot", attributes: { "bulldozer.replicated": options.replicated } }, async () => {
+    return await traceSpan({ description: "bulldozer-js.bulldozer.withSnapshot", attributes: { "bulldozer.consistent": options.consistent } }, async () => {
       const startedAt = performance.now();
       let writeLockWaitMs = 0;
       let getSnapshotMs = 0;
@@ -918,7 +970,7 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
       let toPiledriverObjectMs = 0;
       let setRootMs = 0;
       let waitUntilAvailableMs = 0;
-      let waitUntilReplicatedMs = 0;
+      let waitUntilConsistentMs = 0;
       let mutationDebugInfo: BulldozerSnapshotMutationDebugInfo | undefined;
       const writeLockWaitStartedAt = performance.now();
       const result = await withWriteLock(async () => {
@@ -942,14 +994,14 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
         waitUntilAvailableMs = performance.now() - waitUntilAvailableStartedAt;
         return { snapshot: newSnapshot, seq };
       });
-      if (options.replicated) {
-        const waitUntilReplicatedStartedAt = performance.now();
-        await piledriverDatabase.waitUntilReplicated(result.seq);
-        waitUntilReplicatedMs = performance.now() - waitUntilReplicatedStartedAt;
+      if (options.consistent) {
+        const waitUntilConsistentStartedAt = performance.now();
+        await piledriverDatabase.waitUntilConsistent(result.seq);
+        waitUntilConsistentMs = performance.now() - waitUntilConsistentStartedAt;
       }
       if (!shouldSuppressPeriodicBulldozerLogs) {
         console.debug("bulldozer-js withSnapshot timing", inspect({
-          replicated: options.replicated,
+          consistent: options.consistent,
           elapsedMs: performance.now() - startedAt,
           writeLockWaitMs,
           getSnapshotMs,
@@ -957,7 +1009,7 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
           toPiledriverObjectMs,
           setRootMs,
           waitUntilAvailableMs,
-          waitUntilReplicatedMs,
+          waitUntilConsistentMs,
           mutation: mutationDebugInfo === undefined ? undefined : {
             operation: mutationDebugInfo.operation,
             sourceTableId: mutationDebugInfo.sourceTableId,
@@ -985,6 +1037,8 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
         closePromise,
       };
     },
+    getPiledriverDatabase: () => piledriverDatabase,
+    debugWriteLockStats: () => ({ heldMs: writeLockHeldMs, waitMs: writeLockWaitMs, acquisitions: writeLockAcquisitions }),
     listTables: () => Object.entries(tablesState.tables).map(([tableId, tableState]) => ({
       tableId,
       inputTableIds: { ...tableState.inputTableIds },
@@ -997,14 +1051,28 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
     debugPiledriverSnapshot: async () => await piledriverDatabase.debugSnapshot?.() ?? { roots: [], heap: [] },
     debugLowLevelSnapshot: async () => await piledriverDatabase.debugLowLevelSnapshot?.() ?? { stores: {}, dumps: {} },
     getSnapshot,
-    withSnapshot: async (updateSnapshot) => await withSnapshot(updateSnapshot, { replicated: false }),
-    withSnapshotReplicated: async (updateSnapshot) => await withSnapshot(updateSnapshot, { replicated: true }),
+    withSnapshot: async (updateSnapshot) => await withSnapshot(updateSnapshot, { consistent: false }),
+    withSnapshotConsistent: async (updateSnapshot) => await withSnapshot(updateSnapshot, { consistent: true }),
     waitUntilCurrentStateDurable: async () => await traceSpan("bulldozer-js.bulldozer.waitUntilCurrentStateDurable", async () => await withWriteLock(async () => {
       // Taking the write lock makes this a barrier for every earlier mutation.
       // Waiting on the retained write sequence avoids the eviction race where a
       // fresh read sees initialSeq while the original LMDB flush is still pending.
       await piledriverDatabase.waitUntilDurable(latestRootWriteSeq);
     })),
+    waitUntilCurrentStateConsistent: async () => await traceSpan("bulldozer-js.bulldozer.waitUntilCurrentStateConsistent", async () => await withWriteLock(async () => {
+      // Use the retained write sequence for the same reason as the durability barrier above:
+      // reading a fresh snapshot can lose an evicted instant-availability sequence.
+      await piledriverDatabase.waitUntilConsistent(latestRootWriteSeq);
+    })),
+    getPiledriverGarbageCollectionProcessStartedAtMillis: () => piledriverDatabase.getGarbageCollectionProcessStartedAtMillis(),
+    collectPiledriverGarbage: async (cutoffTimestampMillis, maxObjects) => {
+      if (closePromise !== null) throw new Error("Bulldozer database is closing and cannot start garbage collection");
+      return await withWriteLock(async () => {
+        // Recheck after waiting for the lock: close may have started while GC was queued.
+        if (closePromise !== null) throw new Error("Bulldozer database is closing and cannot start garbage collection");
+        return await piledriverDatabase.collectGarbage(cutoffTimestampMillis, maxObjects);
+      });
+    },
     close() {
       if (closePromise === null) {
         closePromise = traceSpan("bulldozer-js.bulldozer.close", async () => await withWriteLock(async () => {
@@ -1041,7 +1109,7 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
       if (snapshot.mostRecentlyCompletedMigrationIndex === options.migrations.length) {
         if (foundExistingRoot) return { seq: currentSeq };
         const { seq } = await setRoot({ snapshot });
-        await piledriverDatabase.waitUntilReplicated(seq);
+        await piledriverDatabase.waitUntilConsistent(seq);
         return { seq };
       }
 
@@ -1058,7 +1126,14 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
               const currentTablesState = createTablesStateFromMigrations([...options.migrations.slice(0, i), stepsSoFar]);
               const inputTables = createInputTables(currentTablesState.tables, id => serializedTables[id], step.tableId);
               const { serializedTable } = step.table.init({ inputTables });
-              serializedTables[step.tableId] = await backfillTableFromInputs(step.table, serializedTable, inputTables);
+              serializedTables[step.tableId] = await backfillTableFromInputs(
+                step.tableId,
+                currentTablesState.tables,
+                id => serializedTables[id],
+                step.table,
+                serializedTable,
+                inputTables,
+              );
               break;
             }
             case "deleteTable": {
@@ -1077,7 +1152,7 @@ export function declareBulldozerDatabase(piledriverDatabase: PiledriverDatabase,
           uniqueSnapshotIdentifier: crypto.randomUUID(),
         },
       });
-      await piledriverDatabase.waitUntilReplicated(seq);
+      await piledriverDatabase.waitUntilConsistent(seq);
       return { seq };
     })),
   };
@@ -1357,6 +1432,10 @@ export function defineStoredTable(options: {
   };
   const emptyMap = new AugmentedTreeMap(mapOptions);
 
+  // Stored tables always use a null sort key (`compareSortKeys` is constantly 0).
+  // Range bounds are sort-key ranges — same contract as derived tables / timefold —
+  // so identity/flatMap pushdown of null bounds keeps working. Identifier-ordered
+  // pagination belongs on a derived sort table (see payments-manual-transactions-sorted).
   const serialize = (map: typeof emptyMap) => ({
     version: 1,
     map: map.toPiledriverObject(),
@@ -1379,9 +1458,12 @@ export function defineStoredTable(options: {
       yield { groupKey: null };
     },
     async * listRowsInGroup({ serializedTable, groupKey, range }) {
+      if (groupKey !== null || !isInRange(null, range, () => 0) || range.limit === 0) return;
       const map = deserialize(serializedTable);
-      if (groupKey !== null || range.gt !== undefined || range.lt !== undefined || range.limit === 0) return;
-      for await (const [rowIdentifier, rowData] of map.entries({ reverse: range.reverse, limit: range.limit })) {
+      for await (const [rowIdentifier, rowData] of map.entries({
+        reverse: range.reverse,
+        limit: range.limit,
+      })) {
         yield { groupKey: null, rowIdentifier, rowSortKey: null, rowData };
       }
     },
@@ -1856,21 +1938,19 @@ export function defineSortTable(options: {
   sortKeyExtractor: (row: { groupKey: PiledriverObject, rowIdentifier: string, rowData: PiledriverObject }) => PiledriverObject,
   sortKeyComparator: (a: PiledriverObject, b: PiledriverObject) => number,
 }): BulldozerTableImplementation {
-  return createGroupwiseTreeTableImplementation({
-    getMapOptions({ inputGroup }) {
-      return {
-        comparator: (a: PiledriverObject, b: PiledriverObject) => options.sortKeyComparator(a, b),
-        extractAugmentation: (value) => null,
-        mergeAugmentations: (...augmentations) => null,
-      };
+  return {
+    isStateless: true,
+    init() {
+      return { serializedTable: null };
     },
-    async * listRows({ map, inputGroup, range }) {
-      for await (const [rowSortKey, rowIdentifier, rowData] of map.entries(range)) {
-        yield { rowIdentifier, rowSortKey, rowData };
-      }
+    async * listGroups({ inputTables, range }) {
+      yield* inputTables.input.listGroups({ range });
     },
-    async emitInputChanges({ map, inputGroup, changes }) {
-      const changedRows = changedRowsFromTableChanges(changes);
+    async * listRowsInGroup() {
+      throw new Error("Sort table does not support listing rows; add a materialize table before reading from it");
+    },
+    async emitInputChanges({ changes }) {
+      const changedRows = changedRowsFromTableChanges(changes.input);
       const newChangedRows = changedRows.map(row => ({
         old: row.old && {
           ...row.old,
@@ -1881,31 +1961,18 @@ export function defineSortTable(options: {
           rowSortKey: options.sortKeyExtractor(row.new),
         },
       }));
-      for (const row of newChangedRows) {
-        if (row.old) map = await map.delete(row.old.rowSortKey, row.old.rowIdentifier);
-        if (row.new) map = await map.add(row.new.rowSortKey, row.new.rowIdentifier, row.new.rowData);
-      }
       return {
-        newMap: map,
-        outputChanges: changedRowsToGroupChanges(newChangedRows),
+        newSerializedTable: null,
+        outputChanges: changedRowsToTableChanges(newChangedRows, changes.input),
       };
     },
-    async emitInputGroupCreation({ map, inputGroup }) {
-      return {
-        newMap: map,
-        outputChanges: { addedRows: [], modifiedRows: [], deletedRows: [] },
-      };
+    compareGroupKeys({ inputTables, a, b }) {
+      return inputTables.input.compareGroupKeys({ a, b });
     },
-    async emitInputGroupDeletion({ map, inputGroup }) {
-      return {
-        newMap: map,
-        outputChanges: { addedRows: [], modifiedRows: [], deletedRows: [] },
-      };
-    },
-    compareSortKeys({ inputTable, a, b }) {
+    compareSortKeys({ a, b }) {
       return options.sortKeyComparator(a, b);
     },
-  });
+  };
 }
 
 export function defineReduceTable(options: {
@@ -2114,11 +2181,11 @@ export function declareGroupByTable(options: {
   groupKeyComparator: (a: PiledriverObject, b: PiledriverObject) => number,
 }): BulldozerTableImplementation {
   type InputRow = { groupKey: PiledriverObject, rowIdentifier: string, rowSortKey: PiledriverObject, rowData: PiledriverObject };
-  type SerializedGroup = {
-    groupKey: PiledriverObject,
-    rows: PiledriverObject,
-  };
-  type GroupRows = AugmentedTreeMultiMap<PiledriverObject, PiledriverObject, null, string>;
+  // The rows variant is accepted for snapshots written before GroupBy stopped materializing rows.
+  // Touched groups are rewritten to the count-only representation.
+  type SerializedGroup =
+    | { groupKey: PiledriverObject, count: number }
+    | { groupKey: PiledriverObject, rows: PiledriverObject };
   const outputAdded = (groupKey: PiledriverObject, row: InputRow) => ({ groupKey, rowIdentifier: row.rowIdentifier, rowSortKey: row.rowSortKey, rowData: row.rowData });
   const outputDeleted = (groupKey: PiledriverObject, row: InputRow) => ({ groupKey, rowIdentifier: row.rowIdentifier, oldRowSortKey: row.rowSortKey, oldRowData: row.rowData });
   const outputModified = (groupKey: PiledriverObject, oldRow: InputRow, newRow: InputRow) => ({
@@ -2134,13 +2201,6 @@ export function declareGroupByTable(options: {
     extractAugmentation: () => null,
     mergeAugmentations: () => null,
   };
-  const rowMapOptions = (inputTables: Record<string, BulldozerTableImplementationInputTable>): ConstructorParameters<typeof AugmentedTreeMultiMap<PiledriverObject, PiledriverObject, null, string>>[0] => ({
-    comparator: (a, b) => inputTables.input.compareSortKeys({ a, b }),
-    extractAugmentation: () => null,
-    mergeAugmentations: () => null,
-    entryIdComparator: compareStrings,
-  });
-  const emptyRows = (inputTables: Record<string, BulldozerTableImplementationInputTable>) => new AugmentedTreeMultiMap(rowMapOptions(inputTables));
   const serialize = (map: AugmentedTreeMap<PiledriverObject, SerializedGroup, null>) => ({
     version: 1,
     map: map.toPiledriverObject(),
@@ -2150,8 +2210,16 @@ export function declareGroupByTable(options: {
     if (!("version" in serialized && serialized.version === 1) || typeof serialized.map !== "object" || serialized.map === null) throw new Error("Invalid serialized table");
     return AugmentedTreeMap.fromPiledriverObject<PiledriverObject, SerializedGroup, null>(serialized.map, groupMapOptions);
   };
-  const rowsFromSerialized = (serializedRows: PiledriverObject, inputTables: Record<string, BulldozerTableImplementationInputTable>) =>
-    AugmentedTreeMultiMap.fromPiledriverObject<PiledriverObject, PiledriverObject, null, string>(serializedRows, rowMapOptions(inputTables));
+  const legacyRowMapOptions = (inputTables: Record<string, BulldozerTableImplementationInputTable>): ConstructorParameters<typeof AugmentedTreeMultiMap<PiledriverObject, PiledriverObject, null, string>>[0] => ({
+    comparator: (a, b) => inputTables.input.compareSortKeys({ a, b }),
+    extractAugmentation: () => null,
+    mergeAugmentations: () => null,
+    entryIdComparator: compareStrings,
+  });
+  const groupCount = async (group: SerializedGroup, inputTables: Record<string, BulldozerTableImplementationInputTable>) =>
+    "count" in group
+      ? group.count
+      : await AugmentedTreeMultiMap.fromPiledriverObject<PiledriverObject, PiledriverObject, null, string>(group.rows, legacyRowMapOptions(inputTables)).size();
 
   return {
     init() {
@@ -2161,48 +2229,39 @@ export function declareGroupByTable(options: {
       const map = deserialize(serializedTable);
       for await (const groupKey of map.keys(range)) yield { groupKey };
     },
-    async * listRowsInGroup({ serializedTable, inputTables, groupKey, range }) {
-      const group = await deserialize(serializedTable).get(groupKey);
-      if (!group) return;
-      const rows = rowsFromSerialized(group.rows, inputTables);
-      for await (const [rowSortKey, rowIdentifier, rowData] of rows.entries(range)) {
-        yield { groupKey: group.groupKey, rowIdentifier, rowSortKey, rowData };
-      }
+    async * listRowsInGroup() {
+      throw new Error("GroupBy table does not support listing rows; add a materialize table before reading from it");
     },
     async emitInputChanges({ serializedTable, inputTables, changes }) {
       let map = deserialize(serializedTable);
       const outputChanges: TableChanges = { addedRows: [], modifiedRows: [], deletedRows: [], addedGroups: [], deletedGroups: [] };
       const loadGroup = async (groupKey: PiledriverObject) => {
         const existing = await map.get(groupKey);
-        const rows = emptyRows(inputTables);
         return existing
-          ? { existed: true, group: existing, rows: rowsFromSerialized(existing.rows, inputTables) }
-          : { existed: false, group: { groupKey, rows: rows.toPiledriverObject() }, rows };
+          ? { groupKey: existing.groupKey, count: await groupCount(existing, inputTables) }
+          : { groupKey, count: 0 };
       };
-      const saveGroup = async (groupKey: PiledriverObject, group: SerializedGroup, rows: GroupRows, existed: boolean) => {
-        if (await rows.size() === 0) {
-          if (existed) {
-            map = await map.delete(groupKey);
-            outputChanges.deletedGroups.push({ groupKey: group.groupKey });
-          }
+      const saveGroup = async (lookupKey: PiledriverObject, group: { groupKey: PiledriverObject, count: number }, newCount: number) => {
+        if (newCount < 0) throw new Error(`Group ${JSON.stringify(lookupKey)} has a negative row count`);
+        if (newCount === 0) {
+          if (group.count > 0) outputChanges.deletedGroups.push({ groupKey: group.groupKey });
+          map = await map.delete(lookupKey);
         } else {
-          if (!existed) outputChanges.addedGroups.push({ groupKey: group.groupKey });
-          map = await map.set(groupKey, { groupKey: group.groupKey, rows: rows.toPiledriverObject() });
+          if (group.count === 0) outputChanges.addedGroups.push({ groupKey: group.groupKey });
+          map = await map.set(lookupKey, { groupKey: group.groupKey, count: newCount });
         }
       };
       const deleteRow = async (row: InputRow) => {
         const groupKey = await options.groupKeyExtractor(row);
-        const { existed, group, rows } = await loadGroup(groupKey);
-        if (!existed) throw new Error(`Group ${JSON.stringify(groupKey)} does not exist`);
-        const newRows = await rows.delete(row.rowSortKey, row.rowIdentifier);
+        const group = await loadGroup(groupKey);
+        if (group.count === 0) throw new Error(`Group ${JSON.stringify(groupKey)} does not exist`);
         outputChanges.deletedRows.push(outputDeleted(group.groupKey, row));
-        await saveGroup(groupKey, group, newRows, existed);
+        await saveGroup(groupKey, group, group.count - 1);
       };
       const addRow = async (row: InputRow) => {
         const groupKey = await options.groupKeyExtractor(row);
-        const { existed, group, rows } = await loadGroup(groupKey);
-        const newRows = await rows.add(row.rowSortKey, row.rowIdentifier, row.rowData);
-        await saveGroup(groupKey, group, newRows, existed);
+        const group = await loadGroup(groupKey);
+        await saveGroup(groupKey, group, group.count + 1);
         outputChanges.addedRows.push(outputAdded(group.groupKey, row));
       };
 
@@ -2211,11 +2270,9 @@ export function declareGroupByTable(options: {
           const oldGroupKey = await options.groupKeyExtractor(row.old);
           const newGroupKey = await options.groupKeyExtractor(row.new);
           if (piledriverObjectEquals(oldGroupKey, newGroupKey)) {
-            const { existed, group, rows } = await loadGroup(oldGroupKey);
-            if (!existed) throw new Error(`Group ${JSON.stringify(oldGroupKey)} does not exist`);
-            let newRows = await rows.delete(row.old.rowSortKey, row.old.rowIdentifier);
-            newRows = await newRows.add(row.new.rowSortKey, row.new.rowIdentifier, row.new.rowData);
-            await saveGroup(oldGroupKey, group, newRows, existed);
+            const group = await loadGroup(oldGroupKey);
+            if (group.count === 0) throw new Error(`Group ${JSON.stringify(oldGroupKey)} does not exist`);
+            await saveGroup(oldGroupKey, group, group.count);
             if (!piledriverObjectEquals(row.old.rowSortKey, row.new.rowSortKey) || !piledriverObjectEquals(row.old.rowData, row.new.rowData)) {
               outputChanges.modifiedRows.push(outputModified(group.groupKey, row.old, row.new));
             }

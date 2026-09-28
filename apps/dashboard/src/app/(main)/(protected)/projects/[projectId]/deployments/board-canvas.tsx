@@ -1,24 +1,23 @@
 "use client";
 
-import { DesignButton, DesignInput } from "@/components/design-components";
-import { Popover, PopoverContent, PopoverTrigger, Spinner, cn } from "@/components/ui";
+import { Spinner, cn } from "@/components/ui";
 import { getPublicEnvVar } from "@/lib/env";
-import type { AdminDeploymentServiceJson, PushedConfigSource } from "@hexclave/next";
-import { runAsynchronously, runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
-import { GitBranchIcon, LockSimpleIcon, MinusIcon, PlusIcon, TriangleIcon, WarningCircleIcon } from "@phosphor-icons/react";
+import type { AdminDeploymentJson, AdminDeploymentServiceJson } from "@hexclave/next";
+import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
+import { FileTsIcon, MinusIcon, PlusIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAdminApp } from "../use-admin-app";
 import {
   NODE_HEIGHT,
   NODE_WIDTH,
   buildBoardServices,
-  getServiceTypeMeta,
+  buildDeploymentScope,
   type BoardService,
 } from "./board-model";
 import { buildEdgePath, deriveConnections, getEdgeAnchors } from "./connections";
 import { ServiceDetailPane } from "./service-detail-pane";
 import { ServiceNode } from "./service-node";
-import { BLUEPRINT_VARIANT, getAccentClasses } from "./variants";
+import { BLUEPRINT_VARIANT, getAccentClasses, type Accent } from "./variants";
 
 // Below this pointer travel a press counts as a click (select / deselect),
 // not a drag or pan.
@@ -26,6 +25,10 @@ const DRAG_THRESHOLD = 4;
 
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 2.5;
+
+// Breathing room left around the node cluster when fitting it to the viewport,
+// so nodes don't sit flush against the edges (or under the floating chrome).
+const FIT_PADDING = 96;
 
 // The board data is cheap to fetch, so a simple always-on poll keeps deploy
 // statuses fresh without a websocket.
@@ -42,23 +45,51 @@ type Interaction =
   | { mode: "node", id: string, startClientX: number, startClientY: number, startWorldX: number, startWorldY: number, moved: boolean }
   | { mode: "pan", startClientX: number, startClientY: number, startViewX: number, startViewY: number, moved: boolean };
 
-export function BoardCanvas() {
+/**
+ * The project's service map as of the moment one deployment completed.
+ *
+ * Deliberately NOT scoped to the services that deploy shipped. A project deployed from
+ * several repositories has a deployment source per repository, deploying independently, and
+ * a map showing only one source's services would hide every cross-source connection —
+ * `service("api").url(8080)` in the frontend repo would draw an edge to a node that isn't
+ * there. So each OTHER source contributes its own newest deployment at or before this one
+ * (see buildDeploymentScope), and the nodes are coloured by source so the reader can still
+ * tell whose is whose.
+ *
+ * Node STATE comes from those deployments' outcomes, not from the services' current rows: a
+ * board opened on an older deploy shows what was running then, including the failures. The
+ * topology and build settings still come from the current definitions — a Deployment records
+ * what it shipped, not a copy of the graph — so a service reconfigured since will draw with
+ * today's ports and env.
+ */
+export function BoardCanvas({ deployment, deployments, linkedServiceId, linkedPanel }: {
+  deployment: AdminDeploymentJson,
+  // Every deployment the list has loaded, of every source. What the other
+  // sources had running at `deployment`'s moment is read from these.
+  deployments: AdminDeploymentJson[],
+  // The service and panel a `hexclave deploy` link named, or null. Props rather
+  // than read from the URL here: page-client strips the params as soon as it has
+  // them, and this component mounts after that.
+  linkedServiceId: string | null,
+  linkedPanel: string | null,
+}) {
   const variant = BLUEPRINT_VARIANT;
   const adminApp = useAdminApp();
   const project = adminApp.useProject();
 
   const [apiServices, setApiServices] = useState<AdminDeploymentServiceJson[] | null>(null);
-  const [configSource, setConfigSource] = useState<PushedConfigSource | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const scope = useMemo(
+    () => apiServices == null ? null : buildDeploymentScope({ openDeployment: deployment, deployments, apiServices }),
+    [deployment, deployments, apiServices],
+  );
+  const outcomeByServiceId = scope?.outcomeByServiceId ?? new Map();
 
   const refresh = useCallback(async () => {
     try {
-      const [services, source] = await Promise.all([
-        project.listDeploymentServices(),
-        project.getPushedConfigSource(),
-      ]);
+      const services = await project.listDeploymentServices();
       setApiServices(services);
-      setConfigSource(source);
       setLoadError(null);
     } catch (error) {
       // Keep whatever data we have; the board shows the error banner.
@@ -72,15 +103,19 @@ export function BoardCanvas() {
     return () => clearInterval(interval);
   }, [refresh]);
 
-  // Config definitions are read-only in the dashboard when the config is
-  // pushed from a config file or GitHub (deploy-time env vars still work).
-  const readOnly = configSource != null && configSource.type !== "unlinked";
-  const readOnlySourceLabel = configSource?.type === "pushed-from-github" ? "GitHub" : "a config file";
-
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The service a `hexclave deploy` link names, opened once the board knows its
+  // services. Applied once: after that the board is the user's to navigate.
+  const appliedLink = useRef(false);
+  // The linked panel, held until the user navigates away from the linked node.
+  // Cleared rather than re-derived, so that closing the pane and reopening the
+  // same service is a fresh look at it — not a replay of the link.
+  const [pendingPanel, setPendingPanel] = useState<string | null>(linkedPanel);
+  const selectService = useCallback((id: string | null) => {
+    setSelectedId(id);
+    setPendingPanel(null);
+  }, []);
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [addOpen, setAddOpen] = useState(false);
-  const [newServiceName, setNewServiceName] = useState("");
   const [view, setView] = useState<View>({ x: 0, y: 0, zoom: 1 });
   // In-session drag positions, keyed by service id, on top of the
   // deterministic layout. Not persisted — a refresh resets the layout.
@@ -102,15 +137,44 @@ export function BoardCanvas() {
   }, []);
 
   const services = useMemo(() => {
-    if (apiServices == null) return null;
-    return buildBoardServices(apiServices, hexclaveApiHost).map((service) => {
-      const override = positionOverrides.get(service.id);
-      return override != null ? { ...service, x: override.x, y: override.y } : service;
-    });
-  }, [apiServices, hexclaveApiHost, positionOverrides]);
+    if (apiServices == null || scope == null) return null;
+    // Filtered BEFORE the layout runs, so positions have no holes where a
+    // hidden service would have been.
+    const visible = apiServices.filter((apiService) => scope.visibleServiceIds.has(apiService.id));
+    return buildBoardServices(visible, hexclaveApiHost, scope.statusByServiceId)
+      .map((service) => {
+        const override = positionOverrides.get(service.id);
+        return override != null ? { ...service, x: override.x, y: override.y } : service;
+      });
+  }, [apiServices, hexclaveApiHost, positionOverrides, scope]);
+
+  useEffect(() => {
+    if (appliedLink.current || linkedServiceId === null || services === null) return;
+    const match = services.find((service) => service.id === linkedServiceId);
+    appliedLink.current = true;
+    // A link to a service this deployment does not have leaves the map open,
+    // which is the right place to be when the named one is gone.
+    if (match !== undefined) setSelectedId(match.id);
+    else setPendingPanel(null);
+  }, [linkedServiceId, services]);
 
   const selected = services?.find((s) => s.id === selectedId) ?? null;
   const connections = useMemo(() => deriveConnections(services ?? []), [services]);
+
+  // One entry per source actually on the map, in the order the nodes are laid
+  // out, so the legend reads left-to-right with the board.
+  const legend = useMemo(() => {
+    const entries = new Map<string, { sourceId: string, accent: Accent, deployment: AdminDeploymentJson | null }>();
+    for (const service of services ?? []) {
+      if (service.sourceId == null || entries.has(service.sourceId)) continue;
+      entries.set(service.sourceId, {
+        sourceId: service.sourceId,
+        accent: service.accent,
+        deployment: scope?.deploymentBySourceId.get(service.sourceId) ?? null,
+      });
+    }
+    return [...entries.values()];
+  }, [services, scope]);
 
   const linkedIds = useMemo(() => {
     if (!selectedId) return new Set<string>();
@@ -122,7 +186,7 @@ export function BoardCanvas() {
     return ids;
   }, [connections, selectedId]);
 
-  // Center the board once the viewport has a size and the services are known.
+  // Fit the board to the viewport once it has a size and the services are known.
   const centeredRef = useRef(false);
   useEffect(() => {
     const vp = viewportRef.current;
@@ -137,7 +201,14 @@ export function BoardCanvas() {
       const ys = services.map((s) => s.y + NODE_HEIGHT / 2);
       const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
       const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-      setView({ x: width / 2 - cx, y: height / 2 - cy, zoom: 1 });
+      // Scale DOWN to fit, never up: a two-node map at 250% would look broken.
+      // Without this the view stays at 1:1 and anything past four services (or
+      // any map at all in a laptop-height window) opens with nodes off-screen —
+      // and the board has no scrollbars, so they read as missing entirely.
+      const contentWidth = Math.max(...xs) - Math.min(...xs) + NODE_WIDTH + FIT_PADDING;
+      const contentHeight = Math.max(...ys) - Math.min(...ys) + NODE_HEIGHT + FIT_PADDING;
+      const zoom = clampZoom(Math.min(1, width / contentWidth, height / contentHeight));
+      setView({ x: width / 2 - cx * zoom, y: height / 2 - cy * zoom, zoom });
       observer.disconnect();
     };
     const observer = new ResizeObserver(center);
@@ -240,7 +311,7 @@ export function BoardCanvas() {
       if (it && !it.moved) {
         // A click without meaningful movement: select a node, or deselect on
         // empty canvas.
-        setSelectedId(it.mode === "node" ? it.id : null);
+        selectService(it.mode === "node" ? it.id : null);
       }
       interactionRef.current = null;
       setDraggingId(null);
@@ -251,25 +322,16 @@ export function BoardCanvas() {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
     };
-  }, []);
+    // `selectService` is useCallback([]), so listing it re-subscribes nothing.
+  }, [selectService]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSelectedId(null);
+      if (e.key === "Escape") selectService(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  const handleAddService = useCallback(async () => {
-    const name = newServiceName.trim().toLowerCase();
-    if (name === "") return;
-    await project.createDeploymentService(name, {});
-    setAddOpen(false);
-    setNewServiceName("");
-    await refresh();
-    setSelectedId(name);
-  }, [newServiceName, project, refresh]);
+  }, [selectService]);
 
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden rounded-2xl ring-1 ring-black/[0.06] dark:ring-white/[0.06]">
@@ -310,7 +372,10 @@ export function BoardCanvas() {
                 if (!from || !to) return null;
                 const anchors = getEdgeAnchors(from, to);
                 const path = buildEdgePath(anchors, variant.connectorStyle);
-                const accent = getAccentClasses(getServiceTypeMeta(from.type).accent);
+                // The edge takes the colour of the service that DECLARES the
+                // reference, so a cross-source connection visibly leaves its
+                // repository's colour and lands on another's.
+                const accent = getAccentClasses(from.accent);
                 const active = selectedId === from.id || selectedId === to.id;
                 const dimmed = selectedId != null && !active;
                 return (
@@ -337,14 +402,31 @@ export function BoardCanvas() {
         )}
       </div>
 
-      {/* Read-only / error banners — top-left. */}
+      {/* Config-as-code hint / source legend / error banners — top-left. */}
       <div data-board-chrome onPointerDown={(e) => e.stopPropagation()} className="absolute left-3 top-3 z-20 flex max-w-[60%] flex-col gap-2">
-        {readOnly && (
-          <div className="flex items-center gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 ring-1 ring-amber-500/30 backdrop-blur-md dark:text-amber-300">
-            {configSource.type === "pushed-from-github" ? <GitBranchIcon className="h-4 w-4 shrink-0" /> : <LockSimpleIcon className="h-4 w-4 shrink-0" />}
-            <span>
-              This project&apos;s config is managed by {readOnlySourceLabel}. Edit your repo&apos;s <span className="font-mono">hexclave.config.ts</span> to change services.
-            </span>
+        <div className="flex items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-xs text-muted-foreground ring-1 ring-black/[0.08] backdrop-blur-md dark:bg-background/70 dark:ring-white/[0.08]">
+          <FileTsIcon className="h-4 w-4 shrink-0" />
+          <span>
+            Everything running when deployment #{deployment.number} finished. Services are defined by the <span className="font-mono">services</span> member of the <span className="font-mono">deploy</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced by <span className="font-mono">hexclave deploy</span>.
+          </span>
+        </div>
+        {/* Legend. Only earns its space once a second source is on the map —
+            with one source the node colour distinguishes nothing. Each entry
+            names the deployment its source's state was read from, since only
+            one of them is the deployment the reader opened. */}
+        {legend.length > 1 && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl bg-white/80 px-3 py-2 text-xs ring-1 ring-black/[0.08] backdrop-blur-md dark:bg-background/70 dark:ring-white/[0.08]">
+            {legend.map((entry) => (
+              <span key={entry.sourceId} className="flex items-center gap-1.5">
+                <span className={cn("h-2.5 w-2.5 shrink-0 rounded-sm", getAccentClasses(entry.accent).bar)} />
+                <span className="font-mono text-foreground/80">{entry.sourceId}</span>
+                <span className="text-muted-foreground">
+                  {entry.deployment == null
+                    ? "current"
+                    : entry.deployment.id === deployment.id ? `#${entry.deployment.number}` : `#${entry.deployment.number} (then latest)`}
+                </span>
+              </span>
+            ))}
           </div>
         )}
         {loadError != null && (
@@ -366,53 +448,6 @@ export function BoardCanvas() {
         </button>
       </div>
 
-      {/* Add service — top-right. Disabled when the config is pushed from a
-          config file or GitHub (definitions are read-only then). */}
-      <div data-board-chrome onPointerDown={(e) => e.stopPropagation()} className="absolute right-3 top-3 z-20">
-        <Popover
-          open={addOpen}
-          onOpenChange={(open) => {
-            setAddOpen(open);
-            if (!open) setNewServiceName("");
-          }}
-        >
-          <PopoverTrigger asChild>
-            <DesignButton size="sm" variant="outline" disabled={readOnly || services == null}>
-              <PlusIcon className="mr-2 h-4 w-4" />
-              Add Service
-            </DesignButton>
-          </PopoverTrigger>
-          <PopoverContent align="end" className="w-64 p-3">
-            <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-              <TriangleIcon className="h-4 w-4 text-cyan-500" weight="fill" />
-              New Vercel service
-            </div>
-            <DesignInput
-              autoFocus
-              value={newServiceName}
-              size="sm"
-              placeholder="e.g. web, api, docs"
-              className="font-mono"
-              onChange={(e) => setNewServiceName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") runAsynchronouslyWithAlert(handleAddService());
-              }}
-            />
-            <p className="mt-1.5 text-[11px] text-muted-foreground">
-              Lowercase letters, digits, hyphens, and underscores. This is the name you&apos;ll pass to <span className="font-mono">hexclave deploy</span>.
-            </p>
-            <DesignButton
-              size="sm"
-              className="mt-2 w-full"
-              disabled={newServiceName.trim() === ""}
-              onClick={handleAddService}
-            >
-              Create service
-            </DesignButton>
-          </PopoverContent>
-        </Popover>
-      </div>
-
       {/* Detail pane — slides over the right edge. */}
       <div
         data-board-chrome
@@ -427,12 +462,18 @@ export function BoardCanvas() {
             service={selected}
             services={services}
             project={project}
-            readOnly={readOnly}
-            onClose={() => setSelectedId(null)}
-            onDeleted={() => {
-              setSelectedId(null);
-              runAsynchronously(refresh());
-            }}
+            // The deploy's own id and this service's outcome in it: the build
+            // log belongs to the DEPLOYMENT (one builder machine builds every
+            // service), and the outcome is what that deploy did with this one.
+            // `?? null` covers the managed hexclave node, which is in no deploy.
+            deploymentId={deployment.id}
+            // False when no builder ever started, because every service of the
+            // deploy ran an already-built image. Distinct from "not deployed
+            // yet", so the Build logs tab can say which it is.
+            hasBuildLogs={deployment.has_build_logs}
+            initialTab={selected.id === linkedServiceId ? pendingPanel : null}
+            outcome={outcomeByServiceId.get(selected.id) ?? null}
+            onClose={() => selectService(null)}
             refresh={refresh}
           />
         )}

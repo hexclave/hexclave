@@ -51,6 +51,7 @@ ENTRYPOINT ["sh", "-c", "\
     -c shared_preload_libraries='pg_stat_statements,pg_cron' \
     -c cron.database_name='stackframe' \
     -c pg_stat_statements.track=all \
+    -c pg_stat_statements.max=20000 \
     -c logging_collector=on \
     -c log_destination='stderr' \
     -c log_min_messages=log \

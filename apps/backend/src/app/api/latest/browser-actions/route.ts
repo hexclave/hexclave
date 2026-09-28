@@ -7,7 +7,8 @@ import { StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
 
 export const POST = createSmartRouteHandler({
   metadata: {
-    hidden: true,
+    summary: "Create a browser action",
+    description: "Creates a single-use link to one of the project's trusted origins that, when opened, makes the Hexclave SDK on that page perform an action in the browser: signing in as a given user (impersonation) or showing the clickmap overlay. Requires server or higher access.",
   },
   request: yupObject({
     auth: yupObject({
@@ -15,20 +16,60 @@ export const POST = createSmartRouteHandler({
       tenancy: adaptSchema.defined(),
     }).defined(),
     body: yupObject({
-      type: yupString().oneOf(["impersonation", "clickmap-overlay"]).defined(),
-      origin: yupString().defined(),
-      expires_in_millis: yupNumber().integer().min(1).max(MAX_BROWSER_ACTION_TTL_MS).default(DEFAULT_BROWSER_ACTION_TTL_MS),
-      session_expires_in_millis: yupNumber().integer().min(1).max(MAX_AUTH_SESSION_EXPIRATION_MS).default(DEFAULT_IMPERSONATION_SESSION_TTL_MS),
-      user_id: yupString().optional(),
+      type: yupString().oneOf(["impersonation", "clickmap-overlay"]).defined().meta({
+        openapiField: {
+          description: "The action the SDK performs after the link is opened. `impersonation` signs the browser in as `user_id`; `clickmap-overlay` mounts the clickmap overlay.",
+          exampleValue: "impersonation",
+        },
+      }),
+      origin: yupString().defined().meta({
+        openapiField: {
+          description: "The project's trusted origin where the link opens. The action can only be consumed by a request whose Origin header matches this value.",
+          exampleValue: "https://app.example.com",
+        },
+      }),
+      expires_in_millis: yupNumber().integer().min(1).max(MAX_BROWSER_ACTION_TTL_MS).default(DEFAULT_BROWSER_ACTION_TTL_MS).meta({
+        openapiField: {
+          description: "How long the single-use link remains redeemable, in milliseconds.",
+          exampleValue: DEFAULT_BROWSER_ACTION_TTL_MS,
+        },
+      }),
+      session_expires_in_millis: yupNumber().integer().min(1).max(MAX_AUTH_SESSION_EXPIRATION_MS).default(DEFAULT_IMPERSONATION_SESSION_TTL_MS).meta({
+        openapiField: {
+          description: "Lifetime of the impersonation session, measured from link creation. Ignored for `clickmap-overlay` actions.",
+          exampleValue: DEFAULT_IMPERSONATION_SESSION_TTL_MS,
+        },
+      }),
+      user_id: yupString().optional().meta({
+        openapiField: {
+          description: "ID of the user to impersonate. Required when `type` is `impersonation` and ignored for `clickmap-overlay`.",
+          exampleValue: "user_123",
+        },
+      }),
     }).defined(),
   }),
   response: yupObject({
     statusCode: yupNumber().oneOf([200]).defined(),
     bodyType: yupString().oneOf(["json"]).defined(),
     body: yupObject({
-      id: yupString().defined(),
-      url: yupString().defined(),
-      expires_at_millis: yupNumber().defined(),
+      id: yupString().defined().meta({
+        openapiField: {
+          description: "Opaque, single-use browser action ID.",
+          exampleValue: "browser_action_code",
+        },
+      }),
+      url: yupString().defined().meta({
+        openapiField: {
+          description: "URL at the requested trusted origin containing the browser action ID. Open it in the target browser to perform the action.",
+          exampleValue: "https://app.example.com/?hexclave_action_id=browser_action_code",
+        },
+      }),
+      expires_at_millis: yupNumber().defined().meta({
+        openapiField: {
+          description: "Unix timestamp in milliseconds after which the browser action can no longer be consumed.",
+          exampleValue: 1_800_000_000_000,
+        },
+      }),
     }).defined(),
   }),
   handler: async ({ auth: { tenancy }, body: { type, origin, expires_in_millis, session_expires_in_millis, user_id } }, fullReq) => {

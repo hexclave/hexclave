@@ -4,7 +4,7 @@ import { useAdminApp } from "@/app/(main)/(protected)/projects/[projectId]/use-a
 import { AppSquare } from "@/components/app-square";
 import { DesignAlert, DesignCard, DesignCategoryTabs, DesignInput } from "@/components/design-components";
 import { type AppId } from "@/lib/apps-frontend";
-import { getEnabledAppIds } from "@/lib/apps-utils";
+import { getAppIdsForListing, getEnabledAppIds } from "@/lib/apps-utils";
 import { CheckCircleIcon, MagnifyingGlassIcon, SquaresFourIcon } from "@phosphor-icons/react";
 import { ALL_APPS } from "@hexclave/shared/dist/apps/apps-config";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
@@ -41,15 +41,11 @@ export default function PageClient() {
 
   // Create a Set for O(1) lookups
   const installedAppsSet = useMemo(() => new Set(installedApps), [installedApps]);
+  const listedApps = useMemo(() => getAppIdsForListing(installedApps), [installedApps]);
 
   // Filter and categorize apps
   const filteredApps = useMemo(() => {
-    let apps = Object.keys(ALL_APPS) as AppId[];
-
-    // Filter out alpha apps in production, but keep enabled ones
-    if (process.env.NODE_ENV !== "development") {
-      apps = apps.filter(appId => ALL_APPS[appId].stage !== "alpha" || installedAppsSet.has(appId));
-    }
+    let apps = [...listedApps];
 
     // Apply category filter
     if (selectedCategory === "installed") {
@@ -82,22 +78,19 @@ export default function PageClient() {
       if (!aInstalled && bInstalled) return 1;
       return stringCompare(ALL_APPS[a].displayName, ALL_APPS[b].displayName);
     });
-  }, [searchQuery, selectedCategory, installedApps, installedAppsSet]);
+  }, [searchQuery, selectedCategory, installedApps, installedAppsSet, listedApps]);
 
   // Get count for each category
   const getCategoryCount = (categoryId: string) => {
     if (categoryId === "installed") return installedApps.length;
-    if (categoryId === "all") return Object.keys(ALL_APPS).filter(appId =>
-      process.env.NODE_ENV === "development" || ALL_APPS[appId as AppId].stage !== "alpha" || installedAppsSet.has(appId as AppId)
-    ).length;
+    if (categoryId === "all") return listedApps.length;
 
     const category = CATEGORIES.find(c => c.id === categoryId);
     if (!category) return 0;
 
-    return (Object.entries(ALL_APPS) as [AppId, typeof ALL_APPS[AppId]][]).filter(([appId, app]) => {
-      if (process.env.NODE_ENV !== "development" && app.stage === "alpha" && !installedAppsSet.has(appId)) return false;
-      return app.tags.some((tag: string) => category.tags.includes(tag));
-    }).length;
+    return listedApps.filter((appId) => (
+      ALL_APPS[appId].tags.some((tag: string) => category.tags.includes(tag))
+    )).length;
   };
 
   return (

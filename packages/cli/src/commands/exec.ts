@@ -63,7 +63,7 @@ export function registerExecCommand(program: Command) {
       if (target.kind === "cloud") {
         const cloudAuth = resolveAuth(target.projectId);
         if (!isProjectAuthWithRefreshToken(cloudAuth)) {
-          throw new CliError("`hexclave exec --cloud-project-id` requires `hexclave login`. Remove STACK_SECRET_SERVER_KEY and try again.");
+          throw new CliError("`hexclave exec --cloud-project-id` requires `hexclave login`. Unset HEXCLAVE_SECRET_SERVER_KEY (or the legacy STACK_SECRET_SERVER_KEY) and try again.");
         }
         auth = cloudAuth;
       } else {

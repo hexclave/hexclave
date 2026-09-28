@@ -17,6 +17,10 @@
     {
       "path": "/api/latest/internal/workflow-engine-step",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/latest/internal/deployments-parking-sweep",
+      "schedule": "*/10 * * * *"
     }
   ],
   "github": {

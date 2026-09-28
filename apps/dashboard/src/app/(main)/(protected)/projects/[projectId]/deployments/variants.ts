@@ -39,7 +39,11 @@ export const BLUEPRINT_VARIANT: VariantConfig = {
   mono: true,
 };
 
-export type Accent = "purple" | "cyan" | "green";
+// Node/edge colours. "purple" is reserved for the managed Hexclave node; the
+// rest are the palette deployment sources are assigned from (see
+// accentForDeploymentSource), which is what tells two repositories' services
+// apart on one map.
+export type Accent = "purple" | "cyan" | "green" | "amber" | "rose" | "blue" | "indigo";
 
 export type AccentClasses = {
   // Icon chip inside the node header.
@@ -66,6 +70,26 @@ export const ACCENT_CLASSES = new Map<Accent, AccentClasses>([
     bar: "bg-emerald-500/70 dark:bg-emerald-400/70",
     stroke: "text-emerald-500/70 dark:text-emerald-400/70",
   }],
+  ["amber", {
+    chip: "bg-amber-500/12 text-amber-600 dark:bg-amber-400/15 dark:text-amber-300",
+    bar: "bg-amber-500/70 dark:bg-amber-400/70",
+    stroke: "text-amber-500/70 dark:text-amber-400/70",
+  }],
+  ["rose", {
+    chip: "bg-rose-500/12 text-rose-600 dark:bg-rose-400/15 dark:text-rose-300",
+    bar: "bg-rose-500/70 dark:bg-rose-400/70",
+    stroke: "text-rose-500/70 dark:text-rose-400/70",
+  }],
+  ["blue", {
+    chip: "bg-blue-500/12 text-blue-600 dark:bg-blue-400/15 dark:text-blue-300",
+    bar: "bg-blue-500/70 dark:bg-blue-400/70",
+    stroke: "text-blue-500/70 dark:text-blue-400/70",
+  }],
+  ["indigo", {
+    chip: "bg-indigo-500/12 text-indigo-600 dark:bg-indigo-400/15 dark:text-indigo-300",
+    bar: "bg-indigo-500/70 dark:bg-indigo-400/70",
+    stroke: "text-indigo-500/70 dark:text-indigo-400/70",
+  }],
 ]);
 
 export function getAccentClasses(accent: Accent): AccentClasses {
@@ -80,4 +104,9 @@ export const STATUS_META = new Map<string, { label: string, color: "green" | "cy
   ["not_deployed", { label: "Not deployed", color: "orange" }],
   ["canceled", { label: "Cancelled", color: "orange" }],
   ["crashed", { label: "Failed", color: "red" }],
+  // Planned by the deploy but never reached, because something it depends on
+  // (or the build) failed first. Labelled "Build failed" rather than "Skipped":
+  // one deploy is one build, so the overwhelmingly common way a service ends up
+  // here is a build failure, and naming the cause is what a reader needs.
+  ["skipped", { label: "Build failed", color: "orange" }],
 ]);

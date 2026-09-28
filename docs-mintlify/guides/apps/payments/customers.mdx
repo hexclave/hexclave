@@ -1,0 +1,20 @@
+---
+title: "Customer Types"
+description: "Bill users, teams, and custom external customers"
+---
+
+A **customer** is whoever owns a purchase. Hexclave supports three types:
+
+- **Users** - Individual user accounts. Users can manage their own purchases, billing, and invoices from the client SDK.
+- **Teams** - Team or organization accounts. Team admins can create checkouts, switch plans, and cancel subscriptions for their team.
+- **Custom customers** - External entities identified by an arbitrary string ID. Useful for integrations with external systems. They do not support billing, invoices, or plan switching; checkout and grants go through the server SDK or the dashboard.
+
+## Where each method lives
+
+The full billing surface - [`createCheckoutUrl`](./checkout), [`useProducts`](./checkout#checking-what-a-customer-owns), [`useItem`](./items-and-entitlements), [`switchSubscription`](./subscriptions), [`useBilling` and `useInvoices`](./billing-and-invoices) - is available on both **user** and **team** objects.
+
+For **custom customers**, use the top-level `hexclaveServerApp` methods with `customCustomerId` (for example [`createCheckoutUrl`](./checkout), [`grantProduct`](./granting-products), `getItem`, and `listProducts`). Billing, invoices, payment methods, and subscription switching are not available for custom customers.
+
+Every product declares a **customer type** when you [define it](./products-and-pricing#defining-products), which determines who can purchase it.
+
+From the dashboard, **Payments -> Customers** lists users, teams, and custom customers (custom IDs appear after they have transactions). You can adjust item balances and [create a checkout URL](./checkout#creating-a-checkout-url-from-the-dashboard) for any of them. Granting a product without checkout is [SDK/API only](./granting-products).

@@ -7,8 +7,12 @@ on:
       - dev
   pull_request:
 
+# A concurrency group only ever runs one run at a time, so the sha is part of the group on main/dev:
+# otherwise consecutive dev pushes queue behind each other (and GitHub cancels the older queued run),
+# so one slow or hung run silently skips CI for every commit after it. PRs and feature branches stay
+# grouped per ref, where cancelling superseded runs is what we want.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}
 
 env:
@@ -32,6 +36,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   setup-tests-with-custom-base-port:
+    timeout-minutes: 90
     needs: wait-for-fast-fail
     # `success()` is required because the custom `if` otherwise overrides the
     # implicit success() gate from `needs`, letting this run even if the gate failed.
@@ -46,10 +51,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js v22
+      - name: Setup Node.js v24
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -70,6 +75,17 @@ jobs:
           tail: true
           wait-for: 120s
           log-output-if: true
+
+      # Same mitigation as in setup-tests.yaml, see the comment there. The
+      # readiness gate only proves that 6902 and 6946 accept connections, but
+      # build-packages:watch afterwards does a full non-watch tsdown pass that
+      # rewrites packages/*/dist, which restarts watch-based dev tasks such as
+      # bulldozer-js and briefly takes their ports down tens of seconds later.
+      # That caused the ECONNREFUSED failures in run 31351708006, all within
+      # the first minute of the suite.
+      - name: Allow development watchers to settle
+        run: sleep 60
+
       - name: Run tests (first attempt)
         id: run-tests-first-attempt
         continue-on-error: ${{ (github.head_ref || github.ref_name) != 'main' && (github.head_ref || github.ref_name) != 'dev' }}

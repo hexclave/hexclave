@@ -6,14 +6,32 @@ on:
       - main
       - dev
 
+# Grouped per ref (not per sha) on purpose: this publishes the moving `dev`/`latest` image tags after
+# the platform digests are merged, so runs must stay serialized or an older run could overwrite a
+# newer commit's tag.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' }}
 
 jobs:
   build-server:
-    name: Docker Build and Push Server
-    runs-on: ubicloud-standard-8
+    name: Docker Build Server (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubicloud-standard-8
+            timeout: 30
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubicloud-standard-8-arm
+            timeout: 45
+    # Both matrix legs compute the same value, so whichever leg writes this output last is equivalent.
+    outputs:
+      should_push: ${{ steps.push-condition.outputs.should_push }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -28,9 +46,6 @@ jobs:
             type=ref,event=branch,enable=${{ github.ref != 'refs/heads/main' }}
             type=sha,prefix=
             type=match,pattern=\d.\d.\d
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -51,12 +66,89 @@ jobs:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and push
+      # QEMU emulation of the turbo/Next build can hang for the arm64 leg. Build each platform
+      # natively and push only an untagged digest; the merge job below owns moving release tags.
+      - name: Build platform image
+        id: build-platform
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./docker/server/Dockerfile
-          push: ${{ steps.push-condition.outputs.should_push }}
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
+          outputs: ${{ steps.push-condition.outputs.should_push == 'true' && format('type=image,name={0}/server,push-by-digest=true,name-canonical=true,push=true', secrets.DOCKER_REPO) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Export image digest
+        if: steps.push-condition.outputs.should_push == 'true'
+        run: |
+          mkdir -p digest
+          printf '%s\n' '${{ steps.build-platform.outputs.digest }}' > "digest/${{ matrix.arch }}"
+
+      - name: Upload image digest
+        if: steps.push-condition.outputs.should_push == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-digest-${{ matrix.arch }}
+          path: digest/${{ matrix.arch }}
+
+  merge:
+    if: needs.build-server.result == 'success' && needs.build-server.outputs.should_push == 'true'
+    needs: build-server
+    name: Merge and tag server images
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ secrets.DOCKER_REPO }}/server
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch,enable=${{ github.ref != 'refs/heads/main' }}
+            type=sha,prefix=
+            type=match,pattern=\d.\d.\d
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Download image digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: server-digest-*
+          merge-multiple: true
+          path: digests
+
+      # Platform jobs cannot safely race on release tags. Assemble their immutable digests here,
+      # preserving the metadata action's existing tag rules while publishing one multi-platform tag.
+      - name: Merge platform images and publish tags
+        env:
+          IMAGE: ${{ secrets.DOCKER_REPO }}/server
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          sources=()
+          while IFS= read -r digest_file; do
+            digest="$(cat "$digest_file")"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Invalid or empty image digest in $digest_file: '$digest'" >&2
+              exit 1
+            fi
+            sources+=("${IMAGE}@${digest}")
+          done < <(find digests -maxdepth 1 -type f -print | sort)
+
+          if [ "${#sources[@]}" -ne 2 ]; then
+            echo "Expected 2 platform image digests, found ${#sources[@]}" >&2
+            exit 1
+          fi
+
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create --tag "$tag" "${sources[@]}"
+          done <<< "$TAGS"

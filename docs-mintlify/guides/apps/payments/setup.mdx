@@ -1,0 +1,95 @@
+---
+title: "Setup"
+description: "Enable Payments, connect a payment account, and understand how the pieces fit together"
+---
+
+import { PaymentsConcepts } from "/snippets/payments-concepts.jsx";
+
+Hexclave includes a Payments app that handles billing, subscriptions, and one-time purchases. Instead of building your own billing system, you define products in the dashboard and Hexclave takes care of checkout, entitlement tracking, subscription lifecycle, and invoicing.
+
+## Getting started
+
+<Steps>
+  <Step title="Enable Payments">
+    Go to the **Apps** section in your dashboard, find **Payments**, and enable it.
+  </Step>
+  <Step title="Connect your payment account">
+    Open **Payments -> Settings** and follow the onboarding flow. You'll be asked for business details, bank info, and identity verification. Once approved, payments are live.
+  </Step>
+  <Step title="Turn on test mode">
+    While building, enable **test mode** in **Payments -> Settings**. All purchases will be free - no real money is charged. You can switch to live when you're ready.
+  </Step>
+</Steps>
+
+<Info>
+  Hexclave Payments is currently only available for US-based businesses, and processes payments in **USD**. Support for other countries and currencies is coming soon.
+</Info>
+
+## Core concepts
+
+Before writing any code, it helps to understand how the pieces fit together.
+
+A **product** is something you sell - a subscription plan, a one-time purchase, or a credit pack. Products can have one or more **prices** (one-time or recurring), and they can include **items** - quantifiable entitlements like credits, seats, or API calls.
+
+A **product line** groups products that are mutually exclusive. For example, a "Plan" product line might contain Free, Pro, and Enterprise - a customer can only have one at a time. When they upgrade, the old plan is replaced.
+
+A **customer** is whoever owns the purchase. This can be a user, a team, or a custom external entity.
+
+Here's how these pieces look in practice:
+
+<PaymentsConcepts />
+
+And the typical flow to make it all work:
+
+1. You define products and items in the dashboard
+2. Your app generates a checkout URL and redirects the user to the hosted checkout page
+3. The user pays, Hexclave is notified, and the product is granted
+4. Your app reads the customer's products and item balances to control access
+
+Each step has its own guide:
+
+- [Products & Pricing](./products-and-pricing) - define what you sell
+- [Items & Entitlements](./items-and-entitlements) - credits, seats, and quota
+- [Checkout & Purchases](./checkout) - sell a product and read what a customer owns
+- [Subscriptions](./subscriptions) - switching plans and cancellation
+- [Billing & Invoices](./billing-and-invoices) - payment methods and billing history
+- [Refunds](./refunds) - partial or full refunds, and ending access
+- [Granting Products](./granting-products) - give access without checkout
+- [Customer Types](./customers) - users, teams, and custom customers
+
+## Test mode
+
+While you're building, turn on **test mode** in **Payments -> Settings**. With test mode on, purchases skip the payment processor entirely: products and items are granted instantly, no card is collected, and no money moves. It's on by default in development environments.
+
+This lets you wire up checkout, entitlements, and subscription logic end to end without touching real money. When you're confident everything works, turn test mode off - at which point purchases go through the payment processor and **charge real money**.
+
+Test mode does **not** simulate every live behavior:
+
+- **Free trials are skipped.** The product is granted immediately; there is no trial period and no deferred first charge. Turn test mode off to exercise the real trial checkout.
+- **Catalog edits still apply to production.** Test mode only changes how purchases run, not which products exist.
+- **Money refunds are not available.** You can still end access from a refund dialog; you cannot return money that was never charged. See [Refunds](./refunds).
+
+<Warning>
+  There's no "live but free" middle ground. With test mode **off**, every purchase is a real, billable charge. Keep test mode on until you're ready to take real payments.
+</Warning>
+
+## Dashboard
+
+The dashboard gives you full visibility and control over your payments:
+
+- **Product Lines** - Group products into mutually exclusive tiers. In **Payments -> Product Lines**.
+- **Products & Items** - Create and edit products, set pricing, and configure included items. In **Payments -> Products & Items**.
+- **Customers** - View item balances per customer, manually adjust quantities, and create checkout URLs. In **Payments -> Customers**. Granting a product without checkout is [SDK/API only](./granting-products).
+- **Transactions** - See all payment activity, filter by type and customer, export CSV, and issue [refunds](./refunds) on purchase rows. In **Payments -> Transactions**.
+- **Payouts** - View payout information. In **Payments -> Payouts**. Unavailable in development environments.
+- **Settings** - Connect your payment account, toggle test mode, configure payment methods, and **block new purchases** (existing subscriptions keep renewing). In **Payments -> Settings**.
+
+### Payment emails
+
+Email notifications are sent automatically on payment events:
+
+- **Payment Receipt** - Sent on successful payment with product details, amount, and receipt link
+- **Payment Failed** - Sent on failed payment with product name, amount, and failure reason
+- **Trial Ending Soon** - Sent before a [free trial](./products-and-pricing#free-trials) ends, so the customer knows the saved payment method will be charged
+
+These apply to both one-time purchases and subscription renewals (receipts and failures). Customize them in **Emails -> Templates** (see the [Emails guide](/guides/apps/emails/guide)).

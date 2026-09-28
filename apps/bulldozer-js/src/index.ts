@@ -14,14 +14,18 @@ import { isBulldozerRequestAuthorized } from "./auth.js";
 import { declareBulldozerDatabase, type BulldozerDatabase } from "./databases/bulldozer/index.js";
 import { declareInMemoryLowLevelDatabase } from "./databases/low-level/implementations/in-memory.js";
 import { declareInstantAvailabilityLowLevelDatabase } from "./databases/low-level/implementations/instant-availability.js";
-import { declareLmdbLowLevelDatabase } from "./databases/low-level/implementations/lmdb.js";
+import { declareLmdbLowLevelDatabase, getLmdbDiagnostics } from "./databases/low-level/implementations/lmdb.js";
 import type { LowLevelDatabase } from "./databases/low-level/index.js";
-import { declarePiledriverDatabase, type PiledriverObject } from "./databases/piledriver/index.js";
+import { declareBasePiledriverDatabase } from "./databases/piledriver/implementations/base.js";
+import { declareBufferedPiledriverDatabase } from "./databases/piledriver/implementations/buffered.js";
+import type { PiledriverObject } from "./databases/piledriver/index.js";
 import "./load-env.js";
 import { shouldSuppressPeriodicBulldozerLogs } from "./logging.js";
+import { parseManualTransactionsListQuery } from "./manual-transactions-http.js";
 import { instrumentation, traceSpan } from "./otel.js";
 import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf } from "./payments/schema/index.js";
-import type { CustomerType, Json, SubscriptionRow, TransactionRow } from "./payments/schema/types.js";
+import type { CustomerType, Json, ManualTransactionRow, SubscriptionRow, TransactionRow } from "./payments/schema/types.js";
+import { handleVerifyDataIntegrityRequest, verifyDataIntegrity } from "./payments/verify-data-integrity.js";
 import { initSentry, resolveBulldozerSentryEnvironment } from "./sentry.js";
 
 const sentryEnabled = initSentry();
@@ -67,14 +71,22 @@ function createLowLevelDatabase(): LowLevelDatabase {
   mkdirSync(lmdbPath, { recursive: true });
   return declareInstantAvailabilityLowLevelDatabase(declareLmdbLowLevelDatabase({
     path: lmdbPath,
+    // Sticky per path: once a store has compressed values, keep this set on every open.
+    // Enabling on an existing uncompressed store is safe (old values still read; new writes compress).
+    compression: process.env.HEXCLAVE_BULLDOZER_JS_LMDB_COMPRESSION === "1",
     simulateReadMissDelayMs: readOptionalNonNegativeNumberEnv("HEXCLAVE_BULLDOZER_JS_SIMULATE_READ_MISS_DELAY_MS"),
   }));
 }
 
+const basePiledriver = declareBasePiledriverDatabase(createLowLevelDatabase(), {
+  disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
+});
+// Buffering keeps availability instant while durability/replication waits for the wrapped root write;
+// it is worthwhile for write-lock occupancy and throughput, not per-call latency.
+const bufferedPiledriverEnabled = process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_BUFFERED_PILEDRIVER !== "1";
+const piledriver = bufferedPiledriverEnabled ? declareBufferedPiledriverDatabase(basePiledriver) : basePiledriver;
 const bulldozerDb = declareBulldozerDatabase(
-  declarePiledriverDatabase(createLowLevelDatabase(), {
-    disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
-  }),
+  piledriver,
   { migrations: schema.migrations },
 );
 (globalThis as any).bulldozerDb = bulldozerDb;
@@ -366,6 +378,22 @@ function readStringField(body: Record<string, unknown>, fieldName: string): stri
   return value;
 }
 
+function readPositiveSafeIntegerField(body: Record<string, unknown>, fieldName: string) {
+  const value = body[fieldName];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new StatusError(StatusError.BadRequest, `Expected positive safe integer field: ${fieldName}`);
+  }
+  return value;
+}
+
+function readNonNegativeSafeIntegerField(body: Record<string, unknown>, fieldName: string) {
+  const value = body[fieldName];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new StatusError(StatusError.BadRequest, `Expected non-negative safe integer field: ${fieldName}`);
+  }
+  return value;
+}
+
 function readRowData(body: unknown): Record<string, unknown> {
   const record = readObjectBody(body);
   const rowData = record.rowData;
@@ -426,8 +454,8 @@ async function setStoredRow(options: { tenancyId: string, tableId: string, rowId
     throw new StatusError(StatusError.BadRequest, `Row tenancyId ${readRowTenancyId(options.rowData)} does not match URL tenancyId ${options.tenancyId}`);
   }
   try {
-    // Replicated, so that a caller reading right after this write doesn't see the pre-write snapshot root.
-    await bulldozerDb.withSnapshotReplicated(async snapshot => await snapshot.setOrDeleteRow({
+    // Consistent, so subsequent readers see the write and it survives a coordinated failure.
+    await bulldozerDb.withSnapshotConsistent(async snapshot => await snapshot.setOrDeleteRow({
       tableId: options.tableId,
       rowIdentifier: options.rowId,
       newRowData: options.rowData as unknown as PiledriverObject,
@@ -490,7 +518,7 @@ async function setStoredRowsFromBodies(options: { tenancyId: string, tableId: st
     return { rowIdentifier: readStringField(rowData, idField), newRowData: rowData as unknown as PiledriverObject };
   });
   try {
-    await bulldozerDb.withSnapshotReplicated(async snapshot => await snapshot.setOrDeleteRows({ tableId: options.tableId, rows }));
+    await bulldozerDb.withSnapshotConsistent(async snapshot => await snapshot.setOrDeleteRows({ tableId: options.tableId, rows }));
   } catch (error) {
     // A batch is one cascade, so a cascade-phase failure can't be pinned to a single row.
     // Attach the table + the batch's row identifiers (no rowData here, to keep batch events small).
@@ -813,6 +841,7 @@ async function listTransactions(options: { tenancyId: string, limit: number, cur
         type: mapLedgerTransactionTypeToApiType(listedRow.type as LedgerTransactionType),
         customer_type: listedRow.customerType,
         customer_id: listedRow.customerId,
+        renewal_target_subscription_id: listedRow.renewalTargetSubscriptionId ?? null,
         entries: listedRow.entries.flatMap(entry => {
           const mapped = mapLedgerEntry(entry);
           return mapped === null ? [] : [mapped];
@@ -903,6 +932,30 @@ async function readOutstandingItemGrants(options: { tenancyId: string, customerT
   return computeOutstandingItemGrants(rows);
 }
 
+async function listManualTransactions(options: { limit: number, cursor: string | undefined }): Promise<{ rows: ManualTransactionRow[], nextCursor: string | null }> {
+  const { snapshot } = await bulldozerDb.getSnapshot();
+  // Page the identifier-sorted derived table (sort key === rowIdentifier). Stored
+  // tables keep a null sort key, so Range stays sort-key-only everywhere.
+  const range = options.cursor !== undefined
+    ? { gt: options.cursor, limit: options.limit + 1 }
+    : { limit: options.limit + 1 };
+  const rows: ManualTransactionRow[] = [];
+  let lastReturnedRowIdentifier: string | undefined = undefined;
+  for await (const row of snapshot.listRowsInGroup({ tableId: schema.manualTransactionsSorted, groupKey: null, range })) {
+    rows.push(row.rowData as unknown as ManualTransactionRow);
+    // Stop after the peek row, but do not treat it as the page cursor — `gt` must
+    // resume after the last *returned* rowIdentifier or we skip that row.
+    if (rows.length > options.limit) break;
+    lastReturnedRowIdentifier = row.rowIdentifier;
+  }
+  const hasMore = rows.length > options.limit;
+  if (hasMore) rows.pop();
+  return {
+    rows,
+    nextCursor: hasMore && lastReturnedRowIdentifier !== undefined ? lastReturnedRowIdentifier : null,
+  };
+}
+
 function ok() {
   return { success: true };
 }
@@ -928,11 +981,32 @@ const app = new Elysia({ adapter: node() })
     }
   })
   .get("/health", () => ({ ok: true }))
+  .get("/diagnostics", () => getLmdbDiagnostics() ?? { available: false })
+  .get("/v1/manual-transactions", ({ query }) => handler("list-manual-transactions", async () => {
+    // Cross-instance export surface: backend pages this to back up refunds into Prisma.
+    const { limit, cursor } = parseManualTransactionsListQuery(query);
+    const result = await listManualTransactions({ limit, cursor });
+    return { rows: result.rows, next_cursor: result.nextCursor };
+  }))
   .post("/internal/wait-until-durable", () => handler("wait-until-durable", async () => {
     await bulldozerDb.waitUntilCurrentStateDurable();
     return ok();
   }))
-  .post("/internal/payments/verify-data-integrity", () => handler("verify-data-integrity", async () => ok()))
+  .post("/internal/payments/verify-data-integrity", ({ body }) => handler("verify-data-integrity", async () => await handleVerifyDataIntegrityRequest(body, request => verifyDataIntegrity(bulldozerDb, request))))
+  .post("/internal/piledriver-gc", ({ body }) => handler("piledriver-gc", async () => {
+    const request = readObjectBody(body);
+    const cutoffTimestampMillis = readNonNegativeSafeIntegerField(request, "cutoffTimestampMillis");
+    if (cutoffTimestampMillis >= bulldozerDb.getPiledriverGarbageCollectionProcessStartedAtMillis()) {
+      throw new StatusError(
+        StatusError.BadRequest,
+        "GC cutoff must be older than this Bulldozer process. Record the cutoff, then fully restart the singleton Bulldozer service before running GC.",
+      );
+    }
+    return await bulldozerDb.collectPiledriverGarbage(
+      cutoffTimestampMillis,
+      request.maxObjects === undefined ? undefined : readPositiveSafeIntegerField(request, "maxObjects"),
+    );
+  }))
   .get("/v1/:tenancyId/transactions", ({ params, query }) => handler("list-transactions", async () => {
     const parsedLimit = Number.parseInt(typeof query.limit === "string" ? query.limit : "50", 10);
     const result = await listTransactions({
@@ -1086,7 +1160,9 @@ const startupFields = {
   sentryEnvironment: resolveBulldozerSentryEnvironment(),
   lowLevelBackend: process.env.HEXCLAVE_BULLDOZER_JS_LOW_LEVEL_BACKEND ?? "lmdb",
   usingTmpLmdb: process.env.HEXCLAVE_BULLDOZER_JS_USE_TMP_LMDB === "1",
+  lmdbCompression: process.env.HEXCLAVE_BULLDOZER_JS_LMDB_COMPRESSION === "1",
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
+  bufferedPiledriverEnabled,
   gcExposed: globalThis.gc !== undefined,
   heapGcUsageThreshold: HEAP_GC_USAGE_THRESHOLD,
   heapGcMaxPasses: HEAP_GC_MAX_PASSES,
@@ -1116,7 +1192,7 @@ runAsynchronously(async () => {
       const tickStartedAt = performance.now();
       try {
         lastTickMillis = Math.max(Date.now(), lastTickMillis);
-        await bulldozerDb.withSnapshotReplicated(async snapshot => await snapshot.tick(new Date(lastTickMillis)));
+        await bulldozerDb.withSnapshotConsistent(async snapshot => await snapshot.tick(new Date(lastTickMillis)));
       } catch (error) {
         logBulldozerService("tick-loop-error", {
           elapsedMs: performance.now() - tickStartedAt,

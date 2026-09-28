@@ -48,9 +48,38 @@ fi
 
 # ============= ENV VARS =============
 
-export STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY=${STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY:-$(openssl rand -base64 32)}
-export STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY=${STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY:-$(openssl rand -base64 32)}
-export STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY=${STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY:-$(openssl rand -base64 32)}
+resolve_internal_project_key_aliases() {
+  local _canonical _alias
+  for _canonical in STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY; do
+    case "$_canonical" in
+      STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY) _alias=STACK_SEED_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY ;;
+      STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY) _alias=STACK_SEED_INTERNAL_PROJECT_SECRET_SERVER_KEY ;;
+    esac
+    if [ -n "${!_canonical:-}" ] && [ -n "${!_alias:-}" ] && [ "${!_canonical}" != "${!_alias}" ]; then
+      echo "ERROR: $_canonical and $_alias are both set to different non-empty values. Remove one of them or set them to the same value." >&2
+      exit 1
+    fi
+    if [ -z "${!_canonical:-}" ] && [ -n "${!_alias:-}" ]; then
+      export "$_canonical=${!_alias}"
+    fi
+  done
+}
+resolve_internal_project_key_aliases
+
+derive_internal_project_key() {
+  local _label=$1
+  printf '%s' "$_label" | openssl dgst -sha256 -hmac "$STACK_SERVER_SECRET" -binary | base64 -w0
+}
+
+if [ -z "${STACK_SERVER_SECRET:-}" ]; then
+  echo "WARNING: STACK_SERVER_SECRET is unset; generated internal project keys will rotate on restart and break the dashboard. Set the server secret or all internal project keys explicitly." >&2
+fi
+
+# Deterministic derivation keeps generated dashboard keys stable across restarts
+# while using distinct HMAC labels so the three keys cannot be recovered from one another.
+export STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY=${STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY:-$(if [ -n "${STACK_SERVER_SECRET:-}" ]; then derive_internal_project_key internal-project-publishable-client-key; else openssl rand -base64 32; fi)}
+export STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY=${STACK_INTERNAL_PROJECT_SECRET_SERVER_KEY:-$(if [ -n "${STACK_SERVER_SECRET:-}" ]; then derive_internal_project_key internal-project-secret-server-key; else openssl rand -base64 32; fi)}
+export STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY=${STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY:-$(if [ -n "${STACK_SERVER_SECRET:-}" ]; then derive_internal_project_key internal-project-super-secret-admin-key; else openssl rand -base64 32; fi)}
 
 export NEXT_PUBLIC_STACK_PROJECT_ID=internal
 export NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY=${STACK_INTERNAL_PROJECT_PUBLISHABLE_CLIENT_KEY}
@@ -127,12 +156,11 @@ mirror_hexclave_stack_env
 # Keep this off /tmp so config sharing can bind-mount /tmp
 # without pushing the whole runtime copy step onto the host filesystem.
 WORK_DIR="${STACK_RUNTIME_WORK_DIR:-/var/tmp/stack-runtime}"
-mkdir -p "$WORK_DIR"
-
-if [ "$WORK_DIR" != "/app" ]; then
-  echo "Copying files to working directory..."
-  cp -r /app/. "$WORK_DIR"/.
+if [ "$WORK_DIR" = "/" ]; then
+  echo "ERROR: STACK_RUNTIME_WORK_DIR=/ cannot be used because startup cleanup would target the container root. Choose a dedicated runtime directory." >&2
+  exit 1
 fi
+mkdir -p "$WORK_DIR"
 
 # The full-tree sentinel scan is expensive (several seconds over the whole built
 # app tree). On a fast-restart the placeholders have already been sed-replaced
@@ -140,9 +168,93 @@ fi
 # that case. Marker lives in WORK_DIR because the docker/server image runs as
 # the unprivileged `node` user and cannot write to /var/run.
 SENTINEL_MARKER="$WORK_DIR/.stack-sentinels-replaced"
+sentinel_env_vars=""
+sentinel_fingerprint=""
+runtime_build_identity=""
+runtime_tree_trusted=false
+sentinel_marker_present=false
+# Keep this list explicit: these values are required by the bundled dashboard,
+# while other discovered sentinels intentionally remain optional at runtime.
+required_sentinel_env_vars="NEXT_PUBLIC_STACK_PROJECT_ID NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY NEXT_PUBLIC_STACK_API_URL NEXT_PUBLIC_SERVER_STACK_API_URL NEXT_PUBLIC_STACK_DASHBOARD_URL NEXT_PUBLIC_SERVER_STACK_DASHBOARD_URL USE_INLINE_ENV_VARS"
+get_runtime_build_identity() {
+  local _identity
+  if ! _identity=$(cat /app/.stack-runtime-build-identity 2>/dev/null) || [ -z "$_identity" ]; then
+    return 1
+  fi
+  printf '%s\n' "$_identity"
+}
+require_rebuildable_runtime_work_dir() {
+  if [ "$WORK_DIR" = "/app" ]; then
+    echo "ERROR: STACK_RUNTIME_WORK_DIR=/app cannot rebuild changed sentinel values in place. Recreate the container without STACK_RUNTIME_WORK_DIR=/app." >&2
+    exit 1
+  fi
+}
+rebuild_runtime_tree() {
+  require_rebuildable_runtime_work_dir
+  while IFS= read -r -d '' _runtime_entry; do
+    rm -rf "$WORK_DIR/$_runtime_entry"
+  done < <(find /app -mindepth 1 -maxdepth 1 -printf '%f\0')
+  cp -r /app/. "$WORK_DIR"/.
+  rm -f "$SENTINEL_MARKER"
+}
+sentinel_values_are_replaced() {
+  local _env_var _value _sentinel _pattern="" _status=0
+  for _env_var in $sentinel_env_vars; do
+    _value="${!_env_var:-}"
+    if [ -n "$_value" ]; then
+      _sentinel="STACK_ENV_VAR_SENTINEL_$_env_var"
+      _pattern="${_pattern:+$_pattern|}$_sentinel"
+    fi
+  done
+  if [ -z "$_pattern" ]; then
+    return 0
+  fi
+  grep -rl -E "$_pattern" "$WORK_DIR/apps" >/dev/null 2>&1 || _status=$?
+  case "$_status" in
+    0) return 1 ;;
+    1) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+if ! runtime_build_identity=$(get_runtime_build_identity); then
+  echo "WARNING: Could not determine the bundled app build identity; the sentinel marker will not be trusted on restart." >&2
+  runtime_build_identity=""
+fi
 if [ -f "$SENTINEL_MARKER" ]; then
-  echo "Sentinels already replaced on a previous start; skipping scan."
-else
+  sentinel_marker_present=true
+  stored_sentinel_fingerprint=$(sed -n '1p' "$SENTINEL_MARKER")
+  sentinel_env_vars=$(sed -n '2p' "$SENTINEL_MARKER")
+  stored_runtime_build_identity=$(sed -n '3p' "$SENTINEL_MARKER")
+  if [ -n "$stored_sentinel_fingerprint" ] && [ -n "$sentinel_env_vars" ]; then
+    current_sentinel_fingerprint=$(printf '%s\n' "$sentinel_env_vars" | tr ' ' '\n' | while IFS= read -r env_var; do printf '%s=%s\n' "$env_var" "${!env_var:-}"; done | sort | sha256sum | cut -d ' ' -f1)
+    if [ "$stored_sentinel_fingerprint" = "$current_sentinel_fingerprint" ] \
+      && [ -n "$runtime_build_identity" ] \
+      && [ "$stored_runtime_build_identity" = "$runtime_build_identity" ] \
+      && sentinel_values_are_replaced; then
+      echo "Sentinel values unchanged on a previous start; skipping scan."
+      sentinel_fingerprint=$stored_sentinel_fingerprint
+      runtime_tree_trusted=true
+    else
+      echo "Sentinel marker is stale or incomplete; restoring pristine runtime files and rescanning."
+    fi
+  else
+    echo "Sentinel marker has no fingerprint; restoring pristine runtime files and rescanning."
+  fi
+fi
+
+if [ "$runtime_tree_trusted" = false ]; then
+  if [ "$WORK_DIR" != "/app" ]; then
+    echo "Restoring pristine files to working directory..."
+    rebuild_runtime_tree
+  elif [ "$sentinel_marker_present" = true ]; then
+    # A marker proves that /app was previously processed, so it cannot safely
+    # be rescanned in place after the marker becomes stale.
+    require_rebuildable_runtime_work_dir
+  fi
+fi
+
+if [ "$runtime_tree_trusted" = false ]; then
+
   # Find all files in the apps directory that contain a STACK_ENV_VAR_SENTINEL and extract the unique sentinel strings.
   # Require at least one character after `STACK_ENV_VAR_SENTINEL_` — a bare
   # `STACK_ENV_VAR_SENTINEL_` (trailing underscore but no suffix) makes env_var
@@ -162,6 +274,10 @@ else
   for sentinel in $unhandled_sentinels; do
     # The sentinel is like "STACK_ENV_VAR_SENTINEL_MY_VAR", so extract the env var name.
     env_var=${sentinel#STACK_ENV_VAR_SENTINEL_}
+    case " $sentinel_env_vars " in
+      *" $env_var "*) ;;
+      *) sentinel_env_vars="${sentinel_env_vars:+$sentinel_env_vars }$env_var" ;;
+    esac
 
     # Defense in depth: skip if env_var name is empty. The regex above already
     # excludes bare-prefix matches, but `${!env_var}` with an empty name aborts
@@ -171,9 +287,10 @@ else
     fi
 
     # Get the corresponding environment variable value.
-    value="${!env_var}"
+    value="${!env_var:-}"
 
-    # If the env var is not set, skip replacement.
+    # Optional values may remain sentinel-backed so the runtime resolver can
+    # treat them as unset. Required values are checked after the scan.
     if [ -z "$value" ]; then
       continue
     fi
@@ -196,8 +313,35 @@ else
       echo "$files" | xargs sed -i "s${delimiter}${escaped_sentinel}${delimiter}${escaped_value}${delimiter}g"
     fi
   done
+  for env_var in $required_sentinel_env_vars; do
+    value="${!env_var:-}"
+    if [ -z "$value" ]; then
+      echo "ERROR: Required sentinel environment variable $env_var is unset; set it in the self-host environment file before starting the server." >&2
+      exit 1
+    fi
+  done
+  if sentinel_values_are_replaced; then
+    sentinel_check_status=0
+  else
+    sentinel_check_status=$?
+  fi
+  if [ "$sentinel_check_status" -eq 2 ]; then
+    echo "ERROR: Could not verify sentinel replacement in the runtime tree; refusing to start." >&2
+    exit 1
+  fi
+  if [ "$sentinel_check_status" -eq 1 ]; then
+    echo "ERROR: Sentinel replacement was incomplete; refusing to start with unreplaced runtime values." >&2
+    exit 1
+  fi
   echo "Sentinel replacement complete."
-  touch "$SENTINEL_MARKER"
+  sentinel_fingerprint=$(printf '%s\n' "$sentinel_env_vars" | tr ' ' '\n' | while IFS= read -r env_var; do printf '%s=%s\n' "$env_var" "${!env_var:-}"; done | sort | sha256sum | cut -d ' ' -f1)
+  marker_tmp="${SENTINEL_MARKER}.tmp.$$"
+  {
+    printf '%s\n' "$sentinel_fingerprint"
+    printf '%s\n' "$sentinel_env_vars"
+    printf '%s\n' "$runtime_build_identity"
+  } > "$marker_tmp"
+  mv "$marker_tmp" "$SENTINEL_MARKER"
 fi
 
 # ============= START BACKEND AND DASHBOARD =============

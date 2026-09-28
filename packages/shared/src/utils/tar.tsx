@@ -1,7 +1,7 @@
 // A minimal, dependency-free ustar (POSIX.1-1988) tarball writer/reader.
 //
 // Why hand-rolled: the `hexclave deploy` CLI packages a source directory into a
-// tarball and the backend unpacks it to forward the files to Vercel. Both ends
+// tarball and the deployments runtime's builder unpacks it. Both ends
 // are our own code, so we only need the ustar subset we produce ourselves
 // (regular files + directories), and hand-rolling avoids adding an npm
 // dependency to the CLI and backend. The reader is intentionally strict — it

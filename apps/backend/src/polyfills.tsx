@@ -1,6 +1,6 @@
 import * as Sentry from "@sentry/node";
 import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
-import { captureError, registerErrorSink } from "@hexclave/shared/dist/utils/errors";
+import { captureError, errorToNiceString, registerErrorSink } from "@hexclave/shared/dist/utils/errors";
 import * as util from "util";
 import { runAsynchronouslyAndWaitUntil } from "./utils/background-tasks";
 
@@ -16,7 +16,11 @@ const sentryErrorSink = (location: string, error: unknown, level: "error" | "war
     console.log("Attempted to capture Sentry error outside of Next.js script, ignoring");
     return;
   }
-  Sentry.captureException(error, { extra: { location }, level });
+  // Sentry's extra-data normalization only walks enumerable properties, which drops
+  // e.g. AggregateError.errors (the per-address connect errors behind `fetch failed`)
+  // from nested causes. Attach our nicified rendering so the full chain is readable
+  // in one place, whatever Sentry's own error linking does with it.
+  Sentry.captureException(error, { extra: { location, errorNiceString: errorToNiceString(error) }, level });
   runAsynchronouslyAndWaitUntil(Sentry.flush(2000));
 };
 

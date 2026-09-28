@@ -7,7 +7,7 @@ import { Command } from "commander";
 import * as fs from "fs";
 import * as path from "path";
 import { getAdminProject } from "../lib/app.js";
-import { isProjectAuthWithRefreshToken, isProjectAuthWithSecretServerKey, resolveAuth, resolveProjectId, type ProjectAuthWithSecretServerKey } from "../lib/auth.js";
+import { isProjectAuthWithRefreshToken, isProjectAuthWithSecretServerKey, resolveAuth, resolveProjectId, type ProjectAuth, type ProjectAuthWithSecretServerKey } from "../lib/auth.js";
 import { resolveConfigFilePathOption } from "../lib/config-file-path.js";
 import { CliError } from "../lib/errors.js";
 import { startProgress, withProgress } from "../lib/progress.js";
@@ -29,7 +29,7 @@ function parseConfigOverride(value: unknown): EnvironmentConfigOverrideOverride 
   return isConfigOverride(value) ? value : null;
 }
 
-type BranchConfigSourceApi =
+export type BranchConfigSourceApi =
   | { type: "pushed-from-github", owner: string, repo: string, branch: string, commit_hash: string, config_file_path: string, workflow_path?: string }
   | { type: "pushed-from-unknown" }
   | { type: "unlinked" };
@@ -172,7 +172,28 @@ async function pushConfigWithSecretServerKey(
   const message = responseText.length > 0
     ? responseText
     : `Request failed with status ${response.status}.`;
-  throw new CliError(`Failed to push config with STACK_SECRET_SERVER_KEY: ${message}`);
+  throw new CliError(`Failed to push config with HEXCLAVE_SECRET_SERVER_KEY: ${message}`);
+}
+
+/**
+ * Pushes a parsed config override to the project's branch config, for
+ * `hexclave config push`. Publishing the project's configuration is deliberately
+ * its own command: `hexclave deploy` ships this repository's services and never
+ * touches the config, so one of several repositories deploying into a project
+ * cannot overwrite the others' configuration on the way past.
+ */
+async function pushConfigToProject(auth: ProjectAuth, config: EnvironmentConfigOverrideOverride, source: BranchConfigSourceApi): Promise<void> {
+  if (isProjectAuthWithSecretServerKey(auth)) {
+    await pushConfigWithSecretServerKey(auth, config, source);
+  } else {
+    if (!isProjectAuthWithRefreshToken(auth)) {
+      throw new CliError("Pushing the config requires either HEXCLAVE_SECRET_SERVER_KEY or `hexclave login`.");
+    }
+    const project = await getAdminProject(auth);
+    await project.pushConfig(config, {
+      source: sourceToSdkSource(source),
+    });
+  }
 }
 
 function sourceToSdkSource(source: BranchConfigSourceApi):
@@ -248,7 +269,7 @@ export function registerConfigCommand(program: Command) {
     .action(async (opts) => {
       const auth = resolveAuth(resolveProjectId(opts.cloudProjectId));
       if (!isProjectAuthWithRefreshToken(auth)) {
-        throw new CliError("`hexclave config pull` requires `hexclave login`. Remove STACK_SECRET_SERVER_KEY and try again.");
+        throw new CliError("`hexclave config pull` requires `hexclave login`. Unset HEXCLAVE_SECRET_SERVER_KEY (or the legacy STACK_SECRET_SERVER_KEY) and try again.");
       }
       // Resolve and validate the target file before any network work so we fail fast (e.g. when the
       // target already exists without --overwrite) instead of paying for a wasted round-trip.
@@ -303,7 +324,17 @@ export function registerConfigCommand(program: Command) {
         // `@hexclave/js`) from the project's own node_modules.
         const { createJiti } = await import("jiti");
         const jiti = createJiti(import.meta.url);
-        const configModule: { config?: unknown } = await jiti.import(filePath);
+        const configModule: { config?: unknown, deploy?: unknown } = await jiti.import(filePath);
+
+        // Services used to be allowed here. Refused rather than ignored: a
+        // silently skipped `deploy` export would leave the author believing
+        // their services were published by a command that never looks at them.
+        // Keyed on the export EXISTING rather than on its value: `export let
+        // deploy;` is still a file whose author thinks it deploys something.
+        // (`in` rather than Object.hasOwn: this package targets ES2021.)
+        if ("deploy" in configModule) {
+          throw new CliError(`${filePath} has a \`deploy\` export. Service definitions no longer live in the config file — move it to a hexclave.deploy.ts (with an \`export const deploymentGroupId = "..."\` naming the deployment group) and ship it with \`hexclave deploy\`, which is a separate command from \`hexclave config push\`.`);
+        }
 
         const config = parseConfigOverride(configModule.config);
         if (config == null) {
@@ -312,17 +343,7 @@ export function registerConfigCommand(program: Command) {
         }
 
         progress.update("Pushing config");
-        if (isProjectAuthWithSecretServerKey(auth)) {
-          await pushConfigWithSecretServerKey(auth, config, source);
-        } else {
-          if (!isProjectAuthWithRefreshToken(auth)) {
-            throw new CliError("`hexclave config push` requires either STACK_SECRET_SERVER_KEY or `hexclave login`.");
-          }
-          const project = await getAdminProject(auth);
-          await project.pushConfig(config, {
-            source: sourceToSdkSource(source),
-          });
-        }
+        await pushConfigToProject(auth, config, source);
       } finally {
         progress.stop();
       }

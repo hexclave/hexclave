@@ -1,11 +1,19 @@
 import { BooleanTrue, EmailOutboxCreatedWith } from "@/generated/prisma/client";
-import { globalPrismaClient } from "@/prisma-client";
+import { globalPrismaClient, retryTransaction, type PrismaClientTransaction } from "@/prisma-client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { recordExternalDbSyncDeletion } from "./external-db-sync";
 import { _forTesting } from "./email-queue-step";
 import { DEFAULT_BRANCH_ID, getSoleTenancyFromProjectBranch } from "./tenancies";
 
-const { claimEmailsForSending, failEmailsStuckInSending, STUCK_EMAIL_TIMEOUT_MS, updateLastExecutionTime } = _forTesting;
+const {
+  claimEmailsForSending,
+  claimEmailsForSendingWithinLock,
+  failEmailsStuckInSending,
+  STUCK_EMAIL_TIMEOUT_MS,
+  updateLastExecutionTime,
+  withTenancyClaimLock,
+} = _forTesting;
 
 describe.sequential("updateLastExecutionTime", () => {
   const metadataKeys: string[] = [];
@@ -93,9 +101,17 @@ describe.sequential("failEmailsStuckInSending", () => {
   };
 
   afterAll(async () => {
-    for (const { tenancyId, id } of createdIds) {
-      await globalPrismaClient.emailOutbox.deleteMany({ where: { tenancyId, id } });
-    }
+    await retryTransaction(globalPrismaClient, async (tx) => {
+      for (const { tenancyId, id } of createdIds) {
+        // Deletions of synced tables only reach ClickHouse through DeletedRow.
+        await recordExternalDbSyncDeletion(tx, {
+          tableName: "EmailOutbox",
+          tenancyId,
+          emailOutboxId: id,
+        });
+        await tx.emailOutbox.deleteMany({ where: { tenancyId, id } });
+      }
+    });
   });
 
   it("marks a row as failed when startedSendingAt is older than the stuck timeout", async () => {
@@ -186,8 +202,8 @@ describe.sequential("claimEmailsForSending burst allowance", () => {
     await globalPrismaClient.project.delete({ where: { id: testProjectId } });
   });
 
-  const makeRow = async (startedSendingAt: Date | null) => {
-    return await globalPrismaClient.emailOutbox.create({
+  const makeRow = async (tx: PrismaClientTransaction, startedSendingAt: Date | null) => {
+    return await tx.emailOutbox.create({
       data: {
         tenancyId: testTenancyId,
         tsxSource: testFilter.tsxSource,
@@ -212,47 +228,87 @@ describe.sequential("claimEmailsForSending burst allowance", () => {
   };
 
   afterEach(async () => {
-    await globalPrismaClient.emailOutbox.deleteMany({ where: testFilter });
+    await retryTransaction(globalPrismaClient, async (tx) => {
+      const rows = await tx.emailOutbox.findMany({
+        where: testFilter,
+        select: { tenancyId: true, id: true },
+      });
+      for (const row of rows) {
+        // Deletions of synced tables only reach ClickHouse through DeletedRow.
+        await recordExternalDbSyncDeletion(tx, {
+          tableName: "EmailOutbox",
+          tenancyId: row.tenancyId,
+          emailOutboxId: row.id,
+        });
+        await tx.emailOutbox.deleteMany({ where: { tenancyId: row.tenancyId, id: row.id } });
+      }
+    });
   });
 
   it("claims up to the burst limit when the rate quota is zero", async () => {
-    await Promise.all(Array.from({ length: BURST_SEND_LIMIT }, () => makeRow(null)));
-    const claimed = await claimEmailsForSending(testTenancyId, 0);
+    const claimed = await withTenancyClaimLock(testTenancyId, async (tx) => {
+      await Promise.all(Array.from({ length: BURST_SEND_LIMIT }, () => makeRow(tx, null)));
+      return await claimEmailsForSendingWithinLock(tx, testTenancyId, 0);
+    });
 
     expect(claimed).toHaveLength(BURST_SEND_LIMIT);
   });
 
   it("does not claim more after the burst limit has been reached", async () => {
-    await Promise.all(Array.from({ length: BURST_SEND_LIMIT + 1 }, () => makeRow(null)));
-    const firstClaim = await claimEmailsForSending(testTenancyId, 0);
-    const secondClaim = await claimEmailsForSending(testTenancyId, 0);
+    const [firstClaim, secondClaim] = await withTenancyClaimLock(testTenancyId, async (tx) => {
+      await Promise.all(Array.from({ length: BURST_SEND_LIMIT + 1 }, () => makeRow(tx, null)));
+      const firstClaim = await claimEmailsForSendingWithinLock(tx, testTenancyId, 0);
+      const secondClaim = await claimEmailsForSendingWithinLock(tx, testTenancyId, 0);
+      return [firstClaim, secondClaim];
+    });
 
     expect(firstClaim).toHaveLength(BURST_SEND_LIMIT);
     expect(secondClaim).toHaveLength(0);
   });
 
   it("does not count claims older than the burst window", async () => {
-    const oldRows = await Promise.all(Array.from({ length: BURST_SEND_LIMIT }, () => makeRow(new Date(Date.now() - 11 * 60 * 1000))));
-    await Promise.all(Array.from({ length: 3 }, () => makeRow(null)));
-    const claimed = await claimEmailsForSending(testTenancyId, 0);
+    const { claimed, oldRows } = await withTenancyClaimLock(testTenancyId, async (tx) => {
+      const oldRows = await Promise.all(Array.from({ length: BURST_SEND_LIMIT }, () => makeRow(tx, new Date(Date.now() - 11 * 60 * 1000))));
+      await Promise.all(Array.from({ length: 3 }, () => makeRow(tx, null)));
+      const claimed = await claimEmailsForSendingWithinLock(tx, testTenancyId, 0);
+      return { claimed, oldRows };
+    });
 
     expect(claimed).toHaveLength(3);
     expect(oldRows).toHaveLength(BURST_SEND_LIMIT);
   });
 
-  it("does not double-consume the burst when workers claim concurrently", async () => {
-    await Promise.all(Array.from({ length: BURST_SEND_LIMIT * 2 }, () => makeRow(null)));
+  it("keeps two concurrent claimers within one burst allowance", async () => {
+    await Promise.all(
+      Array.from({ length: BURST_SEND_LIMIT * 2 }, () => makeRow(globalPrismaClient, null)),
+    );
     const [firstClaim, secondClaim] = await Promise.all([
       claimEmailsForSending(testTenancyId, 0),
       claimEmailsForSending(testTenancyId, 0),
     ]);
 
-    expect(firstClaim.length + secondClaim.length).toBe(BURST_SEND_LIMIT);
+    // Both claimers can see the committed rows; without the advisory-lock guard, they could each
+    // claim a full burst. A background worker can only reduce what these two calls return.
+    expect(firstClaim.length + secondClaim.length).toBeLessThanOrEqual(BURST_SEND_LIMIT);
+  });
+
+  it("claims nothing when contending for the tenancy lock", async () => {
+    await Promise.all(
+      Array.from({ length: BURST_SEND_LIMIT * 2 }, () => makeRow(globalPrismaClient, null)),
+    );
+
+    await withTenancyClaimLock(testTenancyId, async () => {
+      // Committed rows are visible to the claimer, but the held lock makes it deliberately bail.
+      const claim = await claimEmailsForSending(testTenancyId, 0);
+      expect(claim).toHaveLength(0);
+    });
   });
 
   it("uses the rate quota when it exceeds the burst allowance", async () => {
-    await Promise.all(Array.from({ length: 12 }, () => makeRow(null)));
-    const claimed = await claimEmailsForSending(testTenancyId, 12);
+    const claimed = await withTenancyClaimLock(testTenancyId, async (tx) => {
+      await Promise.all(Array.from({ length: 12 }, () => makeRow(tx, null)));
+      return await claimEmailsForSendingWithinLock(tx, testTenancyId, 12);
+    });
 
     expect(claimed).toHaveLength(12);
   });

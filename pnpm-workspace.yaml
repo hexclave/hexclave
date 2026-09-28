@@ -9,19 +9,21 @@ packages:
 
 minimumReleaseAge: 10080
 
-# Next.js 16.3.0 was published Aug 3, 2026 and is explicitly approved here.
+# Next.js 16.3.1 carries vercel/next.js#96653, the backport of #96599,
+# which fixes the intermittent production TypeError:
+# __turbopack_context__.a is not a function in dashboard builds.
 # Keep this version-pinned so future releases still go through minimumReleaseAge.
 minimumReleaseAgeExclude:
-  - next@16.3.0
-  - '@next/env@16.3.0'
-  - '@next/swc-darwin-arm64@16.3.0'
-  - '@next/swc-darwin-x64@16.3.0'
-  - '@next/swc-linux-arm64-gnu@16.3.0'
-  - '@next/swc-linux-arm64-musl@16.3.0'
-  - '@next/swc-linux-x64-gnu@16.3.0'
-  - '@next/swc-linux-x64-musl@16.3.0'
-  - '@next/swc-win32-arm64-msvc@16.3.0'
-  - '@next/swc-win32-x64-msvc@16.3.0'
+  - next@16.3.1
+  - '@next/env@16.3.1'
+  - '@next/swc-darwin-arm64@16.3.1'
+  - '@next/swc-darwin-x64@16.3.1'
+  - '@next/swc-linux-arm64-gnu@16.3.1'
+  - '@next/swc-linux-arm64-musl@16.3.1'
+  - '@next/swc-linux-x64-gnu@16.3.1'
+  - '@next/swc-linux-x64-musl@16.3.1'
+  - '@next/swc-win32-arm64-msvc@16.3.1'
+  - '@next/swc-win32-x64-msvc@16.3.1'
 
 blockExoticSubdeps: true
 

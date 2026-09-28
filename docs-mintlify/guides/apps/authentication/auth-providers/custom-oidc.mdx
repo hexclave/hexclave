@@ -1,0 +1,100 @@
+---
+title: "Custom OIDC"
+description: "Connect any OpenID Connect identity provider to Hexclave"
+---
+
+Custom OIDC lets you bring **any OpenID Connect-compliant identity provider** - Okta, Auth0, Keycloak, Microsoft Entra ID, Ping, Zitadel, or your own - as a sign-in option, even if it isn't one of Hexclave's built-in providers. Hexclave handles the OAuth flow, OIDC discovery, and account linking; you supply the issuer URL and client credentials.
+
+<Info>
+  Custom OIDC providers require a **Team plan or above**. Because you're always using your own credentials, there are no shared development keys for custom OIDC.
+</Info>
+
+## How it works
+
+You give Hexclave an **issuer URL**, and Hexclave fetches the provider's configuration from its OIDC discovery document (`<issuer>/.well-known/openid-configuration`) to find the authorization, token, and userinfo endpoints. User profiles are mapped from standard OIDC claims (`sub`, `name` / `preferred_username`, `email`, `email_verified`, `picture`).
+
+You can add **multiple** custom OIDC providers, each identified by a unique **provider ID** that you choose.
+
+## Integration Steps
+
+<Steps>
+  <Step>
+    ### Choose a provider ID
+
+    Pick a unique ID for this provider, for example `my-okta`. You'll use it in the callback URL and in your sign-in code.
+
+    Provider IDs may contain **lowercase letters, numbers, hyphens, and underscores** only, and can't match a built-in provider name (like `google` or `github`).
+  </Step>
+
+  <Step>
+    ### Create an OIDC app with your identity provider
+
+    In your identity provider's admin console, create a new OIDC / OAuth2 web application and set its redirect (callback) URL to:
+
+    ```
+    https://api.hexclave.com/api/v1/auth/oauth/callback/YOUR_PROVIDER_ID
+    ```
+
+    Replace `YOUR_PROVIDER_ID` with the ID you chose in the previous step. For local development, use `http://localhost:8102/api/v1/auth/oauth/callback/YOUR_PROVIDER_ID`.
+
+    Then collect:
+
+    - **Issuer URL** - the base URL of your provider (e.g. `https://your-idp.example.com`). It must support OIDC discovery.
+    - **Client ID** and **Client Secret** from the app you just created.
+  </Step>
+
+  <Step>
+    ### Add the provider in Hexclave
+
+    1. On the Hexclave dashboard, select **Auth Methods** in the left sidebar.
+    2. Click **Add Custom OIDC**.
+    3. Fill in the form:
+       - **Provider ID** - the ID you chose (e.g. `my-okta`)
+       - **Display Name** - a human-readable label (e.g. `My Identity Provider`)
+       - **Issuer URL** - your provider's issuer URL
+       - **Client ID** and **Client Secret** - from your provider
+       - **Scopes** (optional) - space-separated OAuth scopes. Defaults to `openid email profile`.
+    4. Click **Add Provider**.
+
+    After it's created, choose **Configure** on the provider's row to view the exact **Redirect URL** Hexclave generated, and confirm it matches what you registered with your identity provider.
+  </Step>
+
+  <Step>
+    ### Trigger sign-in from your app
+
+    Custom OIDC providers are not rendered automatically by the prebuilt sign-in buttons, so start the flow yourself with `signInWithOAuth`, passing your provider ID:
+
+    ```tsx
+    "use client";
+    import { useHexclaveApp } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+    export function OktaSignInButton() {
+      const app = useHexclaveApp();
+      return (
+        <button onClick={async () => await app.signInWithOAuth("my-okta")}>
+          Sign in with My Identity Provider
+        </button>
+      );
+    }
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Custom OIDC providers don't appear in the default `<SignIn />` / `<SignUp />` provider buttons. Add your own button that calls `signInWithOAuth("<your-provider-id>")` (or build a fully custom sign-in UI).
+</Note>
+
+## Connecting accounts
+
+Custom OIDC also works as a [connected account](/guides/apps/authentication/connected-accounts). To link a custom OIDC provider to an already signed-in user, call `linkConnectedAccount` with the same provider ID:
+
+```tsx
+await user.linkConnectedAccount("my-okta");
+```
+
+For non-shared providers like custom OIDC, you can also request additional scopes and retrieve access tokens to call your provider's APIs on the user's behalf.
+
+## Need More Help?
+
+* Read about [OpenID Connect discovery](https://openid.net/specs/openid-connect-discovery-1_0.html)
+* Join our [Discord](https://discord.hexclave.com)

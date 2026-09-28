@@ -1,7 +1,93 @@
 ---
-title: Authentication
-description: Integrate Hexclave with AI-powered tools and services
-sidebarTitle: Overview
+title: "Authentication"
+description: "Production-ready sign-in, a real user directory, and session verification - without building auth yourself"
+sidebarTitle: "Overview"
 ---
 
-TODO stub
+<Visibility for="agents">
+<Note>
+  **For agents/LLMs:** This is a high-level *marketing* overview of the Authentication app, not an implementation reference. To actually build auth, use [Setup](/guides/getting-started/setup) and the [Authentication guide](./guide) (sign-in methods, auth pages, session reads, and route protection), then the deeper pages: [Hosted vs. Handler](/guides/going-further/hosted-vs-handler), [Auth providers](./auth-providers), [JWTs & session verification](./jwts), [Sign-up rules](./sign-up-rules), and [Connected accounts](./connected-accounts).
+</Note>
+</Visibility>
+
+import { SignInSkeleton, AuthMethodsSkeleton, UserDirectorySkeleton } from "/snippets/skeletons/auth-skeletons.jsx";
+
+Authentication is the foundation every other Hexclave app builds on. You get hosted sign-in pages, every common login method, and a complete user directory - wired up in minutes, not weeks. Below are the questions developers actually ask, and the honest answers.
+
+## Can I add sign-in without building forms?
+
+Yes. Prefer **hosted components** (`urls: { default: { type: "hosted" } }` in [Setup](/guides/getting-started/setup)) — Hexclave hosts the sign-in UI and keeps it updated. Or mount `<HexclaveHandler />` on your own `/handler/[...]` route if you want auth pages on your domain. See [Hosted vs. Handler](/guides/going-further/hosted-vs-handler).
+
+```tsx title="app/handler/[...hexclave]/page.tsx"
+import { HexclaveHandler } from "@hexclave/next"; // replace `next` with your framework SDK
+
+export default function Handler() {
+  return <HexclaveHandler fullPage />;
+}
+```
+
+<SignInSkeleton />
+
+You never write a form, manage a redirect, or hand-roll a reset flow. Want it inside your own layout? Drop in the prebuilt components - `<SignIn />`, `<SignUp />`, `<AccountSettings />` - and tune them with props. Want a fully custom UI? Build your own against the SDK's auth methods.
+
+## Can I offer every login method?
+
+Yes - and you flip each one on or off from the dashboard, no redeploy required.
+
+- **Email & password** with secure reset
+- **Magic links / OTP** for passwordless sign-in
+- **Passkeys** (WebAuthn) for phishing-resistant login
+- **12 OAuth providers** - Google, GitHub, Microsoft, Apple, Discord, Facebook, LinkedIn, Twitch, Spotify, GitLab, Bitbucket, and X - plus your own OpenID Connect provider
+- **Two-factor authentication** (TOTP)
+
+<AuthMethodsSkeleton />
+
+Shared Hexclave keys work out of the box for Google, GitHub, Microsoft, and Spotify — best for a [development environment](/guides/going-further/local-vs-cloud-dashboard). Swap in your own client ID and secret for production. See [Auth Providers → Shared vs. Custom OAuth Keys](./auth-providers#shared-vs-custom-oauth-keys).
+
+## Can I get the current user anywhere in my app?
+
+Yes. The same user object is available on the client (as a hook) and the server (as an async call), with full TypeScript types.
+
+```tsx
+// Client component - re-renders when the user changes
+const user = useUser();
+
+// Server component / route handler / action
+const user = await hexclaveServerApp.getUser();
+```
+
+Need to gate a page? Pass `{ or: "redirect" }` and unauthenticated visitors are sent to sign-in automatically:
+
+```tsx
+const user = useUser({ or: "redirect" });
+```
+
+## Can I manage my users?
+
+Yes. Every sign-up creates a real profile - connected accounts, auth methods, metadata, and activity - not just a token. Search, filter, edit, and export from the dashboard, or do the same from code with the server SDK.
+
+<UserDirectorySkeleton />
+
+Store your own data on a user with `clientMetadata`, `clientReadOnlyMetadata`, and `serverMetadata`, so you rarely need a separate users table of your own.
+
+## Can I verify sessions on my backend?
+
+Yes. Hexclave issues standard JWTs you can verify locally against a JWKS endpoint - no round-trip to Hexclave on every request - so auth checks stay fast even in middleware and edge functions. See [JWTs & session verification](./jwts).
+
+## Can I control who gets in?
+
+Yes. Write [sign-up rules](./sign-up-rules) to allow, reject, or restrict accounts by email domain, country, auth method, or built-in [fraud-protection](./fraud-protection) risk scores. Suspicious accounts can be held in a [restricted](./restricted-users) state for review instead of blocked outright.
+
+## Can I own my data and self-host?
+
+Yes. Hexclave is open source (MIT client, AGPLv3 server). Run it fully self-hosted, export your users from the dashboard whenever you want, and avoid lock-in. The same SDK and APIs work on the managed service and self-hosted. A [development environment](/guides/going-further/local-vs-cloud-dashboard) is for building against Hexclave locally — some production-only setup (custom OAuth keys, custom email, payments) lives in the [cloud dashboard](https://app.hexclave.com).
+
+## Start here
+
+1. [Set up Hexclave](/guides/getting-started/setup) in your project (a few minutes) — prefer hosted components; see [Hosted vs. Handler](/guides/going-further/hosted-vs-handler).
+2. Turn on the auth methods you want (and mount `<HexclaveHandler />` only if you chose the own-handler path).
+3. Use `useUser()` / `getUser()` to read the session and protect routes.
+
+Everything else - [teams](../teams/overview), [payments](../payments/overview), [emails](../emails/overview), [analytics](../analytics/overview) - keys off this same user directory.
+
+Ready for a start-to-finish walkthrough — sign-in methods, auth pages, reading the user, and protecting routes? Read the [Authentication guide](./guide).

@@ -74,7 +74,7 @@ Next, we can create a hook/function to check if the user has completed onboardin
   </Tab>
   <Tab title="Server Component">
     ```jsx
-    import { hexclaveServerApp } from '@/stack/server';
+    import { hexclaveServerApp } from '@/hexclave/server';
     import { redirect } from 'next/navigation';
 
     export async function ensureOnboarded() {
@@ -108,7 +108,7 @@ You can then use these functions wherever onboarding is required:
   <Tab title="Server Component">
     ```jsx
     import { ensureOnboarding } from '@/app/onboarding-functions';
-    import { hexclaveServerApp } from '@/stack/server';
+    import { hexclaveServerApp } from '@/hexclave/server';
 
     export default async function HomePage() {
       await ensureOnboarding();

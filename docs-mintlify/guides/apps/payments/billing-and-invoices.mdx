@@ -1,0 +1,70 @@
+---
+title: "Billing & Invoices"
+description: "Save payment methods and display a customer's billing history"
+---
+
+## Payment methods
+
+Customers can save a payment method for future purchases and plan switches. This is built on a secure setup-intent flow.
+
+```typescript
+// Create a setup intent
+const setupIntent = await user.createPaymentMethodSetupIntent();
+// setupIntent.clientSecret - use with the embedded card form to collect card details
+
+// After the user completes the card form:
+const paymentMethod = await user.setDefaultPaymentMethodFromSetupIntent(
+  setupIntentId
+);
+// paymentMethod contains: id, brand, last4, exp_month, exp_year
+// (it may be null, and the card fields can individually be null)
+```
+
+To check if a customer has a payment method saved:
+
+```typescript
+// Client component (hook)
+const billing = user.useBilling();
+
+// Server component
+const billing = await user.getBilling();
+
+// billing.hasCustomer - whether a billing customer exists
+// billing.defaultPaymentMethod - card details or null
+```
+
+## Invoices
+
+List a customer's invoices for displaying billing history:
+
+```typescript
+// Client component (hook)
+const invoices = user.useInvoices();
+
+// Server component
+const invoices = await user.listInvoices();
+```
+
+Each invoice includes `createdAt`, `status` (`"draft"`, `"open"`, `"paid"`, `"uncollectible"`, `"void"`, or `null`), `amountTotal` (in cents), and `hostedInvoiceUrl` (a link to the hosted invoice page, or `null`).
+
+Invoices support pagination:
+
+```typescript
+const firstPage = await user.listInvoices({ limit: 10 });
+const secondPage = await user.listInvoices({
+  limit: 10,
+  cursor: firstPage.nextCursor,
+});
+```
+
+<Info>
+  Billing and invoices are available for user and team customers only, not custom customers (see [Customer Types](./customers)).
+</Info>
+
+To reverse a charge, see [Refunds](./refunds). Refunds are issued from **Payments -> Transactions**, not from the customer invoice list.
+
+## Related
+
+- [Subscriptions](./subscriptions) - switching plans requires a saved payment method
+- [Checkout & Purchases](./checkout) - sell a product
+- [Refunds](./refunds) - reverse a charge and optionally end access

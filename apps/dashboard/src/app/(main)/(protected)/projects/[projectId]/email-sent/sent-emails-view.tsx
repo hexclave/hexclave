@@ -48,9 +48,10 @@ const emailColumns: DataGridColumnDef<AdminEmailOutbox>[] = [
 type SentEmailsViewProps = {
   filterFn: (email: AdminEmailOutbox) => boolean,
   renderActions?: (emails: AdminEmailOutbox[], refresh: () => Promise<void>) => ReactNode,
+  stickyTop?: number | string,
 };
 
-export function SentEmailsView({ filterFn, renderActions }: SentEmailsViewProps) {
+export function SentEmailsView({ filterFn, renderActions, stickyTop }: SentEmailsViewProps) {
   const hexclaveAdminApp = useAdminApp();
   const projectId = useProjectId();
   const router = useRouter();
@@ -107,7 +108,7 @@ export function SentEmailsView({ filterFn, renderActions }: SentEmailsViewProps)
   return (
     <div className="flex gap-4">
       <div className="flex-1 flex flex-col gap-4">
-        {renderActions && !loading && filtered.length > 0 && renderActions(filtered, refreshEmails)}
+        {renderActions != null && !loading && renderActions(filtered, refreshEmails)}
 
         {/* Delivery Stats */}
         <DesignCard gradient="default" glassmorphic contentClassName="p-3">
@@ -145,6 +146,7 @@ export function SentEmailsView({ filterFn, renderActions }: SentEmailsViewProps)
               state={gridState}
               onChange={setGridState}
               fillHeight={false}
+              stickyTop={stickyTop}
               onRowClick={(row) => {
                 router.push(`/projects/${projectId}/email-viewer/${row.id}`);
               }}

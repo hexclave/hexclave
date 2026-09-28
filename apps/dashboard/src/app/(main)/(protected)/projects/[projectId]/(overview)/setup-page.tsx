@@ -8,8 +8,10 @@ import { Tabs, TabsList, TabsTrigger, Typography, cn } from "@/components/ui";
 import { getPublicEnvVar } from '@/lib/env';
 import {
   buildCliDevSetupPrompt,
+  buildOnboardingConfigFile,
   getManualSetupDocsUrl,
   getSetupDocsBaseUrl,
+  prependConfigChangesToSetupPrompt,
 } from '@/lib/setup-prompt';
 import { useThemeWatcher } from '@/lib/theme';
 import { BookIcon, XIcon } from "@phosphor-icons/react";
@@ -52,9 +54,13 @@ export default function SetupPage(props: { toMetrics: () => void }) {
   };
 
   const setupDocsBaseUrl = getSetupDocsBaseUrl();
-  const selectedInstallPrompt = buildCliDevSetupPrompt({
-    docsBaseUrl: setupDocsBaseUrl,
-  });
+  const onboardingConfigFile = buildOnboardingConfigFile(projectConfig);
+  const selectedInstallPrompt = prependConfigChangesToSetupPrompt(
+    buildCliDevSetupPrompt({
+      docsBaseUrl: setupDocsBaseUrl,
+    }),
+    onboardingConfigFile,
+  );
   const manualSetupDocsUrl = getManualSetupDocsUrl();
 
   return (
@@ -76,6 +82,11 @@ export default function SetupPage(props: { toMetrics: () => void }) {
             </div>
             <Typography type="h2">
               Setup Hexclave in your codebase
+            </Typography>
+            <Typography variant="secondary" className="max-w-xl text-sm leading-relaxed">
+              {isRemoteDevelopmentEnvironment
+                ? "You're using the local dashboard on your computer for development. Production uses a separate Hexclave Cloud project."
+                : "You're viewing your production Hexclave Cloud project. The local dashboard runs on your computer during development."}
             </Typography>
           </div>
 
@@ -155,18 +166,38 @@ export default function SetupPage(props: { toMetrics: () => void }) {
               </ol>
             </div>
           ) : (
-            <div className="mx-4 mt-12 flex flex-col items-center gap-4 py-16 text-center">
-              <Typography>
-                Manual setup steps live in the documentation so they stay up to date with every framework and SDK change.
-              </Typography>
-              <DesignButton
-                onClick={() => {
-                  window.open(manualSetupDocsUrl, '_blank');
-                }}
-              >
-                <BookIcon className="mr-2 h-4 w-4" />
-                Open manual setup docs
-              </DesignButton>
+            <div className="mx-4 mt-8 space-y-8">
+              <div className="grid gap-4 sm:grid-cols-[2rem_minmax(0,1fr)]">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground/[0.06] text-sm font-semibold">1</div>
+                <div className="space-y-3">
+                  <Typography type="h2">Follow the manual setup steps in the documentation</Typography>
+                  <Typography variant="secondary">
+                    The documentation stays current for every framework and SDK.
+                  </Typography>
+                  <DesignButton
+                    variant="outline"
+                    onClick={() => {
+                      window.open(manualSetupDocsUrl, '_blank');
+                    }}
+                  >
+                    <BookIcon className="mr-2 h-4 w-4" />
+                    Open manual setup docs
+                  </DesignButton>
+                </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-[2rem_minmax(0,1fr)]">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground/[0.06] text-sm font-semibold">2</div>
+                <div className="min-w-0 space-y-3">
+                  <Typography type="h2">Copy-paste this config file</Typography>
+                  <CodeBlock
+                    language="typescript"
+                    content={onboardingConfigFile}
+                    title="hexclave.config.ts"
+                    icon="code"
+                    maxHeight={480}
+                  />
+                </div>
+              </div>
             </div>
           )}
         </>

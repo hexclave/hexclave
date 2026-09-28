@@ -1,4 +1,8 @@
-import { callHexclaveAskAi, type HexclaveAskDiagnostic } from "../../../packages/shared/src/ai/hexclave-ask";
+import {
+  callHexclaveAskAi,
+  getHexclaveAskRequestMetadata,
+  type HexclaveAskDiagnostic,
+} from "../../../packages/shared/src/ai/hexclave-ask";
 import { remindersPrompt } from "@hexclave/shared/dist/ai/unified-prompts/reminders";
 import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 
@@ -61,7 +65,7 @@ function getStringQueryParam(searchParams: URLSearchParams, name: string): strin
 function getAskQuestion(searchParams: URLSearchParams): string {
   const question = getStringQueryParam(searchParams, "question") ?? getStringQueryParam(searchParams, "query");
   if (question == null) {
-    throw new QueryArgumentError("Missing query parameter \"question\".");
+    throw new QueryArgumentError("Missing query parameters. The format for the ask endpoint is: /ask?question=...&context=...&user=...&project=...\n\n" + remindersPrompt);
   }
   return question;
 }
@@ -120,6 +124,8 @@ async function callUnifiedAiEndpoint(req: Request): Promise<Response> {
   const searchParams = new URL(req.url).searchParams;
   const question = getAskQuestion(searchParams);
   const context = getStringQueryParam(searchParams, "context");
+  const user = getStringQueryParam(searchParams, "user");
+  const project = getStringQueryParam(searchParams, "project");
   const userPrompt = getStringQueryParam(searchParams, "userPrompt") ?? context ?? question;
   const conversationId = getStringQueryParam(searchParams, "conversationId");
 
@@ -128,7 +134,11 @@ async function callUnifiedAiEndpoint(req: Request): Promise<Response> {
     question,
     reason: ASK_ROUTE_REASON,
     userPrompt,
+    context,
+    user,
+    project,
     conversationId,
+    requestMetadata: getHexclaveAskRequestMetadata(req, "skill-ask"),
     onDiagnostic: logAskDiagnostic,
   });
 

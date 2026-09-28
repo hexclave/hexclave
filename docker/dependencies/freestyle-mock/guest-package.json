@@ -1,0 +1,13 @@
+{
+  "name": "freestyle-guest-dependencies",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@react-email/components": "1.0.6",
+    "arktype": "2.1.20",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "tailwindcss": "4.3.3"
+  }
+}

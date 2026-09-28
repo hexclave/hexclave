@@ -1,28 +1,32 @@
 ---
 title: "Analytics"
 description: "Explore events, session replays, and SQL queries in your project's analytics dataset"
-icon: "/images/app-icons/analytics.svg"
 ---
 
 The Analytics app gives you direct access to your project's analytics dataset in Hexclave. You can inspect raw event tables, run ClickHouse SQL queries, and watch session replays to debug real user behavior.
 
 ## Overview
 
-Analytics is organized into three areas in the dashboard:
+Analytics is organized into four areas in the dashboard:
 
-- **Tables**: Browse event rows with sorting, search, and incremental loading
+- **Tables**: Browse rows across tables (events, users, contact channels, and more) with sorting, search, and incremental loading
 - **Queries**: Run and save reusable ClickHouse SQL queries
 - **Replays**: Watch session replays and filter by user, team, duration, activity window, and click count
+- **Clickmaps**: See which elements get clicks on your pages
+
+See [Replays & Clickmaps](./replays-and-clickmaps) for the full guide to session replays and clickmaps.
 
 ## How Analytics Works
 
-Stack records analytics events and replay chunks, then exposes them through the Analytics app for read-only querying and investigation.
+Hexclave records analytics events and replay chunks, then exposes them through the Analytics app for read-only querying and investigation.
 
-User activity in your app flows into Stack event ingestion, which stores data in ClickHouse. This data powers the Tables view, the SQL query runner, and the Session replay UI.
+User activity in your app flows into Hexclave event ingestion, which stores data in ClickHouse. This data powers the Tables view, the SQL query runner, and the Session replay UI.
+
+Analytics isn't only client events. Hexclave also exposes product data from the rest of your project — users, contact channels, teams, permissions, email outbox, and more — in the same read-only ClickHouse dataset, so you can join product state with behavior in one place. See [Queries & Tables](./queries-and-tables) for the full table list.
 
 ### What Gets Tracked
 
-Stack collects both client-side and server-side analytics events:
+Hexclave collects both client-side and server-side analytics events:
 
 - **Client-side events**: browser interaction events like `$page-view` and `$click`
 - **Server-side events**: currently `$token-refresh` and `$sign-up-rule-trigger`
@@ -39,20 +43,22 @@ To use analytics in your project:
 ## Quick Start
 
 1. Enable Analytics in your Hexclave dashboard (**Apps -> Analytics**)
-2. Initialize Hexclave on your frontend with `HexclaveClientApp`/`HexclaveProvider`
+2. Initialize Hexclave on your frontend with `HexclaveClientApp`/`HexclaveProvider` and a persistent `tokenStore` (e.g. `"cookie"`, or `"nextjs-cookie"` in Next.js)
 3. Sign in with a real user session
 4. Open the app and navigate/click around
 5. Check **Analytics -> Tables** to confirm events are arriving
 
-After setup, Stack automatically captures client-side `$page-view` and `$click` events.
+SDK analytics capture and session replay recording are **on by default** once the Analytics app is enabled — you do not need to set `analytics.enabled` or `analytics.replays.enabled` unless you want to opt out (pass `analytics: { enabled: false }` or `analytics: { replays: { enabled: false } }`).
 
-If you want replay recordings, also enable `analytics.replays.enabled` in your client app config.
+After setup, Hexclave automatically captures client-side `$page-view` and `$click` events.
+
+See [Replays & Clickmaps](./replays-and-clickmaps) to tune replay privacy or opt out.
 
 ## Tables
 
 The **Tables** screen is the fastest way to inspect recent analytics records.
 
-- Currently shows the `events` table
+- Opens on `events` by default; pick other tables from the sidebar
 - Built-in ordering and client-side search
 - Relative/absolute timestamp display toggle
 - Row detail dialog for inspecting full JSON payloads
@@ -81,9 +87,9 @@ The **Replays** screen helps you move from "an event happened" to "what the user
 
 Use replays when metrics alone are not enough to explain user behavior.
 
-### Enabling Replay Recording in the SDK
+### Replay recording in the SDK
 
-Session replay recording is disabled by default. To enable it, pass `analytics.replays.enabled: true` when creating your client app.
+Session replay recording is **enabled by default** once Analytics is on and your client app uses a persistent token store. You can tune privacy or opt out via the `analytics.replays` options:
 
 ```ts
 import { HexclaveClientApp } from "@hexclave/js";
@@ -93,6 +99,7 @@ export const hexclaveClientApp = new HexclaveClientApp({
   tokenStore: "cookie", // use "nextjs-cookie" in Next.js
   analytics: {
     replays: {
+      // Optional. Defaults to true when the Analytics app is enabled; set to false to opt out.
       enabled: true,
       // Optional. Defaults to true.
       maskAllInputs: true,
@@ -101,7 +108,7 @@ export const hexclaveClientApp = new HexclaveClientApp({
 });
 ```
 
-`maskAllInputs` defaults to `true`, so form fields are masked unless you explicitly disable it.
+`maskAllInputs` defaults to `true`, so form fields are masked unless you explicitly disable it. For the full set of privacy controls, playback, and clickmaps, see [Replays & Clickmaps](./replays-and-clickmaps).
 
 ### Disabling Analytics Capture in the SDK
 
@@ -121,7 +128,8 @@ This stops the SDK from sending `$page-view` and `$click` events. If you'd rathe
 
 ## Best Practices
 
-1. **Use Tables for quick incident triage**: the Tables UI is the fastest way to inspect recent `events` rows without writing SQL.
+1. **Use Tables for quick incident triage**: the Tables UI is the fastest way to inspect recent rows (events, users, and more) without writing SQL.
 2. **Use Queries for repeatable analysis**: save important SQL in folders, and scope queries with filters/`LIMIT` so they stay within result and timeout limits.
 3. **Use Replays for behavioral debugging**: start from an event pattern, then inspect matching session replays to understand what users actually did.
-4. **Keep replay privacy defaults on**: leave `maskAllInputs` enabled unless you have a specific reason and a data-handling policy for unmasked inputs.
+4. **Use Clickmaps for UI friction and attention**: overlay click counts on your live pages to see whether a flow takes unnecessary clicks, whether a control looks interactable, or how variants compare in an A/B test. Clicks are tied to DOM elements (not pixel coordinates), so a marker in the middle of a button does not mean the user clicked the middle of that button. See [Replays & Clickmaps](./replays-and-clickmaps).
+5. **Keep replay privacy defaults on**: leave `maskAllInputs` enabled unless you have a specific reason and a data-handling policy for unmasked inputs.

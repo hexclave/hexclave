@@ -20,6 +20,16 @@ function arrayBufferFromUint8Array(value: Uint8Array) {
   return copy.buffer;
 }
 
+function compareArrayBuffers(a: ArrayBuffer, b: ArrayBuffer) {
+  const aBytes = new Uint8Array(a);
+  const bBytes = new Uint8Array(b);
+  const commonLength = Math.min(aBytes.length, bBytes.length);
+  for (let index = 0; index < commonLength; index++) {
+    if (aBytes[index] !== bBytes[index]) return aBytes[index] - bBytes[index];
+  }
+  return aBytes.length - bBytes.length;
+}
+
 function encodeHex(value: Uint8Array) {
   return [...value].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -45,13 +55,36 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
 
     const base64KeyToValue = new Map<string, ArrayBuffer>;
     const seqSentinel: DatabaseSeq = [] as unknown as DatabaseSeq;
+    const reserveKeys = (count: number) => {
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error("KV dump reservation count must be a non-negative safe integer");
+      return Array.from({ length: count }, () => crypto.getRandomValues(new Uint8Array(48)).buffer);
+    };
     const result: LowLevelKvStore & LowLevelKvDump = {
+      reserveKeys,
       async get(key: ArrayBuffer) {
         return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.get", attributes }, async () => {
           if (key.byteLength > 64) throw new Error("KV store key must be <= 64 bytes");
           return {
             buffer: base64KeyToValue.get(encodeBase64(new Uint8Array(key)))?.slice(0) ?? null,
             seq: seqSentinel,
+          };
+        });
+      },
+      async listEntries(options) {
+        return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.listEntries", attributes }, async () => {
+          const limit = options?.limit ?? 1000;
+          if (!Number.isInteger(limit) || limit <= 0) throw new Error("KV store list limit must be a positive integer");
+          if (options?.startAfter !== undefined && options.startAfter.byteLength > 64) throw new Error("KV store key must be <= 64 bytes");
+          const matchingEntries = [...base64KeyToValue.entries()]
+            .map(([keyBase64, value]) => ({
+              key: arrayBufferFromUint8Array(Buffer.from(keyBase64, "base64")),
+              value,
+            }))
+            .filter(entry => options?.startAfter === undefined || compareArrayBuffers(entry.key, options.startAfter) > 0)
+            .sort((a, b) => compareArrayBuffers(a.key, b.key));
+          return {
+            entries: matchingEntries.slice(0, limit).map(({ key, value }) => ({ key, value: value.slice(0) })),
+            hasMore: matchingEntries.length > limit,
           };
         });
       },
@@ -78,31 +111,49 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
           };
         });
       },
-      async insertAll(values: ArrayBuffer[], options: { requiresSeq: DatabaseSeq }) {
+      async insertAll(values, options) {
         return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.insertAll", attributes: { ...attributes, "bulldozer.low_level.value_count": values.length } }, async () => {
           for (const value of values) {
             if (value.byteLength > 2_000_000_000) throw new Error("KV store value must be <= 2GB");
           }
-          const keys = values.map(() => crypto.getRandomValues(new Uint8Array(48)).buffer);
+          const keys = options?.keys ?? reserveKeys(values.length);
+          if (keys.length !== values.length) throw new Error("KV dump insertion must provide exactly one key per value");
+          if (new Set(keys.map(key => encodeBase64(new Uint8Array(key)))).size !== keys.length) {
+            throw new Error("KV dump insertion keys must be unique");
+          }
           return {
             keys,
             ...await result.setAll(keys.map((key, index) => ({ key, value: values[index] })), options),
           };
         });
       },
-      async compareAndSet(key: ArrayBuffer, compare: ArrayBuffer, value: ArrayBuffer, options: { requiresSeq: DatabaseSeq }) {
-        return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.compareAndSet", attributes }, async () => {
-          if (key.byteLength > 64) throw new Error("KV store key must be <= 64 bytes");
-          if (compare.byteLength > 2_000_000_000) throw new Error("KV store compare must be <= 2GB");
-          if (value.byteLength > 2_000_000_000) throw new Error("KV store value must be <= 2GB");
-          const base64Key = encodeBase64(new Uint8Array(key));
-          const existingValue = base64KeyToValue.get(base64Key);
-          if (existingValue === undefined || !arrayBuffersAreEqual(existingValue, compare)) {
-            return { wasSet: false, seq: null };
+      async compareAndSetAll(entries, options) {
+        return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.compareAndSetAll", attributes: { ...attributes, "bulldozer.low_level.entry_count": entries.length } }, async () => {
+          for (const { key, compare, value } of entries) {
+            if (key.byteLength > 64) throw new Error("KV store key must be <= 64 bytes");
+            if (compare !== null && compare.byteLength > 2_000_000_000) throw new Error("KV store compare must be <= 2GB");
+            if (value.byteLength > 2_000_000_000) throw new Error("KV store value must be <= 2GB");
           }
+          const keys = new Set<string>();
+          for (const { key } of entries) {
+            const keyBase64 = encodeBase64(new Uint8Array(key));
+            const previousSize = keys.size;
+            keys.add(keyBase64);
+            if (keys.size === previousSize) throw new Error("compareAndSetAll entries must not contain duplicate keys");
+          }
+          const results = entries.map(({ key, compare }) => {
+            const existingValue = base64KeyToValue.get(encodeBase64(new Uint8Array(key)));
+            return compare === null
+              ? existingValue === undefined
+              : existingValue !== undefined && arrayBuffersAreEqual(existingValue, compare);
+          });
+          const matchingEntries = entries.filter((_, index) => results[index]);
+          const write = matchingEntries.length === 0
+            ? { seq: options?.requiresSeq ?? seqSentinel }
+            : await result.setAll(matchingEntries.map(({ key, value }) => ({ key, value })), options);
           return {
-            wasSet: true,
-            ...await result.setAll([{ key, value }], options),
+            results: results.map(wasSet => wasSet ? { wasSet: true, seq: write.seq } : { wasSet: false, seq: null }),
+            seq: write.seq,
           };
         });
       },
@@ -151,6 +202,9 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
     async waitUntilReplicated() {
       return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.waitUntilReplicated", attributes: { "bulldozer.low_level.backend": "in-memory" } }, async () => {});
     },
+    async waitUntilConsistent() {
+      return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.waitUntilConsistent", attributes: { "bulldozer.low_level.backend": "in-memory" } }, async () => {});
+    },
     combineSeqs(...seqs) {
       return this.initialSeq;
     },
@@ -174,4 +228,3 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
     initialSeq: [] as unknown as DatabaseSeq,
   };
 }
-
