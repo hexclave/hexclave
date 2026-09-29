@@ -33,11 +33,13 @@
 // pointed at one. Dropping a service from a deploy file tears the service down
 // and leaves both behind, unattached, until someone deletes them explicitly.
 //
-// Secret VALUES are never part of a definition; they live in the project secret
-// store (see @/lib/project-secrets), envelope-encrypted via KMS. Neither are
-// secret DEFAULTS (`secret(key, default)`): they travel with the deploy request
-// and are never persisted, so the dashboard's secrets page can present a single
-// unambiguous state — a key either has a stored value or it isn't there.
+// Secret VALUES are never part of a definition, and never part of the deploy
+// file either: they live only in the project secret store (see
+// @/lib/project-secrets), envelope-encrypted via KMS, one row per (key,
+// environment). A deploy resolves each secret to its `production` row, else its
+// `default` row, and fails if neither exists — there is no file-level fallback
+// (`secret(key, default)` is rejected), so the secrets page is the whole truth
+// about what a deploy will get.
 
 import { getPlanIdForProjectOrNull } from "@/lib/plan-entitlements";
 import { Tenancy } from "@/lib/tenancies";
@@ -1331,7 +1333,7 @@ const SERVICE_OUTPUT_KEY_TO_MARSHAL = {
  *   on every deploy),
  * - plain vars pass through as literal `{ value }`s,
  * - secret vars are filled from the project's stored secrets (dashboard →
- *   Project Settings → Secrets) for `prod` else `default`. A secret with no stored
+ *   Project Settings → Secrets) for `production` else `default`. A secret with no stored
  *   value is a 400 that lists every missing key at once — failing loud beats
  *   silently deploying without them,
  * - `hexclave.*` connections resolve the managed Hexclave service's outputs
@@ -1429,7 +1431,7 @@ export async function resolveEnvVars(options: {
   const readSecret = (secretKey: string): Promise<string | null> => {
     const cached = secretCache.get(secretKey);
     if (cached != null) return cached;
-    const promise = readProjectSecretValue(tenancy.project.id, secretKey, "prod");
+    const promise = readProjectSecretValue(tenancy.project.id, secretKey, "production");
     secretCache.set(secretKey, promise);
     return promise;
   };
@@ -1499,7 +1501,7 @@ export async function resolveEnvVars(options: {
 
   if (missingSecretKeys.length > 0) {
     const uniqueMissing = [...new Set(missingSecretKeys)].sort(stringCompare);
-    throw new StatusError(400, `Missing ${uniqueMissing.length === 1 ? "a value for secret" : "values for secrets"}: ${uniqueMissing.join(", ")}. ${uniqueMissing.length === 1 ? "It" : "All of these"} must be set in the dashboard under Project Settings > Secrets (for the \`prod\` or \`default\` environment) before this service can deploy.`);
+    throw new StatusError(400, `Missing ${uniqueMissing.length === 1 ? "a value for secret" : "values for secrets"}: ${uniqueMissing.join(", ")}. ${uniqueMissing.length === 1 ? "It" : "All of these"} must be set in the dashboard under Project Settings > Secrets (for the \`production\` or \`default\` environment) before this service can deploy.`);
   }
 
   return {
@@ -2168,9 +2170,9 @@ export type DeploymentServiceApiShape = {
     secret_key: string | null,
     per_environment: {
       default?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
-      prod?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
+      production?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
       preview?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
-      dev?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
+      development?: { type: "plain" | "secret" | "connection" | "omit", value: string | null, secret_key: string | null },
     } | null,
   }[],
   domains: { hostname: string, port: number | null, is_primary: boolean, verified: boolean }[],

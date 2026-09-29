@@ -31,7 +31,7 @@ export type DeployOptions = {
 };
 
 /**
- * The secret keys that MUST have a stored `prod` or `default` value for these
+ * The secret keys that MUST have a stored `production` or `default` value for these
  * services to deploy. Exported for unit tests.
  */
 export function collectRequiredSecretKeys(services: EvaluatedService[]): string[] {
@@ -531,11 +531,11 @@ export function registerDeployCommand(program: Command) {
         console.error(`Note: deploy.builder sets memory ${JSON.stringify(builder.memory)}, but ${opts.serviceId != null ? `services.${opts.serviceId} runs` : "every service in this deploy runs"} an already-built image, so no builder machine starts and the size has no effect here.`);
       }
 
-      // Pre-flight: every secret in the resolved prod map must have a stored
-      // `prod` or `default` value BEFORE anything is packaged or uploaded. The
+      // Pre-flight: every secret in the resolved production map must have a stored
+      // `production` or `default` value BEFORE anything is packaged or uploaded. The
       // backend re-checks this authoritatively per deploy.
       // TODO(preview deploys): when a run is preview, preflight `preview` or
-      // `default` the same way. `hexclave deploy` is always prod, so preview cells
+      // `default` the same way. `hexclave deploy` is always production, so preview cells
       // are not required here.
       const requiredSecretKeys = collectRequiredSecretKeys(deploySet.map((serviceId) => services.get(serviceId) ?? (() => {
         throw new CliError(`Internal error: deploy set contains unknown service ${JSON.stringify(serviceId)}.`);
@@ -544,7 +544,7 @@ export function registerDeployCommand(program: Command) {
         const storedSecrets = await deployApiFetch(auth, authHeaders, "/project-secrets", { method: "GET" });
         const storedKeys = new Set<string>(
           (Array.isArray(storedSecrets?.items) ? storedSecrets.items : [])
-            .filter((item: any) => item?.environment === "prod" || item?.environment === "default" || item?.environment == null)
+            .filter((item: any) => item?.environment === "production" || item?.environment === "default" || item?.environment == null)
             .map((item: any) => item?.key)
             .filter((key: unknown): key is string => typeof key === "string"),
         );
@@ -555,7 +555,7 @@ export function registerDeployCommand(program: Command) {
           // missing secret only after setting the first would mean a round
           // trip per secret.
           throw new CliError([
-            `Missing ${missing.length === 1 ? "a value" : "values"} for ${missing.length === 1 ? "this secret" : `these ${missing.length} secrets`} in the \`prod\` environment (or \`default\`):`,
+            `Missing ${missing.length === 1 ? "a value" : "values"} for ${missing.length === 1 ? "this secret" : `these ${missing.length} secrets`} in the \`production\` environment (or \`default\`):`,
             ...missing.map((key) => `  - ${key}`),
             "",
             `${missing.length === 1 ? "It" : "All of them"} must be set in the dashboard under Project Settings > Secrets before this deploy can run.`,
@@ -631,9 +631,9 @@ export function registerDeployCommand(program: Command) {
           // The field stays so an older API that still reads it keeps working.
           secret_defaults: Object.fromEntries(deploySet.map((serviceId) => [serviceId, {}])),
           // The GitLab-style CI variables this deploy was invoked with. Request-
-          // scoped like the secret defaults: they describe THIS deploy, so
-          // storing them on the definition would leave a stale commit sha on
-          // every service the next deploy doesn't ship.
+          // scoped rather than synced with the definitions: they describe THIS
+          // deploy, so storing them on the definition would leave a stale commit
+          // sha on every service the next deploy doesn't ship.
           ci_env: collectCiEnv(process.env),
           triggered_by: "cli",
         },

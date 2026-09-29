@@ -86,7 +86,7 @@ export const GET = createSmartRouteHandler({
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Deploy a deployment source",
-    description: "Deploys one deployment source from a previously uploaded source tree: every service the deploy file declares is built by ONE builder machine and then rolled out in dependency order. The services' STORED definitions (as last synced via PUT /deployments/services) are authoritative — connections are resolved server-side and secret env vars are filled from the project's stored secret values (Project Settings > Secrets, `prod` else `default`). A secret with no stored value fails the deploy with the full list of keys that need a value. The `ci_env` variables (CI_COMMIT_SHA and friends) are injected into every deployed service's env. Returns as soon as the runtime has accepted the deployment; the build continues remotely, so poll the deployment endpoint for its status.",
+    description: "Deploys one deployment source from a previously uploaded source tree: every service the deploy file declares is built by ONE builder machine and then rolled out in dependency order. The services' STORED definitions (as last synced via PUT /deployments/services) are authoritative — connections are resolved server-side and secret env vars are filled from the project's stored secret values (Project Settings > Secrets, `production` else `default`). A secret with no stored value fails the deploy with the full list of keys that need a value. The `ci_env` variables (CI_COMMIT_SHA and friends) are injected into every deployed service's env. Returns as soon as the runtime has accepted the deployment; the build continues remotely, so poll the deployment endpoint for its status.",
     tags: ["Deploy"],
     hidden: true,
   },
@@ -117,9 +117,9 @@ export const POST = createSmartRouteHandler({
       secret_defaults: yupMixed().optional(),
       // The GitLab-style CI variables the deploy was invoked with (CI_COMMIT_SHA
       // and friends), injected into every deployed service's env. Request-scoped
-      // like the secret defaults: they describe THIS deploy, so storing them on
-      // the definition would leave a stale commit sha on every service a later
-      // deploy doesn't ship.
+      // rather than synced with the definitions: they describe THIS deploy, so
+      // storing them on the definition would leave a stale commit sha on every
+      // service a later deploy doesn't ship.
       ci_env: yupMixed().optional(),
       // A listing of what the client packaged (paths and sizes, never contents),
       // recorded with the deployment because the tarball itself is consumed by
@@ -393,7 +393,7 @@ function assertNoSecretDefaults(raw: unknown, definitionsByServiceId: ReadonlyMa
     "Secret default values are no longer supported. This deploy sent a default for:",
     ...offending,
     "",
-    "Update the Hexclave CLI, write secret(\"KEY\") without a default in hexclave.deploy.ts, and set the value in the dashboard under Project Settings → Secrets with the `default` environment (or `prod`, which deploys use before `default`).",
+    "Update the Hexclave CLI, write secret(\"KEY\") without a default in hexclave.deploy.ts, and set the value in the dashboard under Project Settings → Secrets with the `default` environment (or `production`, which deploys use before `default`).",
   ].join("\n"));
 }
 
