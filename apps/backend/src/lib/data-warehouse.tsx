@@ -255,18 +255,28 @@ import.meta.vitest?.test("ClickHouse cleanup attempts every step after a failure
  *
  * Every statement is idempotent, so this doubles as the retry path for a
  * provisioning run that died halfway.
+ *
+ * `timeoutSeconds` is looked up by the caller before any ClickHouse work, so a
+ * billing failure fails the request up front instead of looking like a failed
+ * ClickHouse mutation (and failing the restore that follows it the same way).
  */
 async function applyWarehouseDdl(options: {
   tenancy: Tenancy,
   databaseName: string,
   userName: string,
   password: string,
+  timeoutSeconds: number,
 }): Promise<void> {
-  const { tenancy, databaseName, userName, password } = options;
+  const { tenancy, databaseName, userName, password, timeoutSeconds } = options;
   const quotedDatabase = quoteClickhouseIdentifierFromProjectId(databaseName);
   const quotedUser = quoteClickhouseIdentifierFromProjectId(userName);
+  // SETTINGS clauses cannot take query parameters, so the identity settings are
+  // interpolated. The project id is UUID-validated above; check the branch id here
+  // so neither can carry a quote.
+  if (!/^[a-zA-Z0-9_-]+$/.test(tenancy.branchId)) {
+    throw new HexclaveAssertionError("Unexpected branch id shape for a ClickHouse setting", { branchId: tenancy.branchId });
+  }
   const quotaName = `\`${userName}_quota\``;
-  const timeoutSeconds = await getPlanTimeoutSeconds(tenancy);
   const client = getClickhouseAdminClient();
 
   try {
@@ -278,12 +288,6 @@ async function applyWarehouseDdl(options: {
       query: `CREATE USER IF NOT EXISTS ${quotedUser} IDENTIFIED WITH sha256_password BY {password:String}`,
       query_params: { password },
     });
-    // SETTINGS clauses cannot take query parameters, so the identity settings are
-    // interpolated. The project id is UUID-validated above; check the branch id here
-    // so neither can carry a quote.
-    if (!/^[a-zA-Z0-9_-]+$/.test(tenancy.branchId)) {
-      throw new HexclaveAssertionError("Unexpected branch id shape for a ClickHouse setting", { branchId: tenancy.branchId });
-    }
     // Start from nothing, so a re-run also removes grants an older version issued.
     await client.command({ query: `REVOKE ALL PRIVILEGES ON *.* FROM ${quotedUser}` });
     await client.command({ query: `REVOKE ALL FROM ${quotedUser}` });
@@ -310,9 +314,13 @@ async function applyWarehouseDdl(options: {
     // 26.5 on, so full engine coverage needs a server at least that new.
     await client.command({ query: `REVOKE SOURCES ON *.* FROM ${quotedUser}` });
 
+    // CREATE IF NOT EXISTS + ALTER, not CREATE OR REPLACE: replacing a quota gives
+    // it a new id, and ClickHouse only carries usage over within the same id, so
+    // every rotation would reset the hourly counters.
+    await client.command({ query: `CREATE QUOTA IF NOT EXISTS ${quotaName}` });
     await client.command({
       query: `
-        CREATE QUOTA OR REPLACE ${quotaName}
+        ALTER QUOTA ${quotaName}
         KEYED BY user_name
         FOR INTERVAL ${QUOTA_INTERVAL_HOURS} HOUR
           MAX queries = ${QUOTA_MAX_QUERIES},
@@ -390,6 +398,7 @@ async function restorePreviousWarehouseDdl(options: {
   databaseName: string,
   userName: string,
   previousPassword: string,
+  timeoutSeconds: number,
 }): Promise<boolean> {
   try {
     await applyWarehouseDdl({
@@ -397,6 +406,7 @@ async function restorePreviousWarehouseDdl(options: {
       databaseName: options.databaseName,
       userName: options.userName,
       password: options.previousPassword,
+      timeoutSeconds: options.timeoutSeconds,
     });
     return true;
   } catch (error) {
@@ -424,6 +434,7 @@ async function recoverPreviousWarehouseAccess(options: {
   databaseName: string,
   userName: string,
   previousPassword: string | null,
+  timeoutSeconds: number,
 }): Promise<boolean> {
   return options.previousPassword == null
     ? await cleanUpUnpersistedWarehouseUser(options.userName)
@@ -432,6 +443,7 @@ async function recoverPreviousWarehouseAccess(options: {
       databaseName: options.databaseName,
       userName: options.userName,
       previousPassword: options.previousPassword,
+      timeoutSeconds: options.timeoutSeconds,
     });
 }
 
@@ -451,6 +463,7 @@ function generateWarehousePassword(): string {
  */
 export async function provisionDataWarehouse(tenancy: Tenancy): Promise<{ password: string, warehouse: DataWarehouse }> {
   await ensureDataWarehouseEntitlement(tenancy);
+  const timeoutSeconds = await getPlanTimeoutSeconds(tenancy);
 
   const prisma = await getPrismaClientForTenancy(tenancy);
   const { databaseName, userName } = getDataWarehouseNames(tenancy.project.id);
@@ -489,10 +502,10 @@ export async function provisionDataWarehouse(tenancy: Tenancy): Promise<{ passwo
       const password = generateWarehousePassword();
       const encryptedPassword = await encryptWithKms(password);
       try {
-        await applyWarehouseDdl({ tenancy, databaseName, userName, password });
+        await applyWarehouseDdl({ tenancy, databaseName, userName, password, timeoutSeconds });
       } catch (error) {
         captureError("data-warehouse-provision-ddl", error);
-        const recovered = await recoverPreviousWarehouseAccess({ tenancy, databaseName, userName, previousPassword });
+        const recovered = await recoverPreviousWarehouseAccess({ tenancy, databaseName, userName, previousPassword, timeoutSeconds });
         await tx.dataWarehouse.update({
           where: { tenancyId: tenancy.id },
           data: {
@@ -517,7 +530,7 @@ export async function provisionDataWarehouse(tenancy: Tenancy): Promise<{ passwo
         });
         return { status: "ok", password, warehouse };
       } catch (error) {
-        const recovered = await recoverPreviousWarehouseAccess({ tenancy, databaseName, userName, previousPassword });
+        const recovered = await recoverPreviousWarehouseAccess({ tenancy, databaseName, userName, previousPassword, timeoutSeconds });
         throw new HexclaveAssertionError(
           recovered
             ? "Failed to persist Data Warehouse credentials after ClickHouse provisioning; the previous access state was restored"
@@ -540,6 +553,7 @@ export async function provisionDataWarehouse(tenancy: Tenancy): Promise<{ passwo
  */
 export async function rotateDataWarehousePassword(tenancy: Tenancy): Promise<{ password: string, warehouse: DataWarehouse }> {
   await ensureDataWarehouseEntitlement(tenancy);
+  const timeoutSeconds = await getPlanTimeoutSeconds(tenancy);
 
   const prisma = await getPrismaClientForTenancy(tenancy);
 
@@ -573,6 +587,7 @@ export async function rotateDataWarehousePassword(tenancy: Tenancy): Promise<{ p
           databaseName: existing.databaseName,
           userName: existing.userName,
           password,
+          timeoutSeconds,
         });
       } catch (error) {
         captureError("data-warehouse-rotate-ddl", error);
@@ -581,6 +596,7 @@ export async function rotateDataWarehousePassword(tenancy: Tenancy): Promise<{ p
           databaseName: existing.databaseName,
           userName: existing.userName,
           previousPassword,
+          timeoutSeconds,
         });
         if (!restored) {
           await tx.dataWarehouse.update({
@@ -611,6 +627,7 @@ export async function rotateDataWarehousePassword(tenancy: Tenancy): Promise<{ p
           databaseName: existing.databaseName,
           userName: existing.userName,
           previousPassword,
+          timeoutSeconds,
         });
         throw new HexclaveAssertionError(
           restored
@@ -649,13 +666,12 @@ export async function getDataWarehouseQueryAuth(tenancy: Tenancy): Promise<{ use
 }
 
 /**
- * Host and ports a customer points their own ClickHouse client at. Falls back to the
- * host of the backend's own ClickHouse URL, which is right locally but wrong wherever
- * the instance is reachable under a different name — hence the explicit env var.
+ * Host and ports a customer points their own ClickHouse client at. The host is
+ * required rather than derived from the backend's own ClickHouse URL: that URL can
+ * be a private or internal name, and handing it out would fail silently.
  */
 export function getDataWarehouseConnectionInfo(): { host: string, httpsPort: number, nativePort: number } {
-  const configuredHost = getEnvVariable("HEXCLAVE_CLICKHOUSE_PUBLIC_HOST", "");
-  const host = configuredHost || new URL(getEnvVariable("HEXCLAVE_CLICKHOUSE_URL")).hostname;
+  const host = getEnvVariable("HEXCLAVE_CLICKHOUSE_PUBLIC_HOST");
   const httpsPort = Number(getEnvVariable("HEXCLAVE_CLICKHOUSE_PUBLIC_HTTPS_PORT", "8443"));
   const nativePort = Number(getEnvVariable("HEXCLAVE_CLICKHOUSE_PUBLIC_NATIVE_PORT", "9440"));
   if (!Number.isInteger(httpsPort) || httpsPort < 1 || httpsPort > 65_535) {
