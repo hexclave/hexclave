@@ -210,7 +210,10 @@ export function StreamPicker(props: {
                   <td className="px-4 py-2.5">
                     <Checkbox
                       checked={current.on}
-                      disabled={!syncable}
+                      // Only turning a table on needs a usable mode. A selected table
+                      // that lost its last one (say, its primary key was dropped) must
+                      // stay uncheckable, or its failing stream could never be removed.
+                      disabled={!syncable && !current.on}
                       onCheckedChange={checked => update(key, { on: checked === true })}
                     />
                   </td>

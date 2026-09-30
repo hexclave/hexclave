@@ -6,7 +6,7 @@ import { probeDataSource, type DataSourceProbeResult, type ProbedTable } from "@
 import { runStreamSyncs, type StreamSyncPlan, type SyncCursorState } from "@/lib/data-sources/sync";
 import { getTenancy, type Tenancy } from "@/lib/tenancies";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
-import type { DataSource, DataSourceStream } from "@/generated/prisma/client";
+import { Prisma, type DataSource, type DataSourceStream } from "@/generated/prisma/client";
 import {
   getDefaultCursorColumn,
   getModeAvailability,
@@ -15,6 +15,7 @@ import {
 import { decryptWithKms, encryptWithKms } from "@hexclave/shared/dist/helpers/vault/server-side";
 import { yupObject, yupString, yupValidate } from "@hexclave/shared/dist/schema-fields";
 import { StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
+import { timeoutThrow } from "@hexclave/shared/dist/utils/promises";
 
 const encryptedPasswordSchema = yupObject({
   edkBase64: yupString().defined(),
@@ -23,6 +24,17 @@ const encryptedPasswordSchema = yupObject({
 
 /** How long a claimed sync may run before the scheduler assumes it died. */
 const SYNC_CLAIM_LEASE_SECONDS = 900;
+
+/**
+ * True when no sync holds the lease: never claimed, released, or claimed so long
+ * ago that its holder must have died. Every claim goes through this one predicate
+ * — the whole concurrency story depends on them agreeing.
+ */
+const syncLeaseIsFree = Prisma.sql`(
+  "lastSyncStartedAt" IS NULL
+  OR "lastSyncStartedAt" <= "lastSyncFinishedAt"
+  OR "lastSyncStartedAt" < NOW() - make_interval(secs => ${SYNC_CLAIM_LEASE_SECONDS})
+)`;
 
 const MODE_TO_PRISMA = {
   cursor: "CURSOR",
@@ -157,6 +169,37 @@ async function dropCdcInfrastructure(source: DataSource): Promise<void> {
 }
 
 /**
+ * Deleting a project removes its data sources by cascade, at the database level,
+ * which never passes through removeDeletingDataSource — so without this every CDC
+ * slot the project had would stay on the customer's server retaining WAL, with
+ * the source id needed to find it gone. Run before the project row is deleted.
+ *
+ * Best-effort, like deleting a single source: an unreachable source must not make
+ * the project undeletable, so a failure is reported and the slot left to the
+ * customer. Sources are marked DELETING first so the scheduler stops claiming
+ * them while this runs.
+ */
+const PROJECT_DELETION_CLEANUP_TIMEOUT_MS = 15_000;
+
+export async function dropDataSourceSlotsForProject(projectId: string): Promise<void> {
+  const sources = await globalPrismaClient.dataSource.findMany({ where: { tenancy: { projectId } } });
+  if (sources.length === 0) return;
+  await globalPrismaClient.dataSource.updateMany({
+    where: { id: { in: sources.map(source => source.id) } },
+    data: { status: "DELETING" },
+  });
+  await Promise.all(sources.map(async source => {
+    try {
+      // Bounded: a blackholed host would otherwise hold the project deletion
+      // for the OS connect timeout, which is minutes.
+      await timeoutThrow(dropCdcInfrastructure(source), PROJECT_DELETION_CLEANUP_TIMEOUT_MS);
+    } catch (error) {
+      captureError("data-source-project-deletion-cleanup", error);
+    }
+  }));
+}
+
+/**
  * Deletes immediately when no sync holds the lease. Otherwise the source is only
  * marked DELETING — which already hides it from every read — and the scheduler
  * finishes the job once the running sync releases the lease. Waiting for the
@@ -175,9 +218,7 @@ export async function deleteDataSource(tenancy: Tenancy, dataSourceId: string): 
       "status" = 'DELETING',
       "updatedAt" = NOW(),
       "lastSyncStartedAt" = CASE
-        WHEN "lastSyncStartedAt" IS NULL
-          OR "lastSyncStartedAt" <= "lastSyncFinishedAt"
-          OR "lastSyncStartedAt" < NOW() - make_interval(secs => ${SYNC_CLAIM_LEASE_SECONDS})
+        WHEN ${syncLeaseIsFree}
         THEN ${claimStartedAt}
         ELSE "lastSyncStartedAt"
       END
@@ -310,11 +351,7 @@ export async function setDataSourceStreams(
     SET "lastSyncStartedAt" = ${configurationClaimStartedAt}
     WHERE "id" = ${source.id}::uuid
       AND "status" <> 'DELETING'
-      AND (
-        "lastSyncStartedAt" IS NULL
-        OR "lastSyncStartedAt" <= "lastSyncFinishedAt"
-        OR "lastSyncStartedAt" < NOW() - make_interval(secs => ${SYNC_CLAIM_LEASE_SECONDS})
-      )
+      AND ${syncLeaseIsFree}
   `;
   if (claimed === 0) {
     // 404 if it was deleted since the read above, otherwise a sync holds the lease.
@@ -462,6 +499,7 @@ async function syncClaimedDataSource(
   tenancy: Tenancy,
   source: DataSourceWithStreams,
   startedAt: Date,
+  deadlineMs: number,
 ): Promise<DataSourceWithStreams | null> {
   const prisma = await getPrismaClientForTenancy(tenancy);
   if (source.streams.length === 0) {
@@ -522,6 +560,7 @@ async function syncClaimedDataSource(
       slotName,
       publicationName: slotName,
       startedAt,
+      deadlineMs,
     }, plans);
   } finally {
     await clickhouse.close();
@@ -564,7 +603,14 @@ async function syncClaimedDataSource(
     streams AS (
       UPDATE "DataSourceStream" AS s
       SET
-        "status" = v."status"::"DataSourceStreamStatus",
+        -- A failed sync must not clear PENDING: it is the only record that the
+        -- destination still holds rows versioned for the previous configuration,
+        -- and the next sync is what drops them. Losing it would leave rows that
+        -- outrank every new version, frozen in the warehouse forever.
+        "status" = CASE
+          WHEN v."status" = 'FAILED' AND s."status" = 'PENDING' THEN 'PENDING'
+          ELSE v."status"
+        END::"DataSourceStreamStatus",
         "error" = v."error",
         -- A truncated source table cannot be represented incrementally, so the
         -- stream goes back to PENDING and the next sync rebuilds it from scratch.
@@ -600,7 +646,7 @@ async function syncClaimedDataSource(
   return await findDataSource(tenancy, source.id);
 }
 
-export async function syncDataSource(tenancy: Tenancy, dataSourceId: string): Promise<DataSourceWithStreams> {
+export async function syncDataSource(tenancy: Tenancy, dataSourceId: string, options: { deadlineMs: number }): Promise<DataSourceWithStreams> {
   await ensureDataWarehouseEntitlement(tenancy);
   const source = await getDataSourceOrThrow(tenancy, dataSourceId);
   if (source.streams.length === 0) return source;
@@ -612,11 +658,7 @@ export async function syncDataSource(tenancy: Tenancy, dataSourceId: string): Pr
     SET "lastSyncStartedAt" = ${startedAt}, "error" = NULL
     WHERE "id" = ${source.id}::uuid
       AND "status" <> 'DELETING'
-      AND (
-        "lastSyncStartedAt" IS NULL
-        OR "lastSyncStartedAt" <= "lastSyncFinishedAt"
-        OR "lastSyncStartedAt" < NOW() - make_interval(secs => ${SYNC_CLAIM_LEASE_SECONDS})
-      )
+      AND ${syncLeaseIsFree}
   `;
   if (claimed === 0) {
     // 404 if it was deleted since the read above, otherwise a sync holds the lease.
@@ -629,7 +671,7 @@ export async function syncDataSource(tenancy: Tenancy, dataSourceId: string): Pr
     // Once the lease is ours, re-read so execution cannot resurrect a removed CDC
     // stream (and its replication slot) from a stale plan.
     const claimedSource = await getDataSourceOrThrow(tenancy, dataSourceId);
-    const synced = await syncClaimedDataSource(tenancy, claimedSource, startedAt);
+    const synced = await syncClaimedDataSource(tenancy, claimedSource, startedAt, options.deadlineMs);
     if (synced == null) throw new StatusError(StatusError.NotFound, "No such data source.");
     return synced;
   } catch (error) {
@@ -676,11 +718,7 @@ export async function runDueDataSourceSyncs(options: { deadlineMs: number }): Pr
         )
         -- The lease: a claim older than this belonged to an invocation that died,
         -- so the row becomes eligible again rather than being stuck forever.
-        AND (
-          "lastSyncStartedAt" IS NULL
-          OR "lastSyncStartedAt" <= "lastSyncFinishedAt"
-          OR "lastSyncStartedAt" < NOW() - make_interval(secs => ${SYNC_CLAIM_LEASE_SECONDS})
-        )
+        AND ${syncLeaseIsFree}
       ORDER BY ("status" = 'DELETING') DESC, "lastSyncFinishedAt" ASC NULLS FIRST
       LIMIT 1
       FOR UPDATE SKIP LOCKED
@@ -710,7 +748,7 @@ export async function runDueDataSourceSyncs(options: { deadlineMs: number }): Pr
         });
         continue;
       }
-      await syncClaimedDataSource(tenancy, source, row.lastSyncStartedAt);
+      await syncClaimedDataSource(tenancy, source, row.lastSyncStartedAt, options.deadlineMs);
     } catch (error) {
       // A source that cannot sync must not stop the sweep, and the failure is
       // already recorded on the row for the dashboard to show.

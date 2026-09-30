@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from "@clickhouse/client";
-import type { Client } from "pg";
+import { DatabaseError, type Client } from "pg";
+import { StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
 import {
   DELETED_COLUMN,
   ensureDestinationTable,
@@ -15,8 +16,20 @@ import { buildDestinationRow, buildSourceRow, coerceTextValue, versionFromCursor
 const READ_BATCH_SIZE = 10_000;
 /** Stops one enormous, keyset-paginated table from monopolising a sync run. */
 const MAX_BATCHES_PER_CURSOR_SYNC = 50;
-/** WAL changes decoded per peek. Postgres always completes the transaction it is in, so this is a floor. */
-const MAX_WAL_CHANGES_PER_SYNC = 20_000;
+/**
+ * WAL messages decoded per peek. The peek materialises its whole result in
+ * memory, so this bounds memory, not throughput: a sync keeps peeking until it
+ * has caught up or runs out of time. Postgres always completes the transaction
+ * it is in, so this is a floor.
+ */
+const MAX_WAL_CHANGES_PER_PEEK = 20_000;
+/**
+ * Time kept back from the deadline for the last round in flight and the
+ * completion write. Snapshots and WAL rounds stop starting new work once inside it.
+ */
+const DEADLINE_RESERVE_MS = 30_000;
+/** Keys per TOAST refetch. One IN list over tens of thousands of keys overflows Postgres' parser stack. */
+const REFETCH_CHUNK_SIZE = 1_000;
 
 /**
  * Reading up to `now()` would race the commit of a transaction that set its
@@ -48,6 +61,11 @@ export type StreamSyncPlan = {
   isPending: boolean,
 };
 
+/**
+ * `cursor`: the watermark of a cursor stream. `lsn`: a CDC stream whose snapshot
+ * finished and which now follows the slot. `snapshot`: a CDC stream part way
+ * through its initial load; `key` is where to resume it.
+ */
 export type SyncCursorState = {
   mode: string,
   value: string,
@@ -73,7 +91,39 @@ export type SyncContext = {
   slotName: string,
   publicationName: string,
   startedAt: Date,
+  /** Epoch ms by which the sync must have returned; long CDC work stops early and resumes next time. */
+  deadlineMs: number,
 };
+
+/**
+ * Errors caused by the customer's database or configuration: connection failures,
+ * missing grants, a publication we cannot manage. They are shown on the stream and
+ * are not ours to fix, so they stay out of Sentry.
+ */
+export class DataSourceUserError extends Error {}
+
+function isSourceSideError(error: unknown): boolean {
+  if (error instanceof DataSourceUserError || error instanceof DatabaseError) return true;
+  // withDataSourceClient reports a failed connect as a 400.
+  if (error instanceof StatusError && error.statusCode < 500) return true;
+  // Node socket errors (ECONNRESET, ETIMEDOUT, …) come from the network path to
+  // their server. Matched by shape, because ClickHouse errors also carry a string
+  // `code` (a numeric one) and those are ours.
+  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && /^E[A-Z]+$/.test(code);
+}
+
+/**
+ * Stream errors are recorded on the stream either way; the ones that point at a
+ * bug of ours (a ClickHouse insert, a decoding error) also go to Sentry.
+ */
+function reportUnexpectedSyncError(error: unknown): void {
+  if (!isSourceSideError(error)) captureError("data-source-stream-sync", error);
+}
+
+function hasTimeLeft(context: SyncContext): boolean {
+  return Date.now() < context.deadlineMs - DEADLINE_RESERVE_MS;
+}
 
 function tableKey(schemaName: string, tableName: string): string {
   return `${schemaName}.${tableName}`;
@@ -256,26 +306,52 @@ async function ensureCdcInfrastructure(
     .map(plan => quotePgQualifiedName(plan.schemaName, plan.tableName))
     .join(", ");
 
+  const publication = quotePgIdentifier(context.publicationName);
   const existingPublication = await client.query<{ exists: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1) AS exists`,
     [context.publicationName],
   );
-  try {
-    if (existingPublication.rows[0].exists) {
-      // SET rather than ADD: a table the customer removed from the sync must stop
-      // pinning WAL for changes nobody will read.
-      await client.query(`ALTER PUBLICATION ${quotePgIdentifier(context.publicationName)} SET TABLE ${tableList}`);
-    } else {
-      await client.query(`CREATE PUBLICATION ${quotePgIdentifier(context.publicationName)} FOR TABLE ${tableList}`);
-    }
-  } catch (error) {
-    // Publication DDL needs ownership of the tables. Rather than fail opaquely,
-    // hand back the exact statement a DBA can run.
-    throw new Error(
-      `Could not manage the publication for change data capture (${error instanceof Error ? error.message : String(error)}). ` +
-      `Run this on your database as a user that owns the tables, then sync again: ` +
-      `CREATE PUBLICATION ${quotePgIdentifier(context.publicationName)} FOR TABLE ${tableList};`,
+  const publicationExists = existingPublication.rows[0].exists;
+  const wanted = new Set(plans.map(plan => tableKey(plan.schemaName, plan.tableName)));
+  const published = new Set<string>();
+  if (publicationExists) {
+    const rows = await client.query<{ schemaname: string, tablename: string }>(
+      `SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = $1`,
+      [context.publicationName],
     );
+    for (const row of rows.rows) published.add(tableKey(row.schemaname, row.tablename));
+  }
+  const coversWanted = [...wanted].every(key => published.has(key));
+
+  // Altering only when the table list changed matters for more than saving a
+  // statement: ALTER PUBLICATION needs ownership of the publication, so a
+  // publication a DBA created for us — the fix our own error message asks for —
+  // would otherwise fail on every sync.
+  if (!publicationExists || !coversWanted || published.size !== wanted.size) {
+    try {
+      if (publicationExists) {
+        // SET rather than ADD: a table the customer removed from the sync must stop
+        // being decoded for changes nobody will read.
+        await client.query(`ALTER PUBLICATION ${publication} SET TABLE ${tableList}`);
+      } else {
+        await client.query(`CREATE PUBLICATION ${publication} FOR TABLE ${tableList}`);
+      }
+    } catch (error) {
+      // Extra tables only cost decoding work, so a publication that already
+      // covers everything we need is good enough when we may not trim it.
+      if (!coversWanted) {
+        // Publication DDL needs ownership of the tables (and, to alter, of the
+        // publication). Rather than fail opaquely, hand back the exact statement
+        // a DBA can run.
+        const statement = publicationExists
+          ? `ALTER PUBLICATION ${publication} SET TABLE ${tableList};`
+          : `CREATE PUBLICATION ${publication} FOR TABLE ${tableList};`;
+        throw new DataSourceUserError(
+          `Could not manage the publication for change data capture (${error instanceof Error ? error.message : String(error)}). ` +
+          `Run this on your database as a user that owns the tables, then sync again: ${statement}`,
+        );
+      }
+    }
   }
 
   const existingSlot = await client.query<{ exists: boolean }>(
@@ -295,30 +371,63 @@ async function ensureCdcInfrastructure(
  * is what makes it safe to create the slot first and snapshot afterwards: the
  * overlap produces duplicates, which deduplicate, rather than a gap, which would
  * be silent data loss.
+ *
+ * Paged by primary key and stopped at the deadline, returning where it got to, so
+ * a table too large for one function run is loaded over several syncs instead of
+ * being restarted from zero every time. Resuming is safe for the same reason as
+ * above: the slot has captured every change since before the first page, so a
+ * row read late (newer data, still version 0) loses to its WAL entry, and a row
+ * deleted before we reach it is simply never read. Each page is its own
+ * statement, so no transaction stays open on the source across the whole load.
  */
 async function snapshotForCdc(
   context: SyncContext,
   plan: StreamSyncPlan,
   table: ProbedTable,
   client: Client,
-): Promise<number> {
-  return await forEachBatch(
-    client,
-    `SELECT * FROM ${quotePgQualifiedName(plan.schemaName, plan.tableName)}`,
-    [],
-    async rows => {
-      await insertRows(context.clickhouse, {
-        databaseName: context.databaseName,
-        tableName: plan.destinationTable,
-        rows: rows.map(values => buildDestinationRow({
-          values, columns: table.columns, version: 0n, deleted: false, extractedAt: context.startedAt,
-        })),
-      });
-    },
-    // Unbounded: the LSN cursor is written once the snapshot returns, so stopping
-    // early would mark rows as loaded that never were.
-    { maxBatches: Number.POSITIVE_INFINITY },
-  );
+  resumeAfterKey: string | null,
+): Promise<{ rowsSynced: number, lastKey: string | null, done: boolean }> {
+  const keyColumns = plan.primaryKeyColumns;
+  if (keyColumns.length === 0) {
+    throw new DataSourceUserError("Change data capture needs a primary key, and this table no longer has one.");
+  }
+  const quotedKeys = keyColumns.map(quotePgIdentifier);
+  // Keys are read back as text so the resume point is exactly what Postgres
+  // stored, whatever the key type, and compare as that type when sent back.
+  const keyAliases = keyColumns.map((_, index) => `_hexclave_snapshot_key_${index}`);
+  const selectKeys = quotedKeys.map((column, index) => `(${column})::text AS ${quotePgIdentifier(keyAliases[index])}`).join(", ");
+
+  let lastKey = resumeAfterKey;
+  let rowsSynced = 0;
+  do {
+    const params = lastKey == null ? [] : JSON.parse(lastKey) as unknown[];
+    const where = lastKey == null
+      ? ""
+      : `WHERE (${quotedKeys.join(", ")}) > (${params.map((_, index) => `$${index + 1}`).join(", ")})`;
+    // Array mode for the same reason as forEachBatch: `__proto__` column names.
+    const result = await client.query<unknown[]>({
+      text: `SELECT *, ${selectKeys} FROM ${quotePgQualifiedName(plan.schemaName, plan.tableName)} ${where}
+             ORDER BY ${quotedKeys.map(column => `${column} ASC`).join(", ")}
+             LIMIT ${READ_BATCH_SIZE}`,
+      values: params,
+      rowMode: "array",
+    });
+    if (result.rows.length === 0) return { rowsSynced, lastKey, done: true };
+    const columnNames = result.fields.map(field => field.name);
+    const rows = result.rows.map(values => buildSourceRow(columnNames, values));
+    await insertRows(context.clickhouse, {
+      databaseName: context.databaseName,
+      tableName: plan.destinationTable,
+      rows: rows.map(values => buildDestinationRow({
+        values, columns: table.columns, version: 0n, deleted: false, extractedAt: context.startedAt,
+      })),
+    });
+    rowsSynced += rows.length;
+    const last = rows[rows.length - 1];
+    lastKey = JSON.stringify(keyAliases.map(alias => last[alias]));
+    if (rows.length < READ_BATCH_SIZE) return { rowsSynced, lastKey, done: true };
+  } while (hasTimeLeft(context));
+  return { rowsSynced, lastKey, done: false };
 }
 
 /**
@@ -341,22 +450,27 @@ async function refetchRowsByKey(
 
   const keyColumns = plan.primaryKeyColumns;
   const quotedKeys = keyColumns.map(quotePgIdentifier).join(", ");
-  const params: unknown[] = [];
-  const tuples = keys.map(key => {
-    const placeholders = keyColumns.map(column => {
-      params.push(key[column]);
-      return `$${params.length}`;
+  // Chunked: one statement touching tens of thousands of rows would build an IN
+  // list deep enough to fail with `stack depth limit exceeded` — on every retry,
+  // since the same WAL batch comes back each time.
+  for (let offset = 0; offset < keys.length; offset += REFETCH_CHUNK_SIZE) {
+    const params: unknown[] = [];
+    const tuples = keys.slice(offset, offset + REFETCH_CHUNK_SIZE).map(key => {
+      const placeholders = keyColumns.map(column => {
+        params.push(key[column]);
+        return `$${params.length}`;
+      });
+      return `(${placeholders.join(", ")})`;
     });
-    return `(${placeholders.join(", ")})`;
-  });
 
-  const result = await client.query(
-    `SELECT * FROM ${quotePgQualifiedName(plan.schemaName, plan.tableName)}
-     WHERE (${quotedKeys}) IN (${tuples.join(", ")})`,
-    params,
-  );
-  for (const row of result.rows as Record<string, unknown>[]) {
-    byKey.set(keyColumns.map(column => String(row[column])).join("\u0000"), row);
+    const result = await client.query(
+      `SELECT * FROM ${quotePgQualifiedName(plan.schemaName, plan.tableName)}
+       WHERE (${quotedKeys}) IN (${tuples.join(", ")})`,
+      params,
+    );
+    for (const row of result.rows as Record<string, unknown>[]) {
+      byKey.set(keyColumns.map(column => String(row[column])).join("\u0000"), row);
+    }
   }
   return byKey;
 }
@@ -378,18 +492,29 @@ function tupleToValues(tuple: PgoutputTuple, relation: PgoutputRelation, table: 
  * get: `pg_logical_slot_get_changes` consumes as it returns, so a failure between
  * reading and writing to ClickHouse would lose those changes permanently. We
  * advance the slot only once the destination write has succeeded.
+ *
+ * One bounded round; the caller repeats it until `caughtUp`.
  */
-async function consumeWal(
+async function consumeWalRound(
   context: SyncContext,
   plans: StreamSyncPlan[],
   client: Client,
-): Promise<{ rowsByStream: Map<string, number>, lastCommitLsn: bigint | null, truncatedStreams: Set<string> }> {
+): Promise<{ rowsByStream: Map<string, number>, advancedTo: bigint | null, caughtUp: boolean, truncatedStreams: Set<string> }> {
   const planByTable = new Map(plans.map(plan => [tableKey(plan.schemaName, plan.tableName), plan]));
+  // Read up to a fixed point rather than "whatever is there". On PG15+ pgoutput
+  // omits transactions that touch none of our tables entirely, so a quiet set of
+  // tables on a busy database yields no commit to advance to — and the slot would
+  // hold back all of that other WAL until the customer's disk fills. Knowing the
+  // point we read up to lets us advance to it whenever the read was complete.
+  const target = await client.query<{ lsn: string }>(`SELECT pg_current_wal_lsn()::text AS lsn`);
+  const targetLsn = target.rows[0].lsn;
   const changes = await client.query<{ lsn: string, data: Buffer }>(
     `SELECT lsn::text AS lsn, data
-     FROM pg_logical_slot_peek_binary_changes($1, NULL, $2, 'proto_version', '1', 'publication_names', $3)`,
-    [context.slotName, MAX_WAL_CHANGES_PER_SYNC, context.publicationName],
+     FROM pg_logical_slot_peek_binary_changes($1, $2::pg_lsn, $3, 'proto_version', '1', 'publication_names', $4)`,
+    [context.slotName, targetLsn, MAX_WAL_CHANGES_PER_PEEK, context.publicationName],
   );
+  // Below the cap means the peek stopped at the target, not at the cap.
+  const caughtUp = changes.rows.length < MAX_WAL_CHANGES_PER_PEEK;
 
   const relations = new Map<number, PgoutputRelation>();
   const rowsByDestination = new Map<string, Record<string, unknown>[]>();
@@ -496,7 +621,20 @@ async function consumeWal(
     await insertRows(context.clickhouse, { databaseName: context.databaseName, tableName: destinationTable, rows });
   }
 
-  return { rowsByStream, lastCommitLsn, truncatedStreams };
+  // A complete read covers everything up to the target, including transactions
+  // pgoutput skipped; a capped one only up to the last commit it returned.
+  const advancedTo = caughtUp ? parseLsn(targetLsn) : lastCommitLsn;
+  if (advancedTo != null) {
+    // Guarded because advancing below the slot's confirmed position is an error,
+    // and a target read on a quiet database can equal it.
+    await client.query(
+      `SELECT pg_replication_slot_advance(slot_name, $2::pg_lsn)
+       FROM pg_replication_slots
+       WHERE slot_name = $1 AND confirmed_flush_lsn < $2::pg_lsn`,
+      [context.slotName, formatLsn(advancedTo)],
+    );
+  }
+  return { rowsByStream, advancedTo, caughtUp, truncatedStreams };
 }
 
 async function syncCdcStreams(
@@ -520,36 +658,57 @@ async function syncCdcStreams(
     results.set(plan.streamId, { streamId: plan.streamId, rowsSynced: 0, syncCursor: plan.syncCursor, error: null });
   }
 
-  // Snapshot anything that has never been loaded. Done after the slot exists, so
+  // Snapshot anything not fully loaded yet. Done after the slot exists, so
   // changes made during the snapshot are captured by the WAL as well.
   for (const plan of plans) {
-    // A slot we had to create while a stream already held an LSN means the old
+    // A slot we had to create while a stream already had progress relative to one
+    // (following it, or part way through a snapshot it was covering) means the old
     // slot is gone — dropped, failed over, or restored from a backup. A new slot
     // starts at the current WAL position, so everything in between is missing and
     // only a fresh snapshot can recover it.
-    const lostSlot = slotWasCreated && plan.syncCursor?.mode === "lsn";
-    if (plan.syncCursor?.mode === "lsn" && !lostSlot) continue;
+    const cursor = plan.syncCursor;
+    const lostSlot = slotWasCreated && (cursor?.mode === "lsn" || cursor?.mode === "snapshot");
+    if (cursor?.mode === "lsn" && !lostSlot) continue;
     const table = context.tablesByName.get(tableKey(plan.schemaName, plan.tableName));
     if (!table) continue;
-    const rowsSynced = await snapshotForCdc(context, plan, table, client);
+    const resumeAfterKey = cursor?.mode === "snapshot" && !lostSlot ? cursor.key ?? null : null;
+    const snapshot = await snapshotForCdc(context, plan, table, client, resumeAfterKey);
     results.set(plan.streamId, {
       streamId: plan.streamId,
-      rowsSynced,
-      syncCursor: { mode: "lsn", value: "0/0" },
+      rowsSynced: snapshot.rowsSynced,
+      syncCursor: snapshot.done
+        ? { mode: "lsn", value: "0/0" }
+        : { mode: "snapshot", value: "", key: snapshot.lastKey ?? undefined },
       error: null,
     });
   }
 
-  const { rowsByStream, lastCommitLsn, truncatedStreams } = await consumeWal(context, plans, client);
-  if (lastCommitLsn != null) {
-    const lsnText = formatLsn(lastCommitLsn);
-    await client.query(`SELECT pg_replication_slot_advance($1, $2::pg_lsn)`, [context.slotName, lsnText]);
+  // Rounds until caught up, not one fixed-size read: a single peek per sync caps
+  // throughput at one peek per interval, and a source writing faster than that
+  // would fall behind forever while its slot retained the backlog.
+  const rowsByStream = new Map<string, number>();
+  const truncatedStreams = new Set<string>();
+  let advancedTo: bigint | null = null;
+  do {
+    const round = await consumeWalRound(context, plans, client);
+    for (const [streamId, rows] of round.rowsByStream) {
+      rowsByStream.set(streamId, (rowsByStream.get(streamId) ?? 0) + rows);
+    }
+    for (const streamId of round.truncatedStreams) truncatedStreams.add(streamId);
+    if (round.advancedTo != null) advancedTo = round.advancedTo;
+    if (round.caughtUp) break;
+  } while (hasTimeLeft(context));
+
+  if (advancedTo != null) {
+    const lsnText = formatLsn(advancedTo);
     for (const plan of plans) {
       const existing = results.get(plan.streamId)!;
       results.set(plan.streamId, {
         ...existing,
         rowsSynced: existing.rowsSynced + (rowsByStream.get(plan.streamId) ?? 0),
-        syncCursor: { mode: "lsn", value: lsnText },
+        // A stream still mid-snapshot keeps its resume point; its WAL changes were
+        // applied all the same and win over whatever the snapshot reads later.
+        syncCursor: existing.syncCursor?.mode === "snapshot" ? existing.syncCursor : { mode: "lsn", value: lsnText },
         needsResnapshot: truncatedStreams.has(plan.streamId),
       });
     }
@@ -577,6 +736,7 @@ export async function runStreamSyncs(context: SyncContext, plans: StreamSyncPlan
         try {
           results.push(await syncCursor(context, plan, table, client));
         } catch (error) {
+          reportUnexpectedSyncError(error);
           results.push({
             streamId: plan.streamId,
             rowsSynced: 0,
@@ -600,6 +760,7 @@ export async function runStreamSyncs(context: SyncContext, plans: StreamSyncPlan
       );
       results.push(...cdcResults);
     } catch (error) {
+      reportUnexpectedSyncError(error);
       const message = error instanceof Error ? error.message : String(error);
       for (const plan of cdcPlans) {
         results.push({ streamId: plan.streamId, rowsSynced: 0, syncCursor: plan.syncCursor, error: message });

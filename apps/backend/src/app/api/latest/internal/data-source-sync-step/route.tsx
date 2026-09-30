@@ -44,9 +44,14 @@ export const GET = createSmartRouteHandler({
     if (!Number.isFinite(requested) || requested < 0) {
       throw new StatusError(400, "Invalid max_duration_ms");
     }
-    const deadlineMs = Date.now() + Math.min(requested, HARD_DEADLINE_MS);
+    const maxDurationMs = Math.min(requested, HARD_DEADLINE_MS);
+    // Same split as workflow-engine-step: the loop is timed on the monotonic
+    // clock, while the deadline handed down is wall-clock, because it crosses
+    // into code that compares it against Date.now().
+    const startTime = performance.now();
+    const deadlineMs = Date.now() + maxDurationMs;
 
-    while (Date.now() < deadlineMs) {
+    while (performance.now() - startTime < maxDurationMs) {
       const { didWork } = await runDueDataSourceSyncs({ deadlineMs });
       if (!didWork) break;
     }

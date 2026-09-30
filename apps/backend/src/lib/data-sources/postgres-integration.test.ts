@@ -14,10 +14,11 @@
  *     pnpm test run apps/backend/src/lib/data-sources/postgres-integration.test.ts
  */
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { probeDataSource } from "./probe";
 import { withDataSourceClient } from "./postgres";
 import { decodePgoutputMessage, formatLsn, type PgoutputRelation } from "./pgoutput";
+import type { SyncCursorState } from "./sync";
 
 const TEST_SERVER = getEnvVariable("HEXCLAVE_DATA_SOURCE_TEST_POSTGRES", "") || undefined;
 
@@ -39,7 +40,7 @@ describe.skipIf(!TEST_SERVER)("Postgres data source", () => {
 
 beforeAll(async () => {
   await withDataSourceClient(credentials, async client => {
-    await client.query(`DROP TABLE IF EXISTS users, plans, events_noindex, keyless CASCADE`);
+    await client.query(`DROP TABLE IF EXISTS users, plans, events_noindex, keyless, cdc_items, cdc_big, cdc_noise, cdc_toast CASCADE`);
     await client.query(`CREATE TABLE users (id bigserial PRIMARY KEY, email text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())`);
     await client.query(`CREATE INDEX users_updated_at_idx ON users (updated_at)`);
     await client.query(`CREATE TABLE plans (id int PRIMARY KEY, name text NOT NULL)`);
@@ -139,6 +140,7 @@ it("runs cursor mode end to end on the Postgres side", async () => {
     slotName: "hexclave_check2",
     publicationName: "hexclave_check2",
     startedAt: new Date("2026-08-21T00:00:00Z"),
+    deadlineMs: Date.now() + 60_000,
   };
 
   const results = await runStreamSyncs(context, [
@@ -179,7 +181,7 @@ it("resumes a cursor stream from its watermark", async () => {
     clickhouse: recorder.client as never,
     databaseName: "wh_test",
     tablesByName: new Map(probe.tables.map(t => [`${t.schemaName}.${t.tableName}`, t])),
-    slotName: "x", publicationName: "x", startedAt: new Date(),
+    slotName: "x", publicationName: "x", startedAt: new Date(), deadlineMs: Date.now() + 60_000,
   }, [{
     streamId: "s-users", schemaName: "public", tableName: "users", mode: "cursor" as const,
     cursorColumn: "id", primaryKeyColumns: ["id"], destinationTable: "public_users",
@@ -210,7 +212,7 @@ it("holds a timestamp cursor back from now(), so a late commit is not skipped", 
     clickhouse: recorder.client as never,
     databaseName: "wh_test",
     tablesByName: new Map(probe.tables.map(t => [`${t.schemaName}.${t.tableName}`, t])),
-    slotName: "x", publicationName: "x", startedAt: new Date(),
+    slotName: "x", publicationName: "x", startedAt: new Date(), deadlineMs: Date.now() + 60_000,
   }, [{
     streamId: "s-users", schemaName: "public", tableName: "users", mode: "cursor" as const,
     cursorColumn: "updated_at", primaryKeyColumns: ["id"], destinationTable: "public_users", isPending: false, syncCursor: null,
@@ -221,5 +223,170 @@ it("holds a timestamp cursor back from now(), so a late commit is not skipped", 
   expect(results[0].error).toBeNull();
   expect(results[0].rowsSynced).toBeGreaterThan(0);
 }, 60000);
+
+describe("change data capture", () => {
+  const SLOT = "hexclave_cdc_test";
+
+  async function dropSlotAndPublication() {
+    await withDataSourceClient(credentials, async client => {
+      await client.query(`SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)`, [SLOT]);
+      await client.query(`DROP PUBLICATION IF EXISTS ${SLOT}`);
+    }, { allowWrites: true });
+  }
+
+  async function runCdc(
+    tables: { table: string, syncCursor?: SyncCursorState | null, primaryKeyColumns?: string[] }[],
+    options: { deadlineMs?: number, credentials?: typeof credentials } = {},
+  ) {
+    const { runStreamSyncs } = await import("./sync");
+    const probe = await probeDataSource(options.credentials ?? credentials);
+    const recorder = recordingClickhouse();
+    const results = await runStreamSyncs({
+      credentials: options.credentials ?? credentials,
+      clickhouse: recorder.client as never,
+      databaseName: "wh_test",
+      tablesByName: new Map(probe.tables.map(t => [`${t.schemaName}.${t.tableName}`, t])),
+      slotName: SLOT,
+      publicationName: SLOT,
+      startedAt: new Date(),
+      deadlineMs: options.deadlineMs ?? Date.now() + 120_000,
+    }, tables.map(({ table, syncCursor, primaryKeyColumns }) => ({
+      streamId: `s-${table}`, schemaName: "public", tableName: table, mode: "cdc" as const,
+      cursorColumn: null, primaryKeyColumns: primaryKeyColumns ?? ["id"], destinationTable: `public_${table}`,
+      isPending: false, syncCursor: syncCursor ?? null,
+    })));
+    return { results, recorder };
+  }
+
+  async function slotConfirmedLsn(): Promise<string> {
+    return await withDataSourceClient(credentials, async client => {
+      const result = await client.query<{ lsn: string }>(`SELECT confirmed_flush_lsn::text AS lsn FROM pg_replication_slots WHERE slot_name = $1`, [SLOT]);
+      return result.rows[0].lsn;
+    });
+  }
+
+  async function currentLsn(): Promise<string> {
+    return await withDataSourceClient(credentials, async client => {
+      return (await client.query<{ lsn: string }>(`SELECT pg_current_wal_lsn()::text AS lsn`)).rows[0].lsn;
+    });
+  }
+
+  beforeAll(async () => {
+    await dropSlotAndPublication();
+    await withDataSourceClient(credentials, async client => {
+      await client.query(`DROP TABLE IF EXISTS cdc_items, cdc_big, cdc_noise, cdc_toast CASCADE`);
+      await client.query(`CREATE TABLE cdc_items (id int PRIMARY KEY, name text NOT NULL)`);
+      await client.query(`INSERT INTO cdc_items SELECT g, 'item ' || g FROM generate_series(1, 10) g`);
+      await client.query(`CREATE TABLE cdc_big (id int PRIMARY KEY, name text NOT NULL)`);
+      await client.query(`INSERT INTO cdc_big SELECT g, 'big ' || g FROM generate_series(1, 25000) g`);
+      await client.query(`CREATE TABLE cdc_noise (id bigserial PRIMARY KEY, payload text)`);
+      await client.query(`CREATE TABLE cdc_toast (id int, part int, title text NOT NULL, body text NOT NULL, PRIMARY KEY (id, part))`);
+      await client.query(`ALTER TABLE cdc_toast ALTER COLUMN body SET STORAGE EXTERNAL`);
+      await client.query(`INSERT INTO cdc_toast SELECT g, 1, 'title', repeat('x', 2100) || g FROM generate_series(1, 30000) g`);
+    }, { allowWrites: true });
+  }, 120000);
+
+  // The probe test above expects to see only its own tables on a rerun.
+  afterAll(async () => {
+    await dropSlotAndPublication();
+    await withDataSourceClient(credentials, async client => {
+      await client.query(`DROP TABLE IF EXISTS cdc_items, cdc_big, cdc_noise, cdc_toast CASCADE`);
+      await client.query(`DROP OWNED BY hexclave_reader`);
+      await client.query(`DROP ROLE hexclave_reader`);
+    }, { allowWrites: true });
+  }, 60000);
+
+  it("works with a publication a DBA created, even though our role cannot alter it", async () => {
+    await dropSlotAndPublication();
+    await withDataSourceClient(credentials, async client => {
+      await client.query(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hexclave_reader') THEN DROP OWNED BY hexclave_reader; DROP ROLE hexclave_reader; END IF; END $$`);
+      await client.query(`CREATE ROLE hexclave_reader LOGIN REPLICATION PASSWORD 'readerpass'`);
+      await client.query(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO hexclave_reader`);
+      // What our error message tells the DBA to run, run as someone else.
+      await client.query(`CREATE PUBLICATION ${SLOT} FOR TABLE public.cdc_items`);
+    }, { allowWrites: true });
+    const reader = { ...credentials, username: "hexclave_reader", password: "readerpass" };
+
+    const first = await runCdc([{ table: "cdc_items" }], { credentials: reader });
+    expect(first.results[0].error).toBeNull();
+    expect(first.results[0].syncCursor?.mode).toBe("lsn");
+    const second = await runCdc([{ table: "cdc_items", syncCursor: first.results[0].syncCursor }], { credentials: reader });
+    expect(second.results[0].error).toBeNull();
+
+    // A table list that does need changing asks for the ALTER it needs, not a
+    // CREATE that would fail on the existing publication.
+    const widened = await runCdc([{ table: "cdc_items", syncCursor: first.results[0].syncCursor }, { table: "cdc_big" }], { credentials: reader });
+    expect(widened.results[0].error).toContain(`ALTER PUBLICATION "${SLOT}" SET TABLE`);
+  }, 120000);
+
+  it("loads a large table over several syncs, resuming by primary key", async () => {
+    await dropSlotAndPublication();
+    // No time beyond the reserve: each sync reads exactly one page and stops.
+    const tight = () => Date.now() + 30_000;
+    const seen = new Set<unknown>();
+    let cursor: SyncCursorState | null = null;
+    let syncs = 0;
+    while (cursor?.mode !== "lsn") {
+      const { results, recorder } = await runCdc([{ table: "cdc_big", syncCursor: cursor }], { deadlineMs: tight() });
+      expect(results[0].error).toBeNull();
+      for (const row of recorder.inserts.flatMap(i => i.rows)) seen.add(row.id);
+      cursor = results[0].syncCursor;
+      syncs++;
+      expect(syncs).toBeLessThan(10);
+    }
+    expect(syncs).toBe(3);
+    expect(seen.size).toBe(25000);
+  }, 120000);
+
+  it("drains a backlog larger than one peek in a single sync", async () => {
+    await dropSlotAndPublication();
+    const initial = await runCdc([{ table: "cdc_items" }]);
+    await withDataSourceClient(credentials, async client => {
+      // 10k single-row transactions: 30k pgoutput messages, more than one peek holds.
+      await client.query(`DO $$ BEGIN FOR i IN 11..10010 LOOP INSERT INTO cdc_items VALUES (i, 'burst ' || i); COMMIT; END LOOP; END $$`);
+    }, { allowWrites: true });
+    const { results } = await runCdc([{ table: "cdc_items", syncCursor: initial.results[0].syncCursor }]);
+    expect(results[0].error).toBeNull();
+    expect(results[0].rowsSynced).toBe(10000);
+  }, 180000);
+
+  it("advances the slot when only unpublished tables are written", async () => {
+    await dropSlotAndPublication();
+    const initial = await runCdc([{ table: "cdc_items" }]);
+    await withDataSourceClient(credentials, async client => {
+      await client.query(`INSERT INTO cdc_noise (payload) SELECT repeat('n', 500) FROM generate_series(1, 20000)`);
+    }, { allowWrites: true });
+    const before = await currentLsn();
+    const { results } = await runCdc([{ table: "cdc_items", syncCursor: initial.results[0].syncCursor }]);
+    expect(results[0].error).toBeNull();
+    expect(results[0].rowsSynced).toBe(0);
+    const confirmed = await slotConfirmedLsn();
+    await withDataSourceClient(credentials, async client => {
+      const caughtUp = await client.query<{ ok: boolean }>(`SELECT $1::pg_lsn >= $2::pg_lsn AS ok`, [confirmed, before]);
+      expect(caughtUp.rows[0].ok).toBe(true);
+    });
+  }, 120000);
+
+  it("refetches withheld TOAST values for more keys than one IN list can hold", async () => {
+    await dropSlotAndPublication();
+    // A composite key: its row-wise IN list is what overflows Postgres' parser
+    // stack, somewhere past ~20k keys in one statement.
+    const initial = await runCdc([{ table: "cdc_toast", primaryKeyColumns: ["id", "part"] }]);
+    await withDataSourceClient(credentials, async client => {
+      await client.query(`UPDATE cdc_toast SET title = 'renamed'`);
+    }, { allowWrites: true });
+    const { results, recorder } = await runCdc([{ table: "cdc_toast", primaryKeyColumns: ["id", "part"], syncCursor: initial.results[0].syncCursor }]);
+    expect(results[0].error).toBeNull();
+    // Every row's final write carries the whole body, not the column default.
+    const latest = new Map<unknown, Record<string, unknown>>();
+    for (const row of recorder.inserts.flatMap(i => i.rows)) latest.set(row.id, row);
+    expect(latest.size).toBe(30000);
+    for (const row of latest.values()) {
+      expect(row.title).toBe("renamed");
+      expect(String(row.body).startsWith("xxxx")).toBe(true);
+    }
+    await dropSlotAndPublication();
+  }, 120000);
+});
 
 });

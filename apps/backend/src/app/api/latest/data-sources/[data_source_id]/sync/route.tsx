@@ -7,6 +7,9 @@ import { adaptSchema, adminAuthTypeSchema, yupMixed, yupNumber, yupObject, yupSt
 // stream, so it needs more than the platform default.
 export const maxDuration = 300;
 
+// Leaves room to serialize the response and for the platform's own shutdown.
+const SYNC_DEADLINE_MS = (maxDuration - 20) * 1000;
+
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Sync a data source now",
@@ -27,6 +30,6 @@ export const POST = createSmartRouteHandler({
   handler: async ({ auth, params }) => ({
     statusCode: 200,
     bodyType: "json",
-    body: { data_source: serializeDataSource(await syncDataSource(auth.tenancy, params.data_source_id)) },
+    body: { data_source: serializeDataSource(await syncDataSource(auth.tenancy, params.data_source_id, { deadlineMs: Date.now() + SYNC_DEADLINE_MS })) },
   }),
 });

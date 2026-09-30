@@ -97,7 +97,9 @@ function DataSourcePage() {
     );
   }
 
-  const failing = dataSource.streams.filter(stream => stream.status === "failed").length;
+  // A stream waiting on a rebuild stays pending when its sync fails, so the
+  // error, not the status, is what says it is failing.
+  const failing = dataSource.streams.filter(stream => stream.status === "failed" || stream.error != null).length;
 
   return (
     <PageLayout

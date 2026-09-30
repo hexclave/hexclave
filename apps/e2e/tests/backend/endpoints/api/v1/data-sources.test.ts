@@ -578,6 +578,40 @@ it("rebuilds the destination when a stream changes mode", async ({ expect }) => 
   });
 });
 
+it("keeps a pending rebuild through a failed first sync", async ({ expect }) => {
+  const { projectId, credentials } = await createProjectWithWarehouse();
+  await withSourceDatabase(SIMPLE_SCHEMA, async source => {
+    const { body: { data_source } } = await connectSource(source.database);
+    await setStreams(data_source.id, [{ schema_name: "public", table_name: "events", mode: "cursor", cursor_column: "created_at" }]);
+    await syncSource(data_source.id);
+    await setStreams(data_source.id, [{ schema_name: "public", table_name: "events", mode: "cdc" }]);
+
+    // A physical slot under our name makes the first CDC sync fail: it is taken
+    // for our slot, then refused for logical decoding.
+    const slotName = `hexclave_${data_source.id.replace(/-/g, "")}`;
+    await source.query(`SELECT pg_create_physical_replication_slot('${slotName}')`);
+    const failed = await syncSource(data_source.id);
+    expect(failed.body.data_source.streams[0].error).not.toBe(null);
+    // Still pending, so the next sync still rebuilds. FAILED would lose the only
+    // record that the destination holds cursor-versioned rows, which outrank
+    // every LSN and would freeze the table at its pre-switch contents.
+    expect(failed.body.data_source.streams[0].status).toBe("pending");
+
+    await source.query(`SELECT pg_drop_replication_slot('${slotName}')`);
+    await syncSource(data_source.id);
+    await source.query(`UPDATE events SET label = 'after-switch' WHERE label = 'e3'`);
+    const afterSwitch = await syncSource(data_source.id);
+    expect(afterSwitch.body.data_source.streams[0]).toMatchObject({ status: "active", error: null });
+    const updated = await queryWarehouse(
+      credentials,
+      `SELECT count() FROM \`${projectId}\`.\`${getDestinationTable(afterSwitch, "events")}\` FINAL WHERE label = 'after-switch'`,
+    );
+    expect(updated.text).toBe("1");
+
+    await deleteSource(data_source.id);
+  });
+});
+
 it("rebuilds the destination when the source's primary key changes", async ({ expect }) => {
   const { projectId, credentials } = await createProjectWithWarehouse();
   await withSourceDatabase(SIMPLE_SCHEMA, async source => {
@@ -654,7 +688,9 @@ it("keeps one stream's failure from stopping the others", async ({ expect }) => 
     const byTable = Object.fromEntries(sync.body.data_source.streams.map((s: any) => [s.table_name, s]));
     expect(byTable.plans.status).toBe("active");
     expect(byTable.plans.error).toBe(null);
-    expect(byTable.events.status).toBe("failed");
+    // Pending rather than failed: it has never loaded, and a failure must not
+    // clear the marker that its first successful sync rebuilds the destination.
+    expect(byTable.events.status).toBe("pending");
     expect(String(byTable.events.error)).toContain("no longer exists");
   });
 });
@@ -682,6 +718,22 @@ it("disconnects a source and drops the replication slot it created", async ({ ex
 
     expect((await listSources()).body.data_sources).toEqual([]);
     expect((await getSource(data_source.id)).status).toBe(404);
+  });
+});
+
+it("drops a source's replication slot when its project is deleted", async ({ expect }) => {
+  await createProjectWithWarehouse();
+  await withSourceDatabase(SIMPLE_SCHEMA, async source => {
+    const { body: { data_source } } = await connectSource(source.database);
+    await setStreams(data_source.id, [{ schema_name: "public", table_name: "events", mode: "cdc" }]);
+    await syncSource(data_source.id);
+    expect(await getCdcInfrastructureCounts(source.database)).toEqual({ slots: 1, publications: 1 });
+
+    // The project delete cascades the source row away without going through
+    // source deletion, so the slot has to be dropped on the way.
+    const deleted = await niceBackendFetch("/api/v1/internal/projects/current", { method: "DELETE", accessType: "admin" });
+    expect(deleted.status).toBe(200);
+    expect(await getCdcInfrastructureCounts(source.database)).toEqual({ slots: 0, publications: 0 });
   });
 });
 
