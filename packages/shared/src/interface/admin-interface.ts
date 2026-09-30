@@ -1,5 +1,6 @@
 import * as yup from "yup";
 import type { EnvironmentConfigOverrideOverride } from "../config/schema";
+import type { DataSourceSyncMode } from "../data-sources/modes";
 import type { DeploymentMemorySize, DeploymentSourceManifest } from "../deployments";
 import { KnownErrors } from "../known-errors";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type RestrictedReason } from "../schema-fields";
@@ -53,6 +54,80 @@ export type DataWarehouseJson = {
   error: string | null,
   password_updated_at_millis: number | null,
   connection: DataWarehouseConnectionJson,
+};
+
+/** A customer-owned database we pull from, into the project's warehouse. */
+export type DataSourceStreamJson = {
+  id: string,
+  schema_name: string,
+  table_name: string,
+  mode: DataSourceSyncMode,
+  /** Only set when mode is `cursor`. */
+  cursor_column: string | null,
+  primary_key_columns: string[],
+  destination_table: string,
+  status: "pending" | "snapshotting" | "active" | "failed",
+  error: string | null,
+  rows_synced: number,
+  last_synced_at_millis: number | null,
+};
+
+export type DataSourceCapabilitiesJson = {
+  version: string,
+  wal_level: string,
+  has_replication: boolean,
+  in_recovery: boolean,
+  slots_used: number,
+  /** Null when the source provider does not expose the replication slot budget. */
+  slots_max: number | null,
+  probed_at_millis: number,
+};
+
+export type DataSourceJson = {
+  id: string,
+  type: "postgres",
+  host: string,
+  port: number,
+  database: string,
+  username: string,
+  ssl_mode: string,
+  status: "pending" | "active" | "paused" | "failed",
+  error: string | null,
+  sync_interval_seconds: number,
+  /** Null until the source has been probed once. */
+  capabilities: DataSourceCapabilitiesJson | null,
+  last_sync_started_at_millis: number | null,
+  last_sync_finished_at_millis: number | null,
+  streams: DataSourceStreamJson[],
+};
+
+export type DataSourceCatalogTableJson = {
+  schema_name: string,
+  table_name: string,
+  /** Null when the source has never been analyzed — not the same as empty. */
+  approx_rows: number | null,
+  /** `pg_class.relreplident`: 'd' default, 'n' nothing, 'f' full, 'i' using index. */
+  replica_identity: string,
+  is_partitioned: boolean,
+  primary_key_columns: string[],
+  cursor_candidates: { column: string, data_type: string, indexed: boolean }[],
+  /** Resolved server-side, so the picker never offers a mode the backend would reject. */
+  available_modes: { mode: DataSourceSyncMode, available: boolean, reason: string | null }[],
+  /** Null when no mode applies to this table as it stands. */
+  recommended_mode: DataSourceSyncMode | null,
+  default_cursor_column: string | null,
+};
+
+export type DataSourceCatalogJson = {
+  capabilities: DataSourceCapabilitiesJson,
+  tables: DataSourceCatalogTableJson[],
+};
+
+export type DataSourceStreamConfig = {
+  schema_name: string,
+  table_name: string,
+  mode: DataSourceSyncMode,
+  cursor_column?: string | null,
 };
 
 /** Only returned by provisioning and rotation; the password is not readable elsewhere. */
@@ -401,6 +476,57 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
   async rotateDataWarehousePassword(): Promise<DataWarehouseCredentialsJson> {
     const response = await this.sendAdminRequest(`/data-warehouse/rotate-password`, { method: "POST" }, null);
     return await response.json();
+  }
+
+  // ─── Data Sources ───────────────────────────────────────────────────────
+
+  async listDataSources(): Promise<DataSourceJson[]> {
+    const response = await this.sendAdminRequest(`/data-sources`, {}, null);
+    const result = await response.json() as { data_sources: DataSourceJson[] };
+    return result.data_sources;
+  }
+
+  /** Verifies the credentials and reads the catalog before anything is stored. */
+  async createDataSource(options: {
+    host: string,
+    port: number,
+    database: string,
+    username: string,
+    password: string,
+    ssl_mode?: string,
+  }): Promise<{ data_source: DataSourceJson, catalog: DataSourceCatalogJson }> {
+    const response = await this.sendAdminRequest(`/data-sources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    }, null);
+    return await response.json();
+  }
+
+  async deleteDataSource(dataSourceId: string): Promise<void> {
+    await this.sendAdminRequest(`/data-sources/${encodeURIComponent(dataSourceId)}`, { method: "DELETE" }, null);
+  }
+
+  async getDataSourceCatalog(dataSourceId: string): Promise<DataSourceCatalogJson> {
+    const response = await this.sendAdminRequest(`/data-sources/${encodeURIComponent(dataSourceId)}/catalog`, {}, null);
+    const result = await response.json() as { catalog: DataSourceCatalogJson };
+    return result.catalog;
+  }
+
+  async setDataSourceStreams(dataSourceId: string, streams: DataSourceStreamConfig[]): Promise<DataSourceJson> {
+    const response = await this.sendAdminRequest(`/data-sources/${encodeURIComponent(dataSourceId)}/streams`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ streams }),
+    }, null);
+    const result = await response.json() as { data_source: DataSourceJson };
+    return result.data_source;
+  }
+
+  async syncDataSource(dataSourceId: string): Promise<DataSourceJson> {
+    const response = await this.sendAdminRequest(`/data-sources/${encodeURIComponent(dataSourceId)}/sync`, { method: "POST" }, null);
+    const result = await response.json() as { data_source: DataSourceJson };
+    return result.data_source;
   }
 
   // ─── Workflows (internal-project gated; see the Workflows v1 spec) ───────

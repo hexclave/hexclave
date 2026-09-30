@@ -1,6 +1,6 @@
 import { KnownErrors, HexclaveAdminInterface } from "@hexclave/shared";
 import { getProductionModeErrors } from "@hexclave/shared/dist/helpers/production-mode";
-import { DataWarehouseCredentialsJson, DataWarehouseJson, InternalApiKeyCreateCrudResponse } from "@hexclave/shared/dist/interface/admin-interface";
+import { DataSourceCatalogJson, DataSourceJson, DataSourceStreamConfig, DataWarehouseCredentialsJson, DataWarehouseJson, InternalApiKeyCreateCrudResponse } from "@hexclave/shared/dist/interface/admin-interface";
 import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse, MetricsResponse, MetricsUserCounts, UserActivityResponse } from "@hexclave/shared/dist/interface/admin-metrics";
 import { EmailTemplateCrud } from "@hexclave/shared/dist/interface/crud/email-templates";
 import { InternalApiKeysCrud } from "@hexclave/shared/dist/interface/crud/internal-api-keys";
@@ -118,6 +118,9 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
   });
   private readonly _adminDataWarehouseCache = createCache(async () => {
     return await this._interface.getDataWarehouse();
+  });
+  private readonly _adminDataSourcesCache = createCache(async () => {
+    return await this._interface.listDataSources();
   });
   private readonly _adminTeamPermissionDefinitionsCache = createCache(async () => {
     return await this._interface.listTeamPermissionDefinitions();
@@ -559,6 +562,9 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
   useDataWarehouse(): DataWarehouseJson {
     return useAsyncCache(this._adminDataWarehouseCache, [], "adminApp.useDataWarehouse()");
   }
+  useDataSources(): DataSourceJson[] {
+    return useAsyncCache(this._adminDataSourcesCache, [], "adminApp.useDataSources()");
+  }
   // END_PLATFORM
   async listEmailThemes(): Promise<{ id: string, displayName: string }[]> {
     const crud = Result.orThrow(await this._adminEmailThemesCache.getOrWait([], "write-only"));
@@ -617,6 +623,53 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
       connection: result.connection,
     }));
     return result;
+  }
+
+  // ─── Data Sources ───────────────────────────────────────────────────────
+
+  async listDataSources(): Promise<DataSourceJson[]> {
+    return Result.orThrow(await this._adminDataSourcesCache.getOrWait([], "write-only"));
+  }
+
+  async createDataSource(options: {
+    host: string,
+    port: number,
+    database: string,
+    username: string,
+    password: string,
+    sslMode?: string,
+  }): Promise<{ dataSource: DataSourceJson, catalog: DataSourceCatalogJson }> {
+    const result = await this._interface.createDataSource({
+      host: options.host,
+      port: options.port,
+      database: options.database,
+      username: options.username,
+      password: options.password,
+      ssl_mode: options.sslMode,
+    });
+    await this._adminDataSourcesCache.refresh([]);
+    return { dataSource: result.data_source, catalog: result.catalog };
+  }
+
+  async deleteDataSource(dataSourceId: string): Promise<void> {
+    await this._interface.deleteDataSource(dataSourceId);
+    await this._adminDataSourcesCache.refresh([]);
+  }
+
+  async getDataSourceCatalog(dataSourceId: string): Promise<DataSourceCatalogJson> {
+    return await this._interface.getDataSourceCatalog(dataSourceId);
+  }
+
+  async setDataSourceStreams(dataSourceId: string, streams: DataSourceStreamConfig[]): Promise<DataSourceJson> {
+    const dataSource = await this._interface.setDataSourceStreams(dataSourceId, streams);
+    await this._adminDataSourcesCache.refresh([]);
+    return dataSource;
+  }
+
+  async syncDataSource(dataSourceId: string): Promise<DataSourceJson> {
+    const dataSource = await this._interface.syncDataSource(dataSourceId);
+    await this._adminDataSourcesCache.refresh([]);
+    return dataSource;
   }
 
   // ─── Workflows (internal-project gated; see the Workflows v1 spec) ───────

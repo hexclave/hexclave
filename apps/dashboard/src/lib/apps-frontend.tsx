@@ -530,6 +530,7 @@ export const ALL_APPS_FRONTEND = {
     href: "data-warehouse",
     navigationItems: [
       { displayName: "Data Warehouse", href: "." },
+      { displayName: "Sources", href: "sources" },
     ],
     screenshots: [],
     storeDescription: (

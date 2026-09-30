@@ -1,4 +1,5 @@
 import { getBranchConfigPushedError, getDevelopmentEnvironmentConfigWarnings, renderedOrganizationConfigToProjectCrud } from "@/lib/config";
+import { dropDataSourceSlotsForProject } from "@/lib/data-sources";
 import { createOrUpdateProjectWithLegacyConfig } from "@/lib/projects";
 import { getTenancy } from "@/lib/tenancies";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
@@ -54,6 +55,9 @@ export const projectsCrudHandlers = createLazyProxy(() => createCrudHandlers(pro
     };
   },
   onDelete: async ({ auth }) => {
+    // The delete cascades data sources away without their own cleanup, so their
+    // replication slots have to be dropped first.
+    await dropDataSourceSlotsForProject(auth.project.id);
     await globalPrismaClient.project.delete({
       where: {
         id: auth.project.id

@@ -92,6 +92,7 @@ model Tenancy {
   workflowEvents WorkflowEvent[]
   workflowScheduleCursors WorkflowScheduleCursor[]
   dataWarehouse       DataWarehouse?
+  dataSources         DataSource[]
 
   // Email capacity boost - when set and in the future, email capacity is multiplied by 4
   emailCapacityBoostExpiresAt DateTime?
@@ -2332,6 +2333,135 @@ model DataWarehouse {
   // { edkBase64, ciphertextBase64 } from encryptWithKms(), as in DataVaultEntry.
   encryptedPassword Json?
   passwordUpdatedAt DateTime?
+}
+
+// ─── Data Sources ───────────────────────────────────────────────────────────
+//
+// A customer-owned database we pull FROM, into the project's own warehouse
+// (see DataWarehouse above). The opposite direction from ExternalDbSync, which
+// pushes Hexclave's own tables out to a sink the customer owns.
+//
+// Postgres is the only source type today. The row is shaped so that adding one
+// later is a new `type` plus a new set of `config` keys, not a new table: the
+// per-stream cursor is deliberately an opaque JSON blob so that a REST source's
+// page token fits the same column as a Postgres LSN.
+
+enum DataSourceType {
+  POSTGRES
+}
+
+enum DataSourceStatus {
+  // Credentials verified and the catalog read, but no streams configured yet.
+  PENDING
+  ACTIVE
+  PAUSED
+  // Set when a sync fails in a way that is about the source as a whole
+  // (unreachable, credentials rejected) rather than one stream.
+  FAILED
+  // Deleted by the user, but a sync still held the lease. Hidden from every API
+  // read; the scheduler drops the replication slot and the row once the lease is
+  // free, so cleanup never races a sync that is using the slot.
+  DELETING
+}
+
+model DataSource {
+  id String @id @default(uuid()) @db.Uuid
+
+  tenancyId String  @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  type DataSourceType @default(POSTGRES)
+
+  // Connection, split into fields rather than a single string: the dashboard
+  // collects them separately, and we never want to render a URL that contains
+  // the password back to the client.
+  host     String
+  port     Int
+  database String
+  username String
+  sslMode  String @default("require")
+
+  // { edkBase64, ciphertextBase64 } from encryptWithKms(), as for DataWarehouse.
+  encryptedPassword Json
+
+  status DataSourceStatus @default(PENDING)
+  error  String?
+
+  syncIntervalSeconds Int @default(300)
+
+  // Snapshot of the last capability probe (wal_level, replication grant, slot
+  // budget, server version). Re-read on every probe: a customer who enables
+  // logical replication later should be offered CDC without re-adding the source.
+  capabilities Json?
+
+  // Named after the source id, so two sources on the same server never collide.
+  replicationSlotName String?
+  publicationName     String?
+
+  lastSyncStartedAt  DateTime?
+  lastSyncFinishedAt DateTime?
+
+  streams DataSourceStream[]
+
+  @@index([tenancyId])
+  // The scheduler scans on exactly this predicate every minute.
+  @@index([status, lastSyncFinishedAt])
+}
+
+enum DataSourceStreamMode {
+  CURSOR
+  CDC
+}
+
+enum DataSourceStreamStatus {
+  // Configured, waiting for its first snapshot.
+  PENDING
+  SNAPSHOTTING
+  ACTIVE
+  FAILED
+}
+
+model DataSourceStream {
+  id String @id @default(uuid()) @db.Uuid
+
+  dataSourceId String     @db.Uuid
+  dataSource   DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  schemaName String
+  tableName  String
+
+  mode DataSourceStreamMode
+
+  // Only set when mode is CURSOR. Chosen by the customer from the candidates the
+  // probe found, because only they know which column their writes actually bump.
+  cursorColumn String?
+
+  // From the source's primary key. Empty means the destination table cannot
+  // deduplicate, so it is written append-only.
+  primaryKeyColumns String[]
+
+  // The destination table in the project's warehouse database.
+  destinationTable String
+
+  status DataSourceStreamStatus @default(PENDING)
+  error  String?
+
+  // Opaque per-mode resume point: { mode: "cursor", value } for CURSOR,
+  // { mode: "lsn", value } for CDC, null for FULL_REFRESH. The engine never
+  // inspects the shape of another mode's cursor, which is what lets a future
+  // source type store a page token here unchanged.
+  syncCursor Json?
+
+  rowsSynced   BigInt    @default(0)
+  lastSyncedAt DateTime?
+
+  @@unique([dataSourceId, schemaName, tableName])
 }
 
 // Platform-wide (cross-tenant) switches for the Deployments app.
