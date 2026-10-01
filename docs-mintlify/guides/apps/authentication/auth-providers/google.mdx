@@ -36,6 +36,23 @@ This guide explains how to set up Google as an authentication provider with Hexc
   </Step>
 </Steps>
 
+## Native apps
+
+Prefer the [Swift SDK](https://github.com/hexclave/swift-sdk-prerelease) (public beta). It opens Google through Hexclave and handles the callback:
+
+```swift
+try await stack.signInWithOAuth(provider: "google")
+```
+
+That uses the callback scheme `hexclave-mobile-oauth-url://`. If you call the REST API yourself:
+
+1. `GET https://api.hexclave.com/api/v1/auth/oauth/authorize/google` with query `client_id` (project ID), `client_secret` (publishable client key), `redirect_uri`, `scope=legacy`, `state`, `grant_type=authorization_code`, `code_challenge` (S256), `code_challenge_method=S256`, `response_type=code`, and `type=authenticate`.
+2. `POST https://api.hexclave.com/api/v1/auth/oauth/token` as `application/x-www-form-urlencoded` with `grant_type=authorization_code`, `code`, `redirect_uri`, `code_verifier`, `client_id`, and `client_secret`.
+
+`scope=legacy` is Hexclave's OAuth-client scope, not a Google Cloud scope string.
+
+OAuth-only users have `hasPassword === false`. To add a password later, enable password sign-in and call `user.setPassword({ password })` (or `POST /api/v1/auth/password/set`). Use `updatePassword` only when a password already exists.
+
 ### Need More Help?
 
 * Check the [Google OAuth2 Documentation](https://developers.google.com/identity/protocols/oauth2)

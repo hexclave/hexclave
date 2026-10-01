@@ -32,7 +32,11 @@ sidebarTitle: FAQ
   </Accordion>
 
   <Accordion title="Can I migrate my existing userbase to Hexclave?">
-    Yes! You can [create users programmatically](/api/server/users/create-user) using our [REST API](/api/overview).
+    Yes. Create users with the [server users API](/api/server/users/create-user) or `hexclaveServerApp.createUser()`. The SDK accepts `password`. The REST API also accepts `password_hash` if you already have a bcrypt hash in Modular Crypt Format (for example `$2a$10$…`). Do not send both.
+  </Accordion>
+
+  <Accordion title="How do I make sign-up invite-only?">
+    Set `auth.allowSignUp` to `false` and create users with the server API. Existing users can still sign in; new OAuth or password sign-ups cannot create an account. See [Sign-up rules](/guides/apps/authentication/sign-up-rules#invite-only-or-an-existing-directory).
   </Accordion>
 </AccordionGroup>
 
@@ -41,5 +45,9 @@ sidebarTitle: FAQ
 <AccordionGroup>
   <Accordion title="How can I contribute?">
     Please carefully read our [CONTRIBUTING.md](https://github.com/hexclave/hexclave/blob/dev/CONTRIBUTING.md).
+  </Accordion>
+
+  <Accordion title="OTP or magic link never arrives in development">
+    Shared-server auth mail is delivered to the address you typed (labeled as a Hexclave "dev email"). Check spam, then **Emails → Sent** in the dashboard. See [Emails](/guides/apps/emails/guide) and [Authentication troubleshooting](/guides/apps/authentication/guide#troubleshooting).
   </Accordion>
 </AccordionGroup>
