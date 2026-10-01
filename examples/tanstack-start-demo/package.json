@@ -17,8 +17,8 @@
     "@hexclave/shared": "workspace:*",
     "@hexclave/ui": "workspace:*",
     "@hexclave/tanstack-start": "workspace:*",
-    "@tanstack/react-router": "^1.168.23",
-    "@tanstack/react-start": "^1.167.42",
+    "@tanstack/react-router": "^1.170.41",
+    "@tanstack/react-start": "^1.168.60",
     "nitro": "^3.0.0",
     "react": "19.2.3",
     "react-dom": "19.2.3"
