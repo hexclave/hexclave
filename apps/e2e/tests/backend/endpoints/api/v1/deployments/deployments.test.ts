@@ -303,9 +303,9 @@ describe("definition sync", () => {
       latest_deployment_id: null,
     });
     expect(body.env).toEqual([
-      { key: "DATABASE_CONNECTION_STRING", type: "secret", value: null, secret_key: "db_connection" },
-      { key: "MY_ENV_VAR", type: "plain", value: "true", secret_key: null },
-      { key: "NEXT_PUBLIC_HEXCLAVE_PROJECT_ID", type: "connection", value: "hexclave.projectId", secret_key: null },
+      { key: "DATABASE_CONNECTION_STRING", type: "secret", value: null, secret_key: "db_connection", per_environment: null },
+      { key: "MY_ENV_VAR", type: "plain", value: "true", secret_key: null, per_environment: null },
+      { key: "NEXT_PUBLIC_HEXCLAVE_PROJECT_ID", type: "connection", value: "hexclave.projectId", secret_key: null, per_environment: null },
     ]);
 
     const listResponse = await niceBackendFetch("/api/v1/deployments/services", { accessType: "admin" });
@@ -814,13 +814,18 @@ describe("secrets", () => {
     const setResponse = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { key: "db_connection", value: "postgres://user:hunter2@db.example.com/app" },
+      body: { environment: "default", key: "db_connection", value: "postgres://user:hunter2@db.example.com/app" },
     });
     expect(setResponse).toMatchInlineSnapshot(`
       NiceResponse {
         "status": 200,
         "body": {
-          "created": true,
+          "items": [
+            {
+              "created": true,
+              "environment": "default",
+            },
+          ],
           "key": "db_connection",
         },
         "headers": Headers { <some fields may have been hidden> },
@@ -831,9 +836,9 @@ describe("secrets", () => {
     const overwriteResponse = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { key: "db_connection", value: "postgres://user:hunter3@db.example.com/app" },
+      body: { environment: "default", key: "db_connection", value: "postgres://user:hunter3@db.example.com/app" },
     });
-    expect((overwriteResponse.body as any).created).toBe(false);
+    expect((overwriteResponse.body as any).items).toEqual([{ environment: "default", created: false }]);
 
     const listResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
     expect(listResponse.status).toBe(200);
@@ -844,17 +849,17 @@ describe("secrets", () => {
     const invalidKeyResponse = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { key: "bad key", value: "x" },
+      body: { environment: "default", key: "bad key", value: "x" },
     });
     expect(invalidKeyResponse.status).toBe(400);
     const emptyValueResponse = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { key: "some_key", value: "" },
+      body: { environment: "default", key: "some_key", value: "" },
     });
     expect(emptyValueResponse.status).toBe(400);
 
-    const deleteResponse = await niceBackendFetch("/api/v1/project-secrets/db_connection", {
+    const deleteResponse = await niceBackendFetch("/api/v1/project-secrets/db_connection?environment=default", {
       method: "DELETE",
       accessType: "admin",
     });
@@ -865,7 +870,7 @@ describe("secrets", () => {
         "headers": Headers { <some fields may have been hidden> },
       }
     `);
-    const deleteAgainResponse = await niceBackendFetch("/api/v1/project-secrets/db_connection", {
+    const deleteAgainResponse = await niceBackendFetch("/api/v1/project-secrets/db_connection?environment=default", {
       method: "DELETE",
       accessType: "admin",
     });
@@ -879,15 +884,317 @@ describe("secrets", () => {
     await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { key: "shared_key", value: "project-a-value" },
+      body: { environment: "default", key: "shared_key", value: "project-a-value" },
     });
     await Project.createAndSwitch();
     const otherProjectList = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
     expect((otherProjectList.body as any).items).toEqual([]);
   });
+
+  it("stores and resolves secrets per environment", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const allSet = await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "default", key: "SHARED", value: "default-value" },
+    });
+    expect(allSet.status).toBe(200);
+    const developmentSet = await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", key: "SHARED", value: "dev-value" },
+    });
+    expect(developmentSet.status).toBe(200);
+    const listResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect(listResponse.status).toBe(200);
+    expect((listResponse.body as any).items.map((item: { key: string, environment: string }) => `${item.key}:${item.environment}`)).toEqual(["SHARED:default", "SHARED:development"]);
+    expect(JSON.stringify(listResponse.body)).not.toContain("default-value");
+    expect(JSON.stringify(listResponse.body)).not.toContain("dev-value");
+
+    const resolveResponse = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", keys: ["SHARED"] },
+    });
+    expect(resolveResponse.status).toBe(200);
+    expect((resolveResponse.body as { values: Record<string, string> }).values.SHARED).toBe("dev-value");
+
+    const serverResolve = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "server",
+      body: { environment: "development", keys: ["SHARED"] },
+    });
+    expect(serverResolve.status).toBe(401);
+
+    const missing = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", keys: ["MISSING_KEY"] },
+    });
+    // Missing keys are omitted, not an error: `hexclave dev` reports them.
+    expect(missing.status).toBe(200);
+    expect(missing.body).toEqual({ values: {} });
+  });
+
+  it("resolves many keys in one request, and refuses more keys than a project can hold", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { environment: "default", key: "A", value: "a-default" } });
+    await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { environment: "default", key: "B", value: "b-default" } });
+    await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { environment: "development", key: "B", value: "b-dev" } });
+    await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { environment: "production", key: "C", value: "c-prod" } });
+    const resolved = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", keys: ["A", "B", "C", "B", "NOPE"] },
+    });
+    // A falls back to `default`, B's development row wins over its `default` row, and C
+    // (production only) never reaches development.
+    expect(resolved.body).toEqual({ values: { A: "a-default", B: "b-dev" } });
+
+    const tooMany = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", keys: Array.from({ length: 101 }, (_, i) => `KEY_${i}`) },
+    });
+    expect(tooMany.status).toBe(400);
+  });
+
+  it("treats a missing environment as `default` (clients from before per-environment secrets)", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const setResponse = await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
+      accessType: "admin",
+      body: { key: "LEGACY", value: "legacy-value" },
+    });
+    expect(setResponse).toMatchInlineSnapshot(`
+      NiceResponse {
+        "status": 200,
+        "body": {
+          "items": [
+            {
+              "created": true,
+              "environment": "default",
+            },
+          ],
+          "key": "LEGACY",
+        },
+        "headers": Headers { <some fields may have been hidden> },
+      }
+    `);
+    const developmentResolve = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", keys: ["LEGACY"] },
+    });
+    expect(developmentResolve.body).toEqual({ values: { LEGACY: "legacy-value" } });
+    // Production values never leave the backend, not even to admins.
+    const productionResolve = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "production", keys: ["LEGACY"] },
+    });
+    expect(productionResolve.status).toBe(400);
+
+    const deleteResponse = await niceBackendFetch("/api/v1/project-secrets/LEGACY", {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(deleteResponse.status).toBe(200);
+    const listResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect((listResponse.body as any).items).toEqual([]);
+
+    const badEnvironment = await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "staging", key: "LEGACY", value: "x" },
+    });
+    expect(badEnvironment.status).toBe(400);
+  });
+
+  it("writes several environments of a key in one request", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const set = async (body: Record<string, unknown>) => await niceBackendFetch("/api/v1/project-secrets", {
+      method: "POST",
+      accessType: "admin",
+      body: { key: "MULTI", value: "multi-value", ...body },
+    });
+
+    expect((await set({ environment: "development" })).status).toBe(200);
+    const multi = await set({ environments: ["production", "development"] });
+    expect(multi.status).toBe(200);
+    expect(multi.body).toEqual({
+      key: "MULTI",
+      items: [{ environment: "production", created: true }, { environment: "development", created: false }],
+    });
+    const listResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect((listResponse.body as any).items.map((item: any) => item.environment).sort()).toEqual(["development", "production"]);
+
+    const resolve = await niceBackendFetch("/api/v1/internal/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", keys: ["MULTI"] },
+    });
+    expect((resolve.body as any).values).toEqual({ MULTI: "multi-value" });
+
+    // Rejected requests write nothing, not even the valid environments in them.
+    for (const body of [
+      { environments: [] },
+      { environments: ["preview", "preview"] },
+      { environments: ["preview", "staging"] },
+      { environment: "preview", environments: ["preview"] },
+    ]) {
+      expect((await set(body)).status).toBe(400);
+    }
+    const afterRejected = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect((afterRejected.body as any).items.map((item: any) => item.environment).sort()).toEqual(["development", "production"]);
+  });
+
+  it("names the unknown environment when env_per_environment uses one", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const response = await niceBackendFetch("/api/v1/deployments/services", {
+      method: "PUT",
+      accessType: "admin",
+      body: {
+        source_id: uniqueServiceId("src"),
+        services: {
+          web: {
+            type: "serverless",
+            ports: { 3000: { protocol: "http" } },
+            env: { MODE: { value: "x" } },
+            env_per_environment: { MODE: { all: { value: "x" } } },
+          },
+        },
+      },
+    });
+    expect(response.status).toBe(400);
+    const body = JSON.stringify(response.body);
+    expect(body).toContain('no environment \\"all\\"');
+    expect(body).toContain("use default / production / preview / development");
+    expect(body).not.toContain("errors occurred");
+  });
+
+  it("deletes every environment of a key when DELETE omits the environment, and only one when it names it", async ({ expect }) => {
+    await Project.createAndSwitch();
+    for (const [key, environment] of [["PROD_ONLY", "production"], ["PROD_ONLY", "development"], ["SPLIT", "production"], ["SPLIT", "development"]]) {
+      const setResponse = await niceBackendFetch("/api/v1/project-secrets", {
+        method: "POST",
+        accessType: "admin",
+        body: { key, value: "v", environment },
+      });
+      expect(setResponse.status).toBe(200);
+    }
+
+    // A key-only DELETE (the pre-per-environment contract) must not 404 just
+    // because the key has no `default` row.
+    const deleteWholeKey = await niceBackendFetch("/api/v1/project-secrets/PROD_ONLY", {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(deleteWholeKey.status).toBe(200);
+
+    const deleteOneEnvironment = await niceBackendFetch("/api/v1/project-secrets/SPLIT?environment=production", {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(deleteOneEnvironment.status).toBe(200);
+
+    const listResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect((listResponse.body as any).items.map((item: any) => [item.key, item.environment])).toEqual([["SPLIT", "development"]]);
+
+    const missingEnvironment = await niceBackendFetch("/api/v1/project-secrets/SPLIT?environment=default", {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(missingEnvironment).toMatchInlineSnapshot(`
+      NiceResponse {
+        "status": 404,
+        "body": "No secret with key \\"SPLIT\\" exists in this project for environment \\"default\\".",
+        "headers": Headers { <some fields may have been hidden> },
+      }
+    `);
+    const missingKey = await niceBackendFetch("/api/v1/project-secrets/PROD_ONLY", {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(missingKey).toMatchInlineSnapshot(`
+      NiceResponse {
+        "status": 404,
+        "body": "No secret with key \\"PROD_ONLY\\" exists in this project.",
+        "headers": Headers { <some fields may have been hidden> },
+      }
+    `);
+  });
+
+  it("can set and delete secrets whose keys look like route names", async ({ expect }) => {
+    await Project.createAndSwitch();
+    // A static route next to /project-secrets/[key] (as the resolve endpoint
+    // once was) would shadow a secret with that key and make it undeletable.
+    for (const key of ["resolve", "internal"]) {
+      const setResponse = await niceBackendFetch("/api/v1/project-secrets", {
+        method: "POST",
+        accessType: "admin",
+        body: { environment: "default", key, value: "v" },
+      });
+      expect(setResponse.status).toBe(200);
+      const deleteOneEnvironment = await niceBackendFetch(`/api/v1/project-secrets/${key}?environment=default`, {
+        method: "DELETE",
+        accessType: "admin",
+      });
+      expect(deleteOneEnvironment.status).toBe(200);
+      await niceBackendFetch("/api/v1/project-secrets", {
+        method: "POST",
+        accessType: "admin",
+        body: { environment: "production", key, value: "v" },
+      });
+      const deleteWholeKey = await niceBackendFetch(`/api/v1/project-secrets/${key}`, {
+        method: "DELETE",
+        accessType: "admin",
+      });
+      expect(deleteWholeKey.status).toBe(200);
+    }
+    const listResponse = await niceBackendFetch("/api/v1/project-secrets", { accessType: "admin" });
+    expect((listResponse.body as any).items).toEqual([]);
+  });
+
+  it("no longer serves the resolve endpoint at its old path", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const oldPath = await niceBackendFetch("/api/v1/project-secrets/resolve", {
+      method: "POST",
+      accessType: "admin",
+      body: { environment: "development", keys: ["ANY"] },
+    });
+    // /project-secrets/[key] only defines DELETE.
+    expect(oldPath.status).toBe(405);
+  });
 });
 
 describe("deploys against the Marshal runtime", () => {
+  it("refuses secret(key, default) defaults from older CLIs with the rewrite, but accepts empty ones", { timeout: 120_000 }, async ({ expect }) => {
+    await Project.createAndSwitch();
+    const serviceId = uniqueServiceId("defaults");
+    const { uploadId, definitionSyncId, sourceId } = await syncServiceAndUpload(serviceId, {
+      env: { OPENAI: { type: "secret", key: "OPENAI_KEY" } },
+    });
+    const withDefault = await niceBackendFetch("/api/v1/deployments/deployments", {
+      method: "POST",
+      accessType: "admin",
+      body: { source_id: sourceId, upload_id: uploadId, definition_sync_id: definitionSyncId, levels: [[serviceId]], secret_defaults: { [serviceId]: { OPENAI: "sk-default" } } },
+    });
+    expect(withDefault.status).toBe(400);
+    const message = (withDefault.body as any).error ?? withDefault.body;
+    expect(message).toContain("Secret default values are no longer supported");
+    expect(message).toContain(`${serviceId}: OPENAI (secret("OPENAI_KEY", ...))`);
+    expect(message).toContain("`default` environment");
+    expect(JSON.stringify(withDefault.body)).not.toContain("sk-default");
+
+    // What every CLI sends when the deploy file has no defaults: still deploys
+    // (the upload was not consumed by the refused request above).
+    await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { environment: "default", key: "OPENAI_KEY", value: "sk-stored" } });
+    const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]], extraBody: { secret_defaults: { [serviceId]: {} } } });
+    await pollDeploymentToStatus(deploymentId, "deployed");
+    expect((await findMockApp(serviceId)).machines[0].env).toMatchObject({ OPENAI: "sk-stored" });
+  });
+
   it("deploys a service end to end: sync, upload, build, machines, env resolution", { timeout: 120_000 }, async ({ expect }) => {
     await Project.createAndSwitch();
     await InternalApiKey.createAndSetProjectKeys();
@@ -897,7 +1204,7 @@ describe("deploys against the Marshal runtime", () => {
     const setSecret = await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { key: "openai_api_key", value: "sk-secret-value-123" },
+      body: { environment: "default", key: "openai_api_key", value: "sk-secret-value-123" },
     });
     expect(setSecret.status).toBe(200);
 
@@ -1287,7 +1594,7 @@ describe("deploys against the Marshal runtime", () => {
     await niceBackendFetch("/api/v1/project-secrets", {
       method: "POST",
       accessType: "admin",
-      body: { key: "inline_secret", value: "sk-build-secret-value" },
+      body: { environment: "default", key: "inline_secret", value: "sk-build-secret-value" },
     });
 
     const { syncId: definitionSyncId, sourceId } = await syncServices({
@@ -1537,7 +1844,7 @@ describe("deploys against the Marshal runtime", () => {
     // target, invalid) config.
     const consumerService = await niceBackendFetch(`/api/v1/deployments/services/${consumerId}`, { accessType: "admin" });
     expect((consumerService.body as any).env).toContainEqual(
-      { key: "API", type: "connection", value: `${multiServiceId}.url:9090`, secret_key: null },
+      { key: "API", type: "connection", value: `${multiServiceId}.url:9090`, secret_key: null, per_environment: null },
     );
     // A port suffix is meaningful only on `url`: a hostname is the service's private DNS
     // name, which no port belongs to.
@@ -1599,7 +1906,7 @@ describe("deploys against the Marshal runtime", () => {
 
     // The upload survives the rejected deploy: set both secrets and reuse it.
     for (const key of ["never_set_secret", "also_never_set"]) {
-      await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { key, value: "now-set" } });
+      await niceBackendFetch("/api/v1/project-secrets", { method: "POST", accessType: "admin", body: { environment: "default", key, value: "now-set" } });
     }
     const deploymentId = await startDeploy({ sourceId, uploadId, definitionSyncId, levels: [[serviceId]] });
     await pollDeploymentToStatus(deploymentId, "deployed");

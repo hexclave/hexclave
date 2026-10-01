@@ -97,7 +97,7 @@ export function resolveAuth(projectId: string): ProjectAuth {
   };
 }
 
-export function resolveProjectId(projectIdOption?: string): string {
+export function resolveProjectId(projectIdOption?: string, missingMessage = "No project ID provided. Pass --cloud-project-id <id> or set the HEXCLAVE_PROJECT_ID environment variable."): string {
   if (projectIdOption != null && projectIdOption !== "") {
     return projectIdOption;
   }
@@ -105,7 +105,7 @@ export function resolveProjectId(projectIdOption?: string): string {
   if (projectIdFromEnv != null && projectIdFromEnv !== "") {
     return projectIdFromEnv;
   }
-  throw new CliError("No project ID provided. Pass --cloud-project-id <id> or set the HEXCLAVE_PROJECT_ID environment variable.");
+  throw new CliError(missingMessage);
 }
 
 export function isRetryableFetchError(err: unknown): boolean {
