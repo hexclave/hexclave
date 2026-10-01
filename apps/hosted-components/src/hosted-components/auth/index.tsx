@@ -1,5 +1,6 @@
 export { HostedSignIn, HostedSignUp } from "./auth-page";
 export { HostedCliAuthConfirm } from "./cli-auth-confirm-page";
+export { HostedAgentAuthConfirm } from "./agent-auth-confirm-page";
 export { HostedEmailVerification } from "./email-verification-page";
 export { HostedError } from "./error-page";
 export { HostedForgotPassword } from "./forgot-password-page";

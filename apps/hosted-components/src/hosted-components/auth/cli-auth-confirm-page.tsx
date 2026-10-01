@@ -2,9 +2,9 @@ import { useCliAuthConfirmation } from "@hexclave/react";
 import { KeyRound } from "lucide-react";
 import { useState } from "react";
 
-import { Button, Typography } from "~/components/ui";
+import { Typography } from "~/components/ui";
 
-import { HostedAuthLoading, HostedAuthMessage, HostedAuthShell } from "./supporting/layout";
+import { HostedAuthConsentCard, HostedAuthErrorDetails, HostedAuthLoading, HostedAuthMessage } from "./supporting/layout";
 
 export function HostedCliAuthConfirm(props: {
   fullPage?: boolean,
@@ -41,14 +41,10 @@ export function HostedCliAuthConfirm(props: {
         secondaryText="Cancel"
         fullPage={props.fullPage}
       >
-        <div className="flex flex-col gap-1 text-center">
-          <Typography className="text-sm text-destructive">
-            Failed to authorize the CLI application:
-          </Typography>
-          <Typography className="text-xs text-muted-foreground font-mono bg-muted p-2 rounded-lg break-all">
-            This authorization request could not be completed. Please try again.
-          </Typography>
-        </div>
+        <HostedAuthErrorDetails
+          summary="Failed to authorize the CLI application:"
+          detail="This authorization request could not be completed. Please try again."
+        />
       </HostedAuthMessage>
     );
   }
@@ -69,45 +65,22 @@ export function HostedCliAuthConfirm(props: {
   }
 
   return (
-    <HostedAuthShell fullPage={props.fullPage}>
-      <div className="text-center">
-        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
-          <KeyRound className="h-6 w-6" />
-        </div>
-        <Typography type="h2" className="mb-2 text-xl font-semibold tracking-tight">
-          Authorize CLI Application
-        </Typography>
+    <HostedAuthConsentCard
+      fullPage={props.fullPage}
+      icon={<KeyRound className="h-6 w-6" />}
+      title="Authorize CLI Application"
+      details={(
         <Typography className="text-sm text-muted-foreground">
           A command line application is requesting access to your account. Clicking authorize will grant a secure access token to the CLI.
         </Typography>
-      </div>
-
-      <div className="mt-6 rounded-xl border border-destructive/20 bg-destructive/5 p-4 text-left">
-        <Typography className="text-xs font-semibold text-destructive mb-1 uppercase tracking-wider">
-          Security Warning
-        </Typography>
-        <Typography className="text-xs text-muted-foreground leading-relaxed">
-          Make sure you trust the command line application, as it will gain access to your account. If you did not initiate this request, please close this page and ignore it.
-        </Typography>
-      </div>
-
-      <div className="mt-6 flex flex-col gap-2.5">
-        <Button
-          onClick={cliAuth.authorize}
-          disabled={cliAuth.isLoading}
-          className="h-10 rounded-xl font-semibold shadow-sm hover:shadow"
-        >
-          {cliAuth.isLoading ? "Authorizing..." : "Authorize"}
-        </Button>
-        <Button
-          variant="secondary"
-          onClick={() => setCancelled(true)}
-          disabled={cliAuth.isLoading}
-          className="h-10 rounded-xl font-semibold"
-        >
-          Cancel
-        </Button>
-      </div>
-    </HostedAuthShell>
+      )}
+      warningTitle="Security Warning"
+      warning="Make sure you trust the command line application, as it will gain access to your account. If you did not initiate this request, please close this page and ignore it."
+      primaryText={cliAuth.isLoading ? "Authorizing..." : "Authorize"}
+      primaryAction={cliAuth.authorize}
+      secondaryText="Cancel"
+      secondaryAction={() => setCancelled(true)}
+      disabled={cliAuth.isLoading}
+    />
   );
 }

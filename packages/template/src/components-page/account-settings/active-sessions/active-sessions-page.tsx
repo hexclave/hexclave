@@ -13,6 +13,7 @@ export function ActiveSessionsPage(props?: {
     id: string,
     isCurrentSession: boolean,
     isImpersonation?: boolean,
+    agentName?: string | null,
     createdAt: string,
     lastUsedAt?: string,
     geoInfo?: {
@@ -34,6 +35,7 @@ export function ActiveSessionsPage(props?: {
     id: session.id,
     isCurrentSession: session.isCurrentSession,
     isImpersonation: session.isImpersonation || false,
+    agentName: session.agentName ?? null,
     createdAt: session.createdAt,
     lastUsedAt: session.lastUsedAt,
     geoInfo: session.geoInfo,
@@ -41,6 +43,7 @@ export function ActiveSessionsPage(props?: {
     {
       id: 'current-session',
       isCurrentSession: true,
+      agentName: null,
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
       geoInfo: { ip: '192.168.1.1', cityName: 'San Francisco' }
@@ -48,6 +51,7 @@ export function ActiveSessionsPage(props?: {
     {
       id: 'mobile-session',
       isCurrentSession: false,
+      agentName: null,
       createdAt: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
       lastUsedAt: new Date(Date.now() - 7200000).toISOString(), // 2 hours ago
       geoInfo: { ip: '10.0.0.1', cityName: 'New York' }
@@ -186,8 +190,9 @@ export function ActiveSessionsPage(props?: {
                     <TableRow key={session.id}>
                       <TableCell>
                         <div className="flex flex-col">
-                          {/* We currently do not save any usefull information about the user, in the future, the name should probably say what kind of session it is (e.g. cli, browser, maybe what auth method was used) */}
-                          <Typography>{session.isCurrentSession ? t("Current Session") : t("Other Session")}</Typography>
+                          {/* Agent sessions carry the agent's name; for everything else we don't save what kind of session it is yet (cli, browser, auth method, ...) */}
+                          <Typography>{session.isCurrentSession ? t("Current Session") : session.agentName ?? t("Other Session")}</Typography>
+                          {session.agentName != null && <Badge variant="secondary" className="w-fit mt-1">{t("Agent")}</Badge>}
                           {session.isImpersonation && <Badge variant="secondary" className="w-fit mt-1">{t("Impersonation")}</Badge>}
                           <Typography variant='secondary' type='footnote'>
                             {t("Signed in {time}", { time: new Date(session.createdAt).toLocaleDateString() })}

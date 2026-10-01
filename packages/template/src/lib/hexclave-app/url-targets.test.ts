@@ -94,6 +94,7 @@ describe("handler URL targets", () => {
     expect(urls.signUp).toBe("/sign-up");
     expect(urls.signIn).toBe("https://project-id.example-stack-hosted.test/handler/sign-in");
     expect(urls.cliAuthConfirm).toBe("https://project-id.example-stack-hosted.test/handler/cli-auth-confirm");
+    expect(urls.agentAuthConfirm).toBe("https://project-id.example-stack-hosted.test/handler/agent-auth-confirm");
   });
 
   it("keeps redirect-only post-auth targets local even when the default target is hosted", () => {
@@ -168,6 +169,31 @@ describe("handler URL targets", () => {
     });
 
     expect(urls.cliAuthConfirm).toBe("/cli/authorize");
+  });
+
+  it("defaults the agent auth confirmation target to the local handler path", () => {
+    const urls = resolveHandlerUrls({
+      projectId: "project-id",
+      urls: {},
+    });
+
+    expect(urls.agentAuthConfirm).toBe("/handler/agent-auth-confirm");
+  });
+
+  it("supports custom agent auth confirmation targets", () => {
+    const agentAuthConfirmPrompt = getPagePrompt("agentAuthConfirm");
+    if (agentAuthConfirmPrompt == null) {
+      throw new Error("Expected agentAuthConfirm prompt metadata to exist");
+    }
+
+    const urls = resolveHandlerUrls({
+      projectId: "project-id",
+      urls: {
+        agentAuthConfirm: { type: "custom", url: "/agents/approve", version: agentAuthConfirmPrompt.latestVersion },
+      },
+    });
+
+    expect(urls.agentAuthConfirm).toBe("/agents/approve");
   });
 
   it("builds CLI auth login URLs from the resolved confirmation target", () => {

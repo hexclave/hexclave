@@ -27,6 +27,7 @@ export type ActiveSession = {
   id: string;
   isCurrentSession: boolean;
   isImpersonation?: boolean;
+  agentName?: string | null;
   createdAt: string;
   lastUsedAt?: string;
   geoInfo?: {
