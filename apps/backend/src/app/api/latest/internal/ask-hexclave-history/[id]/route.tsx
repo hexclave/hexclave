@@ -1,7 +1,6 @@
 import {
-  listAskHexclaveCalls,
+  getAskHexclaveCall,
   toAskHexclaveHistoryApiCall,
-  type AskHexclaveTransport,
 } from "@/lib/ai/ask-hexclave-history";
 import { ensurePlatformAdmin } from "@/lib/platform-admin";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -9,21 +8,15 @@ import { KnownErrors } from "@hexclave/shared";
 import {
   adaptSchema,
   clientOrHigherAuthTypeSchema,
-  yupArray,
   yupMixed,
   yupNumber,
   yupObject,
   yupString,
 } from "@hexclave/shared/dist/schema-fields";
-import type { Json } from "@hexclave/shared/dist/utils/json";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 
 const INTERNAL_PROJECT_ID = "internal";
-const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 200;
-const TransportSchema = yupString()
-  .oneOf(["all", "skill-ask", "mcp-ask-hexclave"])
-  .default("all");
 
 const CallSchema = yupObject({
   id: yupString().defined(),
@@ -48,24 +41,6 @@ const CallSchema = yupObject({
   inner_tool_calls: yupMixed<Exclude<Json, null>>().defined(),
 }).defined();
 
-function parseLimit(raw: string | undefined): number {
-  if (raw == null || raw === "") {
-    return DEFAULT_LIMIT;
-  }
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1 || value > MAX_LIMIT) {
-    throw new StatusError(StatusError.BadRequest, `limit must be an integer between 1 and ${MAX_LIMIT}`);
-  }
-  return value;
-}
-
-function parseTransport(value: string): AskHexclaveTransport | "all" {
-  if (value === "all" || value === "skill-ask" || value === "mcp-ask-hexclave") {
-    return value;
-  }
-  throw new StatusError(StatusError.BadRequest, "Invalid transport");
-}
-
 export const GET = createSmartRouteHandler({
   metadata: { hidden: true },
   request: yupObject({
@@ -75,20 +50,14 @@ export const GET = createSmartRouteHandler({
       user: adaptSchema,
       project: adaptSchema.defined(),
     }),
-    query: yupObject({
-      query: yupString().max(500).optional(),
-      transport: TransportSchema.optional(),
-      cursor: yupString().optional(),
-      limit: yupString().optional(),
-    }).default({}),
+    params: yupObject({
+      id: yupString().uuid().defined(),
+    }).defined(),
   }),
   response: yupObject({
     statusCode: yupNumber().oneOf([200]).defined(),
     bodyType: yupString().oneOf(["json"]).defined(),
-    body: yupObject({
-      calls: yupArray(CallSchema).defined(),
-      next_cursor: yupString().nullable().defined(),
-    }).defined(),
+    body: CallSchema,
   }),
   handler: async (req) => {
     if (req.auth.user == null) {
@@ -99,21 +68,15 @@ export const GET = createSmartRouteHandler({
     }
     await ensurePlatformAdmin(req.auth.user);
 
-    const transport = parseTransport(await TransportSchema.validate(req.query.transport));
-    const result = await listAskHexclaveCalls({
-      query: req.query.query?.trim() ?? "",
-      transport,
-      cursor: req.query.cursor ?? null,
-      limit: parseLimit(req.query.limit),
-    });
+    const call = await getAskHexclaveCall(req.params.id);
+    if (call == null) {
+      throw new StatusError(StatusError.NotFound, "No Ask Hexclave query found with that id");
+    }
 
     return {
       statusCode: 200,
       bodyType: "json",
-      body: {
-        calls: result.calls.map(toAskHexclaveHistoryApiCall),
-        next_cursor: result.nextCursor,
-      },
+      body: toAskHexclaveHistoryApiCall(call),
     };
   },
 });
