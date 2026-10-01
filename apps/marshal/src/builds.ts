@@ -251,19 +251,12 @@ echo "MARSHAL_BUILD_START"
 #
 # Two filesystems on the machine can serve as that upperdir, and the order matters:
 #
-#  - a tmpfs, which uses RAM on these machines without swap. Every byte the snapshot store holds is
-#    taken from the build itself, so the guest must be big enough for BOTH (see
-#    RAILPACK_BUILDER_GUEST). Undersized, this is what an 8g guest with a 6g tmpfs died of:
-#    the store filled and a large "next build" hit ENOSPC, and a hungrier one is OOM-killed
-#    at ~1.3g RSS while the kernel holds ~6g of snapshots it cannot reclaim.
-#  - a disk-backed ext4 directory mounted at $BUILDKIT_DISK_DIR. It is a legal upperdir and
-#    costs no RAM, but is materially slower than tmpfs. Hence second, not first.
+#  - a tmpfs: fastest, but it is RAM with no swap, so the guest must fit both the store and
+#    the build (see buildkitTmpfsSize). A target that fills it retries once on disk.
+#  - a disk-backed ext4 directory mounted at $BUILDKIT_DISK_DIR. A legal upperdir that costs
+#    no RAM, but materially slower. Hence second, not first.
 #
-# It is still far better than the third outcome: on the native snapshotter a build does not
-# fail, it silently gets slow enough to time out.
-# Set by the builder that started this machine: the disk-backed directory differs per
-# runtime (Fly mounts its rootfs overlay device at /.fly-upper-layer; the GCP startup script
-# mounts a data disk at /.marshal-buildkit-disk).
+# Both beat the native snapshotter, where a build does not fail but silently times out.
 ${buildkitRuntimeScript()}
 mkdir -p /ctx
 # Fetch and extract OUTSIDE the context dir, then extract INTO it — otherwise the tarball

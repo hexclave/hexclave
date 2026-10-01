@@ -1111,14 +1111,13 @@ export async function completeBuild(options: {
     };
     return await replaceDeployment(deploying, current.etag) === null ? null : deploying;
   });
-  // A duplicate callback must not delete the builder while the callback that
-  // committed completion is still archiving its logs outside the source lease.
+  // Only the callback that committed completion cleans up; a duplicate must not
+  // delete the builder while its logs are still being archived.
   if (completed === null) return;
   try {
-    // The committed image refs are sufficient to start rollout. Log archival and
-    // source cleanup use immutable deployment identity, so they need neither the
-    // source lease nor a place ahead of runtime creation. Await all work before
-    // deleting the builder, including when one task fails.
+    // Rollout needs only the committed images, so it starts alongside log archival
+    // and source cleanup (neither needs the lease). The builder is deleted once all
+    // three settle, even if one fails.
     const results = await Promise.allSettled([
       persistDeploymentLog(provider, completed),
       deleteValidatedUploadBestEffort(options.ns, options.deploymentId),

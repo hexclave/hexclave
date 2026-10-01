@@ -440,9 +440,8 @@ export const BUILDER_MACHINE_BY_MEMORY_MB: Partial<Record<number, { machineType:
   16384: { machineType: "e2-standard-4", diskSizeGb: 50 },
   32768: { machineType: "e2-standard-8", diskSizeGb: 100 },
 };
-// Four performance CPUs keep image extraction and compilation off the shared-CPU
-// bottleneck. The default 8GB guest leaves room for both the 4GB snapshot tmpfs
-// and build processes; larger explicit memory requests retain their allocation.
+// The Fly builder guests for an explicitly sized builder. Four performance CPUs:
+// shared CPUs bottleneck image extraction and compilation.
 export const FLY_BUILDER_GUEST_BY_MEMORY_MB: Partial<Record<number, FlyGuest>> = {
   8192: { cpu_kind: "performance", cpus: 4, memory_mb: 8192 },
   16384: { cpu_kind: "performance", cpus: 4, memory_mb: 16384 },
@@ -509,7 +508,8 @@ export function buildkitTmpfsSize(memoryMb: number): string {
   return `${Math.max(1, Math.floor((memoryMb * 6) / 10 / 1024))}g`;
 }
 
-// Railpack keeps its larger memory floor for the generated base-image layers.
+// The Fly guests an UNSIZED build runs on. 8GB fits the 4GB snapshot tmpfs plus the build;
+// Railpack needs 16GB for its large base-image layers.
 export const BUILDER_GUEST: FlyGuest = { cpu_kind: "performance", cpus: 4, memory_mb: 8192 };
 export const RAILPACK_BUILDER_GUEST: FlyGuest = { cpu_kind: "performance", cpus: 4, memory_mb: 16384 };
 // A cap, not a reservation — unused tmpfs pages cost nothing. Sized so the store cannot fill

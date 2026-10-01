@@ -1,6 +1,8 @@
 /** BuildKit lifecycle and bounded recovery, shared by all target build modes. */
 export function buildkitRuntimeScript(): string {
   return `
+# Set per runtime by the builder that started this machine: Fly mounts its rootfs overlay
+# device at /.fly-upper-layer; the GCP startup script mounts a data disk at the default.
 BUILDKIT_DISK_DIR="\${BUILDKIT_DISK_DIR:-/.marshal-buildkit-disk}"
 BUILDKIT_ROOT=""
 BUILDKIT_STORE_READY=""
