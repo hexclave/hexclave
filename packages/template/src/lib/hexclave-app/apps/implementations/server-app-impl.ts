@@ -1690,6 +1690,7 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
       last_event_at_from_millis: options?.lastEventAtFromMillis,
       last_event_at_to_millis: options?.lastEventAtToMillis,
       click_count_min: options?.clickCountMin,
+      country_codes: options?.countryCodes && options.countryCodes.length > 0 ? options.countryCodes.join(",") : undefined,
     });
 
     const items: AdminSessionReplay[] = response.items.map((r) => ({

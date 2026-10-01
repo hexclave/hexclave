@@ -6166,7 +6166,7 @@
     "/session-replays": {
       "get": {
         "summary": "List session replays",
-        "description": "Lists session replays for the project, most recently active first. Supports filtering by user, team, duration, last-event time, and click count, and cursor-based pagination.",
+        "description": "Lists session replays for the project, most recently active first. Supports filtering by user, team, duration, last-event time, click count, and session location (country), and cursor-based pagination.",
         "parameters": [
           {
             "name": "cursor",
@@ -6234,6 +6234,14 @@
           },
           {
             "name": "click_count_min",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "country_codes",
             "in": "query",
             "schema": {
               "type": "string"
