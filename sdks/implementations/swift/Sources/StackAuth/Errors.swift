@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Base protocol for all Hexclave errors
 public protocol StackAuthErrorProtocol: Error, CustomStringConvertible {
@@ -187,5 +190,32 @@ extension StackAuthError {
         default:
             return StackAuthError(code: code, message: message, details: details)
         }
+    }
+}
+
+extension StackAuthError {
+    /// Converts an HTTP error response from the Hexclave API into the matching error.
+    ///
+    /// - KnownError responses (`x-hexclave-known-error` / `x-stack-known-error` header, body
+    ///   `{ code, error, details? }`) become the typed error for that code, e.g.
+    ///   `MultiFactorAuthenticationRequiredError` with its attempt code.
+    /// - OAuth 2.0 error bodies (`{ error, error_description? }`) become an `OAuthError` with that code.
+    /// - Anything else returns nil so the caller can choose its own fallback.
+    static func fromHTTPErrorResponse(data: Data, response: HTTPURLResponse) -> (any StackAuthErrorProtocol)? {
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+
+        if let knownErrorCode = response.value(forHTTPHeaderField: "x-hexclave-known-error")
+            ?? response.value(forHTTPHeaderField: "x-stack-known-error") {
+            let message = json?["error"] as? String ?? "Unknown error"
+            let details = json?["details"] as? [String: Any]
+            return from(code: knownErrorCode, message: message, details: details)
+        }
+
+        if let oauthErrorCode = json?["error"] as? String {
+            let message = json?["error_description"] as? String ?? oauthErrorCode
+            return OAuthError(code: oauthErrorCode, message: message)
+        }
+
+        return nil
     }
 }
