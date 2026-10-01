@@ -1,4 +1,4 @@
-import { getClickhouseAdminClient } from "@/lib/clickhouse";
+import { ANALYTICS_READER_ROLE, ANALYTICS_TABLES, getClickhouseAdminClient } from "@/lib/clickhouse";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 
 export async function runClickhouseMigrations() {
@@ -90,24 +90,51 @@ export async function runClickhouseMigrations() {
     await client.command({ query: sql });
   }
 
-  // Row policies in parallel
-  const tables = [
-    "events", "users", "contact_channels", "teams", "team_member_profiles",
-    "team_permissions", "team_invitations", "email_outboxes",
-    "project_permissions", "notification_preferences", "refresh_tokens", "connected_accounts",
-  ];
-  await Promise.all(tables.map(table =>
+  // Project-isolated read access to `default.*` lives on a role rather than on
+  // `limited_user` directly, because the Data Warehouse app gives each provisioned
+  // project its own ClickHouse user (see lib/data-warehouse.tsx) needing the same
+  // access. Row policies and SELECT grants hang off the role; every analytics reader
+  // is granted it.
+  //
+  // The ordering below is load-bearing. ClickHouse defaults to
+  // `users_without_row_policies_can_read_rows = true` (verified on Cloud 26.2.1.558,
+  // which does not let us override it), so a user holding SELECT that no policy names
+  // reads *every* row. `limited_user` must therefore stay covered at every instant:
+  // build the role, grant it, then narrow the policies, and revoke direct grants last.
+  await client.command({ query: `CREATE ROLE IF NOT EXISTS ${ANALYTICS_READER_ROLE}` });
+
+  // Role grants first, so `limited_user` has an indirect route to the data before
+  // its direct one is taken away. Additive on purpose: a revoke-then-rebuild would
+  // empty the role in between, which on a re-run is a live outage.
+  // TODO(data-warehouse-ga): the tradeoff is that dropping a table from
+  // ANALYTICS_TABLES leaves a stale SELECT grant on the role.
+  await Promise.all(ANALYTICS_TABLES.map(table =>
+    client.command({ query: `GRANT SELECT ON default.${table} TO ${ANALYTICS_READER_ROLE};` })
+  ));
+  await client.command({ query: `GRANT ${ANALYTICS_READER_ROLE} TO limited_user;` });
+  // Granted roles are only active in a session if they are default roles. New users
+  // get `DEFAULT ROLE ALL` anyway; say it explicitly for users older migrations made.
+  await client.command({ query: "ALTER USER limited_user DEFAULT ROLE ALL;" });
+
+  // OR REPLACE, not IF NOT EXISTS: existing deployments have these policies pointing
+  // at `limited_user` and they must be re-pointed at the role.
+  //
+  // `limited_user` is named alongside the role on purpose. Role membership is cached
+  // (10 minutes by default), so a session that saw the new policy but not yet its new
+  // role would be named by no policy at all and — per the default above — read every
+  // tenant's rows. The filter is identical either way.
+  // TODO(data-warehouse-ga): drop `, limited_user` from the TO clause once it has held
+  // the role across a full deploy cycle.
+  await Promise.all(ANALYTICS_TABLES.map(table =>
     client.command({
-      query: `CREATE ROW POLICY IF NOT EXISTS ${table}_project_isolation ON default.${table} FOR SELECT USING project_id = getSetting('SQL_project_id') AND branch_id = getSetting('SQL_branch_id') TO limited_user`,
+      query: `CREATE ROW POLICY OR REPLACE ${table}_project_isolation ON default.${table} FOR SELECT USING project_id = getSetting('SQL_project_id') AND branch_id = getSetting('SQL_branch_id') TO ${ANALYTICS_READER_ROLE}, limited_user`,
     })
   ));
 
-  // Grants
+  // Direct grants last. `REVOKE ALL PRIVILEGES ON *.*` strips privileges but not
+  // granted roles — do NOT use `REVOKE ALL FROM limited_user` here, which would also
+  // remove the role and black out analytics until the next run.
   await client.command({ query: "REVOKE ALL PRIVILEGES ON *.* FROM limited_user;" });
-  await client.command({ query: "REVOKE ALL FROM limited_user;" });
-  await Promise.all(tables.map(table =>
-    client.command({ query: `GRANT SELECT ON default.${table} TO limited_user;` })
-  ));
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(1);
   console.log(`[Clickhouse] Clickhouse migrations complete (${elapsed}s)`);

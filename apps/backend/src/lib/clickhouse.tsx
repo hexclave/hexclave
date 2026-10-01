@@ -7,6 +7,23 @@ import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 // dependency on the @clickhouse/client package.
 export type { ClickHouseClient } from "@clickhouse/client";
 
+/**
+ * The `default.*` views customers can read through `/analytics/query`, each scoped
+ * by a row policy to `SQL_project_id`/`SQL_branch_id`. Drives both those policies
+ * and the GRANT SELECT loop in scripts/clickhouse-migrations.ts.
+ */
+export const ANALYTICS_TABLES = [
+  "events", "users", "contact_channels", "teams", "team_member_profiles",
+  "team_permissions", "team_invitations", "email_outboxes",
+  "project_permissions", "notification_preferences", "refresh_tokens", "connected_accounts",
+] as const;
+
+/**
+ * Role carrying the row policies and SELECT grants for `ANALYTICS_TABLES`. Held by
+ * `limited_user` and by every per-project Data Warehouse user.
+ */
+export const ANALYTICS_READER_ROLE = "analytics_reader";
+
 function getAdminAuth() {
   return {
     username: getEnvVariable("STACK_CLICKHOUSE_ADMIN_USER", "stackframe"),
@@ -25,6 +42,26 @@ export function createClickhouseClient(
       username: "limited_user",
       password: getEnvVariable("STACK_CLICKHOUSE_EXTERNAL_PASSWORD"),
     },
+    database,
+    request_timeout: 10 * 60 * 1000, // 10 minutes
+    clickhouse_settings,
+  });
+}
+
+/**
+ * Client for a project's own Data Warehouse user (see lib/data-warehouse.tsx). Its
+ * credentials are per project and passed in by the caller, not read from the
+ * environment like the admin and `limited_user` clients.
+ */
+export function createClickhouseWarehouseClient(
+  auth: { username: string, password: string },
+  database?: string,
+  clickhouse_settings?: ClickHouseSettings,
+) {
+  return createClient({
+    url: getEnvVariable("STACK_CLICKHOUSE_URL"),
+    username: auth.username,
+    password: auth.password,
     database,
     request_timeout: 10 * 60 * 1000, // 10 minutes
     clickhouse_settings,
@@ -51,6 +88,21 @@ const BOUNDED_ANALYTICS_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
 export const EXTERNAL_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
   ...BOUNDED_ANALYTICS_CLICKHOUSE_SETTINGS,
 };
+
+/**
+ * The same ceiling for a per-project Data Warehouse user on `/analytics/query`.
+ *
+ * `max_memory_usage_for_user` is deliberately absent: that user's settings profile
+ * pins it with a `MAX` constraint (see MAX_MEMORY_USAGE_FOR_USER_BYTES in
+ * lib/data-warehouse.tsx), and ClickHouse rejects a query that sets a constrained
+ * setting above its MAX — sending the shared-user value here would fail every
+ * warehouse query. The profile ceiling already bounds that user's concurrent
+ * footprint, and it is per project rather than shared, so nothing is lost.
+ */
+export const WAREHOUSE_ANALYTICS_CLICKHOUSE_SETTINGS: ClickHouseSettings = (() => {
+  const { max_memory_usage_for_user, ...rest } = BOUNDED_ANALYTICS_CLICKHOUSE_SETTINGS;
+  return rest;
+})();
 
 export function getClickhouseExternalClient() {
   return createClickhouseClient(

@@ -241,6 +241,14 @@ export const ALL_APPS = {
     stage: "alpha",
     softRequirements: [],
   },
+  // Same `-alpha` suffix reasoning as Deployments and Workflows above.
+  "data-warehouse-alpha": {
+    displayName: "Data Warehouse",
+    subtitle: "A private database for your project data",
+    tags: ["storage", "developers"],
+    stage: "alpha",
+    softRequirements: [],
+  },
 } as const satisfies Record<string, App>;
 
 export function getParentAppId(appId: AppId): AppId | null {
