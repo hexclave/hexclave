@@ -50,9 +50,15 @@ type OAuthCallbackConsumptionResult =
 
 const oauthErrorParams = ["error", "error_description", "errorCode", "message", "details"] as const;
 
-function removeOAuthErrorParamsFromHistory(originalUrl: URL): void {
+// A callback URL can carry error params alongside code/state (a previous attempt's
+// params also linger when only a subset is stripped), so every consumption path
+// must clear the full set. Otherwise the next callback misreads stale params —
+// e.g. a successful retry after a cancel still throws OAuthProviderAccessDenied.
+const oauthCallbackParams = ["code", "state", ...oauthErrorParams] as const;
+
+function removeOAuthCallbackParamsFromHistory(originalUrl: URL): void {
   const newUrl = new URL(originalUrl);
-  for (const param of oauthErrorParams) {
+  for (const param of oauthCallbackParams) {
     newUrl.searchParams.delete(param);
   }
   window.history.replaceState({}, "", newUrl.toString());
@@ -99,7 +105,7 @@ function consumeOAuthCallbackQueryParams(options?: {
       }
     }
 
-    removeOAuthErrorParamsFromHistory(originalUrl);
+    removeOAuthCallbackParamsFromHistory(originalUrl);
 
     return {
       type: "known-error",
@@ -113,7 +119,7 @@ function consumeOAuthCallbackQueryParams(options?: {
 
   const providerOAuthError = getProviderOAuthErrorFromUrl(originalUrl);
   if (providerOAuthError != null && !requiredParams.every(param => originalUrl.searchParams.has(param))) {
-    removeOAuthErrorParamsFromHistory(originalUrl);
+    removeOAuthCallbackParamsFromHistory(originalUrl);
     return {
       type: "known-error",
       error: providerOAuthError,
@@ -151,18 +157,10 @@ function consumeOAuthCallbackQueryParams(options?: {
   }
 
 
-  const newUrl = new URL(originalUrl);
-  for (const param of requiredParams) {
-    newUrl.searchParams.delete(param);
-  }
-
-  // let's get rid of the authorization code in the history as we
-  // don't redirect to `redirectUrl` if there's a validation error
-  // (as the redirectUrl might be malicious!).
-  //
-  // We use history.replaceState instead of location.assign(...) to
-  // prevent an unnecessary reload
-  window.history.replaceState({}, "", newUrl.toString());
+  // Clear the authorization code from history (replaceState, not a reload), as the
+  // redirectUrl is untrusted when a validation error occurs. Stale error params are
+  // cleared too, so a previous attempt can't pollute the next callback.
+  removeOAuthCallbackParamsFromHistory(originalUrl);
 
   return {
     type: "oauth-response",
