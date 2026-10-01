@@ -2009,6 +2009,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         clientUserDeletionEnabled: crud.config.client_user_deletion_enabled,
         allowTeamApiKeys: crud.config.allow_team_api_keys,
         allowUserApiKeys: crud.config.allow_user_api_keys,
+        allowPromoCodes: crud.config.allow_promo_codes,
+        allowStackingPromoCodes: crud.config.allow_stacking_promo_codes,
         oauthProviders: crud.config.enabled_oauth_providers.map((p) => ({
           id: p.id,
         })),
@@ -2932,10 +2934,18 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         return app.useInvoices({ ...options, ...customerOptions });
       },
       // END_PLATFORM
-      async createCheckoutUrl(options: { productId: string, returnUrl?: string }) {
-        return await app._interface.createCheckoutUrl(type, userIdOrTeamId, options.productId, effectiveSession, options.returnUrl, "client");
+      async createCheckoutUrl(options: { productId: string, returnUrl?: string, allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean }) {
+        return await app._interface.createCheckoutUrl(
+          type,
+          userIdOrTeamId,
+          options.productId,
+          effectiveSession,
+          options.returnUrl,
+          "client",
+          { allowPromoCodes: options.allowPromoCodes, allowStackingPromoCodes: options.allowStackingPromoCodes },
+        );
       },
-      async switchSubscription(options: { fromProductId: string, toProductId: string, priceId?: string, quantity?: number }) {
+      async switchSubscription(options: { fromProductId: string, toProductId: string, priceId?: string, quantity?: number, promoCodes?: string[] }) {
         await app._interface.switchSubscription({
           customer_type: type,
           customer_id: userIdOrTeamId,
@@ -2943,6 +2953,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
           to_product_id: options.toProductId,
           price_id: options.priceId,
           quantity: options.quantity,
+          promo_codes: options.promoCodes,
         }, effectiveSession);
         await app._customerBillingCache.refresh([effectiveSession, type, userIdOrTeamId]);
         if (type === "user") {
@@ -2950,6 +2961,22 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         } else {
           await app._teamProductsCache.invalidateWhere(([cachedSession, teamId]) => cachedSession === effectiveSession && teamId === userIdOrTeamId);
         }
+      },
+      async validatePromoCodes(options: { productId: string, priceId?: string, quantity?: number, promoCodes: string[] }) {
+        const result = await app._interface.validateCustomerPromoCodes({
+          customer_type: type,
+          customer_id: userIdOrTeamId,
+          product_id: options.productId,
+          price_id: options.priceId,
+          quantity: options.quantity,
+          promo_codes: options.promoCodes,
+        }, effectiveSession);
+        return {
+          originalAmount: result.original_amount,
+          netAmount: result.net_amount,
+          recurringAmount: result.recurring_amount,
+          appliedCodeNames: result.applied_code_names,
+        };
       },
     };
   }

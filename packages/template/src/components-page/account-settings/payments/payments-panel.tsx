@@ -21,6 +21,27 @@ type PaymentMethodSummary = {
   exp_year: number | null,
 } | null;
 
+function promoApplyErrorMessage(error: unknown, fallback: string): string {
+  if (
+    error instanceof KnownErrors.PromoCodesDisabled
+    || error instanceof KnownErrors.PromoCodeStackingDisabled
+    || error instanceof KnownErrors.PromoCodeInvalid
+    || error instanceof KnownErrors.PromoCodeNotFound
+    || error instanceof KnownErrors.PromoCodePaused
+    || error instanceof KnownErrors.PromoCodeEnded
+    || error instanceof KnownErrors.PromoCodeExpired
+    || error instanceof KnownErrors.PromoCodeNotYetAvailable
+    || error instanceof KnownErrors.PromoCodeNotApplicableToProduct
+    || error instanceof KnownErrors.PromoCodeRedemptionLimitReached
+    || error instanceof KnownErrors.PromoCodeStackingNotAllowed
+    || error instanceof KnownErrors.PromoCodeNothingToDiscount
+    || error instanceof KnownErrors.PromoCodeDiscountBelowMinimum
+  ) {
+    return error.message;
+  }
+  return fallback;
+}
+
 function formatPaymentMethod(pm: NonNullable<PaymentMethodSummary>) {
   const details = [
     pm.brand ? pm.brand.toUpperCase() : null,
@@ -106,7 +127,8 @@ type CustomerLike = {
   useInvoices: (options?: CustomerInvoicesListOptions) => CustomerInvoicesList,
   createPaymentMethodSetupIntent: () => Promise<CustomerPaymentMethodSetupIntent>,
   setDefaultPaymentMethodFromSetupIntent: (setupIntentId: string) => Promise<PaymentMethodSummary>,
-  switchSubscription: (options: { fromProductId: string, toProductId: string, priceId?: string, quantity?: number }) => Promise<void>,
+  switchSubscription: (options: { fromProductId: string, toProductId: string, priceId?: string, quantity?: number, promoCodes?: string[] }) => Promise<void>,
+  validatePromoCodes: (options: { productId: string, priceId?: string, quantity?: number, promoCodes: string[] }) => Promise<{ originalAmount: string, netAmount: string, recurringAmount: string, appliedCodeNames: string[] }>,
 };
 
 function SetDefaultPaymentMethodForm(props: {
@@ -242,6 +264,12 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
   const [cancelTarget, setCancelTarget] = useState<{ productId: string, subscriptionId?: string } | null>(null);
   const [switchFromProductId, setSwitchFromProductId] = useState<string | null>(null);
   const [switchToProductId, setSwitchToProductId] = useState<string | null>(null);
+  const [appliedPromoCodeNames, setAppliedPromoCodeNames] = useState<string[]>([]);
+  const [promoDraft, setPromoDraft] = useState("");
+  const [promoError, setPromoError] = useState<string | null>(null);
+  const project = hexclaveApp.useProject();
+  const allowPromoCodes = project.config.allowPromoCodes === true;
+  const allowStackingPromoCodes = allowPromoCodes && project.config.allowStackingPromoCodes === true;
 
   const stripePromise = useMemo(() => {
     if (!setupIntentStripeAccountId) return null;
@@ -285,6 +313,9 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
   const closeSwitchDialog = () => {
     setSwitchFromProductId(null);
     setSwitchToProductId(null);
+    setAppliedPromoCodeNames([]);
+    setPromoDraft("");
+    setPromoError(null);
   };
 
   const switchSourceProduct = switchFromProductId
@@ -436,6 +467,7 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
                   fromProductId,
                   toProductId,
                   priceId: selectedPriceId,
+                  promoCodes: appliedPromoCodeNames,
                 }));
                 if (result.status === "error") {
                   handleAsyncError(result.error);
@@ -458,7 +490,12 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
                   <Typography type="footnote">{t("Choose a plan")}</Typography>
                   <Select
                     value={switchToProductId ?? undefined}
-                    onValueChange={(value) => setSwitchToProductId(value || null)}
+                    onValueChange={(value) => {
+                      setSwitchToProductId(value || null);
+                      setAppliedPromoCodeNames([]);
+                      setPromoDraft("");
+                      setPromoError(null);
+                    }}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder={t("Choose a plan")} />
@@ -472,6 +509,61 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
                     </SelectContent>
                   </Select>
                 </>
+              )}
+              {allowPromoCodes && switchToProductId != null && selectedPriceId != null && (
+                <div className="space-y-2">
+                  {appliedPromoCodeNames.map((codeName) => (
+                    <div key={codeName} className="flex items-center justify-between text-sm">
+                      <span>{t("With Code")} {codeName}</span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setAppliedPromoCodeNames((current) => current.filter((name) => name !== codeName))}
+                      >
+                        {t("Remove")}
+                      </Button>
+                    </div>
+                  ))}
+                  {(appliedPromoCodeNames.length === 0 || allowStackingPromoCodes) && (
+                    <div className="flex gap-2">
+                      <input
+                        className="flex-1 rounded-md border bg-transparent px-2 py-1 text-sm"
+                        value={promoDraft}
+                        onChange={(event) => setPromoDraft(event.target.value)}
+                        placeholder={t("Promo code")}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={promoDraft.trim().length === 0}
+                        onClick={async () => {
+                          setPromoError(null);
+                          const requestedProductId = switchToProductId;
+                          const requestedPriceId = selectedPriceId;
+                          const result = await Result.fromThrowingAsync(() => props.customer.validatePromoCodes({
+                            productId: requestedProductId,
+                            priceId: requestedPriceId,
+                            promoCodes: [...appliedPromoCodeNames, promoDraft.trim()],
+                          }));
+                          if (switchToProductId !== requestedProductId || selectedPriceId !== requestedPriceId) {
+                            return;
+                          }
+                          if (result.status === "error") {
+                            setPromoError(promoApplyErrorMessage(result.error, t("This promo code could not be applied.")));
+                            return;
+                          }
+                          setAppliedPromoCodeNames(result.data.appliedCodeNames);
+                          setPromoDraft("");
+                        }}
+                      >
+                        {t("Apply")}
+                      </Button>
+                    </div>
+                  )}
+                  {promoError != null && (
+                    <Typography variant="secondary" className="text-red-500 text-xs">{promoError}</Typography>
+                  )}
+                </div>
               )}
             </div>
           </ActionDialog>

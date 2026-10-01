@@ -152,6 +152,8 @@ const branchAuthSchema = yupObject({
 
 export const branchPaymentsSchema = yupObject({
   blockNewPurchases: yupBoolean(),
+  allowPromoCodes: yupBoolean(),
+  allowStackingPromoCodes: yupBoolean(),
   autoPay: yupObject({
     interval: schemaFields.dayIntervalSchema,
   }).optional(),
@@ -655,9 +657,110 @@ export function migrateConfigOverride(type: "project" | "branch" | "environment"
   }
   // END
 
+  // BEGIN 2026-09-10: payments.allowPromoCodesOnSwitch is now the project-wide
+  // payments.allowPromoCodes gate (checkout URLs and switch). Same for stacking.
+  if (isBranchOrHigher) {
+    res = renameLegacyPaymentFlagPreferringCurrent(res, "payments.allowPromoCodesOnSwitch", "allowPromoCodes");
+    res = renameLegacyPaymentFlagPreferringCurrent(res, "payments.allowStackingPromoCodesOnSwitch", "allowStackingPromoCodes");
+  }
+  // END
+
   // return the result
   return res;
 };
+
+import.meta.vitest?.test("migrateConfigOverride renames payments.allowPromoCodesOnSwitch to allowPromoCodes", ({ expect }) => {
+  expect(migrateConfigOverride("branch", {
+    payments: { allowPromoCodesOnSwitch: true, allowStackingPromoCodesOnSwitch: true },
+  })).toEqual({
+    payments: { allowPromoCodes: true, allowStackingPromoCodes: true },
+  });
+  expect(migrateConfigOverride("branch", {
+    "payments.allowPromoCodesOnSwitch": true,
+    "payments.allowStackingPromoCodesOnSwitch": false,
+  })).toEqual({
+    "payments.allowPromoCodes": true,
+    "payments.allowStackingPromoCodes": false,
+  });
+  // Current keys win over legacy regardless of object key order.
+  expect(migrateConfigOverride("branch", {
+    payments: { allowPromoCodesOnSwitch: true, allowPromoCodes: false, allowStackingPromoCodesOnSwitch: true, allowStackingPromoCodes: false },
+  })).toEqual({
+    payments: { allowPromoCodes: false, allowStackingPromoCodes: false },
+  });
+  expect(migrateConfigOverride("branch", {
+    payments: { allowPromoCodes: false, allowPromoCodesOnSwitch: true, allowStackingPromoCodes: false, allowStackingPromoCodesOnSwitch: true },
+  })).toEqual({
+    payments: { allowPromoCodes: false, allowStackingPromoCodes: false },
+  });
+  expect(migrateConfigOverride("branch", {
+    "payments.allowPromoCodesOnSwitch": true,
+    "payments.allowPromoCodes": false,
+    "payments.allowStackingPromoCodesOnSwitch": true,
+    "payments.allowStackingPromoCodes": false,
+  })).toEqual({
+    "payments.allowPromoCodes": false,
+    "payments.allowStackingPromoCodes": false,
+  });
+  expect(migrateConfigOverride("branch", {
+    "payments.allowPromoCodes": false,
+    "payments.allowPromoCodesOnSwitch": true,
+    "payments.allowStackingPromoCodes": false,
+    "payments.allowStackingPromoCodesOnSwitch": true,
+  })).toEqual({
+    "payments.allowPromoCodes": false,
+    "payments.allowStackingPromoCodes": false,
+  });
+  // Overrides distinguish null (explicit unset) from undefined (missing).
+  // A present-but-undefined current key must not discard a legacy opt-in.
+  expect(migrateConfigOverride("branch", {
+    payments: { allowPromoCodes: undefined, allowPromoCodesOnSwitch: true },
+  })).toEqual({
+    payments: { allowPromoCodes: true },
+  });
+  expect(migrateConfigOverride("branch", {
+    payments: { allowPromoCodesOnSwitch: true, allowPromoCodes: undefined },
+  })).toEqual({
+    payments: { allowPromoCodes: true },
+  });
+  expect(migrateConfigOverride("branch", {
+    "payments.allowPromoCodes": undefined,
+    "payments.allowPromoCodesOnSwitch": true,
+  })).toEqual({
+    "payments.allowPromoCodes": true,
+  });
+  expect(migrateConfigOverride("branch", {
+    payments: { allowPromoCodes: null, allowPromoCodesOnSwitch: true },
+  })).toEqual({
+    payments: { allowPromoCodes: null },
+  });
+  // Mixed representations: a flat undefined current key must not wipe a
+  // nested defined current value when stripping before rename.
+  expect(migrateConfigOverride("branch", {
+    "payments.allowPromoCodes": undefined,
+    payments: { allowPromoCodes: false, allowPromoCodesOnSwitch: true },
+  })).toEqual({
+    payments: { allowPromoCodes: false },
+  });
+  expect(migrateConfigOverride("branch", {
+    payments: { allowPromoCodes: false, allowPromoCodesOnSwitch: true },
+    "payments.allowPromoCodes": undefined,
+  })).toEqual({
+    payments: { allowPromoCodes: false },
+  });
+  expect(migrateConfigOverride("branch", {
+    "payments.allowStackingPromoCodes": undefined,
+    payments: { allowStackingPromoCodes: false, allowStackingPromoCodesOnSwitch: true },
+  })).toEqual({
+    payments: { allowStackingPromoCodes: false },
+  });
+  expect(migrateConfigOverride("branch", {
+    payments: { allowStackingPromoCodes: false, allowStackingPromoCodesOnSwitch: true },
+    "payments.allowStackingPromoCodes": undefined,
+  })).toEqual({
+    payments: { allowStackingPromoCodes: false },
+  });
+});
 
 import.meta.vitest?.test("migrateConfigOverride removes legacy sourceOfTruth overrides", ({ expect }) => {
   expect(migrateConfigOverride("project", {
@@ -847,6 +950,53 @@ import.meta.vitest?.test("mapProperty - basic property mapping", ({ expect }) =>
     .toEqual({ "payments.products.my.product.prices": {} });
 });
 
+function configPathValues(obj: Record<string, any>, path: string): unknown[] {
+  const values: unknown[] = [];
+  if (Object.prototype.hasOwnProperty.call(obj, path)) {
+    values.push(obj[path]);
+  }
+  const segments = path.split(".");
+  let current: unknown = obj;
+  for (const segment of segments) {
+    if (!isObjectLike(current) || !Object.prototype.hasOwnProperty.call(current, segment)) {
+      return values;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  values.push(current);
+  return values;
+}
+
+function hasConfigPath(obj: Record<string, any>, path: string): boolean {
+  // Config overrides treat a present `undefined` as missing (see README:
+  // null unsets, a missing property is undefined). `null`/`false` stay
+  // present so an explicit current value still wins over a legacy flag.
+  // Check every representation: a flat `"payments.allowPromoCodes": undefined`
+  // must not hide nested `payments.allowPromoCodes: false`.
+  return configPathValues(obj, path).some((value) => value !== undefined);
+}
+
+function renameLegacyPaymentFlagPreferringCurrent(
+  obj: Record<string, any>,
+  legacyPath: string,
+  currentName: string,
+): any {
+  const parentSegments = legacyPath.split(".").slice(0, -1);
+  const currentPath = [...parentSegments, currentName].join(".");
+  // Drop only undefined-valued keys at the current path so a mixed override
+  // like `{ "payments.allowPromoCodes": undefined, payments: { allowPromoCodes: false } }`
+  // keeps the nested false. `removeProperty` would wipe every representation.
+  const withoutUndefinedCurrent = mapProperty(
+    obj,
+    (p) => p.join(".") === currentPath,
+    (value) => value === undefined ? undefined : value,
+  );
+  if (hasConfigPath(withoutUndefinedCurrent, currentPath)) {
+    return removeProperty(withoutUndefinedCurrent, (p) => p.join(".") === legacyPath);
+  }
+  return renameProperty(withoutUndefinedCurrent, legacyPath, currentName);
+}
+
 function renameProperty(obj: Record<string, any>, oldPath: string | ((path: string[]) => boolean), newName: string | ((path: string[]) => string)): any {
   const pathCond = typeof oldPath === "function" ? oldPath : (p: string[]) => p.join(".") === oldPath;
   const pathMapper = typeof newName === "function" ? newName : (p: string[]) => (newName as string);
@@ -1029,6 +1179,8 @@ const organizationConfigDefaults = {
 
   payments: {
     blockNewPurchases: false,
+    allowPromoCodes: false,
+    allowStackingPromoCodes: false,
     testMode: true,
     autoPay: undefined,
     productLines: (key: string) => ({

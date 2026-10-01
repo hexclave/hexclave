@@ -40,8 +40,14 @@ export type StackServerApp<HasTokenStore extends boolean = boolean, ProjectId ex
     createCheckoutUrl(options: (
       ({ userId: string } | { teamId: string } | { customCustomerId: string }) &
       ({ productId: string } | { product: InlineProduct }) &
-      { returnUrl?: string }
+      { returnUrl?: string, allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean }
     )): Promise<string>,
+    validatePromoCodes(options: {
+      productId: string,
+      priceId?: string,
+      quantity?: number,
+      promoCodes: string[],
+    }): Promise<{ originalAmount: string, netAmount: string, recurringAmount: string, appliedCodeNames: string[] }>,
 
     // IF_PLATFORM react-like
     useUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'redirect' }): ProjectCurrentServerUser<ProjectId>,

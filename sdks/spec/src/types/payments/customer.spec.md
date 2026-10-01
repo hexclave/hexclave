@@ -16,15 +16,17 @@ id: string
 
 options.productId: string - ID of the product to purchase
 options.returnUrl: string? - URL to redirect after checkout
+options.allowPromoCodes: bool? - default false; purchase page shows a promo-code field. Fails with PROMO_CODES_DISABLED if payments.allowPromoCodes is off.
+options.allowStackingPromoCodes: bool? - default false; requires allowPromoCodes. Fails with PROMO_CODE_STACKING_DISABLED if payments.allowStackingPromoCodes is off.
 
 Returns: string (checkout URL)
 
-POST /api/v1/customers/{type}/{id}/checkout { product_id, return_url } [authenticated]
-Route: apps/backend/src/app/api/latest/customers/[...]/checkout/route.ts
+POST /api/v1/payments/purchases/create-purchase-url { product_id, return_url, allow_promo_codes, allow_stacking_promo_codes } [authenticated]
+Route: apps/backend/src/app/api/latest/payments/purchases/create-purchase-url/route.ts
 
-Returns a Stripe checkout URL for purchasing the product.
+Returns a checkout URL for purchasing the product. Typed promo names are entered on the purchase page, not passed here.
 
-Does not error.
+Errors: PROMO_CODES_DISABLED, PROMO_CODE_STACKING_DISABLED.
 
 
 ### getBilling()
@@ -144,12 +146,36 @@ options.fromProductId: string - current subscription product ID
 options.toProductId: string - target subscription product ID
 options.priceId: string? - specific price of target product
 options.quantity: number?
+options.promoCodes: string[]? - codes to apply on this switch. Empty/omitted means no codes. Project config payments.allowPromoCodes must be true to apply any; payments.allowStackingPromoCodes must be true to apply more than one.
 
-POST /api/v1/customers/{type}/{id}/switch-subscription { from_product_id, to_product_id, price_id, quantity } [authenticated]
+POST /api/v1/payments/products/{type}/{id}/switch { from_product_id, to_product_id, price_id, quantity, promo_codes } [authenticated]
 
 For switching between subscription plans.
 
-Does not error.
+Errors: PROMO_CODES_DISABLED, PROMO_CODE_STACKING_DISABLED, and other promo KnownErrors.
+
+
+### validatePromoCodes(options)
+
+Available on client and server Customer objects (CurrentUser, Team).
+
+options.productId: string
+options.priceId: string?
+options.quantity: number?
+options.promoCodes: string[]
+
+Returns: { originalAmount: string, netAmount: string, recurringAmount: string, appliedCodeNames: string[] }
+
+netAmount is the first charge (including first-payment-only codes). recurringAmount is later renewals (forever / fixed-duration codes only).
+
+POST /api/v1/payments/products/{type}/{id}/validate-promo-codes { product_id, price_id, quantity, promo_codes } [authenticated]
+Route: apps/backend/src/app/api/latest/payments/products/[customer_type]/[customer_id]/validate-promo-codes/route.ts
+
+Validates typed promo names against a product without redeeming them. Stacking is controlled by project configuration. Client and server Customer objects both use this customer-scoped route (server sends a server key) so the preview matches the quantity and product-type checks the switch will use.
+
+HexclaveServerApp also has a server-only validatePromoCodes that POSTs /api/v1/payments/promo-codes/validate with a server key. That app-level helper has no customer context and is not what Customer.validatePromoCodes calls.
+
+Errors: PROMO_CODES_DISABLED, PROMO_CODE_STACKING_DISABLED, and other promo KnownErrors.
 
 
 ---

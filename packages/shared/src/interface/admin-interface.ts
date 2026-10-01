@@ -31,6 +31,42 @@ import type {
 
 export type { PlanUsageResponse } from "./plan-usage";
 
+export type AdminPromoCodeJson = {
+  id: string,
+  code_name: string,
+  status: "active" | "scheduled" | "paused" | "expired" | "ended",
+  status_detail: string | null,
+  discount_type: "percent" | "amount",
+  discount_amount: number,
+  discount_label: string,
+  products_label: string,
+  applicable_product_ids: string[] | null,
+  num_redemptions: number,
+  max_redemptions: number | null,
+  availability: string,
+  availability_type: "always" | "between_dates",
+  starts_at_millis: number | null,
+  ends_at_millis: number | null,
+  paused_at_millis: number | null,
+  ended_at_millis: number | null,
+  subscription_behavior: "first_payment" | "fixed_duration" | "forever",
+  subscription_discount_duration_months: number | null,
+  has_active_subscription_redemptions: boolean,
+};
+
+export type CreateAdminPromoCodeJson = {
+  code_name: string,
+  discount_type: "percent" | "amount",
+  discount_amount: number,
+  applicable_product_ids: string[] | null,
+  max_redemptions: number | null,
+  subscription_behavior: "first_payment" | "fixed_duration" | "forever",
+  subscription_discount_duration_months: number | null,
+  availability_type: "always" | "between_dates",
+  starts_at_millis: number | null,
+  ends_at_millis: number | null,
+};
+
 type BranchConfigSourceApi = yup.InferType<typeof branchConfigSourceSchema>;
 
 export type ChatContent = Array<
@@ -1346,6 +1382,72 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
     );
     const json = await response.json() as { transactions: Transaction[], next_cursor: string | null };
     return { transactions: json.transactions, nextCursor: json.next_cursor };
+  }
+
+  async listPromoCodes(params?: { cursor?: string, query?: string, status?: "all" | "active" | "scheduled" | "paused" | "expired" | "ended" }): Promise<{ promo_codes: AdminPromoCodeJson[], next_cursor: string | null }> {
+    const qs = new URLSearchParams();
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.query) qs.set("query", params.query);
+    if (params?.status) qs.set("status", params.status);
+    const response = await this.sendAdminRequest(
+      `/internal/payments/promo-codes${qs.size ? `?${qs.toString()}` : ""}`,
+      { method: "GET" },
+      null,
+    );
+    return await response.json();
+  }
+
+  async createPromoCode(body: CreateAdminPromoCodeJson): Promise<AdminPromoCodeJson> {
+    const response = await this.sendAdminRequest(
+      "/internal/payments/promo-codes",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      null,
+    );
+    return await response.json();
+  }
+
+  async getPromoCode(promoCodeId: string): Promise<AdminPromoCodeJson> {
+    const response = await this.sendAdminRequest(
+      urlString`/internal/payments/promo-codes/${promoCodeId}`,
+      { method: "GET" },
+      null,
+    );
+    return await response.json();
+  }
+
+  async pausePromoCode(promoCodeId: string): Promise<AdminPromoCodeJson> {
+    const response = await this.sendAdminRequest(
+      urlString`/internal/payments/promo-codes/${promoCodeId}/pause`,
+      { method: "POST" },
+      null,
+    );
+    return await response.json();
+  }
+
+  async resumePromoCode(promoCodeId: string): Promise<AdminPromoCodeJson> {
+    const response = await this.sendAdminRequest(
+      urlString`/internal/payments/promo-codes/${promoCodeId}/resume`,
+      { method: "POST" },
+      null,
+    );
+    return await response.json();
+  }
+
+  async endPromoCode(promoCodeId: string, body?: { existing_subscription_discounts?: "keep" | "end_after_period" }): Promise<AdminPromoCodeJson> {
+    const response = await this.sendAdminRequest(
+      urlString`/internal/payments/promo-codes/${promoCodeId}/end`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      },
+      null,
+    );
+    return await response.json();
   }
 
   async refundTransaction(options: {

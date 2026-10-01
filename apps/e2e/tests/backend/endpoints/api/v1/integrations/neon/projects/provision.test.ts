@@ -33,6 +33,8 @@ it("should be able to provision a new project if neon client details are correct
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
