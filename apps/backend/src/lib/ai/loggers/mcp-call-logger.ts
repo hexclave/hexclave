@@ -93,6 +93,7 @@ export function logIfMcpToolCall(args: {
       ? firstUserMessage.content
       : safeStringify(firstUserMessage?.content ?? "");
     const askCall = {
+      id: correlationId,
       conversationId: conversationIdForLog,
       question: askQuestion,
       response: text,
@@ -106,7 +107,7 @@ export function logIfMcpToolCall(args: {
       stepCount: steps.length,
       durationMs,
     };
-    runAsynchronouslyAndWaitUntil(logAskHexclaveCall({ id: correlationId, ...askCall, innerToolCalls }));
+    runAsynchronouslyAndWaitUntil(logAskHexclaveCall({ ...askCall, innerToolCalls }));
     runAsynchronouslyAndWaitUntil(sendAskHexclaveDiscordNotification(askCall));
   }
 
