@@ -1,5 +1,6 @@
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { clsx } from "clsx";
+import { Button } from "./design";
 
 
 export type HistoryPagingProps = {
@@ -27,7 +28,8 @@ export function NextPageButton({
   const atEnd = atLastLoadedPage && !hasMoreHistory;
 
   return (
-    <button
+    <Button
+      size="xs"
       onClick={() => {
         if (!atLastLoadedPage) {
           setPage(page => page + 1);
@@ -43,12 +45,12 @@ export function NextPageButton({
         ? "Fetch older rows from the server. The live view only streams the newest window."
         : undefined}
       className={clsx(
-        "px-2 py-0.5 text-xs rounded bg-white border border-gray-200 text-gray-600 transition-colors hover:transition-none hover:bg-gray-100 disabled:opacity-40 disabled:hover:bg-white",
+        "border-black/[0.08] bg-card text-foreground hover:bg-foreground/[0.06] dark:border-white/[0.08]",
         className,
       )}
     >
       {isLoadingOlder ? "Loading…" : "Next"}
-    </button>
+    </Button>
   );
 }
 
@@ -65,19 +67,20 @@ export function LoadOlderButton({
 } & HistoryPagingProps) {
   if (!hasMoreHistory) {
     if (!hasRows) return null;
-    return <span className={clsx("text-gray-400", className)}>end of history</span>;
+    return <span className={clsx("text-muted-foreground", className)}>end of history</span>;
   }
 
   return (
-    <button
+    <Button
+      size="xs"
       onClick={() => runAsynchronouslyWithAlert(onLoadOlder())}
       disabled={isLoadingOlder}
       className={clsx(
-        "px-2 py-0.5 text-xs rounded bg-white border border-gray-200 text-gray-600 transition-colors hover:transition-none hover:bg-gray-100 disabled:opacity-40 disabled:hover:bg-white",
+        "border-black/[0.08] bg-card text-foreground hover:bg-foreground/[0.06] dark:border-white/[0.08]",
         className,
       )}
     >
       {isLoadingOlder ? "Loading…" : "Load older"}
-    </button>
+    </Button>
   );
 }

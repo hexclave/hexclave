@@ -1,49 +1,40 @@
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
-import { clsx } from "clsx";
 import { format, formatDistanceToNow } from "date-fns";
-import { useState, useEffect } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import type { McpCallLogRow, QaEntriesRow } from "../types";
+import { useState, useEffect, useId } from "react";
+import { useScheduledTimeout } from "../hooks/useScheduledTimeout";
+import type { FeedbackLogRow, McpCallLogRow, QaEntriesRow } from "../types";
 import { QA_REVIEW_FAILED_THRESHOLD_MS, qaReviewStartedAt, toDate } from "../utils";
-import { ConversationReplay } from "./ConversationReplay";
-import { markdownComponents } from "./markdown-components";
+import { feedbackCategoryColor } from "../lib/feedback-category";
+import { FEATURE_REQUEST_FLAG_TYPE, featureRequestFromFlagsJson } from "../lib/feature-request-flag";
+import { AssistantBubble, ConversationReplay, type ToolCall } from "./ConversationReplay";
+import { DetailMetricStrip, DetailPanelTabs, DetailTabPanel } from "./DetailPanelNavigation";
+import { Alert, Badge, Button, cn, Input, Textarea } from "./design";
+import { CopyFullContextButton } from "./CopyFullContextButton";
+import { formatMcpCallContext } from "../lib/copy-log-context";
+import { hasMcpContextValue } from "../lib/mcp-context";
 
-// ─── Shared ────────────────────────────────────────────
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      className="text-xs text-blue-500 hover:text-blue-700 ml-2"
-      onClick={() => {
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }, (err) => {
-          console.error("Clipboard write failed:", err);
-        });
-      }}
-    >
-      {copied ? "copied" : "copy"}
-    </button>
-  );
-}
+/** Panel surface for the detail cards, matching the design Card's tintable glass treatment. */
+const panelClasses = "overflow-hidden rounded-xl border border-black/[0.06] bg-card shadow-sm ring-1 ring-black/[0.04] dark:border-white/[0.06] dark:ring-white/[0.04]";
+const sectionLabelClasses = "text-[10px] font-medium uppercase tracking-wider text-muted-foreground";
+const ACTION_FLASH_MS = 3000;
 
 // ─── Main Component ────────────────────────────────────
 
-export function CallLogDetail({ row, allRows, qaEntries, onClose, onSaveCorrection, onSetReviewed, onRetryReview }: {
+export function CallLogDetail({ row, allRows, qaEntries, relatedFeedback, onClose, onOpenFeedback, onSaveCorrection, onSetReviewed, onRetryReview }: {
   row: McpCallLogRow;
   allRows: McpCallLogRow[];
   qaEntries: QaEntriesRow[];
+  relatedFeedback: readonly FeedbackLogRow[];
   onClose: () => void;
+  onOpenFeedback: (feedback: FeedbackLogRow) => void;
   onSaveCorrection?: (correlationId: string, correctedQuestion: string, correctedAnswer: string, publish: boolean) => Promise<void> | void;
   onSetReviewed?: (correlationId: string, reviewed: boolean) => Promise<void> | void;
   onRetryReview?: (correlationId: string, payload: { question: string; reason: string; response: string }) => Promise<void> | void;
 }) {
   const linkedQa = qaEntries.find(q => q.sourceMcpCorrelationId === row.correlationId);
-  const [showReplay, setShowReplay] = useState(false);
+  const [activeSection, setActiveSection] = useState<"conversation" | "review" | "correction">("conversation");
+  const tabsId = useId();
   // Optimistic override while the reviewed-state roundtrip is in flight. Cleared
   // once the real subscription update catches up.
   const [optimisticReviewed, setOptimisticReviewed] = useState<boolean | null>(null);
@@ -54,6 +45,14 @@ export function CallLogDetail({ row, allRows, qaEntries, onClose, onSaveCorrecti
     }
   }, [row.humanReviewedAt, optimisticReviewed]);
   const isReviewed = optimisticReviewed ?? (row.humanReviewedAt != null);
+  const qaReviewAgeMs = new Date().getTime() - qaReviewStartedAt(row).getTime();
+  const qaSummary = row.qaErrorMessage != null && row.qaErrorMessage !== ""
+    ? "Error"
+    : row.qaOverallScore != null
+      ? `${row.qaOverallScore}/100`
+      : qaReviewAgeMs > QA_REVIEW_FAILED_THRESHOLD_MS ? "Failed" : "Pending";
+  const resultSummary = row.errorMessage != null && row.errorMessage !== "" ? "Error" : "OK";
+  const featureRequest = featureRequestFromFlagsJson(row.qaFlagsJson);
 
   const handleSetReviewed = (reviewed: boolean) => {
     const previous = optimisticReviewed;
@@ -69,195 +68,151 @@ export function CallLogDetail({ row, allRows, qaEntries, onClose, onSaveCorrecti
   };
 
   return (
-    <div className="p-4 space-y-4">
-      {showReplay && (
-        <ConversationReplay row={row} allRows={allRows} onClose={() => setShowReplay(false)} />
-      )}
-
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-gray-900">Call Detail</h2>
-          {isReviewed && (
-            <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800"
-              title={row.humanReviewedAt ? format(toDate(row.humanReviewedAt), "PPpp") : ""}
-            >
-              &#10003; Reviewed
-              {row.humanReviewedBy ? ` by ${row.humanReviewedBy}` : ""}
-              {row.humanReviewedAt
-                ? ` · ${formatDistanceToNow(toDate(row.humanReviewedAt), { addSuffix: true })}`
-                : " · just now"}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {!isReviewed && onSetReviewed && (
-            <button
-              onClick={() => handleSetReviewed(true)}
-              className="px-2.5 py-1 text-xs font-medium text-green-700 bg-green-50 rounded-md hover:bg-green-100 border border-green-200"
-            >
-              Mark as reviewed
-            </button>
-          )}
-          {isReviewed && onSetReviewed && (
-            <button
-              onClick={() => handleSetReviewed(false)}
-              className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-50 rounded-md hover:bg-gray-100 border border-gray-200"
-            >
-              Unmark
-            </button>
-          )}
-          <button
-            onClick={() => setShowReplay(true)}
-            className="px-2.5 py-1 text-xs font-medium text-purple-600 bg-purple-50 rounded-md hover:bg-purple-100"
-          >
-            Replay
-          </button>
-          <button className="text-gray-400 hover:text-gray-600 text-sm" onClick={onClose}>
-            close
-          </button>
-        </div>
-      </div>
-
-      {/* Card 1: MCP Call */}
-      <MpcCallCard row={row} />
-
-      {/* Card 2: AI QA Review */}
-      <QaReviewCard row={row} onRetryReview={onRetryReview} />
-
-      {/* Card 3: Human Correction */}
-      <HumanCorrectionCard row={row} qa={linkedQa} onSave={onSaveCorrection} />
-    </div>
-  );
-}
-
-// ─── Card 1: MCP Call ──────────────────────────────────
-
-function MpcCallCard({ row }: { row: McpCallLogRow }) {
-  const [toolsExpanded, setToolsExpanded] = useState(true);
-
-  let toolCalls: Array<{ type: string; toolName: string; toolCallId: string; args: unknown; result: unknown }> = [];
-  try {
-    toolCalls = JSON.parse(row.innerToolCallsJson) as typeof toolCalls;
-  } catch {
-    // ignore
-  }
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-      {/* Metadata bar */}
-      <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2 flex-wrap text-xs text-gray-500">
-        <span className="inline-flex items-center px-2 py-0.5 rounded font-medium bg-purple-100 text-purple-800">
-          {row.toolName}
-        </span>
-        <span title={format(toDate(row.createdAt), "PPpp")}>
-          {formatDistanceToNow(toDate(row.createdAt), { addSuffix: true })}
-        </span>
-        <span>{Number(row.durationMs).toLocaleString()}ms</span>
-        <span>{row.stepCount} step{row.stepCount !== 1 ? "s" : ""}</span>
-        <span className="text-gray-400">{row.modelId}</span>
-      </div>
-
-      <div className="p-4 space-y-3">
-        {row.errorMessage && (
-          <div className="p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">
-            {row.errorMessage}
-          </div>
-        )}
-
-        {/* User Prompt */}
-        {row.userPrompt && (
-          <div>
-            <h4 className="text-[10px] uppercase text-gray-400 font-medium tracking-wider mb-0.5">User Prompt</h4>
-            <p className="text-sm text-gray-700">{row.userPrompt}</p>
-          </div>
-        )}
-
-        {/* Reason */}
-        <p className="text-xs text-gray-500 italic">{row.reason}</p>
-
-        {/* Question */}
-        <div>
-          <div className="flex items-center mb-1">
-            <h4 className="text-[10px] uppercase text-gray-400 font-medium tracking-wider">Question</h4>
-            <CopyButton text={row.question} />
-          </div>
-          <p className="text-sm text-gray-900 whitespace-pre-wrap">{row.question}</p>
-        </div>
-
-        {/* Response */}
-        <div>
-          <div className="flex items-center mb-1">
-            <h4 className="text-[10px] uppercase text-gray-400 font-medium tracking-wider">AI Response</h4>
-            <CopyButton text={row.response} />
-          </div>
-          <div className="bg-gray-50 p-3 rounded max-h-64 overflow-auto text-sm">
-            {row.response ? (
-              <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                {row.response}
-              </Markdown>
-            ) : <span className="text-gray-400">(empty)</span>}
-          </div>
-        </div>
-
-        {/* Tool Calls */}
-        {toolCalls.length > 0 && (
-          <div>
-            <button
-              className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
-              onClick={() => setToolsExpanded(prev => !prev)}
-            >
-              <span className="text-[10px]">{toolsExpanded ? "▾" : "▸"}</span>
-              Tool Calls ({toolCalls.length})
-            </button>
-            {toolsExpanded && (
-              <div className="mt-2 space-y-2">
-                {toolCalls.map((call, i) => (
-                  <InnerToolCall key={call.toolCallId || String(i)} call={call} />
-                ))}
-              </div>
+    <div className="min-h-full">
+      <header className="bg-background pt-4">
+        {/* Actions sit in the title row rather than in a strip of their own: the
+            panel's job is reviewing, so "Mark reviewed" should be reachable
+            without reading past the metadata to find it. */}
+        <div className="flex items-start justify-between gap-4 px-4 pb-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold tracking-tight text-foreground">MCP review</h2>
+              <Badge color="purple" mono>{row.toolName}</Badge>
+              {isReviewed && (
+                <Badge color="green" title={row.humanReviewedAt ? format(toDate(row.humanReviewedAt), "PPpp") : undefined}>
+                  Reviewed
+                </Badge>
+              )}
+              {featureRequest != null && <Badge color="blue">Feature request</Badge>}
+            </div>
+            {isReviewed && row.humanReviewedBy != null && (
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Reviewed by {row.humanReviewedBy}
+                {row.humanReviewedAt != null ? ` ${formatDistanceToNow(toDate(row.humanReviewedAt), { addSuffix: true })}` : ""}
+              </p>
             )}
           </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {onSetReviewed && (
+              <Button variant={isReviewed ? "outline" : "default"} onClick={() => handleSetReviewed(!isReviewed)}>
+                {isReviewed ? "Unmark reviewed" : "Mark reviewed"}
+              </Button>
+            )}
+            <CopyFullContextButton getText={() => formatMcpCallContext(row)} subject="MCP call" />
+            <Button variant="ghost" className="size-7 shrink-0 px-0 text-base" aria-label="Close MCP call details" onClick={onClose}>×</Button>
+          </div>
+        </div>
+        <DetailMetricStrip items={[
+          { label: "Result", value: resultSummary, tone: resultSummary === "Error" ? "error" : "success" },
+          { label: "QA review", value: qaSummary, tone: qaSummary === "Error" || qaSummary === "Failed" ? "error" : "default" },
+          { label: "Duration", value: `${Number(row.durationMs).toLocaleString()}ms` },
+          { label: "Steps", value: String(row.stepCount) },
+        ]} />
+        <McpCallSummary row={row} />
+        <DetailPanelTabs
+          id={tabsId}
+          label="MCP call detail sections"
+          value={activeSection}
+          onChange={setActiveSection}
+          items={[
+            { value: "conversation", label: "Conversation" },
+            { value: "review", label: "AI QA review" },
+            { value: "correction", label: "Human correction" },
+          ]}
+        />
+      </header>
+
+      <div className="space-y-4 p-4 pb-8">
+        {activeSection === "conversation" && (
+          <DetailTabPanel id={tabsId} value="conversation">
+            <ConversationReplay key={row.correlationId} row={row} allRows={allRows} />
+          </DetailTabPanel>
         )}
+        {activeSection === "review" && <DetailTabPanel id={tabsId} value="review" className="space-y-4">
+          <QaReviewCard row={row} onRetryReview={onRetryReview} />
+          <RelatedFeedbackCard rows={relatedFeedback} onOpen={onOpenFeedback} />
+        </DetailTabPanel>}
+        {/* Stays mounted while another tab is active so a half-written correction survives a
+            detour to the conversation or the QA review; the other panels hold no user input. */}
+        <DetailTabPanel id={tabsId} value="correction" hidden={activeSection !== "correction"}>
+          <HumanCorrectionCard row={row} qa={linkedQa} onSave={onSaveCorrection} />
+        </DetailTabPanel>
       </div>
     </div>
   );
 }
 
-function InnerToolCall({ call }: { call: { toolName: string; toolCallId: string; args: unknown; result: unknown } }) {
-  const [expanded, setExpanded] = useState(false);
+function McpCallSummary({ row }: { row: McpCallLogRow }) {
+  const user = hasMcpContextValue(row.user) ? row.user : "Unknown";
+  const project = hasMcpContextValue(row.project) ? row.project : "Unknown";
+
   return (
-    <div className="border border-gray-200 rounded">
-      <button
-        className="w-full text-left px-3 py-2 text-sm flex items-center justify-between hover:bg-gray-50"
-        onClick={() => setExpanded(prev => !prev)}
-      >
-        <span className="font-mono text-xs">
-          <span className="text-purple-600">{call.toolName}</span>
-          <span className="text-gray-400 ml-2">#{call.toolCallId.slice(0, 8)}</span>
-        </span>
-        <span className="text-gray-400 text-xs">{expanded ? "collapse" : "expand"}</span>
-      </button>
-      {expanded && (
-        <div className="px-3 pb-2 space-y-2">
-          <div>
-            <p className="text-xs text-gray-500 mb-1">Args:</p>
-            <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto max-h-40">{JSON.stringify(call.args, null, 2)}</pre>
-          </div>
-          <div>
-            <p className="text-xs text-gray-500 mb-1">Result:</p>
-            <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto max-h-40">{JSON.stringify(call.result, null, 2)}</pre>
-          </div>
-        </div>
-      )}
+    <dl className="grid grid-cols-2 gap-x-5 gap-y-3 border-t border-black/[0.06] px-4 py-3 dark:border-white/[0.06]">
+      <SummaryItem label="User" value={user} />
+      <SummaryItem label="Project" value={project} />
+      <SummaryItem label="Model" value={row.modelId} mono />
+      <SummaryItem label="Started" value={format(toDate(row.createdAt), "MMM d, HH:mm:ss")} />
+      <SummaryItem label="Correlation ID" value={row.correlationId} mono />
+      <SummaryItem label="Conversation ID" value={row.conversationId != null && row.conversationId !== "" ? row.conversationId : "—"} mono />
+      {row.reason !== "" && <SummaryItem label="Reason" value={row.reason} wide />}
+      {hasMcpContextValue(row.context) && <SummaryItem label="Task context" value={row.context} wide />}
+      {row.errorMessage != null && row.errorMessage !== "" && <SummaryItem label="Error" value={row.errorMessage} wide />}
+    </dl>
+  );
+}
+
+function SummaryItem({ label, value, mono = false, wide = false }: { label: string; value: string; mono?: boolean; wide?: boolean }) {
+  return (
+    <div className={cn("min-w-0", wide && "col-span-2")}>
+      <dt className={sectionLabelClasses}>{label}</dt>
+      <dd className={cn("mt-0.5 line-clamp-2 break-words text-xs leading-5 text-foreground", mono && "font-mono")}>{value}</dd>
     </div>
   );
 }
 
-// ─── Card 2: AI QA Review ──────────────────────────────
+function RelatedFeedbackCard({ rows, onOpen }: {
+  rows: readonly FeedbackLogRow[],
+  onOpen: (feedback: FeedbackLogRow) => void,
+}) {
+  if (rows.length === 0) return null;
 
-type QaFlag = { type: string; severity: string; explanation: string };
+  return (
+    <div className={panelClasses}>
+      <div className="flex items-center justify-between border-b border-black/[0.06] px-4 py-2.5 dark:border-white/[0.06]">
+        <div className="flex items-center gap-2">
+          <h3 className="text-xs font-semibold text-foreground">Related feedback</h3>
+          <Badge color="purple" mono>give_feedback</Badge>
+        </div>
+        <span className="text-[10px] tabular-nums text-muted-foreground">
+          {rows.length} {rows.length === 1 ? "entry" : "entries"}
+        </span>
+      </div>
+      <div className="divide-y divide-black/[0.06] dark:divide-white/[0.06]">
+        {rows.map(feedback => (
+          <button
+            key={String(feedback.id)}
+            type="button"
+            onClick={() => onOpen(feedback)}
+            className="block w-full px-4 py-3 text-left transition-colors hover:bg-foreground/[0.04] hover:transition-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          >
+            <span className="flex items-center justify-between gap-3">
+              <Badge color={feedbackCategoryColor(feedback.category)}>{feedback.category}</Badge>
+              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                {formatDistanceToNow(toDate(feedback.createdAt), { addSuffix: true })}
+              </span>
+            </span>
+            <span className="mt-2 line-clamp-3 block text-xs leading-5 text-foreground">{feedback.message}</span>
+            <span className="mt-1.5 block text-[10px] font-medium text-muted-foreground">Open feedback details</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── AI QA Review ──────────────────────────────────────
+
+type QaFlag = { type: string; severity: string; explanation: string; summary?: string };
 
 function RetryReviewButton({ row, onRetryReview, label = "Retry review", tone = "indigo" }: {
   row: McpCallLogRow;
@@ -267,13 +222,12 @@ function RetryReviewButton({ row, onRetryReview, label = "Retry review", tone = 
 }) {
   const [retrying, setRetrying] = useState(false);
   const [justTriggered, setJustTriggered] = useState(false);
-
-  const toneClasses = tone === "red"
-    ? "text-red-700 bg-red-100 hover:bg-red-200 border-red-300"
-    : "text-indigo-700 bg-indigo-100 hover:bg-indigo-200 border-indigo-300";
+  const scheduleTimeout = useScheduledTimeout();
 
   return (
-    <button
+    <Button
+      size="xs"
+      variant={tone === "red" ? "destructive" : "outline"}
       disabled={retrying}
       onClick={() => {
         setRetrying(true);
@@ -281,7 +235,7 @@ function RetryReviewButton({ row, onRetryReview, label = "Retry review", tone = 
           Promise.resolve(onRetryReview(row.correlationId, { question: row.question, reason: row.reason, response: row.response }))
             .then(() => {
               setJustTriggered(true);
-              setTimeout(() => setJustTriggered(false), 3000);
+              scheduleTimeout(() => setJustTriggered(false), ACTION_FLASH_MS);
             })
             .catch(err => {
               captureError("call-log-retry-review", err);
@@ -290,13 +244,9 @@ function RetryReviewButton({ row, onRetryReview, label = "Retry review", tone = 
             .finally(() => setRetrying(false))
         );
       }}
-      className={clsx(
-        "px-2 py-1 text-[11px] font-medium border rounded",
-        retrying ? "text-gray-400 bg-gray-50 border-gray-200" : toneClasses,
-      )}
     >
       {retrying ? "Retrying…" : justTriggered ? "Queued" : label}
-    </button>
+    </Button>
   );
 }
 
@@ -306,13 +256,13 @@ function QaReviewCard({ row, onRetryReview }: {
 }) {
   if (row.qaErrorMessage) {
     return (
-      <div className="bg-red-50/50 border border-red-200 rounded-lg p-4 space-y-2">
+      <Alert className="space-y-2">
         <div className="flex items-center justify-between">
-          <h3 className="text-xs font-semibold text-red-800 uppercase tracking-wider">AI QA Review</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wider">AI QA Review</h3>
           {onRetryReview && <RetryReviewButton row={row} onRetryReview={onRetryReview} tone="red" />}
         </div>
-        <p className="text-sm text-red-700 whitespace-pre-wrap">Error: {row.qaErrorMessage}</p>
-      </div>
+        <p className="whitespace-pre-wrap text-sm">Error: {row.qaErrorMessage}</p>
+      </Alert>
     );
   }
 
@@ -323,27 +273,27 @@ function QaReviewCard({ row, onRetryReview }: {
 
     if (reviewFailed) {
       return (
-        <div className="bg-amber-50/60 border border-amber-200 rounded-lg p-4 space-y-2">
+        <Alert variant="warning" className="space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h3 className="text-xs font-semibold text-amber-800 uppercase tracking-wider">AI QA Review</h3>
-              <span className="text-[10px] font-medium text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">Review failed</span>
+              <h3 className="text-xs font-semibold uppercase tracking-wider">AI QA Review</h3>
+              <Badge color="orange">Review failed</Badge>
             </div>
             {onRetryReview && <RetryReviewButton row={row} onRetryReview={onRetryReview} />}
           </div>
-          <p className="text-xs text-amber-700">
-            No review completed in {formatDistanceToNow(reviewStartedAt)}. The reviewer was likely skipped (missing OpenRouter key) or the background task died — click retry to re-run.
+          <p className="text-xs">
+            No review completed in {formatDistanceToNow(reviewStartedAt)}. The reviewer was likely skipped (missing OpenRouter key) or the background task stopped. Retry the review to run it again.
           </p>
-        </div>
+        </Alert>
       );
     }
 
     return (
-      <div className="bg-indigo-50/30 border border-indigo-200 rounded-lg p-4">
+      <div className={cn(panelClasses, "p-4")}>
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold text-indigo-800 uppercase tracking-wider">AI QA Review</h3>
-          <span className="inline-block w-3 h-3 border-2 border-indigo-300 border-t-transparent rounded-full animate-spin" />
-          <span className="text-xs text-indigo-400">Reviewing...</span>
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">AI QA Review</h3>
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+          <span className="text-xs text-muted-foreground">Reviewing...</span>
         </div>
       </div>
     );
@@ -357,29 +307,30 @@ function QaReviewCard({ row, onRetryReview }: {
   }
 
   const scoreColor = row.qaOverallScore >= 80
-    ? "text-green-700 bg-green-100"
+    ? "text-emerald-700 dark:text-emerald-400 bg-emerald-500/15"
     : row.qaOverallScore >= 50
-      ? "text-yellow-700 bg-yellow-100"
-      : "text-red-700 bg-red-100";
+      ? "text-amber-700 dark:text-amber-300 bg-amber-500/15"
+      : "text-red-700 dark:text-red-400 bg-red-500/15";
 
-  const severityColors: Record<string, string> = {
-    critical: "border-red-400 bg-red-50",
-    high: "border-orange-400 bg-orange-50",
-    medium: "border-yellow-400 bg-yellow-50",
-    low: "border-gray-300 bg-gray-50",
-  };
+  const lowSeverityClasses = "border-border bg-foreground/[0.04]";
+  const severityClasses = new Map<string, string>([
+    ["critical", "border-red-500 bg-red-500/10"],
+    ["high", "border-orange-500 bg-orange-500/10"],
+    ["medium", "border-amber-500 bg-amber-500/10"],
+    ["low", lowSeverityClasses],
+  ]);
 
   return (
-    <div className="bg-indigo-50/30 border border-indigo-200 rounded-lg overflow-hidden">
+    <div className={panelClasses}>
       {/* Header */}
-      <div className="px-4 py-2.5 border-b border-indigo-100 flex items-center justify-between">
+      <div className="flex items-center justify-between border-b border-black/[0.06] px-4 py-2.5 dark:border-white/[0.06]">
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold text-indigo-800 uppercase tracking-wider">AI QA Review</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">AI QA Review</h3>
           {row.qaNeedsHumanReview && !row.humanReviewedAt && (
-            <span className="text-[10px] font-medium text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">Needs Review</span>
+            <Badge color="orange">Needs Review</Badge>
           )}
         </div>
-        <span className={`text-lg font-bold px-2 py-0.5 rounded ${scoreColor}`}>
+        <span className={cn("rounded-lg px-2 py-0.5 text-lg font-bold tabular-nums", scoreColor)}>
           {row.qaOverallScore}
         </span>
       </div>
@@ -387,30 +338,27 @@ function QaReviewCard({ row, onRetryReview }: {
       <div className="p-4 space-y-3">
         {/* Badges */}
         <div className="flex gap-2">
-          <span className={clsx(
-            "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium",
-            row.qaAnswerCorrect ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"
-          )}>
+          <Badge color={row.qaAnswerCorrect ? "green" : "red"}>
             {row.qaAnswerCorrect ? "correct" : "incorrect"}
-          </span>
-          <span className={clsx(
-            "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium",
-            row.qaAnswerRelevant ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"
-          )}>
+          </Badge>
+          <Badge color={row.qaAnswerRelevant ? "green" : "red"}>
             {row.qaAnswerRelevant ? "relevant" : "off-topic"}
-          </span>
+          </Badge>
         </div>
 
         {/* Flags */}
         {flags.length > 0 && (
           <div className="space-y-1.5">
             {flags.map((flag, i) => (
-              <div key={i} className={`border-l-4 pl-3 py-1.5 rounded-r text-sm ${severityColors[flag.severity] ?? severityColors.low}`}>
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className="font-mono text-xs text-gray-600">{flag.type}</span>
-                  <span className="text-[10px] uppercase text-gray-400">{flag.severity}</span>
+              <div key={i} className={cn("rounded-lg border px-3 py-2 text-sm", severityClasses.get(flag.severity) ?? lowSeverityClasses)}>
+                <div className="mb-0.5 flex items-center gap-2">
+                  <span className="font-mono text-xs text-foreground">{flag.type === FEATURE_REQUEST_FLAG_TYPE ? "feature request" : flag.type}</span>
+                  <span className="text-[10px] uppercase text-muted-foreground">{flag.severity}</span>
                 </div>
-                <p className="text-gray-700 text-xs">{flag.explanation}</p>
+                {flag.type === FEATURE_REQUEST_FLAG_TYPE && flag.summary != null && flag.summary !== "" && (
+                  <p className="mb-1 text-xs font-medium text-foreground">{flag.summary}</p>
+                )}
+                <p className="text-xs text-muted-foreground">{flag.explanation}</p>
               </div>
             ))}
           </div>
@@ -419,8 +367,8 @@ function QaReviewCard({ row, onRetryReview }: {
         {/* Suggestions */}
         {row.qaImprovementSuggestions && (
           <div>
-            <h4 className="text-[10px] uppercase text-gray-400 font-medium tracking-wider mb-1">Suggestions</h4>
-            <p className="text-xs text-gray-600 whitespace-pre-wrap">{row.qaImprovementSuggestions}</p>
+            <h4 className={cn(sectionLabelClasses, "mb-1")}>Suggestions</h4>
+            <p className="whitespace-pre-wrap text-xs text-muted-foreground">{row.qaImprovementSuggestions}</p>
           </div>
         )}
 
@@ -431,7 +379,7 @@ function QaReviewCard({ row, onRetryReview }: {
 
         {/* Model */}
         {row.qaReviewModelId && (
-          <p className="text-[10px] text-gray-400">by {row.qaReviewModelId}</p>
+          <p className="text-[10px] text-muted-foreground">by {row.qaReviewModelId}</p>
         )}
       </div>
     </div>
@@ -496,6 +444,7 @@ function HumanCorrectionCard({ row, qa, onSave }: {
   const [lastAction, setLastAction] = useState<"published" | "saved" | "deepwiki-error" | "error" | null>(null);
   const [deepWikiLoading, setDeepWikiLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const scheduleTimeout = useScheduledTimeout();
 
   useEffect(() => {
     setQuestion(persistedQuestion);
@@ -508,10 +457,10 @@ function HumanCorrectionCard({ row, qa, onSave }: {
     try {
       await onSave?.(row.correlationId, question, answer, publish);
       setLastAction(publish ? "published" : "saved");
-      setTimeout(() => setLastAction(null), 3000);
+      scheduleTimeout(() => setLastAction(null), ACTION_FLASH_MS);
     } catch {
       setLastAction("error");
-      setTimeout(() => setLastAction(null), 3000);
+      scheduleTimeout(() => setLastAction(null), ACTION_FLASH_MS);
     } finally {
       setIsSaving(false);
     }
@@ -528,29 +477,26 @@ function HumanCorrectionCard({ row, qa, onSave }: {
     return { label: isPublished ? "Update" : "Publish", isDraft: false, disabled: false };
   })();
 
-  const cardStyle = isPublished
-    ? "bg-green-50/50 border-green-200"
+  // Subtle state tint on the card edge: published = green, unpublished draft = amber.
+  const cardTint = isPublished
+    ? "ring-emerald-500/20"
     : hasDraft
-      ? "bg-amber-50/50 border-amber-200"
-      : "bg-white border-gray-200";
+      ? "ring-amber-500/25"
+      : "";
 
   return (
-    <div className={`border rounded-lg overflow-hidden ${cardStyle}`}>
+    <div className={cn(panelClasses, cardTint)}>
       {/* Header */}
-      <div className="px-4 py-2.5 border-b border-inherit flex items-center justify-between">
+      <div className="flex items-center justify-between border-b border-black/[0.06] px-4 py-2.5 dark:border-white/[0.06]">
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Human Correction</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">Human Correction</h3>
           {isPublished ? (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800">
-              &#10003; Published
-            </span>
+            <Badge color="green">&#10003; Published</Badge>
           ) : hasDraft ? (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-100 text-yellow-800">
-              Draft
-            </span>
+            <Badge color="orange">Draft</Badge>
           ) : null}
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-gray-400">
+        <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
           {qa?.lastPublishedAt && (
             <span>{format(toDate(qa.lastPublishedAt), "MMM d, yyyy")}</span>
           )}
@@ -560,7 +506,7 @@ function HumanCorrectionCard({ row, qa, onSave }: {
           {isPublished && (
             <button
               onClick={() => void handleSave(false)}
-              className="text-red-500 hover:text-red-700"
+              className="text-red-600 transition-colors hover:transition-none hover:text-red-500 dark:text-red-400"
             >
               Unpublish
             </button>
@@ -571,11 +517,11 @@ function HumanCorrectionCard({ row, qa, onSave }: {
       <div className="p-4 space-y-3">
         {/* Feedback toast */}
         {lastAction && (
-          <div className={clsx(
-            "px-3 py-1.5 rounded text-xs font-medium",
-            lastAction === "published" ? "bg-green-100 text-green-700" :
-              lastAction === "deepwiki-error" || lastAction === "error" ? "bg-red-100 text-red-700" :
-                "bg-blue-100 text-blue-700"
+          <div className={cn(
+            "rounded-lg px-3 py-1.5 text-xs font-medium",
+            lastAction === "published" ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400" :
+              lastAction === "deepwiki-error" || lastAction === "error" ? "bg-red-500/15 text-red-700 dark:text-red-400" :
+                "bg-blue-500/15 text-blue-700 dark:text-blue-400"
           )}>
             {lastAction === "published" ? "Published to /questions" :
               lastAction === "deepwiki-error" ? "Failed to fetch from DeepWiki" :
@@ -586,10 +532,10 @@ function HumanCorrectionCard({ row, qa, onSave }: {
 
         {/* Question */}
         <div>
-          <label className="text-[10px] uppercase text-gray-400 font-medium mb-1 block tracking-wider">Question</label>
-          <input
+          <label className={cn(sectionLabelClasses, "mb-1 block")}>Question</label>
+          <Input
             type="text"
-            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+            className="h-9 px-3 text-sm"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
             placeholder="The question..."
@@ -598,9 +544,9 @@ function HumanCorrectionCard({ row, qa, onSave }: {
 
         {/* Answer */}
         <div>
-          <label className="text-[10px] uppercase text-gray-400 font-medium mb-1 block tracking-wider">Answer</label>
-          <textarea
-            className="w-full h-40 px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y bg-white"
+          <label className={cn(sectionLabelClasses, "mb-1 block")}>Answer</label>
+          <Textarea
+            className="h-40 resize-y px-3 py-2 font-mono text-sm"
             value={answer}
             onChange={(e) => setAnswer(e.target.value)}
             placeholder="Write the corrected answer..."
@@ -609,16 +555,15 @@ function HumanCorrectionCard({ row, qa, onSave }: {
 
         {/* Actions */}
         <div className="flex items-center gap-2">
-          <button
+          <Button
             onClick={() => {
               setQuestion(row.question);
               setAnswer(row.response);
             }}
-            className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 border border-gray-300 rounded bg-white"
           >
             Pre-fill from call
-          </button>
-          <button
+          </Button>
+          <Button
             disabled={deepWikiLoading}
             onClick={() => {
               const q = question || row.question;
@@ -633,31 +578,20 @@ function HumanCorrectionCard({ row, qa, onSave }: {
                 .catch(() => setLastAction("deepwiki-error"))
                 .finally(() => setDeepWikiLoading(false));
             }}
-            className={clsx(
-              "px-2 py-1 text-xs border rounded bg-white",
-              deepWikiLoading ? "text-gray-400 border-gray-200" : "text-indigo-500 hover:text-indigo-700 border-indigo-300"
-            )}
           >
             {deepWikiLoading ? "Fetching..." : "Pre-fill from DeepWiki"}
-          </button>
+          </Button>
           {hasUnsavedChanges && (
-            <span className="text-[10px] text-amber-500">unsaved changes</span>
+            <span className="text-[10px] text-amber-600 dark:text-amber-400">unsaved changes</span>
           )}
           <div className="ml-auto flex items-center gap-2">
-            <button
+            <Button
+              variant={saveAction.isDraft ? "outline" : "default"}
               onClick={() => void handleSave(!hasUnsavedChanges)}
               disabled={saveAction.disabled}
-              className={clsx(
-                "px-3 py-1.5 text-xs font-medium rounded-md transition-colors hover:transition-none",
-                saveAction.disabled
-                  ? "text-gray-400 bg-gray-50 cursor-not-allowed"
-                  : saveAction.isDraft
-                    ? "text-gray-700 bg-gray-100 hover:bg-gray-200"
-                    : "text-white bg-blue-600 hover:bg-blue-700",
-              )}
             >
               {saveAction.label}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -665,22 +599,37 @@ function HumanCorrectionCard({ row, qa, onSave }: {
   );
 }
 
-// ─── QA Conversation Timeline ──────────────────────────
+// ─── Reviewer conversation ──────────────────────────
 
 type QaStep = {
-  step: number;
-  text?: string;
-  toolCalls?: Array<{ toolName: string; args: unknown }>;
-  toolResults?: Array<{ toolName: string; toolCallId: string; result: unknown }>;
+  step: number,
+  text?: string,
+  toolCalls?: Array<{ toolName: string, toolCallId?: string, args: unknown }>,
+  toolResults?: Array<{ toolName: string, toolCallId?: string, result: unknown }>,
 };
 
-function formatByteSize(value: unknown): string {
-  const str = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  const bytes = new Blob([str]).size;
-  if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(1)} KB`;
+/**
+ * Pairs each tool call with its result. The reviewer emits calls and results as
+ * two separate lists, so they are matched on toolCallId where the model
+ * supplied one and by position otherwise (older rows predate the id).
+ */
+function qaStepToolCalls(step: QaStep): ToolCall[] {
+  const results = step.toolResults ?? [];
+  const byId = new Map(results.flatMap(r => (r.toolCallId == null ? [] : [[r.toolCallId, r] as const])));
+  return (step.toolCalls ?? []).map((call, i) => ({
+    type: "tool-call",
+    toolName: call.toolName,
+    toolCallId: call.toolCallId ?? `${step.step}-${i}`,
+    args: call.args,
+    result: (call.toolCallId == null ? undefined : byId.get(call.toolCallId))?.result ?? results[i]?.result ?? null,
+  }));
 }
 
+/**
+ * The reviewer's own agent loop, rendered with the same bubbles as the MCP
+ * conversation above it — one transcript style for every agent trace in this
+ * panel, distinguished by accent rather than by a separate layout.
+ */
 function QaConversationTimeline({ json }: { json: string }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -696,115 +645,27 @@ function QaConversationTimeline({ json }: { json: string }) {
   return (
     <div>
       <button
-        className="text-xs text-indigo-500 hover:text-indigo-700 flex items-center gap-1"
+        className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:transition-none hover:text-foreground"
         onClick={() => setExpanded(prev => !prev)}
       >
-        <span className="text-[10px]">{expanded ? "▾" : "▸"}</span>
-        Reviewer Conversation ({steps.length} step{steps.length !== 1 ? "s" : ""})
+        <span className="text-[10px]">{expanded ? "\u25BE" : "\u25B8"}</span>
+        Reviewer conversation ({steps.length} step{steps.length !== 1 ? "s" : ""})
       </button>
       {expanded && (
-        <div className="mt-3 relative border-l-2 border-indigo-200 ml-1 space-y-4">
-          {steps.map((step) => {
-            const hasTools = step.toolCalls && step.toolCalls.length > 0;
-            return hasTools
-              ? <QaToolStep key={step.step} step={step} />
-              : step.text ? <QaConclusionStep key={step.step} step={step} /> : null;
-          })}
+        <div className="mt-3 space-y-4">
+          {/* A step with neither text nor tool calls (the model just stopped) would render as a
+              bare avatar, so those are skipped. */}
+          {steps.filter(step => (step.text ?? "") !== "" || qaStepToolCalls(step).length > 0).map(step => (
+            <AssistantBubble
+              key={step.step}
+              accent="indigo"
+              label="QA"
+              content={step.text ?? ""}
+              toolCalls={qaStepToolCalls(step)}
+            />
+          ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function QaToolStep({ step }: { step: QaStep }) {
-  const pairs = (step.toolCalls ?? []).map((tc, i) => ({
-    toolName: tc.toolName,
-    args: tc.args,
-    result: step.toolResults?.[i]?.result ?? null,
-  }));
-
-  return (
-    <div className="relative pl-5">
-      <div className="absolute -left-[5px] top-2 w-2 h-2 rounded-full bg-indigo-400" />
-      <p className="text-[10px] uppercase text-gray-400 font-medium mb-1.5">
-        Step {step.step} — Verification
-      </p>
-      <div className="space-y-2">
-        {pairs.map((pair, i) => (
-          <QaToolCard key={i} pair={pair} />
-        ))}
-      </div>
-      {step.text && (
-        <div className="mt-2 bg-white/50 rounded p-2">
-          <p className="text-xs text-gray-700 whitespace-pre-wrap">{step.text}</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QaToolCard({ pair }: { pair: { toolName: string; args: unknown; result: unknown } }) {
-  const [resultExpanded, setResultExpanded] = useState(false);
-  const resultStr = pair.result == null
-    ? null
-    : typeof pair.result === "string" ? pair.result : JSON.stringify(pair.result, null, 2);
-
-  return (
-    <div className="border border-indigo-200 rounded-lg overflow-hidden bg-white/50">
-      <div className="px-3 py-1.5 bg-indigo-50">
-        <span className="font-mono text-xs text-indigo-700">{pair.toolName}</span>
-      </div>
-      <div className="px-3 py-2 border-t border-indigo-100">
-        <div className="flex items-center justify-between mb-1">
-          <p className="text-[10px] uppercase text-gray-400 font-medium">Args</p>
-          <CopyButton text={JSON.stringify(pair.args, null, 2)} />
-        </div>
-        <pre className="text-xs text-gray-600 overflow-auto max-h-24">{JSON.stringify(pair.args, null, 2)}</pre>
-      </div>
-      {resultStr != null && (
-        <div className="px-3 py-2 border-t border-indigo-100">
-          <div className="w-full flex items-center justify-between text-[10px] uppercase text-gray-400 font-medium">
-            <button
-              className="hover:text-gray-600"
-              onClick={() => setResultExpanded(prev => !prev)}
-            >
-              Result ({formatByteSize(pair.result)}) — {resultExpanded ? "collapse" : "expand"}
-            </button>
-            {resultExpanded && <CopyButton text={resultStr} />}
-          </div>
-          {resultExpanded && (
-            <pre className="mt-1 text-xs text-gray-600 overflow-auto max-h-64 whitespace-pre-wrap">{resultStr}</pre>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QaConclusionStep({ step }: { step: QaStep }) {
-  const [expanded, setExpanded] = useState(false);
-  const text = step.text ?? "";
-  const truncated = text.length > 150 ? text.slice(0, 150) + "..." : text;
-
-  return (
-    <div className="relative pl-5">
-      <div className="absolute -left-[5px] top-2 w-2 h-2 rounded-full bg-gray-400" />
-      <p className="text-[10px] uppercase text-gray-400 font-medium mb-1.5">
-        Step {step.step} — Conclusion
-      </p>
-      <div className="bg-white/50 rounded-lg p-3">
-        <p className="text-xs text-gray-600 whitespace-pre-wrap">
-          {expanded ? text : truncated}
-        </p>
-        {text.length > 150 && (
-          <button
-            className="text-xs text-indigo-500 hover:text-indigo-700 mt-1"
-            onClick={() => setExpanded(prev => !prev)}
-          >
-            {expanded ? "show less" : "show full"}
-          </button>
-        )}
-      </div>
     </div>
   );
 }

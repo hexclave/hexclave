@@ -11,6 +11,7 @@
     "test": "vitest run",
     "lint": "eslint --ext .ts,.tsx .",
     "clean": "rimraf .next && rimraf node_modules",
+    "seed:demo": "tsx scripts/seed-demo-data.ts",
     "spacetime:generate": "spacetime generate --lang typescript --out-dir src/module_bindings --module-path spacetimedb",
     "spacetime:inject-auth-config": "node scripts/spacetime-auth-config.mjs inject",
     "spacetime:restore-auth-config": "node scripts/spacetime-auth-config.mjs restore",
@@ -19,6 +20,7 @@
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.21",
+    "@hexclave/dashboard-ui-components": "workspace:*",
     "@hexclave/next": "workspace:*",
     "@hexclave/shared": "workspace:*",
     "@openrouter/ai-sdk-provider": "2.2.3",

@@ -115,6 +115,9 @@ export type McpLogEntry = {
   durationMs: number,
   modelId: string,
   errorMessage: string | undefined,
+  context: string | undefined,
+  user: string | undefined,
+  project: string | undefined,
 };
 
 export type GenerationUsageFields = {
