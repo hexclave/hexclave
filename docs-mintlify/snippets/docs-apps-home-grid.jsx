@@ -18,6 +18,7 @@ export const DocsAppsHomeGrid = () => {
   const fallbackApps = [
     { name: "Authentication", href: "/guides/apps/authentication/overview", iconSrc: "/images/app-icons/authentication.svg" },
     { name: "Emails", href: "/guides/apps/emails/overview", iconSrc: "/images/app-icons/emails.svg" },
+    { name: "Deploy", href: "/guides/apps/deploy/overview", iconSrc: "/images/app-icons/deploy.svg" },
     { name: "Payments", href: "/guides/apps/payments/overview", iconSrc: "/images/app-icons/payments.svg" },
     { name: "Analytics", href: "/guides/apps/analytics/overview", iconSrc: "/images/app-icons/analytics.svg" },
     { name: "Teams", href: "/guides/apps/teams/overview", iconSrc: "/images/app-icons/teams.svg" },
