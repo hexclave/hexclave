@@ -221,7 +221,7 @@ describe("TV chart headers", () => {
     ["live-pulse", "Today’s Activity", "Current UTC day"],
     ["audience-momentum", "Audience Lifecycle", "Daily activity · trailing 7 days"],
     ["revenue-payments", "Gross Collected Revenue Momentum", "Cumulative daily trend · trailing 30 days"],
-    ["email-health", "Email Delivery Volume", "Daily send status · trailing 7 days"],
+    ["email-health", "Delivery Outcomes & Queue", "Daily status · trailing 7 days · excludes unconfirmed sends"],
   ] as const)("labels the %s chart and its reporting window", (screenId, title, subtitle) => {
     const snapshot = getTvFixtureSnapshot("project-a", "company-pulse");
     if (snapshot == null) throw new Error("Missing company-pulse fixture");
@@ -608,7 +608,7 @@ describe("TV insight area", () => {
 
   it.each([
     ["revenue-payments", "At least 10 completed payment outcomes are required before Payment Success can be assessed."],
-    ["email-health", "At least 20 confirmed delivery outcomes are required before delivery health can be assessed."],
+    ["email-health", "Completed sends may lack delivery receipts. Delivery health requires at least 20 confirmed outcomes."],
   ] as const)("explains the evidence threshold for %s", (screenId, message) => {
     expect(getTvInsightPresentation({
       screenId,

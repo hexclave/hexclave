@@ -2,6 +2,11 @@
 
 ---
 
+## 9/11/26
+
+- Trusted domains can now include a custom port, e.g. `*.example.com:4250`.
+- Fixed impersonation links and console snippets not navigating correctly.
+
 ## 9/4/26
 
 - Microsoft sign-in no longer asks for admin consent on every login.

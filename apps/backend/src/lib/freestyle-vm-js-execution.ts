@@ -1,12 +1,20 @@
 import type { CreateVmOptions } from "freestyle";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { wait } from "@hexclave/shared/dist/utils/promises";
 import type { ExecuteResult } from "./js-execution-types";
 export { DEFAULT_FREESTYLE_SNAPSHOT_ID } from "./freestyle-vm-constants";
 
 const DEFAULT_EXECUTION_TIMEOUT_MS = 30_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
+const CLEANUP_DELETE_ATTEMPTS = 3;
+const DEFAULT_CLEANUP_RETRY_DELAY_BASE_MS = 500;
 const VM_TTL_GRACE_SECONDS = 5 * 60;
 const RUNTIME_ROOT = "/opt/hexclave-runtime";
+
+type CleanupOptions = {
+  timeoutMs: number,
+  retryDelayBaseMs: number,
+};
 
 type FreestyleExecutionPty = {
   detach: () => void,
@@ -50,12 +58,16 @@ export async function executeJavascriptInFreestyleVm(options: {
   nodeModules: Map<string, string>,
   executionTimeoutMs?: number,
   cleanupTimeoutMs?: number,
+  cleanupRetryDelayBaseMs?: number,
   signal?: AbortSignal,
   scheduleCleanup: (cleanup: Promise<void>) => void,
   onCleanupError: (vmId: string, error: unknown) => void,
 }): Promise<ExecuteResult> {
   const timeoutMs = options.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
-  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
+  const cleanupOptions: CleanupOptions = {
+    timeoutMs: options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
+    retryDelayBaseMs: options.cleanupRetryDelayBaseMs ?? DEFAULT_CLEANUP_RETRY_DELAY_BASE_MS,
+  };
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const executionSignal = options.signal == null
     ? timeoutSignal
@@ -93,7 +105,7 @@ export async function executeJavascriptInFreestyleVm(options: {
       options.scheduleCleanup(deleteFreestyleVmWhenCreated(
         createVmPromise,
         options.onCleanupError,
-        cleanupTimeoutMs,
+        cleanupOptions,
       ));
     }
     throw error;
@@ -153,7 +165,7 @@ export async function executeJavascriptInFreestyleVm(options: {
     const cleanupPromise = deleteFreestyleVmAfterExecution(
       vm,
       options.onCleanupError,
-      cleanupTimeoutMs,
+      cleanupOptions,
     );
     if (executionSignal.aborted) {
       options.scheduleCleanup(cleanupPromise);
@@ -228,20 +240,43 @@ async function runPtyCommand(
 async function deleteFreestyleVmAfterExecution(
   vm: FreestyleExecutionVm,
   onCleanupError: (vmId: string, error: unknown) => void,
-  cleanupTimeoutMs: number,
+  cleanupOptions: CleanupOptions,
 ): Promise<void> {
-  try {
-    // ttlSeconds remains the provider-side backstop; this only bounds request latency.
-    await awaitWithAbortSignal(vm.delete(), AbortSignal.timeout(cleanupTimeoutMs));
-  } catch (error) {
-    onCleanupError(vm.id, error);
+  // ttlSeconds remains the provider-side backstop; this only bounds request latency.
+  // The budget spans all attempts so retries never extend the caller's wait.
+  const cleanupSignal = AbortSignal.timeout(cleanupOptions.timeoutMs);
+  // The delete is usually the first request after the job ran for a while, so
+  // undici's idle keep-alive connection is gone and a fresh TCP connect is
+  // needed. That connect is what fails transiently (`fetch failed`), and a
+  // retry moments later is far cheaper than leaking the VM until its TTL.
+  const errors: unknown[] = [];
+  for (let attempt = 0; attempt < CLEANUP_DELETE_ATTEMPTS; attempt++) {
+    try {
+      await awaitWithAbortSignal(vm.delete(), cleanupSignal);
+      return;
+    } catch (error) {
+      errors.push(error);
+    }
+    if (cleanupSignal.aborted || attempt === CLEANUP_DELETE_ATTEMPTS - 1) break;
+    const delayMs = (Math.random() + 0.5) * cleanupOptions.retryDelayBaseMs * (2 ** attempt);
+    try {
+      await awaitWithAbortSignal(wait(delayMs), cleanupSignal);
+    } catch {
+      // Budget exhausted while backing off; report what we have instead of trying again.
+      break;
+    }
   }
+  onCleanupError(vm.id, new AggregateError(
+    errors,
+    `Freestyle VM deletion failed after ${errors.length} attempt(s)`,
+    { cause: errors[errors.length - 1] },
+  ));
 }
 
 async function deleteFreestyleVmWhenCreated(
   createVmPromise: Promise<FreestyleExecutionVm>,
   onCleanupError: (vmId: string, error: unknown) => void,
-  cleanupTimeoutMs: number,
+  cleanupOptions: CleanupOptions,
 ): Promise<void> {
   let vm: FreestyleExecutionVm;
   try {
@@ -250,7 +285,7 @@ async function deleteFreestyleVmWhenCreated(
     // Creation failed, so there is no VM to own or delete.
     return;
   }
-  await deleteFreestyleVmAfterExecution(vm, onCleanupError, cleanupTimeoutMs);
+  await deleteFreestyleVmAfterExecution(vm, onCleanupError, cleanupOptions);
 }
 
 async function awaitWithAbortSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

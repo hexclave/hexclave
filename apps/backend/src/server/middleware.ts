@@ -57,7 +57,7 @@ function withHexclaveHeaderAliases(headers: string[]): string[] {
 const corsAllowedRequestHeadersWithAliases = withHexclaveHeaderAliases(corsAllowedRequestHeaders);
 const corsAllowedResponseHeadersWithAliases = withHexclaveHeaderAliases(corsAllowedResponseHeaders);
 
-// The configured TV origin is process-scoped, so resolve its fallback chain once
+// The configured TV origin is process-scoped, so resolve the dashboard URL once
 // instead of repeating environment lookups for every request.
 const configuredTvOrigin = getConfiguredTvDisplayOrigin();
 

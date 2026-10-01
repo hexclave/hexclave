@@ -2,6 +2,7 @@ import { getAuthorizedTvDisplay } from "@/lib/tv-mode/displays";
 import { readTvDisplayBearerToken } from "@/lib/tv-mode/read-bearer-token";
 import { resolveTvProfile } from "@/lib/tv-mode/profiles";
 import { buildLiveTvSnapshot } from "@/lib/tv-mode/snapshot";
+import { readTvSnapshotContractVersion } from "@/lib/tv-mode/snapshot-contract";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { TvSnapshotSchema } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import { yupNumber, yupObject, yupString, yupTuple } from "@hexclave/shared/dist/schema-fields";
@@ -17,7 +18,8 @@ export const GET = createSmartRouteHandler({
     bodyType: yupString().oneOf(["json"]).defined(),
     body: TvSnapshotSchema,
   }),
-  handler: async ({ headers }) => {
+  handler: async ({ headers }, fullRequest) => {
+    const contractVersion = readTvSnapshotContractVersion(fullRequest.headers);
     const accessToken = readTvDisplayBearerToken(headers.authorization?.[0]);
     const authorized = await getAuthorizedTvDisplay(accessToken);
     if (authorized == null) throw new StatusError(401, "tv_display_access_invalid");
@@ -30,7 +32,10 @@ export const GET = createSmartRouteHandler({
       tenancy: authorized.tenancy,
       profileId: authorized.display.profileId,
       resolvedProfile: profile,
+      // Paired TV boxes may run an older app.mjs that sends no contract header;
+      // they still need per-screen timings, so durations stay unconditional.
       includeScreenDurations: true,
+      includeEmailSendActivity: contractVersion >= 3,
       forceFinancialRedaction: !exactFinancialsAcknowledged,
     });
     if (snapshot == null) throw new StatusError(409, "tv_display_profile_unavailable");
@@ -52,6 +57,7 @@ export const GET = createSmartRouteHandler({
         profileId: currentAuthorized.display.profileId,
         resolvedProfile: currentProfile,
         includeScreenDurations: true,
+        includeEmailSendActivity: contractVersion >= 3,
         forceFinancialRedaction: true,
       });
       if (snapshot == null) throw new StatusError(409, "tv_display_profile_unavailable");

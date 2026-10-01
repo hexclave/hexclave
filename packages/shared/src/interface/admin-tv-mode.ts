@@ -219,6 +219,34 @@ export const TvRevenuePaymentsScreenSchema = yupObject({
     return screen.sourceStatus !== "insufficient-data" && percent !== null;
   });
 
+export const TvEmailSendActivitySchema = yupObject({
+  sent: yupNumber().integer().min(0).defined(),
+  failed: yupNumber().integer().min(0).defined(),
+  trend: yupArray(yupObject({
+    label: yupString().defined(),
+    primary: yupNumber().integer().min(0).defined(),
+    secondary: yupNumber().integer().min(0).defined(),
+    tertiary: yupNumber().integer().min(0).defined(),
+  }).noUnknown().defined()).defined(),
+}).noUnknown().defined().test({
+  name: "sending-totals",
+  message: "TV sending totals must match their daily series",
+  skipAbsent: true,
+  test: (activity) => {
+    // Yup can run this object test before validating its children; defer to the
+    // field-level errors unless every compared value is already well-typed.
+    if (
+      typeof activity.sent !== "number" || typeof activity.failed !== "number"
+      || !Array.isArray(activity.trend)
+      || !activity.trend.every((point: { primary: unknown, secondary: unknown } | null | undefined) =>
+        point != null && typeof point.primary === "number" && typeof point.secondary === "number")
+    ) return true;
+    return activity.sent === activity.trend.reduce((sum, point) => sum + point.primary, 0)
+      && activity.failed === activity.trend.reduce((sum, point) => sum + point.secondary, 0);
+  },
+});
+export type TvEmailSendActivity = yup.InferType<typeof TvEmailSendActivitySchema>;
+
 export const TvEmailHealthScreenSchema = yupObject({
   id: yupString().oneOf(["email-health"]).defined(),
   ...TvScreenEnvelopeSchema,
@@ -233,6 +261,8 @@ export const TvEmailHealthScreenSchema = yupObject({
     bounceRatePercent: yupNumber().min(0).max(100).nullable().defined(),
     volumeChangePercent: yupNumber().defined(),
     statusTrend: yupArray(TvStackedTrendPointSchema).defined(),
+    // Contract 3 requests opt in; older clients reject unknown response fields.
+    sendActivity: TvEmailSendActivitySchema.optional().default(undefined),
   }).noUnknown().nullable().defined(),
   insight: yupObject({
     kind: yupString().oneOf(["delivery-healthy-volume-up"]).defined(),

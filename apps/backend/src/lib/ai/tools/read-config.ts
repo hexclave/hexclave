@@ -1,6 +1,5 @@
 import { getRenderedBranchConfigQuery } from "@/lib/config";
 import { globalPrismaClient, rawQuery } from "@/prisma-client";
-import { SmartRequestAuth } from "@/route-handlers/smart-request";
 import { DEFAULT_BRANCH_ID } from "@/lib/tenancies";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { tool } from "ai";
@@ -9,21 +8,17 @@ import { z } from "zod";
 export const READ_CONFIG_RESULT_MAX_CHARS = 50_000;
 
 /**
- * Resolves the project/branch whose config should be read. Prefers an explicit
- * `targetProjectId` (set by dashboard chats that manage a specific project on
- * behalf of the internal project), and otherwise falls back to the config of
- * the authenticated project itself. Returns `null` when no concrete project can
- * be resolved (eg. the docs assistant, which has no project context).
+ * Resolves the project/branch whose config should be read. Only an explicit
+ * `targetProjectId` is accepted: the route verifies it via `assertProjectAccess`
+ * before tools are built. There is deliberately no fallback to the caller's own
+ * project, since the AI endpoint accepts client-level auth and the rendered
+ * config contains secrets (OAuth client secrets, email server passwords, etc.).
  */
 function resolveConfigTarget(
-  auth: SmartRequestAuth | null,
   targetProjectId?: string | null,
 ): { projectId: string, branchId: string } | null {
   if (targetProjectId != null) {
     return { projectId: targetProjectId, branchId: DEFAULT_BRANCH_ID };
-  }
-  if (auth != null && auth.project.id !== "internal") {
-    return { projectId: auth.project.id, branchId: auth.branchId };
   }
   return null;
 }
@@ -34,8 +29,8 @@ function resolveConfigTarget(
  * file (auth settings, installed apps, RBAC permissions, teams, payments,
  * emails, etc.). Returns `null` when there is no project context to read from.
  */
-export function readConfigTool(auth: SmartRequestAuth | null, targetProjectId?: string | null) {
-  const target = resolveConfigTarget(auth, targetProjectId);
+export function readConfigTool(targetProjectId?: string | null) {
+  const target = resolveConfigTarget(targetProjectId);
   if (target == null) {
     return null;
   }

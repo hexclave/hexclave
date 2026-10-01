@@ -720,7 +720,7 @@ export function TvPresentation({
 
   return (
     <div
-      className="relative h-dvh min-h-[36rem] w-full overflow-hidden bg-[#070910] font-sans text-white"
+      className="relative h-dvh min-h-0 w-full overflow-hidden bg-[#070910] font-sans text-white"
     >
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_15%,rgba(99,102,241,0.09),transparent_32%),radial-gradient(circle_at_85%_75%,rgba(34,211,238,0.06),transparent_30%)]" />
       {previewData ? (

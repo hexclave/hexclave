@@ -216,20 +216,34 @@ export class TvSnapshotRequestError extends Error {
   }
 }
 
-export async function fetchTvSnapshotOrThrow(
+async function requestTvSnapshot(
   adminApp: object,
   profileId: string,
+  contract: "2" | "3",
   signal?: AbortSignal,
 ): Promise<TvSnapshot> {
   const response = await sendInternalAdminRequest(adminApp, getTvSnapshotPath(profileId), {
     method: "GET",
-    headers: { "x-hexclave-tv-snapshot-contract": "2" },
+    headers: { "x-hexclave-tv-snapshot-contract": contract },
     signal,
   });
   if (!response.ok) throw new TvSnapshotRequestError(response.status);
   return await TvSnapshotSchema.validate(await response.json(), {
     strict: true,
   });
+}
+
+export async function fetchTvSnapshotOrThrow(
+  adminApp: object,
+  profileId: string,
+  signal?: AbortSignal,
+): Promise<TvSnapshot> {
+  const snapshot = await requestTvSnapshot(adminApp, profileId, "3", signal);
+  // A backend that predates contract 3 treats the header as unknown and omits
+  // screenDurations; renegotiate at contract 2 so configured per-screen timings
+  // survive a dashboard/backend deploy skew.
+  if (snapshot.profile.screenDurations == null) return await requestTvSnapshot(adminApp, profileId, "2", signal);
+  return snapshot;
 }
 
 const TvProfileListResponseSchema = yupObject({

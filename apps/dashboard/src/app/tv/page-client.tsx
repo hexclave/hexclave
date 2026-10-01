@@ -1,6 +1,7 @@
 "use client";
 
 import { TvPresentation } from "@/components/tv-mode/tv-presentation";
+import { DesignCard } from "@/components/design-components/card";
 import { getPublicEnvVar } from "@/lib/env";
 import { TvSnapshotRequestError } from "@/lib/hexclave-app-internals";
 import { useTvSnapshotPolling } from "@/lib/tv-mode/live-snapshot";
@@ -14,6 +15,7 @@ import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { BroadcastIcon, LinkBreakIcon, MonitorPlayIcon } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { withTvRequestDeadline } from "../../../public/tv-box/request.mjs";
+import styles from "./pairing-screen.module.css";
 
 const PAIRING_RETRY_INTERVAL_MS = 5_000;
 const PAIRING_REQUEST_TIMEOUT_MS = 12_000;
@@ -82,36 +84,36 @@ async function jsonRequestWithTimeout(path: string, options: RequestInit): Promi
   }, PAIRING_REQUEST_TIMEOUT_MS, options.signal);
 }
 
-function PairingScreen({ challenge, error }: { challenge: TvDisplayPairingChallenge | null, error: boolean }) {
+export function PairingScreen({ challenge, error }: { challenge: TvDisplayPairingChallenge | null, error: boolean }) {
   const code = challenge?.pairingCode;
   return (
-    <main className="flex min-h-dvh items-center justify-center bg-[#070910] p-8 text-white">
-      <div className="w-full max-w-3xl rounded-[2.5rem] border border-white/10 bg-white/[0.035] p-10 text-center shadow-2xl backdrop-blur-2xl sm:p-16">
-        <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-3xl border border-cyan-300/15 bg-cyan-300/10 text-cyan-200">
-          {error ? <LinkBreakIcon className="h-10 w-10" weight="fill" /> : <MonitorPlayIcon className="h-10 w-10" weight="fill" />}
+    <main className={styles.stage}>
+      <DesignCard glassmorphic={false} className={`${styles.card} bg-transparent text-foreground`} contentClassName={styles.content}>
+        <div className={styles.icon} aria-hidden="true">
+          {error ? <LinkBreakIcon weight="fill" /> : <MonitorPlayIcon weight="fill" />}
         </div>
-        <p className="mt-8 text-sm font-semibold uppercase tracking-[0.24em] text-cyan-200/70">Hexclave TV Mode</p>
-        <h1 className="mt-4 text-4xl font-semibold tracking-[-0.045em] sm:text-6xl">Launch TV Mode</h1>
-        <p className="mx-auto mt-5 max-w-xl text-base leading-relaxed text-white/45 sm:text-lg">
+        <p className={styles.kicker}>Hexclave TV Mode</p>
+        <h1 className={styles.title}>Launch TV Mode</h1>
+        <p className={styles.copy}>
           Open TV Mode in the Hexclave dashboard, choose Pair Display, and enter this secure code to connect the screen.
         </p>
-        <div className="mt-10 rounded-3xl border border-white/10 bg-black/30 px-6 py-8">
+        <div className={styles.codePanel} aria-live="polite" aria-atomic="true">
           {code == null ? (
-            <div className="flex items-center justify-center gap-3 text-white/55">
-              <BroadcastIcon className="h-5 w-5 animate-pulse motion-reduce:animate-none" weight="fill" />
+            <div className={styles.pending}>
+              <BroadcastIcon className="h-5 w-5 shrink-0" weight="fill" aria-hidden="true" />
               {error ? "We couldn’t create a pairing code. Retrying automatically…" : "Preparing a secure pairing code…"}
             </div>
           ) : (
             <>
-              <p className="font-mono text-[clamp(2.5rem,8vw,5.5rem)] font-semibold tracking-[0.12em] text-white">
+              <p className={styles.code}>
                 {code.slice(0, 4)}-{code.slice(4)}
               </p>
-              {error ? <p className="mt-3 text-sm text-amber-200/70">Connection interrupted. Retrying automatically…</p> : null}
+              {error ? <p className={styles.warning}>Connection interrupted. Retrying automatically…</p> : null}
             </>
           )}
         </div>
-        <p className="mt-6 text-sm text-white/30">Codes expire after 10 minutes. Project data stays unavailable until an administrator approves this display.</p>
-      </div>
+        <p className={styles.footnote}>Codes expire after 10 minutes. Project data stays unavailable until an administrator approves this display.</p>
+      </DesignCard>
     </main>
   );
 }

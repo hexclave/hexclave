@@ -4,8 +4,50 @@ import {
   TvSnapshotSchema,
 } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import { it } from "../../../../helpers";
-import { Project, niceBackendFetch } from "../../../backend-helpers";
+import { withPortPrefix } from "../../../../helpers/ports";
+import { Project, backendContext, niceBackendFetch, waitForOutboxEmailWithStatus } from "../../../backend-helpers";
 import { createLiveModeOneTimePurchaseTransaction } from "../../../helpers/payments";
+
+it("shows successful SMTP sends and a nonempty TV graph without delivery receipts", async ({ expect }) => {
+  await Project.createAndSwitch({
+    config: { email_config: {
+      type: "standard", host: "localhost", port: Number(withPortPrefix("29")),
+      username: "test", password: "test", sender_name: "Test Project", sender_email: "test@example.com",
+    } },
+  });
+  await Project.updateConfig({ "apps.installed.emails.enabled": true });
+  const user = await niceBackendFetch("/api/v1/users", {
+    method: "POST", accessType: "server",
+    body: { primary_email: backendContext.value.mailbox.emailAddress, primary_email_verified: true },
+  });
+  expect(user.status).toBe(201);
+  const subject = "TV SMTP activity regression";
+  const send = await niceBackendFetch("/api/v1/emails/send-email", {
+    method: "POST", accessType: "server",
+    body: { user_ids: [user.body.id], html: "<p>TV sending test</p>", subject, notification_category_name: "Transactional" },
+  });
+  expect(send.status).toBe(200);
+  await waitForOutboxEmailWithStatus(subject, "sent");
+
+  for (const contract of [undefined, "2", "3"]) {
+    const response = await niceBackendFetch("/api/v1/internal/tv-mode/profiles/company-pulse/snapshot", {
+      accessType: "admin",
+      headers: contract == null ? {} : { "x-hexclave-tv-snapshot-contract": contract },
+    });
+    expect(response.status).toBe(200);
+    const snapshot = await TvSnapshotSchema.validate(response.body, { strict: true });
+    const email = snapshot.screens.find(screen => screen.id === "email-health");
+    if (email?.data == null) throw new Error("Sent email must produce a TV email data screen");
+    expect(email.data).toMatchObject({ sent: 1, delivered: 0, assessableSends: 0, deliveryRatePercent: null });
+    if (contract === "3") {
+      expect(email.data.sendActivity).toMatchObject({ sent: 1, failed: 0 });
+      expect(email.data.sendActivity?.trend.reduce((sum, point) => sum + point.primary, 0)).toBe(1);
+      expect(snapshot.profile.screenDurations).toHaveLength(snapshot.profile.playlist.length);
+    } else {
+      expect(email.data).not.toHaveProperty("sendActivity");
+    }
+  }
+});
 
 it("returns one validated, project-scoped TV snapshot for an admin", async ({ expect }) => {
   const firstProject = await Project.createAndSwitch();

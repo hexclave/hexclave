@@ -27,6 +27,8 @@ Apply the organization's approval, custody, and audit process around that comman
 
 Connect HDMI and power, then join the temporary TV Box network using the credentials shown on the display. If the setup page does not open automatically, visit `http://10.42.0.1` while connected to that network. Select the destination Wi-Fi, enter its password, and submit once. Reconnect the phone or laptop to its normal network after the TV Box connects; if the TV shows a pairing code, enter it in the project's TV Mode display management page. Explain the distinction between the temporary hotspot password shown on HDMI and the destination Wi-Fi password entered in the portal.
 
+Pilot and test images both show an eight-character temporary hotspot password using uppercase letters and digits chosen to avoid easily confused characters. Type it exactly as displayed. Each new setup session generates a fresh password; there is no shared default password. This does not change the destination Wi-Fi password or display pairing code.
+
 For an incorrect **hotspot password**, the phone must be denied access but remain able to retry with the currently displayed password without a box reboot. Forget only the saved TV Box network on the phone if it keeps attempting an outdated password.
 
 For an incorrect **destination Wi-Fi password**:

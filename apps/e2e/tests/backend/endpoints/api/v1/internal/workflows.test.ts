@@ -160,7 +160,7 @@ export default workflow("${workflowId}", {
   onConflict: "skip",
 }, async (event, step) => {
   const doubled = await step.run("double", () => event.data.amount * 2);
-  await step.sleep("short-nap", "1s");
+  await step.sleep("nap", event.data.nap);
   console.log("processed order", event.data.orderId);
 });
 `;
@@ -195,37 +195,52 @@ export default workflow("${workflowId}", {
 
       // Duplicate delivery: two events mapping to the same runKey while the
       // first run is active -> onConflict "skip" collapses them to one run.
-      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21 });
-      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21 });
+      // The engine also ticks in the background (run-cron-jobs), so the two
+      // events are not guaranteed to land in the same event batch, and the
+      // collapse only holds while the first run is still active when the
+      // second event is dispatched. A one-hour nap keeps that run active for
+      // the whole test, which makes the collapse independent of tick timing.
+      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21, nap: "1h" });
+      await sendCustomEvent(expect, eventName, { orderId: "o1", amount: 21, nap: "1h" });
+      await pollWithTicks(expect, async () => {
+        const { runs } = await listRuns(workflowId);
+        return runs.find((run) => run.run_key === "order:o1" && run.state === "sleeping") ?? null;
+      }, { timeoutMs: 120_000 });
 
+      // A distinct key runs to completion through the same steps. The outbox
+      // dispatches in event order, so once this run exists the duplicate
+      // above has already been dispatched (and skipped).
+      await sendCustomEvent(expect, eventName, { orderId: "o2", amount: 21, nap: "1s" });
       const completedRun = await pollWithTicks(expect, async () => {
         const { runs } = await listRuns(workflowId);
-        return runs.find((run) => run.run_key === "order:o1" && run.state === "completed") ?? null;
+        return runs.find((run) => run.run_key === "order:o2" && run.state === "completed") ?? null;
       }, { timeoutMs: 120_000 });
 
       const { runs: allRunsForKey } = await listRuns(workflowId, { run_key: "order:o1" });
       expect(allRunsForKey).toHaveLength(1);
+      expect(allRunsForKey[0]).toMatchObject({ state: "sleeping", current_step_id: "nap" });
 
-      // The summary's total matches the historical runs grid, while the
-      // active/sleeping fields remain zero after the run completes.
+      // The summary's total matches the historical runs grid; the completed
+      // run drops out of the active/sleeping fields, which only count the
+      // run still napping (sleeping, not queued/running).
       const afterRunListResponse = await niceBackendFetch("/api/v1/internal/workflows", { method: "GET", accessType: "admin" });
       const afterRunSummary = afterRunListResponse.body.workflows.find((workflow: { id: string }) => workflow.id === workflowId);
-      expect(afterRunSummary).toMatchObject({ stats: { total_runs: 1, active_runs: 0, sleeping_runs: 0 } });
+      expect(afterRunSummary).toMatchObject({ stats: { total_runs: 2, active_runs: 0, sleeping_runs: 1 } });
 
       // The Admin SDK's includeState option is backed by this wire query.
       // It must return full details for every listed run rather than only
       // widening the TypeScript type.
       const { runs: runsWithState } = await listRuns(workflowId, {
-        run_key: "order:o1",
+        run_key: "order:o2",
         include_state: "true",
       });
       expect(runsWithState).toHaveLength(1);
       expect(runsWithState[0]).toMatchObject({
         id: completedRun.id,
-        trigger_payload: { orderId: "o1", amount: 21 },
+        trigger_payload: { orderId: "o2", amount: 21, nap: "1s" },
         steps: expect.arrayContaining([
           expect.objectContaining({ step_key: "double", result: 42 }),
-          expect.objectContaining({ step_key: "short-nap", kind: "sleep" }),
+          expect.objectContaining({ step_key: "nap", kind: "sleep" }),
         ]),
         step_attempts: expect.any(Array),
       });
@@ -239,19 +254,19 @@ export default workflow("${workflowId}", {
       expect(details).toMatchObject({
         id: completedRun.id,
         workflow_id: workflowId,
-        run_key: "order:o1",
+        run_key: "order:o2",
         state: "completed",
         version: 1,
         trigger_type: `custom.${eventName}`,
         steps_recorded: 2,
         error_summary: null,
       });
-      expect(details.trigger_payload).toEqual({ orderId: "o1", amount: 21 });
+      expect(details.trigger_payload).toEqual({ orderId: "o2", amount: 21, nap: "1s" });
       const stepsByKey = new Map<string, any>(details.steps.map((step: any) => [step.step_key, step]));
       expect(stepsByKey.get("double")).toMatchObject({ kind: "run", result: 42, executed_at_version: 1 });
-      expect(stepsByKey.get("short-nap")).toMatchObject({ kind: "sleep" });
+      expect(stepsByKey.get("nap")).toMatchObject({ kind: "sleep" });
       const logs = details.step_attempts.map((attempt: any) => attempt.logs ?? "").join("\n");
-      expect(logs).toContain("processed order o1");
+      expect(logs).toContain("processed order o2");
 
       const invalidRunFilters: Record<string, string>[] = [{ version: "not-a-number" }, { limit: "1.5" }, { limit: "0" }];
       for (const query of invalidRunFilters) {

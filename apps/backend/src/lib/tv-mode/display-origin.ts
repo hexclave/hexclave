@@ -1,11 +1,8 @@
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 
 export function getConfiguredTvDisplayOrigin(): string {
-  return getEnvVariable(
-    "HEXCLAVE_TV_DISPLAY_ORIGIN",
-    getEnvVariable(
-      "NEXT_PUBLIC_BROWSER_STACK_DASHBOARD_URL",
-      getEnvVariable("NEXT_PUBLIC_STACK_DASHBOARD_URL", ""),
-    ),
-  ).trim();
+  // TV runs on the dashboard origin. Use the same canonical setting as other
+  // backend dashboard integrations so stale TV/browser overrides cannot select
+  // a different credentialed origin. The shared reader supports the legacy alias.
+  return getEnvVariable("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "").trim();
 }

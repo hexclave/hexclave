@@ -1,4 +1,5 @@
 import { buildLiveTvSnapshot } from "@/lib/tv-mode/snapshot";
+import { readTvSnapshotContractVersion } from "@/lib/tv-mode/snapshot-contract";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { TvSnapshotSchema } from "@hexclave/shared/dist/interface/admin-tv-mode";
 import {
@@ -27,12 +28,12 @@ export const GET = createSmartRouteHandler({
     body: TvSnapshotSchema,
   }),
   handler: async ({ auth: { tenancy }, params: { profileId } }, fullRequest) => {
-    const snapshotContract = fullRequest.headers["x-hexclave-tv-snapshot-contract"]?.at(0)
-      ?? fullRequest.headers["x-stack-tv-snapshot-contract"]?.at(0);
+    const contractVersion = readTvSnapshotContractVersion(fullRequest.headers);
     const snapshot = await buildLiveTvSnapshot({
       tenancy,
       profileId,
-      includeScreenDurations: snapshotContract === "2",
+      includeScreenDurations: contractVersion >= 2,
+      includeEmailSendActivity: contractVersion >= 3,
     });
     if (snapshot == null) {
       throw new StatusError(StatusError.NotFound, "No TV presentation profile found with the given ID.");
