@@ -2,6 +2,12 @@
 
 ---
 
+## 9/18/26
+
+![Hexclave Deploy config defining a web service and a Postgres database](https://raw.githubusercontent.com/hexclave/hexclave/dev/apps/dashboard/public/assets/changelog-deploy.webp)
+
+- Hexclave Deploy: define and deploy your services and databases from a single `hexclave.deploy.ts` file.
+
 ## 9/11/26
 
 - Trusted domains can now include a custom port, e.g. `*.example.com:4250`.
