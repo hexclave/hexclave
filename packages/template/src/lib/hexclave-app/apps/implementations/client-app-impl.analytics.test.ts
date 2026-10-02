@@ -535,27 +535,30 @@ describe("browser analytics startup", () => {
       throw new Error("Hexclave browser OpenTelemetry is already configured for a different project or resource on this page");
     });
 
-    const parent = analytics.startSpan("checkout");
-    expect(isW3cTraceId(parent.traceId)).toBe(true);
-    expect(isW3cSpanId(parent.spanId)).toBe(true);
-    expect(() => analytics.startSpan("")).toThrow();
+    try {
+      const parent = analytics.startSpan("checkout");
+      expect(isW3cTraceId(parent.traceId)).toBe(true);
+      expect(isW3cSpanId(parent.spanId)).toBe(true);
+      expect(() => analytics.startSpan("")).toThrow();
 
-    const child = parent.startSpan("db.query");
-    expect(child.traceId).toBe(parent.traceId);
-    expect(isW3cSpanId(child.spanId)).toBe(true);
-    const detached = parent.startSpan("detached", { root: true });
-    expect(detached.traceId).not.toBe(parent.traceId);
+      const child = parent.startSpan("db.query");
+      expect(child.traceId).toBe(parent.traceId);
+      expect(isW3cSpanId(child.spanId)).toBe(true);
+      const detached = parent.startSpan("detached", { root: true });
+      expect(detached.traceId).not.toBe(parent.traceId);
 
-    const ambientChild = await parent.run(() => analytics.startSpan("ambient"));
-    expect(ambientChild.traceId).toBe(parent.traceId);
+      const ambientChild = await parent.run(() => analytics.startSpan("ambient"));
+      expect(ambientChild.traceId).toBe(parent.traceId);
 
-    analytics.setGlobalSpan(parent);
-    await parent.trackEvent("step", { n: 1 });
-    await Promise.all([child.end(), detached.end(), ambientChild.end(), parent.end()]);
-    await analytics.flush();
-    expect(exporter.getFinishedSpans()).toEqual([]);
-    trace.disable();
-    context.disable();
+      analytics.setGlobalSpan(parent);
+      await parent.trackEvent("step", { n: 1 });
+      await Promise.all([child.end(), detached.end(), ambientChild.end(), parent.end()]);
+      await analytics.flush();
+      expect(exporter.getFinishedSpans()).toEqual([]);
+    } finally {
+      trace.disable();
+      context.disable();
+    }
   });
 
   it("routes console.error promotion through the shared capture policy (dedupe + ignores)", async () => {
