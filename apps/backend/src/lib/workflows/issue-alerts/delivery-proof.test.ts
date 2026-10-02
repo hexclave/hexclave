@@ -254,7 +254,8 @@ describe.sequential("issue alert workflow delivery proof", () => {
       },
     });
     recipientOwnerTeamId = ownerTeamId;
-    tenancy = { ...internalTenancy, project: { ...internalTenancy.project, owner_team_id: ownerTeamId } };
+    const project: Tenancy["project"] & { ownerTeamId: string } = { ...internalTenancy.project, ownerTeamId, owner_team_id: ownerTeamId };
+    tenancy = { ...internalTenancy, project };
     scope = { tenancyId: tenancy.id, projectId: tenancy.project.id, branchId: tenancy.branchId };
     service = new IssueAlertPersistenceService();
     recipientIds = [randomUUID(), randomUUID()];
