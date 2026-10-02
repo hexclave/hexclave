@@ -641,7 +641,7 @@ describe("managed browser OpenTelemetry", () => {
   });
 
   it("bounds managed forceFlush while retaining a timed-out batch for delivery", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"] });
     let useRecoveryResponse = false;
     const blockedResponse = new Promise<Response>(() => {});
     const fetchMock = vi.fn(async () => useRecoveryResponse
