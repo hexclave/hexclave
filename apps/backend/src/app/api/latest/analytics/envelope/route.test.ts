@@ -1,7 +1,7 @@
 import type { Tenancy } from "@/lib/tenancies";
 import type { SmartRequest } from "@/route-handlers/smart-request";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseErrorIngestEnvelope } from "@/lib/error-ingest";
 import { POST as ingestEnvelope } from "./route";
 
@@ -78,11 +78,17 @@ function request(body: unknown): SmartRequest {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-08-06T00:00:05.000Z"));
   vi.clearAllMocks();
   vi.mocked(parseErrorIngestEnvelope).mockClear();
   mocks.arePlanLimitsEnforced.mockReturnValue(true);
   mocks.getBillingTeamId.mockReturnValue("billing-team");
   mocks.tryDecreasePlanItemQuantities.mockResolvedValue({ insufficientItemId: null, createdChangeIds: [] });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 function sentryEnvelopeBytes(sentAt = "2026-08-06T00:00:02.000Z"): Uint8Array {
@@ -164,6 +170,7 @@ describe("sentry envelope parse boundary", () => {
   });
 
   it("uses accepted item time when the envelope sent_at is malformed", async () => {
+    vi.setSystemTime(new Date("2025-08-06T01:46:45.000Z"));
     await ingestEnvelope.invoke(request(sentryEnvelopeBytes("not-a-date")));
 
     expect(mocks.tryDecreasePlanItemQuantities).toHaveBeenCalledWith("billing-team", expect.arrayContaining([

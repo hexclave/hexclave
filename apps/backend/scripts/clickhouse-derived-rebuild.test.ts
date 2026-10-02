@@ -106,9 +106,13 @@ describe("ensureDerivedRollupCurrent (integration)", () => {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     })();
-    const rebuilt = await ensureDerivedRollupCurrent(client, spec, FAST_TIMING);
-    done = true;
-    await load;
+    let rebuilt: boolean;
+    try {
+      rebuilt = await ensureDerivedRollupCurrent(client, spec, FAST_TIMING);
+    } finally {
+      done = true;
+      await load;
+    }
     expect(minimumSeen).toBeGreaterThanOrEqual(floor);
     return rebuilt;
   };

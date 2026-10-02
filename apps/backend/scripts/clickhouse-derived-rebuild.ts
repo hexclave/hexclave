@@ -156,7 +156,8 @@ async function dropStaleObjects(client: ClickHouseClient, spec: DerivedRollupSpe
   const stale = (await listObjects(client, spec)).filter((row) => row.name !== spec.name && !keep.has(row.name));
   // Views first so nothing writes into a table while it is being dropped.
   for (const row of stale.filter((r) => r.engine === "MaterializedView" || r.engine === "View")) {
-    await client.command({ query: `DROP VIEW IF EXISTS ${spec.database}.${row.name}` });
+    const kind = row.engine === "MaterializedView" ? "TABLE" : "VIEW";
+    await client.command({ query: `DROP ${kind} IF EXISTS ${spec.database}.${row.name}` });
   }
   for (const row of stale.filter((r) => r.engine !== "MaterializedView" && r.engine !== "View")) {
     await client.command({ query: `DROP TABLE IF EXISTS ${spec.database}.${row.name} SYNC` });
@@ -178,7 +179,7 @@ async function attachMaterializedView(
     // A recorded cutoff without its view means the process died in between;
     // rows at or after that cutoff may already have been missed, so restart
     // this version from scratch rather than trusting it.
-    await client.command({ query: `DROP VIEW IF EXISTS ${spec.database}.${names.materializedView}` });
+    await client.command({ query: `DROP TABLE IF EXISTS ${spec.database}.${names.materializedView}` });
     await client.command({ query: `DROP TABLE IF EXISTS ${spec.database}.${names.staging} SYNC` });
     await client.command({ query: `DROP TABLE IF EXISTS ${spec.database}.${names.storage} SYNC` });
     await client.command({
@@ -199,7 +200,7 @@ async function attachMaterializedView(
     });
     if (await serverNow(client, 0) < cutoff) return cutoff;
     // Attaching took longer than the lead time; the same reasoning applies.
-    await client.command({ query: `DROP VIEW IF EXISTS ${spec.database}.${names.materializedView}` });
+    await client.command({ query: `DROP TABLE IF EXISTS ${spec.database}.${names.materializedView}` });
   }
 }
 
@@ -264,7 +265,7 @@ async function switchReaders(
     await client.command({ query: readerViewSql(spec, spec.name, names.storage, true) });
   } else {
     await client.command({ query: readerViewSql(spec, names.legacySwap, names.storage, true) });
-    await client.command({ query: `DROP VIEW IF EXISTS ${spec.database}.${spec.legacyMaterializedView}` });
+    await client.command({ query: `DROP TABLE IF EXISTS ${spec.database}.${spec.legacyMaterializedView}` });
     await client.command({ query: `EXCHANGE TABLES ${spec.database}.${spec.name} AND ${spec.database}.${names.legacySwap}` });
   }
 }

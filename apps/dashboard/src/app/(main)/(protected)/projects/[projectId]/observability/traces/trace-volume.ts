@@ -37,6 +37,7 @@ SELECT
 FROM default.trace_roots AS r
 WHERE r.started_at >= range_start
   AND r.started_at < range_end + ${granularity.stepSql}
+  AND r.page_view_span_id IS NULL
   ${serviceCondition}
 GROUP BY bucket_start
 ORDER BY bucket_start ASC

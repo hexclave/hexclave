@@ -575,9 +575,24 @@ async function processWorkflowEvents(tenancyCache: Map<string, Tenancy | null>, 
         if (processedEveryDefinition && skippedPausedWorkflowIds.size > 0) {
           // A resume that commits after the initial pause snapshot must keep the
           // event pending; otherwise marking it processed would permanently drop
-          // the resumed workflow's run.
-          const currentPausedWorkflowIds = await listPausedWorkflowIdsForTenancy(event.tenancyId);
-          processedEveryDefinition = !didAnySkippedWorkflowResume(skippedPausedWorkflowIds, currentPausedWorkflowIds);
+          // the resumed workflow's run. FOR SHARE makes a concurrent resume either
+          // visible here or wait until processedAt has committed.
+          const marked = await retryTransaction(globalPrismaClient, async (tx) => {
+            const rows = await tx.$queryRaw<{ workflowId: string }[]>(Prisma.sql`
+              SELECT "workflowId" FROM "WorkflowDefinition"
+              WHERE "tenancyId" = ${event.tenancyId}::uuid AND "pausedAt" IS NOT NULL
+              FOR SHARE
+            `);
+            const currentPausedWorkflowIds = new Set(rows.map((row) => row.workflowId));
+            if (didAnySkippedWorkflowResume(skippedPausedWorkflowIds, currentPausedWorkflowIds)) return false;
+            await tx.workflowEvent.update({
+              where: { tenancyId_id: { tenancyId: event.tenancyId, id: event.id } },
+              data: { processedAt: new Date() },
+            });
+            return true;
+          });
+          if (!marked) break;
+          continue;
         }
         if (!processedEveryDefinition) break;
       }

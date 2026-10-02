@@ -1,5 +1,5 @@
 import type { SmartRequest } from "@/route-handlers/smart-request";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   arePlanLimitsEnforced: vi.fn(() => true),
@@ -97,11 +97,17 @@ function validateBatchRequest(body: unknown) {
 
 describe("analytics batch data contract", () => {
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(LEGACY_BODY.sent_at_ms + 5_000);
     vi.clearAllMocks();
     mocks.arePlanLimitsEnforced.mockReturnValue(true);
     mocks.getBillingTeamId.mockReturnValue("billing-team");
     mocks.findRecentSessionReplay.mockResolvedValue(null);
     mocks.tryDecreasePlanItemQuantities.mockResolvedValue({ insufficientItemId: null, createdChangeIds: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("accepts any JSON data on batches — old SDKs hold that contract forever", async () => {

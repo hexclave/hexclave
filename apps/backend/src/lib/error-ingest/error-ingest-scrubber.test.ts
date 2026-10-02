@@ -71,6 +71,12 @@ describe("scrubErrorIngestPayload", () => {
     expect(result.value).toEqual({ message: "connect failed auth: [Filtered] auth=[Filtered]" });
   });
 
+  it("filters authentication assignments without matching longer identifiers", () => {
+    const result = scrubErrorIngestPayload({ message: "authentication=s3cret oauth: disabled" });
+
+    expect(result.value).toEqual({ message: "authentication=[Filtered] oauth: disabled" });
+  });
+
   it("filters quoted credentials following authorization schemes", () => {
     const result = scrubErrorIngestPayload({
       message: String.raw`authorization=Bearer "two words,still secret" credential=Basic 'alpha;beta'`,
