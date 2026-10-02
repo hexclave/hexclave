@@ -148,6 +148,35 @@ describe("plan metering persistence", () => {
     expect(mocks.deleteMany).not.toHaveBeenCalled();
   });
 
+  it("zeroes posted Bulldozer rows when the Postgres transaction fails to commit", async () => {
+    const commitError = new Error("Transaction timed out");
+    const committedFindMany = vi.fn().mockResolvedValue([]);
+    mocks.getPrismaClientForTenancy.mockResolvedValue({ itemQuantityChange: { findMany: committedFindMany } });
+    mocks.retryTransaction.mockImplementationOnce(async (_prisma, callback) => {
+      await callback({
+        $executeRaw: mocks.executeRaw,
+        itemQuantityChange: {
+          createMany: mocks.createMany,
+          deleteMany: mocks.deleteMany,
+          findMany: mocks.findMany,
+        },
+      });
+      throw commitError;
+    });
+
+    await expect(tryDecreasePlanItemQuantities("billing-team", [{
+      itemId: ITEM_IDS.analyticsEvents,
+      quantity: 2,
+    }])).rejects.toBe(commitError);
+
+    const postedChange = mocks.bulldozerWriteItemQuantityChanges.mock.calls[0][0][0];
+    expect(committedFindMany).toHaveBeenCalledWith({
+      where: { tenancyId: "internal-tenancy", id: { in: [postedChange.id] } },
+      select: { id: true },
+    });
+    expect(mocks.bulldozerWriteItemQuantityChanges).toHaveBeenNthCalledWith(2, [{ ...postedChange, quantity: 0 }]);
+  });
+
   it("refuses a debit that would take a plan item below zero", async () => {
     mocks.getItemQuantitiesForCustomer.mockResolvedValueOnce({
       [ITEM_IDS.analyticsEvents]: 1,

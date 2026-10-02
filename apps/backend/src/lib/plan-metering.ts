@@ -4,7 +4,7 @@ import { getItemQuantitiesForCustomer } from "@/lib/payments/customer-data";
 import { getPrismaClientForTenancy, retryTransaction, type PrismaClientTransaction } from "@/prisma-client";
 import { KnownErrors } from "@hexclave/shared";
 import { ITEM_IDS } from "@hexclave/shared/dist/plans";
-import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { getOrUndefined } from "@hexclave/shared/dist/utils/objects";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { typedToUppercase } from "@hexclave/shared/dist/utils/strings";
@@ -69,6 +69,39 @@ async function withPlanMeteringCustomerQueue<T>(
     if (planMeteringCustomerQueues.get(key) === tail) {
       planMeteringCustomerQueues.delete(key);
     }
+  }
+}
+
+// Bulldozer is written before the Postgres transaction commits so the advisory
+// lock covers the whole read-check-write. If the transaction ultimately fails,
+// zero out any posted rows that did not commit so Bulldozer never keeps a debit
+// that Postgres does not have.
+async function withPostedChangeCompensation<T>(
+  prisma: Awaited<ReturnType<typeof getPrismaClientForTenancy>>,
+  getPostedChanges: () => readonly PlanItemQuantityChange[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    const posted = getPostedChanges();
+    if (posted.length > 0) {
+      const compensation = await Result.fromPromise((async () => {
+        const committed = await prisma.itemQuantityChange.findMany({
+          where: { tenancyId: posted[0].tenancyId, id: { in: posted.map(({ id }) => id) } },
+          select: { id: true },
+        });
+        const committedIds = new Set(committed.map(({ id }) => id));
+        const uncommitted = posted.filter(({ id }) => !committedIds.has(id));
+        if (uncommitted.length > 0) {
+          await bulldozerWriteItemQuantityChanges(uncommitted.map((change) => ({ ...change, quantity: 0 })));
+        }
+      })());
+      if (compensation.status === "error") {
+        captureError("plan-metering-bulldozer-compensation", compensation.error);
+      }
+    }
+    throw error;
   }
 }
 
@@ -193,7 +226,8 @@ export async function tryDecreasePlanItemQuantities(
   // The in-process queue keeps same-instance callers from each holding a pool
   // connection while blocked on the advisory lock; the lock itself provides
   // cross-instance serialization of the read-check-write sequence.
-  return await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => await retryTransaction(prisma, async (tx) => {
+  let postedChanges: PlanItemQuantityChange[] = [];
+  return await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => await withPostedChangeCompensation(prisma, () => postedChanges, async () => await retryTransaction(prisma, async (tx) => {
     await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
 
     const existingChanges = await tx.itemQuantityChange.findMany({
@@ -231,9 +265,10 @@ export async function tryDecreasePlanItemQuantities(
       throw persistResult.error;
     }
 
+    postedChanges = ownedChanges;
     await bulldozerWriteItemQuantityChanges(ownedChanges);
     return { insufficientItemId: null, createdChangeIds: ownedChanges.map(({ id }) => id) };
-  }));
+  })));
 }
 
 export async function rollbackPlanItemDebits(
