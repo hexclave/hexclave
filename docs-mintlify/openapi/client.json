@@ -317,9 +317,6 @@
                             "string",
                             "null"
                           ],
-                          "enum": [
-                            null
-                          ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
                         }
@@ -700,9 +697,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -1276,9 +1270,6 @@
                             "string",
                             "null"
                           ],
-                          "enum": [
-                            null
-                          ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
                         }
@@ -1395,9 +1386,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -2151,9 +2139,6 @@
                             "string",
                             "null"
                           ],
-                          "enum": [
-                            null
-                          ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
                         }
@@ -2249,6 +2234,134 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/issues/search-views/{view_id}": {
+      "put": {
+        "summary": "Update a saved issue search view",
+        "description": "Updates a saved issue-search filter only when the authenticated user owns it or the caller has explicit admin access.",
+        "parameters": [
+          {
+            "name": "view_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "visibility": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "project"
+                    ]
+                  },
+                  "query": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "name",
+                  "visibility",
+                  "query"
+                ],
+                "example": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "Issues"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/issues/search-views/{view_id}",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "schema_version": {
+                      "type": "number"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "project"
+                      ]
+                    },
+                    "owner_user_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "query": {
+                      "type": "object"
+                    },
+                    "created_at_millis": {
+                      "type": "integer"
+                    },
+                    "updated_at_millis": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "schema_version",
+                    "name",
+                    "visibility",
+                    "query",
+                    "created_at_millis",
+                    "updated_at_millis"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a saved issue search view",
+        "description": "Deletes a saved issue-search filter only when the authenticated user owns it or the caller has explicit admin access.",
+        "parameters": [
+          {
+            "name": "view_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Issues"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/issues/search-views/{view_id}",
+        "responses": {
+          "204": {
+            "description": "No content"
           }
         }
       }
@@ -2719,9 +2832,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -4193,9 +4303,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ]
                     },
                     "project_id": {
@@ -4205,9 +4312,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ]
                     },
                     "already_bought_non_stackable": {
@@ -4345,9 +4449,6 @@
                             "string",
                             "null"
                           ],
-                          "enum": [
-                            null
-                          ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
                         }
@@ -4466,9 +4567,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -4621,27 +4719,18 @@
                                 "type": [
                                   "string",
                                   "null"
-                                ],
-                                "enum": [
-                                  null
                                 ]
                               },
                               "regionCode": {
                                 "type": [
                                   "string",
                                   "null"
-                                ],
-                                "enum": [
-                                  null
                                 ]
                               },
                               "cityName": {
                                 "type": [
                                   "string",
                                   "null"
-                                ],
-                                "enum": [
-                                  null
                                 ]
                               },
                               "latitude": {
@@ -4660,9 +4749,6 @@
                                 "type": [
                                   "string",
                                   "null"
-                                ],
-                                "enum": [
-                                  null
                                 ]
                               }
                             },
@@ -4686,9 +4772,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -4910,9 +4993,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -5312,9 +5392,6 @@
                               "string",
                               "null"
                             ],
-                            "enum": [
-                              null
-                            ],
                             "example": "John Doe",
                             "description": "Human-readable team member display name. This is not a unique identifier. Note that this is separate from the display_name of the user."
                           },
@@ -5322,9 +5399,6 @@
                             "type": [
                               "string",
                               "null"
-                            ],
-                            "enum": [
-                              null
                             ],
                             "example": "https://example.com/image.jpg",
                             "description": "URL of the profile image for team member. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -5343,9 +5417,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -5416,9 +5487,6 @@
                         "string",
                         "null"
                       ],
-                      "enum": [
-                        null
-                      ],
                       "example": "John Doe",
                       "description": "Human-readable team member display name. This is not a unique identifier. Note that this is separate from the display_name of the user."
                     },
@@ -5426,9 +5494,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "https://example.com/image.jpg",
                       "description": "URL of the profile image for team member. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -5485,9 +5550,6 @@
                       "string",
                       "null"
                     ],
-                    "enum": [
-                      null
-                    ],
                     "example": "https://example.com/image.jpg",
                     "description": "URL of the profile image for team member. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                   }
@@ -5527,9 +5589,6 @@
                         "string",
                         "null"
                       ],
-                      "enum": [
-                        null
-                      ],
                       "example": "John Doe",
                       "description": "Human-readable team member display name. This is not a unique identifier. Note that this is separate from the display_name of the user."
                     },
@@ -5537,9 +5596,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "https://example.com/image.jpg",
                       "description": "URL of the profile image for team member. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -5717,9 +5773,6 @@
                               "string",
                               "null"
                             ],
-                            "enum": [
-                              null
-                            ],
                             "example": "https://example.com/image.jpg",
                             "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                           },
@@ -5757,9 +5810,6 @@
                           "type": [
                             "string",
                             "null"
-                          ],
-                          "enum": [
-                            null
                           ],
                           "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
                           "description": "The cursor to fetch the next page of results. null if there is no next page."
@@ -5802,9 +5852,6 @@
                     "type": [
                       "string",
                       "null"
-                    ],
-                    "enum": [
-                      null
                     ],
                     "example": "https://example.com/image.jpg",
                     "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -5861,9 +5908,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "https://example.com/image.jpg",
                       "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -5940,9 +5984,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "https://example.com/image.jpg",
                       "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -6048,9 +6089,6 @@
                       "string",
                       "null"
                     ],
-                    "enum": [
-                      null
-                    ],
                     "example": "https://example.com/image.jpg",
                     "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                   },
@@ -6102,9 +6140,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "https://example.com/image.jpg",
                       "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -6179,9 +6214,6 @@
                             "string",
                             "null"
                           ],
-                          "enum": [
-                            null
-                          ],
                           "example": "https://example.com/image.jpg",
                           "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                         },
@@ -6221,9 +6253,6 @@
                         "string",
                         "null"
                       ],
-                      "enum": [
-                        null
-                      ],
                       "example": "johndoe@example.com",
                       "description": "Primary email"
                     },
@@ -6236,9 +6265,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "John Doe",
                       "description": "Human-readable user display name. This is not a unique identifier."
@@ -6268,9 +6294,6 @@
                         "string",
                         "null"
                       ],
-                      "enum": [
-                        null
-                      ],
                       "example": "https://example.com/image.jpg",
                       "description": "URL of the profile image for user. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                     },
@@ -6283,9 +6306,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "team-id",
                       "description": "ID of the team currently selected by the user"
@@ -6328,9 +6348,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": null,
                       "description": "Public reason shown to the user explaining why they are restricted. Optional."
@@ -6397,9 +6414,6 @@
                       "string",
                       "null"
                     ],
-                    "enum": [
-                      null
-                    ],
                     "example": "John Doe",
                     "description": "Human-readable user display name. This is not a unique identifier."
                   },
@@ -6407,9 +6421,6 @@
                     "type": [
                       "string",
                       "null"
-                    ],
-                    "enum": [
-                      null
                     ],
                     "example": "https://example.com/image.jpg",
                     "description": "URL of the profile image for user. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -6429,9 +6440,6 @@
                       "string",
                       "null"
                     ],
-                    "enum": [
-                      null
-                    ],
                     "example": "team-id",
                     "description": "ID of the team currently selected by the user"
                   },
@@ -6440,9 +6448,6 @@
                       "string",
                       "null"
                     ],
-                    "enum": [
-                      null
-                    ],
                     "example": "dG90cC1zZWNyZXQ=",
                     "description": "Enables 2FA and sets a TOTP secret for the user. Set to null to disable 2FA."
                   },
@@ -6450,9 +6455,6 @@
                     "type": [
                       "string",
                       "null"
-                    ],
-                    "enum": [
-                      null
                     ],
                     "example": "johndoe@example.com",
                     "description": "Primary email"
@@ -6505,9 +6507,6 @@
                             "string",
                             "null"
                           ],
-                          "enum": [
-                            null
-                          ],
                           "example": "https://example.com/image.jpg",
                           "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                         },
@@ -6547,9 +6546,6 @@
                         "string",
                         "null"
                       ],
-                      "enum": [
-                        null
-                      ],
                       "example": "johndoe@example.com",
                       "description": "Primary email"
                     },
@@ -6562,9 +6558,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "John Doe",
                       "description": "Human-readable user display name. This is not a unique identifier."
@@ -6594,9 +6587,6 @@
                         "string",
                         "null"
                       ],
-                      "enum": [
-                        null
-                      ],
                       "example": "https://example.com/image.jpg",
                       "description": "URL of the profile image for user. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                     },
@@ -6609,9 +6599,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": "team-id",
                       "description": "ID of the team currently selected by the user"
@@ -6654,9 +6641,6 @@
                       "type": [
                         "string",
                         "null"
-                      ],
-                      "enum": [
-                        null
                       ],
                       "example": null,
                       "description": "Public reason shown to the user explaining why they are restricted. Optional."

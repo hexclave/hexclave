@@ -1,5 +1,19 @@
 export * from './lib/hexclave-app';
 export { getConvexProvidersConfig } from "./integrations/convex";
+// IF_PLATFORM next
+export {
+  createHexclaveNext,
+  hexclaveInstrumentation,
+  type HexclaveNextFactoryOptions,
+  type HexclaveNextInstrumentation,
+  type HexclaveNextInstrumentationOptions,
+  type HexclaveNextRequestErrorContext,
+  type HexclaveNextRequestErrorRequest,
+  type HexclaveNextRouteHandlerContext,
+  type HexclaveNextRouteHandlerOptions,
+  type HexclaveNextServerActionOptions,
+} from "./integrations/next";
+// END_PLATFORM
 // Hexclave aliases and legacy Stack* names — @deprecated JSDoc lives on the original
 // declarations in @hexclave/shared/config so it survives dts bundling
 // (per-specifier JSDoc on re-exports does not).
@@ -18,8 +32,12 @@ export type {
   HexclaveServiceOutputs,
 } from "@hexclave/shared/config";
 
+export type { ParentRef, Span, SpanContext, StartSpanOptions, TrackOptions } from "./lib/hexclave-app/apps/implementations/event-tracker";
+
 // IF_PLATFORM react-like
-export type { AnalyticsOptions, AnalyticsReplayOptions } from "./lib/hexclave-app/apps/implementations/session-replay";
+export type { AnalyticsOptions, AnalyticsReplayOptions } from "./lib/hexclave-app/apps/implementations/analytics-config";
+export type { ErrorCaptureOptions, LogsOptions, NetworkOptions, ObservabilityOptions, SpanPropagationOptions } from "./lib/hexclave-app/apps/implementations/observability-config";
+export type { TelemetryOptions } from "./lib/hexclave-app/apps/implementations/telemetry-config";
 // Hexclave aliases and legacy Stack* names — @deprecated JSDoc lives on the original
 // declarations in the source files (so it survives dts bundling).
 export { HexclaveHandler, StackHandler } from "./components-page/hexclave-handler";

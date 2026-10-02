@@ -7,7 +7,14 @@ import { CustomerInvoicesList, CustomerInvoicesRequestOptions, CustomerProductsL
 import { Project } from "../../projects";
 import { ProjectCurrentUser, SyncedPartialUser, TokenPartialUser } from "../../users";
 import { _HexclaveClientAppImpl } from "../implementations";
-import { AnalyticsOptions } from "../implementations/session-replay";
+import type { ParentRef, Span, StartSpanOptions, TrackOptions } from "../implementations/event-tracker";
+import type { AnalyticsOptions, AnalyticsOptionsJson } from "../implementations/analytics-config";
+import type { ObservabilityOptions, ObservabilityOptionsJson } from "../implementations/observability-config";
+import type { TelemetryOptions } from "../implementations/telemetry-config";
+import type { Logger } from "../implementations/logs";
+import type { CaptureEvent, CaptureExceptionOptions, CaptureMessageOptions, ErrorEventId, ErrorScope } from "./error-capture";
+
+export type { CapturedErrorEvent, CaptureEvent, CaptureExceptionOptions, CaptureMessageOptions, ErrorAttachmentInput, ErrorAttachmentMetadata, ErrorAttachmentTransport, ErrorAttachmentType, ErrorAttachmentUploadRequest, ErrorAttachmentUploadResult, ErrorBeforeSend, ErrorEventHint, ErrorEventProcessor, ErrorEventId, ErrorLevel, ErrorProcessorDecision, ErrorProcessorResult, ErrorScope, ErrorScopeData, PendingErrorAttachment } from "./error-capture";
 
 /** @deprecated Use `HexclaveClientAppConstructorOptions` from the `@hexclave/*` package instead — same symbol, new brand name. See https://docs.hexclave.com/migration. */
 export type StackClientAppConstructorOptions<HasTokenStore extends boolean, ProjectId extends string> = {
@@ -50,6 +57,8 @@ export type StackClientAppConstructorOptions<HasTokenStore extends boolean, Proj
    * set `{ replays: { enabled: false } }` to opt out.
    */
   analytics?: AnalyticsOptions,
+  observability?: ObservabilityOptions,
+  telemetry?: TelemetryOptions,
 } & (
   { tokenStore: TokenStoreInit<HasTokenStore> } | { tokenStore?: undefined, inheritsFrom: StackClientApp<HasTokenStore, any> }
 ) & (
@@ -58,7 +67,29 @@ export type StackClientAppConstructorOptions<HasTokenStore extends boolean, Proj
 
 
 /** @deprecated Use `HexclaveClientAppJson` from the `@hexclave/*` package instead — same symbol, new brand name. See https://docs.hexclave.com/migration. */
-export type StackClientAppJson<HasTokenStore extends boolean, ProjectId extends string> = StackClientAppConstructorOptions<HasTokenStore, ProjectId> & { inheritsFrom?: undefined } & {
+export type StackClientAppJson<HasTokenStore extends boolean, ProjectId extends string> = {
+  baseUrl?: string | { browser: string, server: string },
+  extraRequestHeaders?: Record<string, string>,
+  projectId?: ProjectId,
+  publishableClientKey?: string,
+  urls?: HandlerUrlOptions,
+  oauthScopesOnSignIn?: Partial<OAuthScopesOnSignIn>,
+  tokenStore?: TokenStoreInit<HasTokenStore>,
+  redirectMethod?: RedirectMethod,
+  devTool?: boolean | "auto",
+  noAutomaticPrefetch?: boolean,
+  // Serialized so a deserialized app stays inert (fromClientJson skips
+  // registration side effects when false); participates in the checkString like
+  // every other field, so two apps sharing a uniqueIdentifier but disagreeing
+  // on inertness conflict loudly instead of silently reusing one of them.
+  automaticSideEffects?: boolean,
+  inheritsFrom?: undefined,
+  analytics?: AnalyticsOptionsJson,
+  observability?: ObservabilityOptionsJson,
+  // Only the `resource` half of TelemetryOptions crosses the serialization boundary:
+  // `telemetryOptionsToJson` drops `waitUntil`, since a runtime hook can't survive
+  // being serialized into the client payload and re-hydrated on the other side.
+  telemetry?: Pick<TelemetryOptions, "resource">,
   uniqueIdentifier: string,
   // note: if you add more fields here, make sure to ensure the checkString in the constructor has/doesn't have them
 };
@@ -125,6 +156,138 @@ export type StackClientApp<HasTokenStore extends boolean = boolean, ProjectId ex
     getUser(options?: GetCurrentUserOptions<HasTokenStore>): Promise<ProjectCurrentUser<ProjectId> | null>,
 
     cancelSubscription(options: { productId: string, subscriptionId?: string } | { productId: string, subscriptionId?: string, teamId: string }): Promise<void>,
+
+    /**
+     * Tracks a custom analytics event as a named OpenTelemetry LogRecord. In
+     * managed-provider mode the returned promise resolves after the provider
+     * force-flushes; existing-provider mode acknowledges synchronous provider
+     * acceptance because that provider owns delivery. Invalid input and unavailable analytics reject instead of
+     * silently dropping the event; fire-and-forget use is safe because the SDK
+     * observes rejected promises internally.
+     */
+    trackEvent(eventType: string, data?: Record<string, unknown>, options?: TrackOptions): Promise<void>,
+
+    /**
+     * Captures a handled or unhandled exception through the same `$error`
+     * pipeline used by automatic integrations. The returned UUID is placed in
+     * the event payload before delivery, so callers can correlate it with
+     * backend records even while the transport is asynchronous.
+     */
+    captureException(error: unknown, options?: CaptureExceptionOptions): ErrorEventId,
+
+    /**
+     * Captures a message through the `$error` pipeline. Same pre-delivery UUID
+     * contract as `captureException`.
+     */
+    captureMessage(message: string, options?: CaptureMessageOptions): ErrorEventId,
+
+    /**
+     * Captures a pre-normalized event or exception chain through the `$error`
+     * pipeline. Same pre-delivery UUID contract as `captureException`.
+     */
+    captureEvent(event: CaptureEvent): ErrorEventId,
+
+    /** Returns the most recently attempted error event ID, if any. Delivery may still drop it later. */
+    lastEventId(): ErrorEventId | undefined,
+
+    /**
+     * Runs work with an isolated error scope. Scope fields apply to captures
+     * made inside the callback and are propagated through the active OTel
+     * context when the runtime provides an async context manager. The return
+     * type is preserved: synchronous callbacks stay synchronous and async
+     * callbacks return their own Promise.
+     */
+    withErrorScope<T>(fn: (scope: ErrorScope) => T): T,
+
+    /**
+     * Async counterpart for runtimes where callers need an explicit
+     * promise-chain boundary. Server/framework adapters use the same
+     * AsyncLocalStorage-backed runner internally; this method makes that
+     * guarantee available to generic server jobs and route code too.
+     */
+    withErrorScopeAsync<T>(fn: (scope: ErrorScope) => Promise<T>): Promise<T>,
+
+    /**
+     * Native structured logging: `logger.trace/debug/info/warn/error(message, data?)`
+     * emits an OpenTelemetry LogRecord through the configured LoggerProvider
+     * (the same path automatic console capture uses). Fire-and-forget and guaranteed never to throw into your code:
+     * invalid structured data is dropped with a console warning, and
+     * environments without a delivery path warn once and drop. Messages are
+     * truncated to 8KB; `data` follows the same rules as event data. Logs
+     * use standard OTel trace/span context correlation plus namespaced
+     * Hexclave replay/page attributes.
+     */
+    readonly logger: Logger,
+
+    /**
+     * Starts a custom span through the active OTel Tracer. The provider owns
+     * recording, sampling, processing, and export. Invalid input throws
+     * synchronously; when the ENVIRONMENT makes
+     * telemetry impossible (e.g. during server-side rendering on a client
+     * app), an inert no-op span is returned instead — all its methods are safe
+     * to call and `spanContext()` keeps the identity it would have had — so
+     * isomorphic code does not need environment branches around span calls.
+     */
+    startSpan(spanType: string, options?: StartSpanOptions): Span,
+
+    /**
+     * Registers a span as an ambient parent for all subsequently tracked custom
+     * events and spans. Ending the span automatically unregisters it.
+     *
+     * Registering several is fine: a span has exactly one parent, so the NEAREST
+     * ambient span wins and any other global span in a different trace is recorded
+     * as a link instead of being rejected.
+     */
+    setGlobalSpan(span: Span): void,
+    clearGlobalSpan(span: Span): void,
+
+    /**
+     * Sends all buffered analytics immediately and settles in-flight sends.
+     */
+    flush(): Promise<void>,
+
+    /**
+     * Runs `fn` inside a span: the span starts on entry, is an ambient parent
+     * for everything created inside the callback, and ends automatically when
+     * `fn` settles. On throw, `data.error` is recorded and the error is
+     * rethrown — telemetry failures never affect `fn`'s result.
+     *
+     * Ambient parenting covers the callback's full async extent on runtimes
+     * with an exact async-context primitive (servers/edge today, browsers once
+     * TC39 AsyncContext ships) and the callback's synchronous window in
+     * browsers. After an `await` in a browser, parent via the handle you
+     * already have — `span.trackEvent` / `span.withSpan` / `span.fetch` /
+     * `span.run`. Handle-based item methods are exact everywhere; `span.run`
+     * covers its callback's synchronous window in the browser fallback. Opt out
+     * of the ambient parent per item with `root: true`, which starts a new trace.
+     */
+    withSpan<T>(spanType: string, fn: (span: Span) => Promise<T> | T): Promise<T>,
+    withSpan<T>(spanType: string, options: StartSpanOptions, fn: (span: Span) => Promise<T> | T): Promise<T>,
+
+    /**
+     * The cross-tier propagation headers — the standard `traceparent` plus
+     * `baggage` — for a request the SDK cannot attach them to
+     * itself. `fetch` to same-origin (and
+     * `observability.spanPropagation.allowedOrigins`) already gets them
+     * automatically, so this is the escape hatch for other transports (XHR,
+     * sendBeacon, WebSocket handshakes) or manually-built requests.
+     *
+     * `traceparent` carries the hierarchy for a head-sampled enclosing span, so
+     * the receiving tier joins the same trace without naming a parent the
+     * flusher may drop. `baggage` carries non-hierarchical
+     * correlation only (per-tab replay segment, current page view). Returns `{}`
+     * when there is nothing to propagate (analytics off, non-browser).
+     *
+     * Setting these on a `fetch` also overrides the automatic ones. `parent` pins
+     * the trace explicitly and `root: true` drops the ambient parent — together the
+     * precise-control path when overlapping async flows could mix ambient frames
+     * (the documented browser sync-stack fallback):
+     * `fetch(url, { headers: app.getSpanPropagationHeaders({ parent: span }) })`.
+     * With `root: true` and no `parent` there is no span to name, so no
+     * `traceparent` is emitted — inventing a trace id would fabricate a parent span
+     * that never exists.
+     */
+    getSpanPropagationHeaders(options?: { parent?: ParentRef, root?: boolean }): Record<string, string>,
 
     // note: we don't special-case 'anonymous' here to return non-null, see GetPartialUserOptions for more details
     getPartialUser(options: GetCurrentPartialUserOptions<HasTokenStore> & { from: 'token' }): Promise<TokenPartialUser | null>,

@@ -1,4 +1,5 @@
 import * as yup from "yup";
+import { issueCreatedWebhookEvent, issueIgnoredWebhookEvent, issueMergedWebhookEvent, issueRegressedWebhookEvent, issueResolvedWebhookEvent } from "./crud/issues";
 import { teamMembershipCreatedWebhookEvent, teamMembershipDeletedWebhookEvent } from "./crud/team-memberships";
 import { teamPermissionCreatedWebhookEvent, teamPermissionDeletedWebhookEvent } from "./crud/team-permissions";
 import { teamCreatedWebhookEvent, teamDeletedWebhookEvent, teamUpdatedWebhookEvent } from "./crud/teams";
@@ -25,4 +26,9 @@ export const webhookEvents = [
   teamMembershipDeletedWebhookEvent,
   teamPermissionCreatedWebhookEvent,
   teamPermissionDeletedWebhookEvent,
+  issueCreatedWebhookEvent,
+  issueRegressedWebhookEvent,
+  issueResolvedWebhookEvent,
+  issueIgnoredWebhookEvent,
+  issueMergedWebhookEvent,
 ] as const;

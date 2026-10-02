@@ -1,0 +1,53 @@
+---
+title: "Observability"
+description: "Investigate errors, logs, traces, services, and performance with the user activity that caused them"
+sidebarTitle: "Overview"
+---
+
+The Observability app connects operational telemetry to the user activity that caused it. Use it to investigate application health and performance without mixing logs and code traces into product analytics.
+
+## What Observability includes
+
+- **Issues** groups error occurrences into bugs that you can assign, resolve, ignore, merge, and track across regressions.
+- **Logs** combines captured console output with structured records from `app.logger`.
+- **Traces** shows work across browsers, servers, databases, model calls, and tools in one waterfall.
+- **Services** maps dependencies and compares latency, throughput, and errors between services.
+- **Performance** reports web vitals and route-level browser performance.
+- **Registry** connects releases and source maps to the code behind an error.
+
+Observability shares correlation identifiers and storage with Analytics, but it is a separate app. Enable Observability independently under **Apps -> Observability** in the dashboard. Use [Warehouse](/guides/apps/warehouse/overview) to browse the underlying tables or run SQL.
+
+## Set up collection
+
+Opt in when you create a client or server app:
+
+```ts
+import { HexclaveClientApp, HexclaveServerApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  // ...your existing client app options
+  observability: { enabled: true },
+});
+
+export const hexclaveServerApp = new HexclaveServerApp({
+  // ...your existing server app options
+  observability: { enabled: true },
+});
+```
+
+The setting enables logs, errors, spans, trace propagation, and automatic instrumentation. Analytics capture and session replay use the separate `analytics` configuration.
+
+For framework-specific server instrumentation, see [Framework adapters](/guides/apps/observability/framework-adapters). To control the OpenTelemetry provider and connect browser work to backend work, see [Cross-tier tracing](/guides/apps/observability/cross-tier-tracing).
+
+## Investigate telemetry
+
+Start with the view that matches the question:
+
+- To triage a failure, open **Issues**, then use its linked trace, replay, and release.
+- To inspect one request or background job, open **Traces**.
+- To search diagnostic output, open **Logs**.
+- To find a slow dependency or route, open **Services** or **Performance**.
+- To inspect raw records or aggregate them with SQL, open **Warehouse**.
+
+See [Error tracking](/guides/apps/observability/error-tracking) for the error-to-issue pipeline. See [Errors and logs](/guides/apps/observability/errors-and-logs) for capture and logging configuration.

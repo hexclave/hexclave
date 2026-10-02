@@ -182,11 +182,9 @@ function SaveQueryDialog({
   const [newFolderName, setNewFolderName] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
-  // Get folders from config - hooks are now called unconditionally
   const config = adminApp.useProject().useConfig();
   const folders = useMemo((): FolderWithId[] => {
-    const analyticsConfig = config.analytics;
-    const queryFolders = analyticsConfig.queryFolders;
+    const queryFolders = config.warehouse.queryFolders;
 
     return Object.entries(queryFolders)
       .map(([id, folder]) => ({
@@ -211,7 +209,7 @@ function SaveQueryDialog({
       await updateConfig({
         adminApp,
         configUpdate: {
-          [`analytics.queryFolders.${selectedFolderId}.queries.${queryId}`]: {
+          [`warehouse.queryFolders.${selectedFolderId}.queries.${queryId}`]: {
             displayName: displayName.trim(),
             sqlQuery,
             ...(description.trim() ? { description: description.trim() } : {}),
@@ -224,7 +222,7 @@ function SaveQueryDialog({
       setSelectedFolderId("");
       onOpenChange(false);
       // Navigate to the queries page after saving
-      router.push(`/projects/${encodeURIComponent(adminApp.projectId)}/analytics/queries`);
+      router.push(`/projects/${encodeURIComponent(adminApp.projectId)}/warehouse/queries`);
     } finally {
       setLoading(false);
     }
@@ -238,7 +236,7 @@ function SaveQueryDialog({
       await updateConfig({
         adminApp,
         configUpdate: {
-          [`analytics.queryFolders.${folderId}`]: {
+          [`warehouse.queryFolders.${folderId}`]: {
             displayName: newFolderName.trim(),
             sortOrder: folders.length,
             queries: {},

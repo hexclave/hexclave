@@ -19,7 +19,7 @@ import {
   NULL_TAB_KEY,
 } from "@/lib/session-replay-streams";
 import { cn } from "@/lib/utils";
-import { ArrowLeftIcon, ArrowsClockwiseIcon, CheckIcon, CursorClickIcon, FastForwardIcon, FunnelSimpleIcon, GearIcon, LinkIcon, MonitorPlayIcon, PauseIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, ArrowsClockwiseIcon, CheckIcon, FastForwardIcon, FunnelSimpleIcon, GearIcon, LinkIcon, MonitorPlayIcon, PauseIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
 import { runAsynchronously, runAsynchronouslyWithAlert, wait } from "@hexclave/shared/dist/utils/promises";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -28,7 +28,26 @@ import { AppEnabledGuard } from "../app-enabled-guard";
 import { PageLayout } from "../page-layout";
 import { useAdminApp, useServerApp } from "../use-admin-app";
 import { SessionReplayLimitBanner } from "../analytics/shared";
+import { replaceLocationSearch } from "../observability/filters";
+import { sessionReplayHref } from "../observability/observability-links";
+import { ReplayActivityMetrics } from "./replay-activity-metrics";
+import { ensureMetaBeforeFirstFullSnapshot } from "./replay-event-compat";
+import { ReplayRecordingBoundary } from "./replay-recording-boundary";
+import {
+  formatReplayTimelineEventTooltip,
+  getReplayTimelineQuery,
+  replayTimelineMarkerClassName,
+  type ReplayTimelineEvent,
+  type ReplayTimelineMarker,
+} from "./replay-timeline";
+import {
+  EMPTY_REPLAY_FILTERS,
+  replayFiltersActiveCount,
+  replayUserKindLabel,
+  type ReplayFilters,
+} from "./replay-list-filters";
 import { ReplayUserOverview, ReplayUserOverviewSkeleton } from "./replay-user-overview";
+import { parseReplaySeekAt, replaySeekOffsetMs } from "./replay-url-state";
 import {
   ALLOWED_PLAYER_SPEEDS,
   areStatesRenderEquivalent,
@@ -63,8 +82,8 @@ const EXTRA_TABS_TO_SHOW = 2;
 const REPLAY_SETTINGS_STORAGE_KEY = "stack.session-replay.settings";
 const LEGACY_PLAYER_SPEED_STORAGE_KEY = "stack.session-replay.speed";
 
-type RrwebEventWithTime = import("rrweb/typings/types").eventWithTime;
-type RrwebReplayer = InstanceType<typeof import("rrweb").Replayer>;
+type RrwebEventWithTime = import("@rrweb/types").eventWithTime;
+type RrwebReplayer = InstanceType<typeof import("@rrweb/replay").Replayer>;
 
 type RecordingRow = {
   id: string,
@@ -83,6 +102,16 @@ type RecordingRow = {
 type RecordingListRow = {
   replay: RecordingRow,
   key: string,
+};
+
+type ReplayActivityCounts = {
+  clickCount: number,
+  keystrokeCount: number,
+};
+
+const EMPTY_REPLAY_ACTIVITY_COUNTS: ReplayActivityCounts = {
+  clickCount: 0,
+  keystrokeCount: 0,
 };
 
 type ChunkRow = {
@@ -107,6 +136,7 @@ type AdminAppWithSessionReplays = ReturnType<typeof useAdminApp> & {
     lastEventAtFromMillis?: number,
     lastEventAtToMillis?: number,
     clickCountMin?: number,
+    userKind?: "anonymous" | "verified",
   }) => Promise<{
     items: RecordingRow[],
     nextCursor: string | null,
@@ -116,28 +146,6 @@ type AdminAppWithSessionReplays = ReturnType<typeof useAdminApp> & {
     chunks: ChunkRow[],
     chunkEvents: Array<{ chunkId: string, events: unknown[] }>,
   }>,
-};
-
-type ReplayFilters = {
-  userId: string,
-  userLabel: string,
-  teamId: string,
-  teamLabel: string,
-  durationMinSeconds: string,
-  durationMaxSeconds: string,
-  lastActivePreset: "" | "24h" | "7d" | "30d",
-  clickCountMin: string,
-};
-
-const EMPTY_FILTERS: ReplayFilters = {
-  userId: "",
-  userLabel: "",
-  teamId: "",
-  teamLabel: "",
-  durationMinSeconds: "",
-  durationMaxSeconds: "",
-  lastActivePreset: "",
-  clickCountMin: "",
 };
 
 function coerceRrwebEvents(raw: unknown[]): RrwebEventWithTime[] {
@@ -162,42 +170,6 @@ function formatTimelineMs(ms: number) {
     return `${h}:${(m % 60).toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   }
   return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-function filtersActiveCount(filters: ReplayFilters): number {
-  let count = 0;
-  if (filters.userId) count += 1;
-  if (filters.teamId) count += 1;
-  if (filters.durationMinSeconds || filters.durationMaxSeconds) count += 1;
-  if (filters.lastActivePreset) count += 1;
-  if (filters.clickCountMin) count += 1;
-  return count;
-}
-
-type TimelineEvent = {
-  eventType: string,
-  eventAtMs: number,
-  data: Record<string, unknown>,
-};
-
-type TimelineMarker = {
-  timeMs: number,
-  eventType: string,
-  label: string,
-};
-
-function formatEventTooltip(event: TimelineEvent): string {
-  const d = event.data;
-  if (event.eventType === "$click") {
-    const tag = (d.tag_name as string) || "element";
-    return `Clicked ${tag}`;
-  }
-  if (event.eventType === "$page-view") {
-    const path = (d.path as string | undefined) ?? (d.url as string | undefined) ?? "/";
-    const truncated = path.length > 30 ? path.slice(0, 27) + "..." : path;
-    return truncated;
-  }
-  return event.eventType;
 }
 
 function DisplayDate({ date }: { date: Date }) {
@@ -261,7 +233,7 @@ const TimelineMarkersLane = React.memo(function TimelineMarkersLane({
   totalTimeMs,
   onSeek,
 }: {
-  markers: TimelineMarker[],
+  markers: ReplayTimelineMarker[],
   totalTimeMs: number,
   onSeek: (timeOffset: number) => void,
 }) {
@@ -273,16 +245,13 @@ const TimelineMarkersLane = React.memo(function TimelineMarkersLane({
       {markers.map((marker, i) => {
         const left = totalTimeMs > 0 ? (marker.timeMs / totalTimeMs) * 100 : 0;
         if (left < 0 || left > 100) return null;
-        const isClick = marker.eventType === "$click";
         return (
           <div
             key={i}
             className={cn(
               "absolute bottom-0 w-[3px] h-3 rounded-sm cursor-pointer",
-              "transition-colors",
-              isClick
-                ? "bg-blue-500/70 hover:bg-blue-400"
-                : "bg-emerald-500/70 hover:bg-emerald-400",
+              "transition-colors hover:transition-none",
+              replayTimelineMarkerClassName(marker.eventType),
             )}
             style={{ left: `${left}%`, marginLeft: "-1.5px" }}
             onMouseEnter={() => setHoveredMarkerIndex(i)}
@@ -328,7 +297,7 @@ function Timeline({
   onSeek: (timeOffset: number) => void,
   playerSpeed: number,
   onSpeedChange: (speed: number) => void,
-  markers?: TimelineMarker[],
+  markers?: ReplayTimelineMarker[],
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const timeLabelRef = useRef<HTMLSpanElement | null>(null);
@@ -519,7 +488,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
   const isStandaloneReplayPage = initialReplayId != null;
   const isEmbedded = lockedUserId != null;
   const baseFilters = useMemo<ReplayFilters>(
-    () => lockedUserId ? { ...EMPTY_FILTERS, userId: lockedUserId } : EMPTY_FILTERS,
+    () => lockedUserId ? { ...EMPTY_REPLAY_FILTERS, userId: lockedUserId } : EMPTY_REPLAY_FILTERS,
     [lockedUserId],
   );
 
@@ -530,7 +499,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
-  const [activeFilterDialog, setActiveFilterDialog] = useState<null | "user" | "team" | "duration" | "lastActive" | "clicks">(null);
+  const [activeFilterDialog, setActiveFilterDialog] = useState<null | "user" | "team" | "duration" | "lastActive" | "clicks" | "userKind">(null);
   const [appliedFilters, setAppliedFilters] = useState<ReplayFilters>(baseFilters);
   const [draftFilters, setDraftFilters] = useState<ReplayFilters>(baseFilters);
 
@@ -538,8 +507,8 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
     if (!lockedUserId) return;
     setAppliedFilters((prev) => prev.userId === lockedUserId ? prev : { ...prev, userId: lockedUserId, userLabel: prev.userLabel || "" });
   }, [lockedUserId]);
-  const [clickCountsByReplayId, setClickCountsByReplayId] = useState<Map<string, number>>(new Map());
-  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [activityCountsByReplayId, setActivityCountsByReplayId] = useState<Map<string, ReplayActivityCounts>>(new Map());
+  const [timelineEvents, setTimelineEvents] = useState<ReplayTimelineEvent[]>([]);
   const [standaloneReplay, setStandaloneReplay] = useState<RecordingRow | null>(null);
   const [standaloneReplayError, setStandaloneReplayError] = useState<string | null>(null);
 
@@ -547,6 +516,9 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
 
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(initialReplayId ?? null);
   const [replayShareLinkCopied, setReplayShareLinkCopied] = useState(false);
+  const seedSeekRef = useRef(
+    typeof window === "undefined" ? null : parseReplaySeekAt(new URLSearchParams(window.location.search).get("at")),
+  );
   const selectedRecording = useMemo(
     () => recordings.find(r => r.id === selectedRecordingId)
       ?? (standaloneReplay?.id === selectedRecordingId ? standaloneReplay : null),
@@ -602,6 +574,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
         durationMsMax: appliedFilters.durationMaxSeconds ? Number(appliedFilters.durationMaxSeconds) * 1000 : undefined,
         lastEventAtFromMillis: lastActiveFromMillis,
         clickCountMin: appliedFilters.clickCountMin ? Number(appliedFilters.clickCountMin) : undefined,
+        userKind: appliedFilters.userKind || undefined,
       });
       setRecordings((prev) => {
         const items = cursor ? [...prev, ...res.items] : res.items;
@@ -638,20 +611,31 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
     const ids = recordings.map(r => r.id);
     runAsynchronously(async () => {
       const res = await serverApp.queryAnalytics({
-        query: `SELECT session_replay_id, count() as cnt
+        query: `SELECT
+                  session_replay_id,
+                  countIf(event_type = '$click') AS click_count,
+                  sumIf(JSONExtractUInt(toString(data), 'count'), event_type = '$keystroke') AS keystroke_count
                 FROM default.events
-                WHERE event_type = '$click'
+                WHERE event_type IN ('$click', '$keystroke')
                   AND session_replay_id IN ({ids:Array(String)})
                 GROUP BY session_replay_id`,
         params: { ids },
         include_all_branches: false,
         timeout_ms: 15000,
       });
-      const map = new Map<string, number>();
+      const map = new Map<string, ReplayActivityCounts>();
       for (const row of res.result) {
-        map.set(row.session_replay_id as string, Number(row.cnt));
+        if (typeof row.session_replay_id !== "string") {
+          throw new Error("Session replay activity query returned a non-string session_replay_id");
+        }
+        const clickCount = Number(row.click_count);
+        const keystrokeCount = Number(row.keystroke_count);
+        if (!Number.isFinite(clickCount) || !Number.isFinite(keystrokeCount)) {
+          throw new Error("Session replay activity query returned a non-numeric count");
+        }
+        map.set(row.session_replay_id, { clickCount, keystrokeCount });
       }
-      setClickCountsByReplayId(map);
+      setActivityCountsByReplayId(map);
     }, { noErrorLogging: true });
   }, [isStandaloneReplayPage, recordings, serverApp]);
 
@@ -761,7 +745,11 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
     const rootEl = rootMaybe;
 
     const eventsSnapshot = eventsByTabRef.current.get(tabKey)?.slice() ?? [];
-    if (eventsSnapshot.length === 0) {
+    // rrweb's Replayer constructor throws ("Replayer need at least 2 events")
+    // below two events, which a sparse first chunk can trigger. Stay pending
+    // instead — the machine re-emits ensure_replayer on every CHUNK_LOADED
+    // until this replayer reports ready, so the next chunk retries.
+    if (eventsSnapshot.length < 2) {
       pendingInitByTabRef.current.add(tabKey);
       return;
     }
@@ -787,18 +775,20 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
     }
 
     try {
-      const { Replayer } = await import("rrweb");
+      const { Replayer } = await import("@rrweb/replay");
       if (msRef.current.generation !== gen) return;
       if (replayerByTabRef.current.has(tabKey)) return;
 
       const eventsSnapshot2 = eventsByTabRef.current.get(tabKey)?.slice() ?? [];
-      if (eventsSnapshot2.length === 0) return;
+      if (eventsSnapshot2.length < 2) return;
 
       const replayer = new Replayer(eventsSnapshot2, {
         root: rootEl,
         speed: msRef.current.settings.playerSpeed,
         skipInactive: msRef.current.settings.skipInactivity,
         triggerFocus: false,
+        showWarning: false,
+        showDebug: false,
       });
 
       rootEl.style.position = "relative";
@@ -1121,6 +1111,12 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
         const prev = eventsByTabRef.current.get(tabKey) ?? [];
         const wasEmpty = prev.length === 0;
         prev.push(...events);
+        // Repair recordings from SDK builds whose rotation gate dropped the
+        // Meta event before the first FullSnapshot (see replay-event-compat).
+        // Safe to run per chunk: it is a no-op once a Meta is in place, and a
+        // repair can only happen before the tab's replayer exists (a replayer
+        // is only constructed once the accumulated events hold a snapshot).
+        ensureMetaBeforeFirstFullSnapshot(prev);
         eventsByTabRef.current.set(tabKey, prev);
 
         const hasFullSnapshot = !msRef.current.hasFullSnapshotByTab.has(tabKey)
@@ -1281,14 +1277,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
     setTimelineEvents([]);
     runAsynchronously(async () => {
       const res = await serverApp.queryAnalytics({
-        query: `SELECT event_type,
-                       toUnixTimestamp64Milli(event_at) as event_at_ms,
-                       data
-                FROM default.events
-                WHERE session_replay_id = {id:String}
-                  AND event_type IN ('$click', '$page-view')
-                ORDER BY event_at ASC
-                LIMIT 2000`,
+        query: getReplayTimelineQuery(),
         params: { id: selectedRecordingId },
         include_all_branches: false,
         timeout_ms: 15000,
@@ -1418,7 +1407,21 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
 
   const handleSeek = useCallback((globalOffset: number) => {
     actRef.current({ type: "SEEK", globalOffsetMs: globalOffset, nowMs: performance.now() });
-  }, []);
+    if (!isStandaloneReplayPage || selectedRecordingId == null) return;
+    const atMs = Math.trunc(msRef.current.globalStartTs + globalOffset);
+    const params = new URLSearchParams(window.location.search);
+    params.set("at", String(atMs));
+    replaceLocationSearch(params);
+  }, [isStandaloneReplayPage, msRef, selectedRecordingId]);
+
+  useEffect(() => {
+    if (!isStandaloneReplayPage) return;
+    const seed = seedSeekRef.current;
+    if (seed == null) return;
+    if (ms.globalTotalMs <= 0) return;
+    seedSeekRef.current = null;
+    handleSeek(replaySeekOffsetMs(seed, ms.globalStartTs, ms.globalTotalMs));
+  }, [handleSeek, isStandaloneReplayPage, ms.globalStartTs, ms.globalTotalMs]);
 
   const updateSpeed = useCallback((speed: number) => {
     actRef.current({ type: "UPDATE_SPEED", speed });
@@ -1486,19 +1489,19 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
 
   const timelineMarkers = useMemo(() => {
     if (timelineEvents.length === 0 || ms.globalTotalMs <= 0) return [];
-    return timelineEvents.map((e): TimelineMarker => ({
+    return timelineEvents.map((e): ReplayTimelineMarker => ({
       timeMs: e.eventAtMs - ms.globalStartTs,
       eventType: e.eventType,
-      label: formatEventTooltip(e),
+      label: formatReplayTimelineEventTooltip(e),
     })).filter(m => m.timeMs >= 0 && m.timeMs <= ms.globalTotalMs);
   }, [timelineEvents, ms.globalStartTs, ms.globalTotalMs]);
 
   const activeFilterCount = useMemo(() => {
-    const count = filtersActiveCount(appliedFilters);
+    const count = replayFiltersActiveCount(appliedFilters);
     return isEmbedded && appliedFilters.userId === lockedUserId ? Math.max(0, count - 1) : count;
   }, [appliedFilters, isEmbedded, lockedUserId]);
 
-  const openFilterDialog = useCallback((dialog: "user" | "team" | "duration" | "lastActive" | "clicks") => {
+  const openFilterDialog = useCallback((dialog: "user" | "team" | "duration" | "lastActive" | "clicks" | "userKind") => {
     setDraftFilters(appliedFilters);
     setActiveFilterDialog(dialog);
   }, [appliedFilters]);
@@ -1575,6 +1578,9 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                                 User
                               </DropdownMenuItem>
                             )}
+                            <DropdownMenuItem onClick={() => { requestAnimationFrame(() => openFilterDialog("userKind")); }}>
+                              User type
+                            </DropdownMenuItem>
                             <DropdownMenuItem onClick={() => { requestAnimationFrame(() => openFilterDialog("team")); }}>
                               Team
                             </DropdownMenuItem>
@@ -1616,6 +1622,11 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                           {appliedFilters.clickCountMin && (
                             <span className="inline-flex items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-[10px]">
                               clicks
+                            </span>
+                          )}
+                          {appliedFilters.userKind && (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-[10px]">
+                              {replayUserKindLabel(appliedFilters.userKind)}
                             </span>
                           )}
                           <button
@@ -1814,6 +1825,43 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                       </DialogContent>
                     </Dialog>
 
+                    <Dialog open={activeFilterDialog === "userKind"} onOpenChange={(open) => setActiveFilterDialog(open ? "userKind" : null)}>
+                      <DialogContent className="max-w-md">
+                        <DialogHeader>
+                          <DialogTitle>User Type Filter</DialogTitle>
+                        </DialogHeader>
+                        <div className="flex flex-wrap gap-2 pt-2">
+                          {(["anonymous", "verified"] as const).map((value) => (
+                            <Button
+                              key={value}
+                              variant={appliedFilters.userKind === value ? "default" : "outline"}
+                              size="sm"
+                              className="h-8"
+                              onClick={() => {
+                          setAppliedFilters((prev) => ({ ...prev, userKind: value }));
+                          setActiveFilterDialog(null);
+                              }}
+                            >
+                              {replayUserKindLabel(value)}
+                            </Button>
+                          ))}
+                        </div>
+                        <div className="pt-1 flex items-center justify-end gap-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8"
+                            onClick={() => {
+                        setAppliedFilters((prev) => ({ ...prev, userKind: "" }));
+                        setActiveFilterDialog(null);
+                            }}
+                          >
+                            Clear
+                          </Button>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
+
                     {listError && (
                       <div className="p-3">
                         <Alert variant="destructive">{listError}</Alert>
@@ -1845,42 +1893,42 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                           {recordingListRows.map(({ replay: r, key }) => {
                             const isSelected = r.id === selectedRecordingId;
                             const durationMs = r.lastEventAt.getTime() - r.startedAt.getTime();
-                            const duration = formatDurationMs(durationMs);
+                            const activityCounts = activityCountsByReplayId.get(r.id) ?? EMPTY_REPLAY_ACTIVITY_COUNTS;
                             return (
                               <div
                                 key={key}
                                 className={cn(
-                                "rounded-lg",
-                                isSelected
-                                  ? "bg-white shadow-sm ring-1 ring-black/[0.06] dark:bg-background/80 dark:ring-white/[0.06]"
-                                  : "hover:bg-white/70 dark:hover:bg-muted/20",
-                              )}
+                                  "relative w-full rounded-lg text-left outline-none",
+                                  "transition-colors duration-150 hover:transition-none focus-within:ring-2 focus-within:ring-foreground/20",
+                                  isSelected
+                                    ? "bg-foreground/[0.055] ring-1 ring-border/60"
+                                    : "hover:bg-foreground/[0.035]",
+                                )}
                               >
                                 <button
+                                  type="button"
                                   onClick={() => setSelectedRecordingId(r.id)}
-                                  className={cn(
-                                  "w-full text-left rounded-lg px-3 py-2.5",
-                                  "transition-colors hover:transition-none",
-                                )}
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-sm font-medium truncate">
-                                      {getRecordingTitle(r)}
-                                    </span>
-                                    <span className="text-xs text-muted-foreground whitespace-nowrap">
-                                      {duration}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                                  aria-current={isSelected ? "true" : undefined}
+                                  aria-label={`Open replay for ${getRecordingTitle(r)}`}
+                                  className="absolute inset-0 rounded-lg outline-none"
+                                />
+                                <div className="pointer-events-none relative flex min-w-0 items-baseline justify-between gap-3 px-3 pt-2.5">
+                                  <span className="truncate text-sm font-medium">
+                                    {getRecordingTitle(r)}
+                                  </span>
+                                  <span className="shrink-0 text-xs text-muted-foreground">
                                     <DisplayDate date={r.lastEventAt} />
-                                    {(clickCountsByReplayId.get(r.id) ?? 0) > 0 && (
-                                      <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground/70">
-                                        <CursorClickIcon className="h-3 w-3" />
-                                        {clickCountsByReplayId.get(r.id)}
-                                      </span>
-                                    )}
-                                  </div>
-                                </button>
+                                  </span>
+                                </div>
+                                <div className="relative px-3 pb-2.5 pt-0.5">
+                                  <ReplayActivityMetrics
+                                    durationMs={durationMs}
+                                    eventCount={r.eventCount}
+                                    clickCount={activityCounts.clickCount}
+                                    keystrokeCount={activityCounts.keystrokeCount}
+                                    onActivate={() => setSelectedRecordingId(r.id)}
+                                  />
+                                </div>
                               </div>
                             );
                           })}
@@ -1941,7 +1989,11 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                         title={replayShareLinkCopied ? "Copied!" : "Copy link to replay"}
                         onClick={() => runAsynchronouslyWithAlert(async () => {
                           await navigator.clipboard.writeText(
-                          `${window.location.origin}/projects/${encodeURIComponent(adminApp.projectId)}/session-replays/${encodeURIComponent(selectedRecordingId)}`,
+                          `${window.location.origin}${sessionReplayHref(
+                            adminApp.projectId,
+                            selectedRecordingId,
+                            { atMs: Math.trunc(ms.globalStartTs + ms.currentGlobalTimeMsForUi) },
+                          )}`,
                         );
                         setReplayShareLinkCopied(true);
                         })}
@@ -2016,7 +2068,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                                 ...(isActive ? {} : { aspectRatio: "16/10" }),
                               }}
                             >
-                              <div
+                              <ReplayRecordingBoundary
                                 ref={(el) => setContainerRefForTab(s.tabKey, el)}
                                 className={cn("absolute inset-0", replaysViewerSurfaceClass)}
                               />

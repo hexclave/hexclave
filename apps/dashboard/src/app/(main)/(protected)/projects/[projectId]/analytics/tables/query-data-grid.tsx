@@ -1,14 +1,6 @@
 "use client";
 
 import { Alert, Button, Typography } from "@/components/ui";
-import {
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import { SimpleTooltip } from "@/components/ui/simple-tooltip";
 import { ArrowClockwiseIcon } from "@phosphor-icons/react";
 import {
@@ -36,6 +28,7 @@ import {
   isJsonValue,
   JsonValue,
   parseClickHouseDate,
+  RowDetailDialog,
   type RowData,
 } from "../shared";
 
@@ -59,6 +52,14 @@ export type QueryDataGridToolbarContext<TRow = RowData> =
     isRefetching: boolean,
   };
 
+export type QueryDataGridColumnConfig = {
+  header?: string,
+  width?: number,
+  flex?: number,
+  hidden?: boolean,
+  renderCell?: (value: unknown, row: RowData) => ReactNode,
+};
+
 export type QueryDataGridProps = {
   /**
    * The SQL query to execute.
@@ -74,6 +75,7 @@ export type QueryDataGridProps = {
    *   touch its LIMIT.
    */
   query: string,
+  queryParams?: Record<string, string | number>,
   /** Execution mode. Defaults to `paginated`. */
   mode?: QueryDataGridMode,
   /** Page size for paginated mode. Defaults to 50. */
@@ -123,10 +125,14 @@ export type QueryDataGridProps = {
   toolbarActions?:
     | ReactNode
     | ((ctx: QueryDataGridToolbarContext<RowData>) => ReactNode),
+  columnConfigs?: ReadonlyMap<string, QueryDataGridColumnConfig>,
   /** Whether the default row-click-to-inspect dialog is enabled. Defaults to `true`. */
   enableRowDetailDialog?: boolean,
   /** Custom row click handler. Overrides the default row detail dialog. */
   onRowClick?: (row: RowData) => void,
+  detailTitle?: string,
+  detailTechnicalColumns?: readonly string[],
+  detailExtraContent?: ReactNode | ((row: RowData) => ReactNode),
   /** Called whenever the error state changes (null when cleared). */
   onError?: (error: string | null) => void,
   /** Called when the discovered schema changes. */
@@ -207,50 +213,6 @@ function CellValue({
   return <span>{str}</span>;
 }
 
-function RowDetailDialog({
-  row,
-  columns,
-  open,
-  onOpenChange,
-}: {
-  row: RowData | null,
-  columns: string[],
-  open: boolean,
-  onOpenChange: (open: boolean) => void,
-}) {
-  if (!row) return null;
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh]">
-        <DialogHeader>
-          <DialogTitle>Row Details</DialogTitle>
-        </DialogHeader>
-        <DialogBody>
-          <div className="space-y-4">
-            {columns.map((column) => (
-              <div key={column} className="space-y-1">
-                <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {column}
-                </Label>
-                <div className="font-mono text-sm bg-muted/30 rounded px-3 py-2 overflow-auto max-h-48">
-                  {isJsonValue(row[column]) ? (
-                    <pre className="whitespace-pre-wrap break-all">
-                      {JSON.stringify(row[column], null, 2)}
-                    </pre>
-                  ) : (
-                    <CellValue value={row[column]} truncate={false} />
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </DialogBody>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 // ─── Query building ─────────────────────────────────────────────────
 
 type BuildQueryArgs = {
@@ -322,17 +284,22 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
   function QueryDataGrid(
     {
       query,
+      queryParams,
       mode = "paginated",
       pageSize = 50,
       defaultOrderBy,
       defaultOrderDir = "desc",
       enableQuickSearchFilter = true,
+      columnConfigs,
       toolbar,
       searchBar,
       toolbarExtra,
       toolbarActions,
       enableRowDetailDialog = true,
       onRowClick,
+      detailTitle,
+      detailTechnicalColumns,
+      detailExtraContent,
       onError,
       onSchemaChange,
       exportFilename,
@@ -361,6 +328,9 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
     defaultOrderByRef.current = defaultOrderBy;
     const defaultOrderDirRef = useRef(defaultOrderDir);
     defaultOrderDirRef.current = defaultOrderDir;
+    const queryParamsRef = useRef(queryParams);
+    queryParamsRef.current = queryParams;
+    const queryParamsKey = JSON.stringify(queryParams ?? {});
 
     const [gridState, setGridState] = useState<DataGridState>(() => {
       const base = createDefaultDataGridState([]);
@@ -398,7 +368,7 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
         pagination: { ...prev.pagination, pageIndex: 0 },
         quickSearch: "",
       }));
-    }, [query]);
+    }, [query, queryParamsKey]);
 
     useEffect(() => {
       onError?.(error);
@@ -410,10 +380,11 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
 
     const columns = useMemo<DataGridColumnDef<RowData>[]>(
       () =>
-        discoveredColumns.map((col): DataGridColumnDef<RowData> => {
-          const isDate = isDateColumnName(col);
-          if (isDate) {
-            return {
+        discoveredColumns.flatMap((col): DataGridColumnDef<RowData>[] => {
+          const config = columnConfigs?.get(col);
+          if (config?.hidden) return [];
+          const base: DataGridColumnDef<RowData> = isDateColumnName(col)
+            ? {
               id: col,
               header: col,
               accessor: (row) => row[col],
@@ -422,26 +393,33 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
               sortable: true,
               type: "dateTime",
               parseValue: parseClickHouseDateOrNull,
+            }
+            : {
+              id: col,
+              header: col,
+              accessor: (row) => row[col],
+              width: guessColumnWidth(col),
+              minWidth: 80,
+              sortable: true,
+              type: "string",
+              renderCell: ({ value }) => <CellValue value={value} />,
             };
+          if (config == null) return [base];
+          const configuredRenderCell = config.renderCell;
+          const configured: DataGridColumnDef<RowData> = { ...base };
+          if (config.header != null) configured.header = config.header;
+          if (config.width != null) configured.width = config.width;
+          if (config.flex != null) configured.flex = config.flex;
+          if (configuredRenderCell != null) {
+            configured.renderCell = ({ value, row }) => configuredRenderCell(value, row);
           }
-          return {
-            id: col,
-            header: col,
-            accessor: (row) => row[col],
-            width: guessColumnWidth(col),
-            minWidth: 80,
-            sortable: true,
-            type: "string",
-            renderCell: ({ value }) => <CellValue value={value} />,
-          };
+          return [configured];
         }),
-      [discoveredColumns],
+      [discoveredColumns, columnConfigs],
     );
 
-    // Capture `query` and `mode` so the generator identity and the SQL it
-    // executes change together. useDataSource keys off that identity to
-    // refetch when either input changes.
     const dataSource = useMemo<DataGridDataSource<RowData>>(() => {
+      void queryParamsKey;
       return async function* (params) {
         setError(null);
         try {
@@ -475,10 +453,14 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
 
           const response = await serverApp.queryAnalytics({
             query: finalQuery,
+            params: queryParamsRef.current ?? {},
             include_all_branches: false,
             timeout_ms: 30000,
           });
 
+          // SAFETY: queryAnalytics rows are the deserialized JSON response
+          // body, so every column value is Json by construction; the SDK only
+          // types them unknown because it cannot know each query's schema.
           const newRows = (response.result as RowData[]).map((row, index) => ({
             ...row,
             [INTERNAL_ROW_ID_KEY]: `${offset + index}`,
@@ -506,7 +488,7 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
           yield { rows: [], hasMore: false };
         }
       };
-    }, [serverApp, query, mode]);
+    }, [serverApp, query, queryParamsKey, mode]);
 
     const getRowId = useCallback((row: RowData): string => {
       if (typeof row[INTERNAL_ROW_ID_KEY] === "string") return row[INTERNAL_ROW_ID_KEY];
@@ -698,6 +680,15 @@ export const QueryDataGrid = forwardRef<QueryDataGridHandle, QueryDataGridProps>
             columns={discoveredColumns}
             open={detailDialogOpen}
             onOpenChange={setDetailDialogOpen}
+            title={detailTitle}
+            technicalColumns={detailTechnicalColumns}
+            extraContent={
+              selectedRow == null || detailExtraContent == null
+                ? null
+                : typeof detailExtraContent === "function"
+                  ? detailExtraContent(selectedRow)
+                  : detailExtraContent
+            }
           />
         )}
       </div>

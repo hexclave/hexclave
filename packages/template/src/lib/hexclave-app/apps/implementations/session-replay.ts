@@ -1,98 +1,11 @@
-import { KnownErrors } from "@hexclave/shared/dist/known-errors";
 import { isBrowserLike } from "@hexclave/shared/dist/utils/env";
 import { captureWarning, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
+import { generateUuid, isAdBlockerNetworkError, isAnalyticsNotEnabledError } from "./telemetry-transport";
+import { getEffectiveSessionReplayBlockSelector, type AnalyticsReplayOptions } from "./analytics-config";
+import type { TelemetryResource } from "./telemetry-config";
 
-export type AnalyticsReplayOptions = {
-  /**
-   * Whether session replays are enabled.
-   *
-   * @default true
-   */
-  enabled?: boolean,
-  /**
-   * Whether to mask the content of all `<input>` elements.
-   *
-   * @default true
-   */
-  maskAllInputs?: boolean,
-  /**
-   * A CSS class name or RegExp. Elements with a matching class will be blocked
-   * (replaced with a placeholder in the recording).
-   *
-   * @default undefined
-   */
-  blockClass?: string | RegExp,
-  /**
-   * A CSS selector string. Elements matching this selector will be blocked
-   * (replaced with a placeholder in the recording).
-   *
-   * @default undefined
-   */
-  blockSelector?: string,
-};
-
-export type AnalyticsOptions = {
-  /**
-   * Whether SDK-managed analytics capture is enabled.
-   *
-   * @default true
-   */
-  enabled?: boolean,
-  /**
-   * Options for session replay recording. Replays are enabled by default;
-   * set `enabled: false` to opt out.
-   */
-  replays?: AnalyticsReplayOptions,
-};
-
-export function getSessionReplayOptions(analyticsOptions: AnalyticsOptions | undefined): AnalyticsReplayOptions {
-  return {
-    ...analyticsOptions?.replays,
-    enabled: analyticsOptions?.replays?.enabled ?? true,
-  };
-}
-
-/**
- * Converts AnalyticsOptions to a JSON-safe representation.
- * RegExp blockClass values are serialized as `{ __regexp, __flags }` objects.
- * The return type is AnalyticsOptions to keep StackClientAppJson simple;
- * the actual runtime value is JSON-safe.
- */
-export function analyticsOptionsToJson(options: AnalyticsOptions | undefined): AnalyticsOptions | undefined {
-  if (!options?.replays?.blockClass) return options;
-  const { blockClass, ...rest } = options.replays;
-  if (!(blockClass instanceof RegExp)) return options;
-  return {
-    ...options,
-    replays: {
-      ...rest,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      blockClass: { __regexp: blockClass.source, __flags: blockClass.flags } as any,
-    },
-  };
-}
-
-/**
- * Reconstructs AnalyticsOptions from a JSON-deserialized value.
- * Converts `{ __regexp, __flags }` objects back to RegExp instances.
- */
-export function analyticsOptionsFromJson(json: AnalyticsOptions | undefined): AnalyticsOptions | undefined {
-  if (!json?.replays?.blockClass) return json;
-  const { blockClass, ...rest } = json.replays;
-  if (typeof blockClass === 'object' && '__regexp' in blockClass) {
-    const bc = blockClass as unknown as { __regexp: string, __flags: string };
-    return {
-      ...json,
-      replays: {
-        ...rest,
-        blockClass: new RegExp(bc.__regexp, bc.__flags),
-      },
-    };
-  }
-  return json;
-}
 
 // ---------- Recording internals ----------
 
@@ -102,6 +15,7 @@ const LOCAL_STORAGE_PREFIX = "hexclave:session-replay:v1";
 // across an SDK upgrade is not orphaned. Never written.
 const LEGACY_LOCAL_STORAGE_PREFIX = "stack:session-replay:v1";
 const IDLE_TTL_MS = 3 * 60 * 1000;
+const MAX_SESSION_DURATION_MS = 12 * 60 * 60 * 1000;
 
 const FLUSH_INTERVAL_MS = 5_000;
 const MAX_EVENTS_PER_BATCH = 200;
@@ -119,6 +33,28 @@ const MAX_SINGLE_EVENT_BYTES = 8 * 1024 * 1024 - BATCH_ENVELOPE_OVERHEAD_BYTES;
 
 // Reused across the emit hot path to avoid per-event allocation.
 const textEncoder = new TextEncoder();
+
+const STYLESHEET_RESNAPSHOT_DEBOUNCE_MS = 1_000;
+
+function isFullSnapshotEvent(event: unknown): boolean {
+  return typeof event === "object" && event !== null && Reflect.get(event, "type") === 2;
+}
+
+/**
+ * Whether rrweb would be able to inline this just-loaded stylesheet link into
+ * a full snapshot: the sheet must exist, its rules must be readable (reading
+ * `cssRules` of a cross-origin stylesheet served without CORS headers throws),
+ * and it must be non-empty. Exported for tests.
+ */
+export function canInlineStylesheetLink(link: HTMLLinkElement): boolean {
+  const sheet = link.sheet;
+  if (sheet == null) return false;
+  try {
+    return sheet.cssRules.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 export type StoredSession = {
   session_id: string,
@@ -149,16 +85,16 @@ export function makeLegacyStorageKey(projectId: string) {
   return `${LEGACY_LOCAL_STORAGE_PREFIX}:${projectId}`;
 }
 
-export function generateUuid() {
-  return crypto.randomUUID();
-}
-
 export function getOrRotateSession(options: { key: string, legacyKey?: string, nowMs: number }): StoredSession {
   // Hexclave rebrand: prefer the new key; fall back to the legacy key so a
   // recording session active across an SDK upgrade is not orphaned.
   const existing = safeParseStoredSession(localStorage.getItem(options.key))
     ?? (options.legacyKey ? safeParseStoredSession(localStorage.getItem(options.legacyKey)) : null);
-  if (existing && options.nowMs - existing.last_activity_ms <= IDLE_TTL_MS) {
+  if (
+    existing
+    && options.nowMs - existing.last_activity_ms <= IDLE_TTL_MS
+    && options.nowMs - existing.created_at_ms <= MAX_SESSION_DURATION_MS
+  ) {
     return existing;
   }
   const next: StoredSession = {
@@ -172,27 +108,14 @@ export function getOrRotateSession(options: { key: string, legacyKey?: string, n
 
 export type SessionRecorderDeps = {
   projectId: string,
+  resource: TelemetryResource,
   sendBatch: (body: string, options: { keepalive: boolean }) => Promise<Result<Response, Error>>,
+  sessionReplaySegmentId?: string,
+  /** Rotate the shared tab span when the durable replay lifecycle rotates. */
+  onSessionRotation?: () => void,
+  /** The replay endpoint has materialized this segment and it is safe to parent under it. */
+  onSessionReplaySegmentMaterialized?: (segmentId: string) => Promise<void>,
 };
-
-export function isAnalyticsNotEnabledError(error: unknown): boolean {
-  return KnownErrors.AnalyticsNotEnabled.isInstance(error);
-}
-
-/**
- * Whether the error looks like a network failure caused by an ad blocker or
- * similar extension blocking analytics requests. These are expected in
- * production and should be silently ignored rather than logged as warnings.
- */
-export function isAdBlockerNetworkError(error: unknown): boolean {
-  if (error instanceof Error) {
-    return error.message.includes("Failed to fetch")
-      || error.message.includes("NetworkError")
-      || error.message.includes("Load failed")
-      || error.message.includes("network connection");
-  }
-  return false;
-}
 
 export class SessionRecorder {
   private _started = false;
@@ -206,11 +129,14 @@ export class SessionRecorder {
   private _approxBytes = 0;
   private _lastPersistActivity = 0;
   private _recording = false;
-  private _rrwebModule: typeof import("rrweb") | null = null;
+  private _rrwebModule: typeof import("@rrweb/record") | null = null;
   private _lastBrowserSessionId: string | null = null;
   private _takingSnapshot = false;
+  private _needsFullSnapshot = false;
+  private _hasMaterializedFullSnapshot = false;
   private _flushInProgress = false;
-  private readonly _sessionReplaySegmentId: string;
+  private _resnapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  private _sessionReplaySegmentId: string;
   private readonly _storageKey: string;
   // Hexclave rebrand: legacy key used for dual-read fallback only.
   private readonly _legacyStorageKey: string;
@@ -220,7 +146,7 @@ export class SessionRecorder {
   constructor(deps: SessionRecorderDeps, replayOptions: AnalyticsReplayOptions) {
     this._deps = deps;
     this._replayOptions = replayOptions;
-    this._sessionReplaySegmentId = generateUuid();
+    this._sessionReplaySegmentId = deps.sessionReplaySegmentId ?? generateUuid();
     this._storageKey = makeStorageKey(deps.projectId);
     this._legacyStorageKey = makeLegacyStorageKey(deps.projectId);
   }
@@ -257,6 +183,34 @@ export class SessionRecorder {
     this._approxBytes = 0;
   }
 
+  /**
+   * Replaces the per-tab id shared with the EventTracker. Called on sign-out
+   * (paired with clearBuffer) so a subsequent same-tab sign-in as a different user
+   * does not reuse the previous user's session_replay_segment_id — which would let
+   * the two users' replays and events be correlated. The app rotates both trackers
+   * to the SAME new id so they stay in sync.
+   */
+  setSessionReplaySegmentId(id: string) {
+    this._sessionReplaySegmentId = id;
+    this._needsFullSnapshot = true;
+    this._hasMaterializedFullSnapshot = false;
+  }
+
+  /** Resume a rotated segment only after its authenticated session is live. */
+  captureFullSnapshotForCurrentSegment(): void {
+    if (!this._needsFullSnapshot || !this._recording || this._rrwebModule === null) return;
+    if (this._takingSnapshot) return;
+    this._takingSnapshot = true;
+    try {
+      this._rrwebModule.record.takeFullSnapshot();
+      this._needsFullSnapshot = false;
+    } catch (error) {
+      captureWarning("SessionRecorder.fullSnapshot", error);
+    } finally {
+      this._takingSnapshot = false;
+    }
+  }
+
   private _persistActivity(nowMs: number): StoredSession {
     const stored = getOrRotateSession({ key: this._storageKey, legacyKey: this._legacyStorageKey, nowMs });
     if (nowMs - this._lastPersistActivity < 5_000) return stored;
@@ -276,6 +230,14 @@ export class SessionRecorder {
     // picked up by the next tick or batch-size check.
     if (this._flushInProgress) return;
 
+    // A segment is not usable until its FullSnapshot has reached the server.
+    // If an earlier first-batch attempt failed, never upload the dependent
+    // mutations by themselves; replace them with a fresh reconstruction root.
+    if (this._recording && !this._hasMaterializedFullSnapshot && !this._events.some(isFullSnapshotEvent)) {
+      this._restartUnmaterializedSegment(this._sessionReplaySegmentId);
+      if (this._events.length === 0) return;
+    }
+
     const nowMs = Date.now();
     const stored = getOrRotateSession({ key: this._storageKey, legacyKey: this._legacyStorageKey, nowMs });
 
@@ -287,6 +249,7 @@ export class SessionRecorder {
     this._events = [];
     this._eventSizes = [];
     this._approxBytes = 0;
+    const sessionReplaySegmentId = this._sessionReplaySegmentId;
 
     // Non-keepalive flushes gzip before sending, so a single event up to the
     // server's decompressed budget can be sent alone. Keepalive flushes
@@ -322,12 +285,15 @@ export class SessionRecorder {
         }
 
         const batchEvents = allEvents.slice(offset, batchEnd);
+        const batchHasFullSnapshot = batchEvents.some(isFullSnapshotEvent);
         offset = batchEnd;
 
         const batchId = generateUuid();
         const payload = {
+          schema_version: 2,
+          resource: this._deps.resource,
           browser_session_id: stored.session_id,
-          session_replay_segment_id: this._sessionReplaySegmentId,
+          session_replay_segment_id: sessionReplaySegmentId,
           batch_id: batchId,
           started_at_ms: stored.created_at_ms,
           sent_at_ms: nowMs,
@@ -344,6 +310,7 @@ export class SessionRecorder {
             this._disable();
             return;
           }
+          this._restartUnmaterializedSegment(sessionReplaySegmentId);
           // Ad blockers commonly block analytics endpoints, causing network
           // errors. These are expected and should not pollute the console.
           if (isAdBlockerNetworkError(res.error)) {
@@ -357,6 +324,7 @@ export class SessionRecorder {
           // On any non-2xx we stop the loop, so this batch and every event still
           // buffered behind it are dropped (not retried). Count them for the log.
           const droppedCount = batchEvents.length + (allEvents.length - offset);
+          this._restartUnmaterializedSegment(sessionReplaySegmentId);
           if (res.data.status === 413) {
             // The payload exceeded the server's body limit despite the client-side
             // size caps — most likely a single poorly-compressible event (e.g. an
@@ -371,10 +339,21 @@ export class SessionRecorder {
           captureWarning("SessionRecorder.flush", new Error(`SessionRecorder flush failed (dropping ${droppedCount} buffered event(s)): ${res.data.status} ${await res.data.text()}`));
           return;
         }
+        if (batchHasFullSnapshot && sessionReplaySegmentId === this._sessionReplaySegmentId) {
+          this._hasMaterializedFullSnapshot = true;
+        }
+        await this._deps.onSessionReplaySegmentMaterialized?.(sessionReplaySegmentId);
       }
     } finally {
       this._flushInProgress = false;
     }
+  }
+
+  private _restartUnmaterializedSegment(segmentId: string): void {
+    if (segmentId !== this._sessionReplaySegmentId || this._hasMaterializedFullSnapshot) return;
+    this.clearBuffer();
+    this._needsFullSnapshot = true;
+    this.captureFullSnapshotForCurrentSegment();
   }
 
   private _disable() {
@@ -391,9 +370,9 @@ export class SessionRecorder {
     if (this._recording || this._cancelled) return;
 
     if (!this._rrwebModule) {
-      const rrwebImport = await Result.fromPromise(import("rrweb"));
+      const rrwebImport = await Result.fromPromise(import("@rrweb/record"));
       if (rrwebImport.status === "error") {
-        console.warn("SessionRecorder: rrweb import failed. Is rrweb installed?", rrwebImport.error);
+        console.warn("SessionRecorder: @rrweb/record import failed. Is @rrweb/record installed?", rrwebImport.error);
         return;
       }
       this._rrwebModule = rrwebImport.data;
@@ -403,6 +382,73 @@ export class SessionRecorder {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (this._cancelled) return;
 
+    // rrweb only inlines a `<link rel="stylesheet">` into a snapshot when
+    // its CSS is already loaded and readable at serialization time. Two paths
+    // systematically miss that window: (1) the initial full snapshot is taken
+    // as soon as the SDK boots, which can be before head stylesheets finish
+    // loading (async SDK scripts are not blocked by pending stylesheets), and
+    // (2) links inserted later (e.g. Next.js App Router route CSS on client
+    // navigation) are serialized by the mutation observer at insert time,
+    // before their CSS has loaded. In both cases only the href is recorded, so
+    // playback depends on re-fetching the original asset URL — which 404s once
+    // hashed assets are redeployed — and the replay renders as unstyled raw
+    // HTML. Fix: whenever a stylesheet link finishes loading while recording,
+    // re-take a debounced full snapshot; the sheet is now loaded, so rrweb
+    // inlines it and the recording becomes self-contained. Stylesheets that
+    // were already inlined never fire another load event, so this adds no
+    // snapshots in the steady state. Attached BEFORE record() so a stylesheet
+    // finishing between the initial snapshot and listener setup is not missed
+    // (the resulting extra snapshot is harmless). Resource load events don't
+    // bubble, but they do pass document in the capture phase.
+    const onResourceLoad = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLLinkElement)) return;
+      if (!target.relList.contains("stylesheet")) return;
+      // If rrweb couldn't inline this sheet anyway (cross-origin without CORS,
+      // empty sheet), a new snapshot wouldn't help — skip the cost.
+      if (!canInlineStylesheetLink(target)) return;
+      if (this._resnapshotTimer !== null) clearTimeout(this._resnapshotTimer);
+      this._resnapshotTimer = setTimeout(() => {
+        this._resnapshotTimer = null;
+        if (this._cancelled || !this._recording || !this._rrwebModule) return;
+        if (this._takingSnapshot) return;
+        this._takingSnapshot = true;
+        try {
+          this._rrwebModule.record.takeFullSnapshot();
+        } finally {
+          this._takingSnapshot = false;
+        }
+      }, STYLESHEET_RESNAPSHOT_DEBOUNCE_MS);
+    };
+    document.addEventListener("load", onResourceLoad, true);
+
+    try {
+      this._startRrwebRecording();
+    } catch (e) {
+      document.removeEventListener("load", onResourceLoad, true);
+      throw e;
+    }
+
+    this._recording = true;
+
+    const onPageHide = () => {
+      runAsynchronously(() => this._flush({ keepalive: true }));
+    };
+    window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("visibilitychange", onPageHide);
+    this._detachListeners = () => {
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onPageHide);
+      document.removeEventListener("load", onResourceLoad, true);
+      if (this._resnapshotTimer !== null) {
+        clearTimeout(this._resnapshotTimer);
+        this._resnapshotTimer = null;
+      }
+    };
+  }
+
+  private _startRrwebRecording() {
+    if (!this._rrwebModule) throwErr("_startRrwebRecording called before rrweb was imported — this should never happen");
     this._stopRecording = this._rrwebModule.record({
       emit: (event) => {
         const nowMs = Date.now();
@@ -415,14 +461,21 @@ export class SessionRecorder {
           this._lastBrowserSessionId = stored.session_id;
         } else if (stored.session_id !== this._lastBrowserSessionId && !this._takingSnapshot) {
           this._lastBrowserSessionId = stored.session_id;
-          // Inject a FullSnapshot for the new session (calls emit synchronously)
-          this._takingSnapshot = true;
-          try {
-            this._rrwebModule!.record.takeFullSnapshot();
-          } finally {
-            this._takingSnapshot = false;
-          }
+          this._deps.onSessionRotation?.();
+          this._needsFullSnapshot = true;
+          this.captureFullSnapshotForCurrentSegment();
         }
+
+        // While a rotated segment waits for its fresh FullSnapshot, drop
+        // everything EXCEPT the FullSnapshot (type 2) and Meta (type 4):
+        // rrweb's takeFullSnapshot emits a Meta event immediately before the
+        // snapshot, and the replayer keeps its iframe hidden (display: none)
+        // until it has seen a Meta to size it — a segment whose Meta was
+        // dropped plays back as a blank white frame. Meta events are only ever
+        // emitted as part of a snapshot, so letting them through cannot leak
+        // pre-rotation activity into the new segment.
+        if (this._needsFullSnapshot && event.type !== 2 && event.type !== 4) return;
+        if (event.type === 2) this._needsFullSnapshot = false;
 
         // Measure UTF-8 byte length to match the server's byte limit (.length counts UTF-16 units, undercounting multibyte content).
         const eventSize = textEncoder.encode(JSON.stringify(event)).byteLength;
@@ -435,20 +488,8 @@ export class SessionRecorder {
       },
       maskAllInputs: this._replayOptions.maskAllInputs ?? true,
       ...(this._replayOptions.blockClass !== undefined ? { blockClass: this._replayOptions.blockClass } : {}),
-      ...(this._replayOptions.blockSelector !== undefined ? { blockSelector: this._replayOptions.blockSelector } : {}),
+      blockSelector: getEffectiveSessionReplayBlockSelector(this._replayOptions.blockSelector),
     }) ?? null;
-
-    this._recording = true;
-
-    const onPageHide = () => {
-      runAsynchronously(() => this._flush({ keepalive: true }));
-    };
-    window.addEventListener("pagehide", onPageHide);
-    document.addEventListener("visibilitychange", onPageHide);
-    this._detachListeners = () => {
-      window.removeEventListener("pagehide", onPageHide);
-      document.removeEventListener("visibilitychange", onPageHide);
-    };
   }
 
   private _stopCurrentRecording() {

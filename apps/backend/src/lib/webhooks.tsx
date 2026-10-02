@@ -1,3 +1,4 @@
+import { issueCreatedWebhookEvent, issueIgnoredWebhookEvent, issueMergedWebhookEvent, issueRegressedWebhookEvent, issueResolvedWebhookEvent } from "@hexclave/shared/dist/interface/crud/issues";
 import { projectPermissionCreatedWebhookEvent, projectPermissionDeletedWebhookEvent } from "@hexclave/shared/dist/interface/crud/project-permissions";
 import { teamMembershipCreatedWebhookEvent, teamMembershipDeletedWebhookEvent } from "@hexclave/shared/dist/interface/crud/team-memberships";
 import { teamPermissionCreatedWebhookEvent, teamPermissionDeletedWebhookEvent } from "@hexclave/shared/dist/interface/crud/team-permissions";
@@ -10,6 +11,7 @@ import { Result } from "@hexclave/shared/dist/utils/results";
 import { Svix } from "svix";
 import * as yup from "yup";
 import { isPreviewModeEnabled } from "@/lib/preview-mode";
+import type { Tenancy } from "@/lib/tenancies";
 
 export function getSvixClient() {
   return new Svix(
@@ -18,10 +20,15 @@ export function getSvixClient() {
   );
 }
 
+export function isWebhooksAppEnabled(tenancy: Tenancy): boolean {
+  return tenancy.config.apps.installed["webhooks"]?.enabled ?? false;
+}
+
 async function sendWebhooks(options: {
   type: string,
   projectId: string,
   data: any,
+  eventId?: string,
 }) {
   if (isPreviewModeEnabled()) {
     return;
@@ -42,6 +49,7 @@ async function sendWebhooks(options: {
   }
   await svix.message.create(options.projectId, {
     eventType: options.type,
+    ...options.eventId === undefined ? {} : { eventId: options.eventId },
     payload: {
       type: options.type,
       data: options.data,
@@ -50,13 +58,14 @@ async function sendWebhooks(options: {
 }
 
 function createWebhookSender<T extends yup.Schema>(event: WebhookEvent<T>) {
-  return async (options: { projectId: string, data: yup.InferType<typeof event.schema> }) => {
+  return async (options: { projectId: string, data: yup.InferType<typeof event.schema>, eventId?: string }) => {
     await Result.retry(async () => {
       try {
         return Result.ok(await sendWebhooks({
           type: event.type,
           projectId: options.projectId,
           data: options.data,
+          eventId: options.eventId,
         }));
       } catch (e) {
         if (typeof e === "object" && e !== null && "code" in e && e.code === "429") {
@@ -81,3 +90,16 @@ export const sendTeamPermissionCreatedWebhook = createWebhookSender(teamPermissi
 export const sendTeamPermissionDeletedWebhook = createWebhookSender(teamPermissionDeletedWebhookEvent);
 export const sendProjectPermissionCreatedWebhook = createWebhookSender(projectPermissionCreatedWebhookEvent);
 export const sendProjectPermissionDeletedWebhook = createWebhookSender(projectPermissionDeletedWebhookEvent);
+
+function createIdempotentWebhookSender<T extends yup.Schema>(event: WebhookEvent<T>) {
+  const send = createWebhookSender(event);
+  return async (options: { projectId: string, data: yup.InferType<typeof event.schema>, eventId: string }) => {
+    await send(options);
+  };
+}
+
+export const sendIssueCreatedWebhook = createIdempotentWebhookSender(issueCreatedWebhookEvent);
+export const sendIssueRegressedWebhook = createIdempotentWebhookSender(issueRegressedWebhookEvent);
+export const sendIssueResolvedWebhook = createIdempotentWebhookSender(issueResolvedWebhookEvent);
+export const sendIssueIgnoredWebhook = createIdempotentWebhookSender(issueIgnoredWebhookEvent);
+export const sendIssueMergedWebhook = createIdempotentWebhookSender(issueMergedWebhookEvent);

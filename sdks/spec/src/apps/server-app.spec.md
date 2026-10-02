@@ -14,6 +14,19 @@ Extends HexclaveClientApp constructor options with:
 Required:
   secretServerKey: string - from Hexclave dashboard
 
+The inherited telemetry.resource contract applies unchanged. Give each
+deployable server service its own logical identity, for example:
+
+  telemetry: {
+    resource: {
+      service: { name: "stack-backend" }
+    }
+  }
+
+The server app does not infer this from its key, request host, framework, or
+runtime. See analytics.spec.md "Constructor options" for required fields,
+inheritance/replacement semantics, and validation.
+
 The secretServerKey enables server-only operations like listing all users,
 creating users, and accessing server metadata.
 
@@ -261,6 +274,80 @@ Request:
 Does not error.
 
 
+## Telemetry API (server-side variants)
+
+HexclaveServerApp inherits the telemetry surface of HexclaveClientApp
+(trackEvent, logger, startSpan, withSpan, setGlobalSpan/clearGlobalSpan,
+flush, getSpanPropagationHeaders) with server-specific differences — full
+contracts in analytics.spec.md:
+
+  trackEvent(eventType, data?, options?)
+    options additionally accepts:
+      userId: uuid? - explicit attribution (no session to derive it from)
+      request: RequestLike? - resolve attribution AND the caller's trace from an
+        incoming request: session tokens give the user, the standard W3C
+        `traceparent` gives the trace id + parent span, and
+        baggage gives the non-hierarchical correlation ids
+        (replay, segment, page view). With request, userId is derived from the
+        session unless overridden. A request with no `traceparent` starts a new
+        trace rooted at this request.
+    With an ambient request provider registered (Next.js:
+    hexclaveInstrumentation().register()), bare calls inside a request scope
+    attribute to the caller automatically — request stays as the explicit
+    override. See analytics.spec.md "Ambient request provider".
+
+  logger
+    Same API as the client logger; emits OTel LogRecords through the active LoggerProvider. Inside a
+    withSpan({ request }) scope — or any request scope when an ambient request
+    provider is registered — logs automatically join the caller's TRACE (they
+    carry its trace_id and the enclosing span_id) and pick up the caller's
+    correlation ids (page view, replay, segment, refresh token).
+
+  startSpan(spanType, options?)
+    options additionally accepts userId. Synchronous — cannot resolve a
+    request (and never consults the ambient request provider); use
+    withSpan(type, { request }, fn) for request-linked spans.
+
+  withSpan(spanType, options, fn)
+    options additionally accepts userId and request. This is the primitive the
+    framework adapters build on (see analytics.spec.md "Framework
+    integrations") — with an adapter you never pass request yourself, and with
+    an ambient request provider registered even bare withSpan(type, fn) calls
+    adopt the ambient request.
+    Ambient parenting is AsyncLocalStorage-backed (exact under concurrency).
+
+  Delivery: the configured OTel SpanProcessors and LogRecordProcessors own
+  batching, queue bounds, scheduling, retry, and OTLP serialization. In managed
+  mode, await trackEvent/withSpan or call flush() when remote acknowledgement is
+  required; telemetry.waitUntil carries that flush through serverless request
+  teardown. Existing-provider mode leaves lifecycle ownership with the host
+  application.
+
+  Auto-instrumentation seams (official server Undici spans, the uncaught-exception $error
+  monitor, Next.js hexclaveInstrumentation, the ambient request provider) are
+  specified in analytics.spec.md.
+
+  captureException(error, options?): ErrorEventId
+    Captures an arbitrary thrown value and returns a 32-character lowercase
+    hexadecimal event id. Manual server captures are drained by `flush()`.
+
+  captureMessage(message, options?): ErrorEventId
+    Captures a non-empty message and returns its event id.
+
+  captureEvent(event): ErrorEventId
+    Captures a normalized event or exception chain and returns its event id.
+
+  lastEventId(): ErrorEventId | undefined
+    Returns the latest manually or automatically captured event id.
+
+  withErrorScope<T>(fn: (scope: ErrorScope) => T): T
+    Runs a callback with isolated user, tags, contexts, extras, breadcrumbs,
+    level, and fingerprint enrichment. `scope.setExtras(extras)` provides the
+    same bulk-extra merge as `setExtra`. Server framework adapters use the
+    async context integration described in analytics.spec.md for request-safe
+    propagation.
+
+
 ## queryAnalytics(options)
 
 Arguments:
@@ -304,6 +391,7 @@ Arguments:
   options.lastEventAtFromMillis: number? - only replays whose last event is at or after this Unix ms timestamp
   options.lastEventAtToMillis: number? - only replays whose last event is at or before this Unix ms timestamp
   options.clickCountMin: number? - only replays with at least this many click events
+  options.userKind: "anonymous" | "verified"? - only anonymous users or only identified users. Omitted means both. "verified" here is identified / signed-up, not email-verified.
 
 Returns:
   {
@@ -315,7 +403,7 @@ Request:
   GET /api/v1/session-replays [server-only]
   Query params: cursor?, limit?, user_ids? (comma-separated), team_ids? (comma-separated),
                 duration_ms_min?, duration_ms_max?, last_event_at_from_millis?,
-                last_event_at_to_millis?, click_count_min?
+                last_event_at_to_millis?, click_count_min?, user_kind?
 
 Response:
   {

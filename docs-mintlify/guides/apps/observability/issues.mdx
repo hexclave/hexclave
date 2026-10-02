@@ -1,0 +1,179 @@
+---
+title: "Triaging Issues"
+sidebarTitle: "Triaging Issues"
+description: "The Issues list and detail view — filters, stack frames, occurrence navigation, correlation, and the resolve/ignore/regression lifecycle"
+---
+
+**Observability -> Issues** is the triage surface. The list answers "what is broken right now"; the detail view answers "what exactly happened, to whom, and in which trace".
+
+## The Issues List
+
+`/projects/{projectId}/observability/issues`
+
+Each row is one issue, not one error. The **Issue** cell carries the exception type, the message, the culprit in monospace, the short id as `#42`, and a red **Unhandled** badge when the error was never caught by your code.
+
+| Column | What it means | Source |
+|---|---|---|
+| Issue | Type, message, culprit, short id, badges | — |
+| Graph | Occurrence sparkline across the selected range | Windowed |
+| Events | Occurrences inside the selected time range | Windowed |
+| Users | Distinct users affected inside the selected range | Windowed |
+| Last seen | Most recent occurrence, **all time** | Lifetime |
+| First seen | First occurrence ever, plus the all-time count underneath | Lifetime |
+| Status | Status / substatus badge, or `—` for a plain ongoing issue | — |
+| Environment | Deployment environment (hidden by default) | — |
+| Release | Release of the most recent occurrence (hidden by default) | — |
+
+<Warning>
+**Events** and **Users** are scoped to the selected time range. **Last seen**, **First seen**, and the all-time count under First seen are lifetime values that ignore the range entirely. They sit next to each other and they are not interchangeable — see [Limits](/guides/apps/observability/error-tracking#limits-and-caveats) for why they can disagree.
+</Warning>
+
+Environment and Release are available from the **Columns** button in the toolbar, along with CSV **Export**. The list pages in automatically as you scroll.
+
+### Filters
+
+| Filter | Options | Default |
+|---|---|---|
+| Time range | `1h`, `24h`, `7d`, `30d` | `24h` |
+| Status | Unresolved, Resolved, Ignored, All (each with a count) | Unresolved |
+| Service | All services, then every service seen in the range | All services |
+| Environment | All environments, then every environment seen in the range | All environments |
+| Handled | Handled & unhandled, Unhandled only, Handled only | Handled & unhandled |
+| Search | Free text over type, message, and culprit | empty |
+
+The default range is **24 hours** — deliberately shorter than the Logs page's default, because triage is about what is happening now. Filters are reflected in the URL (defaults are omitted, so a fresh page has a clean query string), which makes a filtered view shareable.
+
+Select one or more rows for bulk **Resolve**, **Ignore**, and **Reopen**. Select two or more for **Merge**. Below the list, **Event search** queries the public issue search API by level, release, user id, or tag — dimensions the filter bar does not cover.
+
+Sorting defaults to most-recently-seen first. Sorting by **Events** or **Users** ranks issues by activity inside the selected range; because that ranking happens over a bounded candidate set, very large result sets show an info banner reading *"Ranking is approximate"* rather than silently truncating. Narrowing the filters restores an exact ordering.
+
+<Info>
+The status tab counts are scoped to the time range only — they deliberately ignore the service, environment, handled, and search filters, so the tabs keep telling you how much unresolved work exists overall while you narrow the list underneath them.
+</Info>
+
+### Status Badges
+
+| Badge | When |
+|---|---|
+| **New** (blue) | The issue was first seen inside the selected range |
+| **Regressed** (orange) | The issue regressed inside the selected range — the row also gets an amber leading rule so it is scannable without reading the Status column |
+| **Resolved** (green) | Marked resolved |
+| **Ignored** (zinc) | Marked ignored |
+| `—` | Unresolved and ongoing |
+
+New / ongoing / regressed is a **substatus**, derived at read time relative to the range you are looking at and never stored. The same issue is "New" in a 24h view and "ongoing" in a 30d view — that is correct, not a bug.
+
+## The Issue Detail View
+
+`/projects/{projectId}/observability/issues/{issueId}`
+
+The route accepts either the issue's UUID or its numeric short id (`.../issues/42`), so `#42` in a Slack message is a working URL. A merged-away id still resolves: the server follows the redirect and serves the surviving issue.
+
+The page has several parts.
+
+**Header.** Sticky, so the controls stay reachable while you read a long stack. Title is the exception type; description is the culprit and message; actions are the status badge, a **Resolve** / **Unresolve** button, and an overflow menu with **Ignore forever**, snooze presets (**1 hour**, **1 day**, **1 week**), **Unsnooze**, and **Mark as regressed** when the issue is resolved.
+
+**Stat strip.** Windowed Events and Users, the **All time** lifetime count, and First seen. Below a divider: the log level, a Handled/Unhandled badge, environment, service name, and the short id. The lifetime count is the reliable number here — for windowed activity, read the sparkline on the list row.
+
+**Stack trace.** The parsed frames of one occurrence, with navigation across occurrences.
+
+**Correlation rail.** Links out to everything else that happened around this occurrence.
+
+### Stack Frames
+
+Frames are ordered **Newest first** by default — the crash site at the top — with a toggle for **Oldest first**.
+
+Runs of two or more consecutive library frames collapse into a single expandable row labelled by their common origin, for example `7 frames from node_modules`, `4 frames from node internals`, or `3 frames from cdn.example.com`. A lone library frame is never collapsed (hiding one line behind a toggle costs more than it saves), and if *every* frame in the stack is library code the group starts expanded so the card is never just a toggle. Your own frames carry a blue **App** badge.
+
+Two degraded states are rendered explicitly rather than as a blank card:
+
+- **No stack trace** — the error arrived without one, typically a non-`Error` value thrown somewhere the runtime could not attach a stack.
+- **Unparsed stack trace** — the stack didn't match any known runtime format, so it is shown verbatim exactly as it arrived.
+
+<Info>
+Frames are shown as the runtime reported them. In a production browser bundle that means minified filenames and function names unless you have uploaded source maps — look up a registered artifact under **Observability → Source maps**, and upload with `hexclave sourcemaps upload`. The `App` badge and the collapsing rules still work, because in-app detection runs on the paths, not on the symbol names.
+</Info>
+
+### Occurrence Navigation
+
+**Older** and **Newer** step through the individual occurrences of the issue, newest first. Each step reloads that occurrence's stack, event data, and correlation links — so you can check whether a bug reproduces the same way for a different user, release, or environment.
+
+There is deliberately no "84 of 1,203" counter: it would cost an extra count on every step, and a stale ordinal is worse than none.
+
+When every occurrence of an issue has aged out of the 90-day retention window, the card says **"No retained occurrence"** and notes that the issue's counters are still exact. The issue does not disappear.
+
+### Correlation
+
+The rail links each occurrence to:
+
+- **Trace** — opens the [trace waterfall](/guides/apps/observability/cross-tier-tracing) filtered to this trace, so a browser error and the backend request behind it sit in one view.
+- **Session replay** — opens the recording of the session the error happened in.
+- **User** — opens the user in the user directory.
+- **Release** — the release the occurrence came from.
+
+Missing links render as `—` rather than disappearing, so stepping through occurrences never makes the page jump.
+
+Below that, **Leading up to this** shows the log lines from the five minutes before the error, up to 50 of them, read forward in time and ending at the error. It anchors on the narrowest correlation id the occurrence carries, in this order:
+
+1. `trace_id` — *same trace*
+2. `page_view_span_id` — *same page view*
+3. `session_replay_id` — *same session*
+
+If the occurrence carries none of the three, the card says so instead of showing unrelated logs.
+
+### Grouping, symbolication, and triage
+
+Below the stack, the detail page also shows:
+
+- **Grouping** — provenance for why the occurrence landed in this issue, plus the live hash list. Select a strict subset of hashes and **Unmerge** to split them into a new issue.
+- **Symbolication** — source-map lookup diagnostics for the occurrence, when the symbolicator recorded any.
+- **Triage** — assignee (project owner-team members), issue team (always this project's owner team), manual owner, bookmark, and user/team subscribe. Owner rows keep their source (`manual`, `ownership_rule`, `codeowners`, `suspect_commit`, `seer_suggested`).
+
+## Lifecycle
+
+An issue is stored as one of three statuses — **unresolved**, **resolved**, **ignored** — and the substatus (new / ongoing / regressed) is derived on read.
+
+**Resolve** marks the bug as fixed. **Unresolve** puts it back. **Ignore forever** hides an issue you have decided not to act on; **Unsnooze** / unignore reverses it. Both actions are available from the list row and from the detail header, and both apply optimistically: the row dims instead of vanishing, so a resolve doesn't yank the row out from under you mid-scan. A failed update reverts the row and pins an inline error — never a toast you might miss.
+
+### Regression Detection
+
+If a **resolved** issue occurs again, it automatically returns to unresolved, records the moment it regressed, and (with the Webhooks app enabled) fires [`issue.regressed`](/guides/apps/observability/webhooks).
+
+The comparison uses the **server's receipt time for the ingest batch**, never the client-supplied event timestamp. That distinction is load-bearing: event timestamps come from the user's device, so a browser with a fast clock could otherwise reopen an issue you just resolved, and one with a slow clock could hide a real regression. A back-dated occurrence still regresses a resolved issue; it just widens `first_seen` instead of deciding the outcome.
+
+<Info>
+Lifetime counters do honour the client clock, but only to *widen* the interval: `first_seen` moves earlier and `last_seen` moves later, never the reverse. So a back-dated occurrence can make an issue look older than you expected — it can never make it look newer than it is.
+</Info>
+
+### Snooze
+
+The issue model supports ignoring an issue **until a given time**: when the snooze has expired, the issue is treated as unresolved by the list immediately, and it is flipped back to unresolved for real on its next occurrence.
+
+There is deliberately no cron sweeping expired snoozes — an ignored issue that never recurs *should* stay ignored, and waking it up on a timer would just recreate the noise you silenced.
+
+From the detail overflow menu, **Ignore forever** ignores indefinitely. **Snooze 1 hour / 1 day / 1 week** sets `ignored_until`. **Unsnooze** returns a snoozed issue to unresolved.
+
+## Merge and Unmerge
+
+Grouping is good, not perfect. Two hashes can describe the same bug (the same fault reached through two different code paths), and occasionally one hash covers two bugs. Merge and unmerge are the escape hatches.
+
+**Merge** folds several issues into one. The surviving issue is chosen deterministically — earliest `first_seen`, then highest lifetime count, then lowest id — so the oldest issue, which carries the most history and the most inbound links, is the one that survives. The survivor's lifetime counters become the *sum* of the merged issues' lifetime counters (never a snapshot of recent activity, which could not answer an all-time question anyway), and its status is the survivor's — a merge is not a lifecycle event.
+
+The merged-away issues keep working as references: their ids and their short ids redirect to the survivor. Redirects are **rewritten, not chained**, so resolving an id is always exactly one hop no matter how many merges an issue has been through.
+
+**Unmerge** splits a subset of an issue's grouping hashes back out into a new issue. Two things make this better than it usually is:
+
+- **The split is retroactive.** Because every occurrence stores its owning grouping hash rather than an issue id, historical occurrences of the moved hashes resolve to the new issue immediately — no reprocessing, no rewriting of telemetry, no "only new events will be split" caveat.
+- **It is cheap.** The only writes are to the hash-to-issue mapping.
+
+The one honest limitation is lifetime counters. Lifetime counts are all-time while occurrence data is retained for 90 days, so a split cannot divide them exactly. The new issue's counters are therefore **seeded from the retained window and marked as truncated** — the UI renders "12,431 events since 3 May" rather than an all-time number it cannot back up, and the list marks the count with a `*`. The source issue's counters are deliberately left as they are: subtracting a windowed number from a lifetime one produces a value that is neither, and can even go negative.
+
+<Warning>
+**Merge** is on the Issues list: select two or more issues and click Merge. The dashboard does not let you pick the survivor — the server uses the rule above. **Unmerge** is on the issue detail **Grouping** card: select a strict subset of hashes and split them into a new issue. You land on the new issue after the split.
+</Warning>
+
+## Next Steps
+
+- [Error Grouping](/guides/apps/observability/grouping) — why two errors did or didn't land in the same issue
+- [Querying Errors](/guides/apps/observability/querying-errors) — the same data in SQL
+- [Issue Webhooks](/guides/apps/observability/webhooks) — get told about new issues and regressions

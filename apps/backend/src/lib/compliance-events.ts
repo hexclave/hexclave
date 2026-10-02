@@ -1,7 +1,7 @@
 import { runAsynchronouslyAndWaitUntil } from "@/utils/background-tasks";
 import { getBillingTeamId } from "@/lib/plan-entitlements";
 import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
-import { logEvent, getEndUserIpInfoForEvent, SystemEventTypes } from "./events";
+import { recordSystemTelemetry, getEndUserIpInfoForEvent, SystemEventTypes } from "./events";
 import { Tenancy } from "./tenancies";
 
 type SignInAttemptOptions = {
@@ -43,7 +43,7 @@ async function logSignInAttempt(tenancy: Tenancy, options: SignInAttemptOptions)
     "Failed to log sign-in attempt compliance event",
     async () => {
       const ipInfo = await getEndUserIpInfoForEvent();
-      await logEvent([SystemEventTypes.SignInAttempt], {
+      await recordSystemTelemetry([SystemEventTypes.SignInAttempt], {
         projectId: tenancy.project.id,
         branchId: tenancy.branchId,
         userId: options.userId ?? null,
@@ -67,7 +67,7 @@ async function logPermissionDenied(tenancy: Tenancy, options: PermissionDeniedOp
     "Failed to log permission denial compliance event",
     async () => {
       const ipInfo = await getEndUserIpInfoForEvent();
-      await logEvent([SystemEventTypes.PermissionCheck], {
+      await recordSystemTelemetry([SystemEventTypes.PermissionCheck], {
         projectId: tenancy.project.id,
         branchId: tenancy.branchId,
         userId: options.userId ?? null,
@@ -90,7 +90,7 @@ async function logUserRestricted(tenancy: Tenancy, options: UserRestrictedOption
     "Failed to log restricted-user compliance event",
     async () => {
       const ipInfo = await getEndUserIpInfoForEvent();
-      await logEvent([SystemEventTypes.UserRestricted], {
+      await recordSystemTelemetry([SystemEventTypes.UserRestricted], {
         projectId: tenancy.project.id,
         branchId: tenancy.branchId,
         userId: options.userId,

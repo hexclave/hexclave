@@ -1,10 +1,11 @@
 {
   "compilerOptions": {
-    "target": "es2020",
+    "target": "es2021",
     "lib": [
       "dom",
       "dom.iterable",
-      "esnext"
+      "es2021",
+      "es2022.error"
     ],
     "allowJs": true,
     "strict": true,
@@ -17,6 +18,9 @@
     "jsx": "react-jsx",
     "incremental": true,
     "noErrorTruncation": true,
+    "types": [
+      "vitest/importMeta"
+    ],
     "plugins": [
       {
         "name": "next"

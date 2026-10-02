@@ -6,7 +6,7 @@ import { it } from "../../../../helpers";
 import { Project, User, niceBackendFetch, withInternalProject } from "../../../backend-helpers";
 import { waitForItemQuantityToReach } from "../../../payment-quota-helpers";
 
-async function runQuery(body: { query: string, params?: Record<string, string>, timeout_ms?: number }) {
+async function runQuery(body: { query: string, params?: Record<string, unknown>, timeout_ms?: number }) {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
 
   const response = await niceBackendFetch("/api/v1/analytics/query", {
@@ -18,7 +18,7 @@ async function runQuery(body: { query: string, params?: Record<string, string>, 
   return response;
 }
 
-async function runQueryWithPlan(planId: PlanId, body: { query: string, params?: Record<string, string>, timeout_ms?: number }) {
+async function runQueryWithPlan(planId: PlanId, body: { query: string, params?: Record<string, unknown>, timeout_ms?: number }) {
   const { createProjectResponse } = await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   const ownerTeamId = createProjectResponse.body.owner_team_id;
 
@@ -164,6 +164,32 @@ it("can execute a query with parameters", async ({ expect }) => {
     NiceResponse {
       "status": 200,
       "body": { "result": [{ "value": "hello world" }] },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("can execute a query with an array parameter", async ({ expect }) => {
+  const response = await runQuery({
+    query: "SELECT arraySort({values:Array(String)}) as value",
+    params: {
+      values: ["second", "first"],
+    },
+  });
+
+  expect(stripQueryId(response, expect)).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": {
+        "result": [
+          {
+            "value": [
+              "first",
+              "second",
+            ],
+          },
+        ],
+      },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
@@ -591,14 +617,22 @@ it("has limited grants", async ({ expect }) => {
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.connected_accounts TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.contact_channels TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.email_outboxes TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.errors TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.events TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.logs TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.notification_preferences TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.page_views TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.project_permissions TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.refresh_tokens TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.span_events TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.span_links TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.spans TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.team_invitations TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.team_member_profiles TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.team_permissions TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.teams TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.trace_roots TO limited_user" },
+          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.trace_services TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.users TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SELECT ON system.aggregate_function_combinators TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SELECT ON system.collations TO limited_user" },
@@ -651,11 +685,23 @@ it("can see only some tables", async ({ expect }) => {
           },
           {
             "database": "default",
+            "name": "errors",
+          },
+          {
+            "database": "default",
             "name": "events",
           },
           {
             "database": "default",
+            "name": "logs",
+          },
+          {
+            "database": "default",
             "name": "notification_preferences",
+          },
+          {
+            "database": "default",
+            "name": "page_views",
           },
           {
             "database": "default",
@@ -664,6 +710,18 @@ it("can see only some tables", async ({ expect }) => {
           {
             "database": "default",
             "name": "refresh_tokens",
+          },
+          {
+            "database": "default",
+            "name": "span_events",
+          },
+          {
+            "database": "default",
+            "name": "span_links",
+          },
+          {
+            "database": "default",
+            "name": "spans",
           },
           {
             "database": "default",
@@ -680,6 +738,14 @@ it("can see only some tables", async ({ expect }) => {
           {
             "database": "default",
             "name": "teams",
+          },
+          {
+            "database": "default",
+            "name": "trace_roots",
+          },
+          {
+            "database": "default",
+            "name": "trace_services",
           },
           {
             "database": "default",
@@ -705,14 +771,22 @@ it("SHOW TABLES should have the correct tables", async ({ expect }) => {
           { "name": "connected_accounts" },
           { "name": "contact_channels" },
           { "name": "email_outboxes" },
+          { "name": "errors" },
           { "name": "events" },
+          { "name": "logs" },
           { "name": "notification_preferences" },
+          { "name": "page_views" },
           { "name": "project_permissions" },
           { "name": "refresh_tokens" },
+          { "name": "span_events" },
+          { "name": "span_links" },
+          { "name": "spans" },
           { "name": "team_invitations" },
           { "name": "team_member_profiles" },
           { "name": "team_permissions" },
           { "name": "teams" },
+          { "name": "trace_roots" },
+          { "name": "trace_services" },
           { "name": "users" },
         ],
       },
@@ -1217,14 +1291,22 @@ it("shows grants", async ({ expect }) => {
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.connected_accounts TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.contact_channels TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.email_outboxes TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.errors TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.events TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.logs TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.notification_preferences TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.page_views TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.project_permissions TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.refresh_tokens TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.span_events TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.span_links TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.spans TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.team_invitations TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.team_member_profiles TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.team_permissions TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.teams TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.trace_roots TO limited_user" },
+          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.trace_services TO limited_user" },
           { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.users TO limited_user" },
         ],
       },

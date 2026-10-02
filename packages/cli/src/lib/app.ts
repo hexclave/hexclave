@@ -26,6 +26,8 @@ export function getInternalApp(auth: SessionAuth): StackClientApp<true, "interna
       refreshToken: auth.refreshToken,
     },
     noAutomaticPrefetch: true,
+    analytics: { enabled: false },
+    observability: { enabled: false },
   });
 }
 

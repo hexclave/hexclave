@@ -1,35 +1,40 @@
 ---
 title: "Analytics"
-description: "Explore events, session replays, and SQL queries in your project's analytics dataset"
+description: "Understand product usage and user behavior through paths, replays, and clickmaps"
+sidebarTitle: "Overview"
 ---
 
-The Analytics app gives you direct access to your project's analytics dataset in Hexclave. You can inspect raw event tables, run ClickHouse SQL queries, and watch session replays to debug real user behavior.
+The Analytics app shows how people use your product. It keeps paths, replays, and clickmaps separate from operational telemetry and data exploration.
 
 ## Overview
 
-Analytics is organized into four areas in the dashboard:
+Analytics is organized into these areas in the dashboard:
 
-- **Tables**: Browse rows across tables (events, users, contact channels, and more) with sorting, search, and incremental loading
-- **Queries**: Run and save reusable ClickHouse SQL queries
+- **Paths**: Explore route transitions and compare unique visitors across 2 or 3 exact paths
 - **Replays**: Watch session replays and filter by user, team, duration, activity window, and click count
-- **Clickmaps**: See which elements get clicks on your pages
+- **Clickmaps**: Visualize where users click on your pages
 
-See [Replays & Clickmaps](./replays-and-clickmaps) for the full guide to session replays and clickmaps.
+Observability is a separate app for Issues, Logs, Traces, Services, Performance, and Registry. Warehouse owns Tables and Queries. Enable each app independently under **Apps** in the dashboard.
+
+See [Replays & Clickmaps](./replays-and-clickmaps) for the full guide to session replays and clickmaps. Use [Warehouse](/guides/apps/warehouse/overview) to explore the shared ClickHouse dataset.
 
 ## How Analytics Works
 
-Hexclave records analytics events and replay chunks, then exposes them through the Analytics app for read-only querying and investigation.
+Hexclave records product events and replay chunks, then exposes them through Analytics for read-only querying and investigation. The shared telemetry foundation also correlates these signals with code observability without storing them in the same read model.
 
-User activity in your app flows into Hexclave event ingestion, which stores data in ClickHouse. This data powers the Tables view, the SQL query runner, and the Session replay UI.
+User activity in your app flows into Hexclave event ingestion, which stores product events in ClickHouse. This data powers paths, replays, and clickmaps.
 
-Analytics isn't only client events. Hexclave also exposes product data from the rest of your project — users, contact channels, teams, permissions, email outbox, and more — in the same read-only ClickHouse dataset, so you can join product state with behavior in one place. See [Queries & Tables](./queries-and-tables) for the full table list.
+Analytics isn't only client events. Hexclave also exposes product data from the rest of your project — users, contact channels, teams, permissions, email outbox, and more — in the same read-only ClickHouse dataset, so you can join product state with behavior in one place.
 
 ### What Gets Tracked
 
 Hexclave collects both client-side and server-side analytics events:
 
-- **Client-side events**: browser interaction events like `$page-view` and `$click`
+- **Client-side events**: browser interaction events like `$page-view` and `$click`. Page views also carry web vitals (LCP, CLS, INP, and friends) — tracked per navigation, so SPA soft navigations get their own CLS/INP instead of polluting the initial load's numbers
 - **Server-side events**: currently `$token-refresh` and `$sign-up-rule-trigger`
+- **Session spans**: every sign-in session and replay recording is recorded as a span, with a span per recorded browser tab underneath — forming a tree your telemetry attaches to
+- **Custom events**: anything you record with `trackEvent`
+- **Observability signals**: network requests, errors, logs, and custom spans share correlation and ingestion but appear in the separate Observability app — see [Errors & Logs](/guides/apps/observability/errors-and-logs) and [Custom Events & Spans](/guides/apps/analytics/custom-events-and-spans)
 
 ## Enabling the Analytics App
 
@@ -46,34 +51,69 @@ To use analytics in your project:
 2. Initialize Hexclave on your frontend with `HexclaveClientApp`/`HexclaveProvider` and a persistent `tokenStore` (e.g. `"cookie"`, or `"nextjs-cookie"` in Next.js)
 3. Sign in with a real user session
 4. Open the app and navigate/click around
-5. Check **Analytics -> Tables** to confirm events are arriving
+5. Enable the Warehouse app (**Apps -> Warehouse**), then open **Warehouse -> Tables** and inspect the `events` table to confirm events are arriving
 
 SDK analytics capture and session replay recording are **on by default** once the Analytics app is enabled — you do not need to set `analytics.enabled` or `analytics.replays.enabled` unless you want to opt out (pass `analytics: { enabled: false }` or `analytics: { replays: { enabled: false } }`).
 
-After setup, Hexclave automatically captures client-side `$page-view` and `$click` events.
+Replay recording is on by default as part of analytics capture; set `analytics.replays.enabled: false` in your client app config to opt out.
 
-See [Replays & Clickmaps](./replays-and-clickmaps) to tune replay privacy or opt out.
+## Identify Every Service
 
-## Tables
+Analytics and Observability records are always attributed to the application that produced them. Hexclave infers that identity from your environment, so nothing is required to get started. Override it through `telemetry.resource` when you want the name pinned:
 
-The **Tables** screen is the fastest way to inspect recent analytics records.
+```ts
+import { HexclaveClientApp, HexclaveServerApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
 
-- Opens on `events` by default; pick other tables from the sidebar
-- Built-in ordering and client-side search
-- Relative/absolute timestamp display toggle
-- Row detail dialog for inspecting full JSON payloads
+export const hexclaveClientApp = new HexclaveClientApp({
+  // ...your existing client app options
+  telemetry: {
+    resource: {
+      service: { name: "stack-dashboard" },
+      deploymentEnvironmentName: "production",
+    },
+  },
+});
 
-Use this view when you need to quickly answer "what just happened?" without writing SQL.
+export const hexclaveServerApp = new HexclaveServerApp({
+  // ...your existing server app options
+  telemetry: {
+    resource: {
+      service: { name: "stack-backend" },
+      deploymentEnvironmentName: "production",
+    },
+  },
+});
+```
 
-## Queries
+`telemetry.resource` is optional. When you omit it, Hexclave infers a service identity so telemetry works with no configuration at all: `service.name` comes from `HEXCLAVE_SERVICE_NAME`, `VERCEL_PROJECT_NAME`, `npm_package_name`, or `SITE_NAME`, suffixed with `-browser` or `-server` so the two halves of an isomorphic app stay distinguishable (falling back to a bare `browser` / `server` when nothing names the app). `version` comes from `VERCEL_GIT_COMMIT_SHA`, `COMMIT_REF`, or `npm_package_version`, and `deploymentEnvironmentName` from `VERCEL_ENV` or `NODE_ENV`.
 
-The **Queries** screen is a ClickHouse SQL workspace for deeper analysis.
+Set it explicitly when the inferred name would be ambiguous — most importantly when several browser apps, mobile apps, APIs, or workers share one Hexclave project, since that is where a guessed name stops being meaningful. An explicit `resource` is validated strictly and never merged with the inferred one.
 
-- Run read-only SQL queries with a timeout budget
-- Query the users and analytics tables
-- Save reusable queries into folders
-- Re-run saved queries with one click
-- Edit and overwrite saved query definitions
+The complete public shape is:
+
+```ts
+telemetry: {
+  resource: {
+    service: {
+      name: string;
+      namespace?: string;
+      version?: string;
+      instanceId?: string;
+    };
+    deploymentEnvironmentName?: string;
+    attributes?: Record<string, unknown>;
+  };
+}
+```
+
+The logical service identity is the pair `(service.namespace, service.name)`. Use a stable `name` for one deployable application, an optional shared `namespace` to group related services, `version` for its release, `instanceId` for a particular replica or browser instance, and `deploymentEnvironmentName` for environments such as `production` or `staging`. Keep secrets, credentials, and user data out of `attributes`.
+
+Every event, replay, span, log, error, and automatic network/library signal from an app instance inherits its immutable resource. There is no per-event or per-span override. Hexclave snapshots the resource when the app is constructed, so mutating the original options object later does not rename an active service.
+
+An app created with `inheritsFrom` inherits the entire parent telemetry configuration when `telemetry` is omitted. Supplying `telemetry` on the child replaces the parent's whole telemetry configuration, so include any `waitUntil` hook the child still needs. A child `telemetry.resource` is also atomic: nested `service` fields and `attributes` are not merged with the parent.
+
+For multiple clients using one project, give each deployable application a distinct service identity—for example, `stack-dashboard`, `stack-ios`, and `stack-backend`. Do not encode users, sessions, routes, or request hosts into `service.name`; those belong to individual telemetry records, not service identity.
 
 ## Session Replays
 
@@ -87,20 +127,26 @@ The **Replays** screen helps you move from "an event happened" to "what the user
 
 Use replays when metrics alone are not enough to explain user behavior.
 
-### Replay recording in the SDK
+### Configuring Replay Recording in the SDK
 
-Session replay recording is **enabled by default** once Analytics is on and your client app uses a persistent token store. You can tune privacy or opt out via the `analytics.replays` options:
+Session replay recording is enabled by default whenever analytics is enabled. You can opt out or tune masking when creating your client app:
 
 ```ts
 import { HexclaveClientApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
 
 export const hexclaveClientApp = new HexclaveClientApp({
   // ...your existing client app options
   tokenStore: "cookie", // use "nextjs-cookie" in Next.js
+  telemetry: {
+    resource: { service: { name: "stack-dashboard" } },
+  },
   analytics: {
     replays: {
-      // Optional. Defaults to true when the Analytics app is enabled; set to false to opt out.
+      // Set to false to opt out of replay recording. Defaults to true.
       enabled: true,
+      // Optional. Defaults to false. Captures debounced counts, never key values.
+      captureKeystrokes: true,
       // Optional. Defaults to true.
       maskAllInputs: true,
     },
@@ -108,7 +154,11 @@ export const hexclaveClientApp = new HexclaveClientApp({
 });
 ```
 
-`maskAllInputs` defaults to `true`, so form fields are masked unless you explicitly disable it. For the full set of privacy controls, playback, and clickmaps, see [Replays & Clickmaps](./replays-and-clickmaps).
+`captureKeystrokes` is disabled by default. When enabled, the SDK records one debounced `$keystroke` event per typing burst with only a count and timing metadata; it never records key values or typed text. Keystrokes in masked inputs, password fields, or elements covered by `blockClass` / `blockSelector` are excluded entirely.
+
+`maskAllInputs` defaults to `true`, so form fields are masked unless you explicitly disable it. That same setting also keeps their keystrokes out of keyboard-activity counts.
+
+Replay recording is independent of `observability.traceSampleRate`. That option samples traces only; replays are still recorded for every eligible session. For sampling, privacy controls, playback, and clickmaps, see [Replays & Clickmaps](./replays-and-clickmaps).
 
 ### Disabling Analytics Capture in the SDK
 
@@ -116,20 +166,26 @@ SDK-managed analytics capture is enabled by default. You can disable it by disab
 
 ```ts
 import { HexclaveClientApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
 
 export const hexclaveClientApp = new HexclaveClientApp({
   // ...your existing client app options
   tokenStore: "cookie", // use "nextjs-cookie" in Next.js
+  telemetry: {
+    resource: { service: { name: "stack-dashboard" } },
+  },
   analytics: { enabled: false },
 });
 ```
 
-This stops the SDK from sending `$page-view` and `$click` events. If you'd rather keep analytics, enable the Analytics app in your dashboard (**Apps -> Analytics**) instead.
+This stops product events and replays. Logs, errors, spans, propagation, and instrumentation are separate: they are off unless you opted in with `observability: { enabled: true }`.
 
 ## Best Practices
 
-1. **Use Tables for quick incident triage**: the Tables UI is the fastest way to inspect recent rows (events, users, and more) without writing SQL.
-2. **Use Queries for repeatable analysis**: save important SQL in folders, and scope queries with filters/`LIMIT` so they stay within result and timeout limits.
-3. **Use Replays for behavioral debugging**: start from an event pattern, then inspect matching session replays to understand what users actually did.
-4. **Use Clickmaps for UI friction and attention**: overlay click counts on your live pages to see whether a flow takes unnecessary clicks, whether a control looks interactable, or how variants compare in an A/B test. Clicks are tied to DOM elements (not pixel coordinates), so a marker in the middle of a button does not mean the user clicked the middle of that button. See [Replays & Clickmaps](./replays-and-clickmaps).
-5. **Keep replay privacy defaults on**: leave `maskAllInputs` enabled unless you have a specific reason and a data-handling policy for unmasked inputs.
+1. **Use Warehouse Tables for product behavior**: inspect recent rows in the `events` table without writing SQL.
+2. **Use Observability for code investigation**: Logs and Traces retain the user/session context that caused the code path.
+3. **Use Warehouse Queries for repeatable analysis**: save important SQL in folders, and scope queries with filters/`LIMIT` so they stay within result and timeout limits.
+4. **Use Replays for behavioral debugging**: start from an event pattern, then inspect matching session replays to understand what users actually did.
+5. **Use Clickmaps for UI friction and attention**: overlay click counts on your live pages to see whether a flow takes unnecessary clicks, whether a control looks interactable, or how variants compare in an A/B test. See [Replays & Clickmaps](./replays-and-clickmaps).
+6. **Keep replay privacy defaults on**: leave `maskAllInputs` enabled unless you have a specific reason and a data-handling policy for unmasked inputs.
+7. **Instrument the flows you care about**: a few well-named [custom spans](/guides/apps/analytics/custom-events-and-spans) around checkout, onboarding, or imports make Traces and SQL dramatically more useful than raw page views alone.

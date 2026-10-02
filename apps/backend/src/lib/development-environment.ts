@@ -1,5 +1,5 @@
 import { Prisma } from "@/generated/prisma/client";
-import { globalPrismaClient } from "@/prisma-client";
+import { globalPrismaClient, type PrismaClientTransaction } from "@/prisma-client";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
 
 export const DEVELOPMENT_ENVIRONMENT_ENV_CONFIG_BLOCKED_MESSAGE =
@@ -7,8 +7,8 @@ export const DEVELOPMENT_ENVIRONMENT_ENV_CONFIG_BLOCKED_MESSAGE =
 
 export type ConfigOverrideWriteLevel = "project" | "branch" | "environment";
 
-export async function isDevelopmentEnvironmentProject(projectId: string): Promise<boolean> {
-  const rows = await globalPrismaClient.$replica().$queryRaw<Array<{ isDevelopmentEnvironment: boolean }>>(Prisma.sql`
+export async function isDevelopmentEnvironmentProject(projectId: string, client: Pick<PrismaClientTransaction, "$queryRaw"> = globalPrismaClient.$replica()): Promise<boolean> {
+  const rows = await client.$queryRaw<Array<{ isDevelopmentEnvironment: boolean }>>(Prisma.sql`
     SELECT "isDevelopmentEnvironment"
     FROM "Project"
     WHERE "id" = ${projectId}
@@ -17,8 +17,8 @@ export async function isDevelopmentEnvironmentProject(projectId: string): Promis
   return rows[0]?.isDevelopmentEnvironment === true;
 }
 
-export async function getEnvironmentConfigWriteBlockReason(projectId: string): Promise<string | null> {
-  return await isDevelopmentEnvironmentProject(projectId)
+export async function getEnvironmentConfigWriteBlockReason(projectId: string, client?: Pick<PrismaClientTransaction, "$queryRaw">): Promise<string | null> {
+  return await isDevelopmentEnvironmentProject(projectId, client)
     ? DEVELOPMENT_ENVIRONMENT_ENV_CONFIG_BLOCKED_MESSAGE
     : null;
 }

@@ -10,7 +10,7 @@ import { getPrismaClientForTenancy, globalPrismaClient } from '@/prisma-client';
 import { ALL_APPS } from '@hexclave/shared/dist/apps/apps-config';
 import { DEFAULT_EMAIL_THEME_ID } from '@hexclave/shared/dist/helpers/emails';
 import { AdminUserProjectsCrud } from '@hexclave/shared/dist/interface/crud/projects';
-import { ITEM_IDS, PLAN_LIMITS } from '@hexclave/shared/dist/plans';
+import { ITEM_IDS, PLAN_LIMITS, UNLIMITED } from '@hexclave/shared/dist/plans';
 import { DayInterval } from '@hexclave/shared/dist/utils/dates';
 import { getEnvVariable } from '@hexclave/shared/dist/utils/env';
 import { throwErr } from '@hexclave/shared/dist/utils/errors';
@@ -163,6 +163,7 @@ export async function seed() {
               [ITEM_IDS.emailsPerMonth]: { quantity: PLAN_LIMITS.free.emailsPerMonth, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.analyticsTimeoutSeconds]: { quantity: PLAN_LIMITS.free.analyticsTimeoutSeconds, repeat: "never" as const, expires: "when-purchase-expires" as const },
               [ITEM_IDS.analyticsEvents]: { quantity: PLAN_LIMITS.free.analyticsEvents, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
+              [ITEM_IDS.analyticsSpans]: { quantity: PLAN_LIMITS.free.analyticsSpans, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.sessionReplays]: { quantity: PLAN_LIMITS.free.sessionReplays, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
             },
           },
@@ -185,6 +186,7 @@ export async function seed() {
               [ITEM_IDS.emailsPerMonth]: { quantity: PLAN_LIMITS.team.emailsPerMonth, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.analyticsTimeoutSeconds]: { quantity: PLAN_LIMITS.team.analyticsTimeoutSeconds, repeat: "never" as const, expires: "when-purchase-expires" as const },
               [ITEM_IDS.analyticsEvents]: { quantity: PLAN_LIMITS.team.analyticsEvents, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
+              [ITEM_IDS.analyticsSpans]: { quantity: PLAN_LIMITS.team.analyticsSpans, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.sessionReplays]: { quantity: PLAN_LIMITS.team.sessionReplays, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.onboardingCall]: { quantity: 1, repeat: "never" as const, expires: "when-purchase-expires" as const },
             },
@@ -208,6 +210,7 @@ export async function seed() {
               [ITEM_IDS.emailsPerMonth]: { quantity: PLAN_LIMITS.growth.emailsPerMonth, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.analyticsTimeoutSeconds]: { quantity: PLAN_LIMITS.growth.analyticsTimeoutSeconds, repeat: "never" as const, expires: "when-purchase-expires" as const },
               [ITEM_IDS.analyticsEvents]: { quantity: PLAN_LIMITS.growth.analyticsEvents, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
+              [ITEM_IDS.analyticsSpans]: { quantity: PLAN_LIMITS.growth.analyticsSpans, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.sessionReplays]: { quantity: PLAN_LIMITS.growth.sessionReplays, repeat: MONTHLY_REPEAT, expires: "when-repeated" as const },
               [ITEM_IDS.onboardingCall]: { quantity: 1, repeat: "never" as const, expires: "when-purchase-expires" as const },
             },
@@ -240,6 +243,7 @@ export async function seed() {
           [ITEM_IDS.emailsPerMonth]: { displayName: "Emails per Month", customerType: "team" as const },
           [ITEM_IDS.analyticsTimeoutSeconds]: { displayName: "Analytics Timeout (seconds)", customerType: "team" as const },
           [ITEM_IDS.analyticsEvents]: { displayName: "Analytics Events", customerType: "team" as const },
+          [ITEM_IDS.analyticsSpans]: { displayName: "Analytics Spans", customerType: "team" as const },
           [ITEM_IDS.sessionReplays]: { displayName: "Session Replays", customerType: "team" as const },
           [ITEM_IDS.onboardingCall]: { displayName: "Onboarding Call", customerType: "team" as const },
         },
@@ -356,6 +360,40 @@ export async function seed() {
     }
   }
 
+  const internalTeamUnlimitedGrants: { id: string, itemId: string }[] = [
+    { id: 'b3a52b60-0a1e-4a3c-9c3e-000000000001', itemId: ITEM_IDS.seats },
+    { id: 'b3a52b60-0a1e-4a3c-9c3e-000000000002', itemId: ITEM_IDS.authUsers },
+    { id: 'b3a52b60-0a1e-4a3c-9c3e-000000000003', itemId: ITEM_IDS.emailsPerMonth },
+    { id: 'b3a52b60-0a1e-4a3c-9c3e-000000000004', itemId: ITEM_IDS.analyticsTimeoutSeconds },
+    { id: 'b3a52b60-0a1e-4a3c-9c3e-000000000005', itemId: ITEM_IDS.analyticsEvents },
+    { id: 'b3a52b60-0a1e-4a3c-9c3e-000000000006', itemId: ITEM_IDS.analyticsSpans },
+    { id: 'b3a52b60-0a1e-4a3c-9c3e-000000000007', itemId: ITEM_IDS.sessionReplays },
+  ];
+  for (const grant of internalTeamUnlimitedGrants) {
+    await internalPrisma.itemQuantityChange.upsert({
+      where: {
+        tenancyId_id: {
+          tenancyId: internalTenancy.id,
+          id: grant.id,
+        },
+      },
+      update: {
+        quantity: UNLIMITED,
+      },
+      create: {
+        tenancyId: internalTenancy.id,
+        id: grant.id,
+        customerId: internalTeamId,
+        customerType: CustomerType.TEAM,
+        itemId: grant.itemId,
+        quantity: UNLIMITED,
+        description: 'Internal team unlimited allowance (Hexclave dogfooding must never exhaust its own quotas)',
+        expiresAt: null,
+      },
+    });
+  }
+  console.log('Granted unlimited item quantities to internal team');
+
   // Upsert the internal API key set before any flake-prone work (dummy-project
   // seed, email/svix, clickhouse).
   const rawPck = resolveInternalProjectKeyAlias(
@@ -442,12 +480,7 @@ export async function seed() {
     },
   } satisfies AdminUserProjectsCrud["Admin"]["Create"];
   if (await getProject(DEVELOPMENT_ENVIRONMENT_PROJECT_ID)) {
-    await createOrUpdateProjectWithLegacyConfig({
-      type: 'update',
-      projectId: DEVELOPMENT_ENVIRONMENT_PROJECT_ID,
-      branchId: DEFAULT_BRANCH_ID,
-      data: developmentEnvironmentProjectData,
-    });
+    console.log("Development environment project already exists, leaving it unchanged (its environment config is read-only).");
   } else {
     await createOrUpdateProjectWithLegacyConfig({
       type: 'create',

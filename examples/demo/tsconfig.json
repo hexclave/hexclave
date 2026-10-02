@@ -27,6 +27,9 @@
     "paths": {
       "src/*": ["./src/*"]
     },
+    "types": [
+      "node"
+    ],
     "strictNullChecks": true,
     "skipLibCheck": true
   },

@@ -1,9 +1,46 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import React from "react";
-import { RouterProvider, useRouterConfirm } from "./router";
+import React, { useRef, useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { RouterProvider, useRouter, useRouterConfirm } from "./router";
+
+const nextRouter = vi.hoisted(() => ({
+  push: vi.fn(),
+  replace: vi.fn(),
+  back: vi.fn(),
+}));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => nextRouter,
+}));
+
+function RouterIdentityProbe() {
+  const router = useRouter();
+  const firstRouter = useRef(router);
+  const [, setRenderCount] = useState(0);
+
+  return (
+    <button type="button" onClick={() => setRenderCount((count) => count + 1)}>
+      {firstRouter.current === router ? "stable" : "changed"}
+    </button>
+  );
+}
+
+describe("useRouter", () => {
+  it("keeps its navigation wrapper stable across unrelated rerenders", () => {
+    const view = render(
+      <RouterProvider>
+        <RouterIdentityProbe />
+      </RouterProvider>,
+    );
+    const button = view.getByRole("button");
+
+    expect(button.textContent).toBe("stable");
+    fireEvent.click(button);
+    expect(button.textContent).toBe("stable");
+  });
+});
 
 afterEach(() => {
   cleanup();

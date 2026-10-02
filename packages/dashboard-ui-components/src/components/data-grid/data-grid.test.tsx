@@ -225,20 +225,26 @@ function PaginatedDataGridHarness(props: { stickyTop?: number | string } = {}) {
 function InteractiveDataGridHarness(props: {
   onSortChange?: DataGridProps<Row>["onSortChange"],
   onSelectionChange?: DataGridProps<Row>["onSelectionChange"],
+  onRowClick?: DataGridProps<Row>["onRowClick"],
+  rows?: readonly Row[],
 }) {
   const [state, setState] = useState(() => createDefaultDataGridState(columns));
+  const rows = props.rows ?? [{ id: "row-1", name: "Row 1" }];
 
   return (
-    <DataGrid<Row>
-      columns={columns}
-      rows={[{ id: "row-1", name: "Row 1" }]}
-      getRowId={(row) => row.id}
-      state={state}
-      onChange={setState}
-      selectionMode="multiple"
-      onSortChange={props.onSortChange}
-      onSelectionChange={props.onSelectionChange}
-    />
+    <div style={{ height: 400 }}>
+      <DataGrid<Row>
+        columns={columns}
+        rows={rows}
+        getRowId={(row) => row.id}
+        state={state}
+        onChange={setState}
+        selectionMode="multiple"
+        onSortChange={props.onSortChange}
+        onSelectionChange={props.onSelectionChange}
+        onRowClick={props.onRowClick}
+      />
+    </div>
   );
 }
 
@@ -512,6 +518,12 @@ describe("DataGrid controlled callbacks", () => {
         return 400;
       },
     });
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get() {
+        return 400;
+      },
+    });
     Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
       configurable: true,
       get() {
@@ -546,6 +558,55 @@ describe("DataGrid controlled callbacks", () => {
     const [selectedIds, selectedRows] = onSelectionChange.mock.calls[0];
     expect([...selectedIds]).toEqual(["row-1"]);
     expect(selectedRows).toEqual([{ id: "row-1", name: "Row 1" }]);
+  });
+
+  it("selects a row from its checkbox without firing onRowClick", () => {
+    const onRowClick = vi.fn();
+    const onSelectionChange = vi.fn();
+    const { getByRole } = render(
+      <InteractiveDataGridHarness onRowClick={onRowClick} onSelectionChange={onSelectionChange} />,
+    );
+
+    fireEvent.click(getByRole("checkbox", { name: /select row row-1/i }));
+
+    expect(onRowClick).not.toHaveBeenCalled();
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+    const [selectedIds] = onSelectionChange.mock.calls[0];
+    expect([...selectedIds]).toEqual(["row-1"]);
+  });
+
+  it("toggles additional rows from checkboxes instead of replacing the selection", () => {
+    const onRowClick = vi.fn();
+    const onSelectionChange = vi.fn();
+    const { getByRole } = render(
+      <InteractiveDataGridHarness
+        onRowClick={onRowClick}
+        onSelectionChange={onSelectionChange}
+        rows={[
+          { id: "row-1", name: "Row 1" },
+          { id: "row-2", name: "Row 2" },
+        ]}
+      />,
+    );
+
+    fireEvent.click(getByRole("checkbox", { name: /select row row-1/i }));
+    fireEvent.click(getByRole("checkbox", { name: /select row row-2/i }));
+
+    expect(onRowClick).not.toHaveBeenCalled();
+    expect(onSelectionChange).toHaveBeenCalledTimes(2);
+    const [selectedIds] = onSelectionChange.mock.calls[1] ?? [];
+    expect(selectedIds).toEqual(new Set(["row-1", "row-2"]));
+  });
+
+  it("still fires onRowClick when a row cell is clicked", () => {
+    const onRowClick = vi.fn();
+    const { container } = render(<InteractiveDataGridHarness onRowClick={onRowClick} />);
+    const cell = container.querySelector('[data-row-id="row-1"] [role="gridcell"]');
+    if (cell == null) throw new Error("DataGrid: expected a rendered cell for row-1");
+    fireEvent.click(cell);
+
+    expect(onRowClick).toHaveBeenCalledTimes(1);
+    expect(onRowClick.mock.calls[0]?.[0]).toEqual({ id: "row-1", name: "Row 1" });
   });
 
   it("identifies nested interactive controls as row-click blockers", () => {

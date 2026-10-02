@@ -12,7 +12,7 @@ import {
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError, StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { deterministicWorkflowUuid, enqueueWorkflowEvent } from "./events";
-import { workflowDefinitionMatchesEvent, workflowEventRetryDelayMs } from "./event-processing";
+import { didAnySkippedWorkflowResume, workflowDefinitionMatchesEvent, workflowEventRetryDelayMs } from "./event-processing";
 import { invokeWorkflowSandbox } from "./invoke";
 import { listCronOccurrences, MAX_CATCHUP_WINDOW_MS, parseCronExpression } from "./cron";
 import {
@@ -551,16 +551,17 @@ async function processWorkflowEvents(tenancyCache: Map<string, Tenancy | null>, 
         const matching = definitions.filter((definition) => workflowDefinitionMatchesEvent(definition.workflowId, definition.manifest, event));
         // Only costs a query for events that actually match something.
         const pausedWorkflowIds = matching.length === 0 ? new Set<string>() : await listPausedWorkflowIdsForTenancy(event.tenancyId);
+        const skippedPausedWorkflowIds = new Set<string>();
         let processedEveryDefinition = true;
         for (const definition of matching) {
           // Paused workflows consume their matching events without dispatching
           // them. The event is still marked processed below (it may match
           // other, unpaused definitions), so events the engine sees during a
-          // pause are dropped rather than queued up for the resume. The
-          // boundary is approximate by design: an event enqueued shortly
-          // before a resume can still dispatch if no tick reached it while the
-          // workflow was paused.
-          if (pausedWorkflowIds.has(definition.workflowId)) continue;
+          // pause are dropped rather than queued up for the resume.
+          if (pausedWorkflowIds.has(definition.workflowId)) {
+            skippedPausedWorkflowIds.add(definition.workflowId);
+            continue;
+          }
           // runKey derivation is itself a sandbox invocation. Leave the
           // event unprocessed once the latest-start deadline arrives;
           // deterministic run ids make replay safe for definitions that
@@ -570,6 +571,28 @@ async function processWorkflowEvents(tenancyCache: Map<string, Tenancy | null>, 
             break;
           }
           await createRunForEvent(tenancy, event, definition);
+        }
+        if (processedEveryDefinition && skippedPausedWorkflowIds.size > 0) {
+          // A resume that commits after the initial pause snapshot must keep the
+          // event pending; otherwise marking it processed would permanently drop
+          // the resumed workflow's run. FOR SHARE makes a concurrent resume either
+          // visible here or wait until processedAt has committed.
+          const marked = await retryTransaction(globalPrismaClient, async (tx) => {
+            const rows = await tx.$queryRaw<{ workflowId: string }[]>(Prisma.sql`
+              SELECT "workflowId" FROM "WorkflowDefinition"
+              WHERE "tenancyId" = ${event.tenancyId}::uuid AND "pausedAt" IS NOT NULL
+              FOR SHARE
+            `);
+            const currentPausedWorkflowIds = new Set(rows.map((row) => row.workflowId));
+            if (didAnySkippedWorkflowResume(skippedPausedWorkflowIds, currentPausedWorkflowIds)) return false;
+            await tx.workflowEvent.update({
+              where: { tenancyId_id: { tenancyId: event.tenancyId, id: event.id } },
+              data: { processedAt: new Date() },
+            });
+            return true;
+          });
+          if (!marked) break;
+          continue;
         }
         if (!processedEveryDefinition) break;
       }

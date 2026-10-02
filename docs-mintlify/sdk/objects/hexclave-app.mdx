@@ -87,7 +87,7 @@ If you're building a client-only app and don't have a `HEXCLAVE_SECRET_SERVER_KE
       </ParamField>
 
       <ParamField body="analytics" type="object">
-        Analytics capture configuration. SDK-managed capture is enabled by default; pass `{ enabled: false }` to disable it entirely, or `{ replays: { enabled: true } }` to record session replays.
+        Analytics capture configuration. SDK-managed capture is enabled by default; pass `{ enabled: false }` to disable it entirely, or `{ replays: { enabled: true, captureKeystrokes: true } }` to record session replays with privacy-safe keyboard activity counts. Keystroke capture defaults to disabled and never records key values or typed text.
       </ParamField>
 
       <ParamField body="noAutomaticPrefetch" type="boolean">

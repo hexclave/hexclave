@@ -55,7 +55,7 @@ describe("HexclaveClientApp automatic side effects", () => {
     }
   });
 
-  it("does not initialize automatic side effects when disabled", () => {
+  it("initializes the explicit telemetry seam while deferring automatic work", () => {
     const methodName = "_initializeAutomaticSideEffects";
     const originalInitializer = Reflect.get(HexclaveClientApp.prototype, methodName);
     let initializationCalls = 0;
@@ -69,7 +69,7 @@ describe("HexclaveClientApp automatic side effects", () => {
         automaticSideEffects: false,
       });
 
-      expect(initializationCalls).toBe(0);
+      expect(initializationCalls).toBe(1);
     } finally {
       Reflect.set(HexclaveClientApp.prototype, methodName, originalInitializer);
     }

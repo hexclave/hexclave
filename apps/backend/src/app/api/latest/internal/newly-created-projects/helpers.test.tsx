@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildInternalOwnerReplayIdsQuery,
   getEmailSetup,
   getEnabledAppIds,
   getTrustedDomainBaseUrls,
@@ -10,6 +11,15 @@ import {
 } from "./helpers";
 
 describe("newly-created-projects helpers", () => {
+  it("finds owner replays through the derived page-view store with branch isolation", () => {
+    const query = buildInternalOwnerReplayIdsQuery();
+
+    expect(query).toContain("FROM default.page_views");
+    expect(query).not.toContain("analytics_internal.spans");
+    expect(query).not.toContain("analytics_internal.events");
+    expect(query.match(/branch_id = \{branchId:String\}/g)).toHaveLength(1);
+  });
+
   it("chunks project IDs without changing their order", () => {
     expect(chunkProjectIds(["a", "b", "c", "d", "e"], 2)).toEqual([
       ["a", "b"],

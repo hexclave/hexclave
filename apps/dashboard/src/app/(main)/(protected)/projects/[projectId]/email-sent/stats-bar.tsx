@@ -2,7 +2,6 @@
 
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui";
-import { TooltipPortal } from "@radix-ui/react-tooltip";
 
 export type StatsBarData = {
   sent: number,
@@ -80,19 +79,17 @@ export function StatsBar({ data, className }: StatsBarProps) {
             )}
           </div>
         </TooltipTrigger>
-        <TooltipPortal>
-          <TooltipContent side="bottom" className="text-xs">
-            <div className="space-y-1">
-              {tooltipLines.map(({ label, count, color }) => (
-                <div key={label} className="flex items-center gap-2">
-                  <span className={cn("w-2 h-2 rounded-full shrink-0", color)} />
-                  <span>{label}: {count}</span>
-                </div>
-              ))}
-              <div className="text-muted-foreground pt-0.5 border-t border-border/40">Total: {total}</div>
-            </div>
-          </TooltipContent>
-        </TooltipPortal>
+        <TooltipContent side="bottom" className="text-xs">
+          <div className="space-y-1">
+            {tooltipLines.map(({ label, count, color }) => (
+              <div key={label} className="flex items-center gap-2">
+                <span className={cn("w-2 h-2 rounded-full shrink-0", color)} />
+                <span>{label}: {count}</span>
+              </div>
+            ))}
+            <div className="text-muted-foreground pt-0.5 border-t border-border/40">Total: {total}</div>
+          </div>
+        </TooltipContent>
       </Tooltip>
     </div>
   );

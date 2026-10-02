@@ -7,6 +7,7 @@
 import * as yup from "yup";
 import { ALL_APPS, getParentAppId } from "../apps/apps-config";
 import { DEFAULT_EMAIL_TEMPLATES, DEFAULT_EMAIL_THEMES, DEFAULT_EMAIL_THEME_ID } from "../helpers/emails";
+import { ITEM_IDS } from "../plans";
 import * as schemaFields from "../schema-fields";
 import { productSchema, userSpecifiedIdSchema, yupBoolean, yupDate, yupMixed, yupNever, yupNumber, yupObject, yupRecord, yupString, yupTuple, yupUnion } from "../schema-fields";
 import { SUPPORTED_CURRENCIES } from "../utils/currency-constants";
@@ -24,6 +25,26 @@ export type ConfigLevel = typeof configLevels[number];
 const permissionRegex = /^\$?[a-z0-9_:]+$/;
 const customPermissionRegex = /^[a-z0-9_:]+$/;
 const providerIdRegex = /^[a-z0-9_-]+$/;
+
+const errorIngestOverrideKeySchema = yupString().matches(
+  /^(?:user\.(?:email|username|ip_address)|request\.url|url|tags\.[a-zA-Z0-9_.-]{1,64}|contexts\.[a-zA-Z0-9_.-]{1,64}|extra\.[a-zA-Z0-9_.-]{1,64})$/,
+  "Unsupported error-ingest scrub override key",
+);
+const errorIngestOverrideRuleIdSchema = yupString().matches(
+  /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/,
+  "Error-ingest scrub override rule ids must be short dotless identifiers",
+);
+const errorIngestScrubOverrideRecordSchema = (selectorSchema: yup.StringSchema) => yupRecord(errorIngestOverrideRuleIdSchema, selectorSchema).test(
+  "max-error-ingest-override-keys",
+  "${path} must not contain more than 32 keys",
+  (value: unknown) => !isObjectLike(value) || Object.keys(value).length <= 32,
+);
+const errorIngestPolicySchema = yupObject({
+  finalScrub: yupObject({
+    dropKeys: errorIngestScrubOverrideRecordSchema(errorIngestOverrideKeySchema.defined().notOneOf(["url"], "The url selector is only valid for URL scrubbing")).optional(),
+    urlKeys: errorIngestScrubOverrideRecordSchema(errorIngestOverrideKeySchema.defined()).optional(),
+  }).optional(),
+});
 
 declare module "yup" {
   // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
@@ -344,8 +365,7 @@ export const branchConfigSchema = canNoLongerBeOverridden(projectConfigSchema, [
 }));
 
 
-// --- Analytics Schema (environment config only - not pushable) ---
-const environmentAnalyticsSchema = yupObject({
+const environmentWarehouseSchema = yupObject({
   queryFolders: yupRecord(
     userSpecifiedIdSchema("folderId"),
     yupObject({
@@ -362,7 +382,25 @@ const environmentAnalyticsSchema = yupObject({
     }),
   ),
 });
-// --- END Analytics Schema ---
+
+
+export const GROUPING_CONFIG_IDS = ["hexclave-js:2026-08-01", "hexclave-js:2026-08-20"] as const;
+import.meta.vitest?.test("GROUPING_CONFIG_IDS lists both published JS configs", ({ expect }) => {
+  expect([...GROUPING_CONFIG_IDS]).toEqual(["hexclave-js:2026-08-01", "hexclave-js:2026-08-20"]);
+});
+
+const environmentObservabilitySchema = yupObject({
+  errorIngest: errorIngestPolicySchema.optional(),
+  errorGrouping: yupObject({
+    activeConfigId: yupString().oneOf(GROUPING_CONFIG_IDS).optional(),
+    readableConfigIds: yupRecord(
+      yupString().oneOf(GROUPING_CONFIG_IDS),
+      yupObject({
+        enabled: yupBoolean(),
+      }),
+    ),
+  }),
+});
 
 export const environmentConfigSchema = branchConfigSchema.concat(yupObject({
   auth: branchConfigSchema.getNested("auth").concat(yupObject({
@@ -468,7 +506,8 @@ export const environmentConfigSchema = branchConfigSchema.concat(yupObject({
     ),
   }),
 
-  analytics: environmentAnalyticsSchema,
+  warehouse: environmentWarehouseSchema,
+  observability: environmentObservabilitySchema,
   customDashboards: schemaFields.customDashboardsSchema,
 }));
 
@@ -496,6 +535,18 @@ import.meta.vitest?.test("Apple OAuth key credentials are all-or-nothing", async
   await expect(environmentConfigSchema.validate({
     auth: { oauth: { providers: { apple: { type: "apple", isShared: true } } } },
   })).resolves.toBeDefined();
+});
+
+import.meta.vitest?.test("error-ingest policy schema matches the backend policy parser's constraints", async ({ expect }) => {
+  const config = (errorIngest: unknown) => ({ observability: { errorIngest } });
+
+  await expect(environmentConfigSchema.validate(config({ finalScrub: { urlKeys: { urlRule: "url" } } }))).resolves.toBeDefined();
+  await expect(environmentConfigSchema.validate(config({ finalScrub: { dropKeys: { urlRule: "url" } } }))).rejects.toThrow("The url selector is only valid for URL scrubbing");
+
+  const manyKeys = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`rule-${i}`, `tags.key-${i}`] as const));
+  await expect(environmentConfigSchema.validate(config({ finalScrub: { dropKeys: manyKeys } }))).rejects.toThrow("must not contain more than 32 keys");
+  await expect(environmentConfigSchema.validate(config({ finalScrub: { dropKeys: Object.fromEntries(Object.entries(manyKeys).slice(0, 32)) } }))).resolves.toBeDefined();
+
 });
 
 
@@ -627,6 +678,36 @@ export function migrateConfigOverride(type: "project" | "branch" | "environment"
   }
   // END
 
+  if (isEnvironmentOrHigher) {
+    const hasContentUnder = (obj: unknown, prefix: string[], path: string[] = []): boolean => {
+      if (!isObjectLike(obj)) return false;
+      return Object.entries(obj).some(([key, value]) => {
+        if (value == null) return false;
+        const newPath = [...path, ...key.split(".")];
+        const matchesPrefix = newPath.length > prefix.length && prefix.every((segment, i) => newPath[i] === segment);
+        return matchesPrefix || hasContentUnder(value, prefix, newPath);
+      });
+    };
+    const hasPathTouching = (obj: unknown, prefix: string[], path: string[] = []): boolean => {
+      if (!isObjectLike(obj)) return false;
+      return Object.entries(obj).some(([key, value]) => {
+        const newPath = [...path, ...key.split(".")];
+        if (newPath.length >= prefix.length && prefix.every((segment, i) => newPath[i] === segment)) return true;
+        return newPath.every((segment, i) => prefix[i] === segment) && hasPathTouching(value, prefix, newPath);
+      });
+    };
+    const hasWarehouseOverride = typedEntries(res).some(([key]) =>
+      typeof key === "string" && (key === "warehouse" || key.startsWith("warehouse."))
+    );
+    const hadSavedQueries = !hasWarehouseOverride && hasContentUnder(res, ["analytics", "queryFolders"]);
+    res = hasWarehouseOverride
+      ? removeProperty(res, (path) => path[0] === "analytics")
+      : renameProperty(res, "analytics", "warehouse");
+    if (hadSavedQueries && !hasPathTouching(res, ["apps", "installed", "warehouse"])) {
+      res = { ...res, "apps.installed.warehouse.enabled": true };
+    }
+  }
+
   // BEGIN 2026-07-28: deployment service definitions moved out of the config
   // entirely — they now come from the `deploy` export and are stored in the
   // backend database, synced by `hexclave deploy`. The
@@ -652,6 +733,13 @@ export function migrateConfigOverride(type: "project" | "branch" | "environment"
   // BEGIN 2026-08-31: the Growth app was removed.
   if (isBranchOrHigher) {
     res = removeProperty(res, p => p[0] === "apps" && p[1] === "installed" && p[2] === "gtm");
+  }
+  // END
+
+  // BEGIN 2026-09-02: existing billing configs that already meter analytics_events
+  // must grow analytics_spans the same way, or span ingest throws ItemNotFound.
+  if (isBranchOrHigher) {
+    res = ensureAnalyticsSpansPaymentConfig(res);
   }
   // END
 
@@ -750,6 +838,72 @@ import.meta.vitest?.test("migrateConfigOverride renames legacy deployments app k
   expect(migrateConfigOverride("project", { deployments: { services } })).toEqual({ deployments: { services } });
 });
 
+import.meta.vitest?.test("migrateConfigOverride moves saved queries from Analytics to Warehouse", ({ expect }) => {
+  const queryFolders = {
+    favorites: {
+      displayName: "Favorites",
+      sortOrder: 0,
+      queries: {},
+    },
+  };
+
+  expect(migrateConfigOverride("environment", {
+    analytics: { queryFolders },
+  })).toEqual({
+    warehouse: { queryFolders },
+    "apps.installed.warehouse.enabled": true,
+  });
+
+  expect(migrateConfigOverride("environment", {
+    "analytics.queryFolders.favorites.displayName": "Favorites",
+  })).toEqual({
+    "warehouse.queryFolders.favorites.displayName": "Favorites",
+    "apps.installed.warehouse.enabled": true,
+  });
+
+  expect(migrateConfigOverride("environment", {
+    analytics: { queryFolders },
+    warehouse: { queryFolders: {} },
+  })).toEqual({
+    warehouse: { queryFolders: {} },
+  });
+
+  expect(migrateConfigOverride("branch", {
+    analytics: { queryFolders },
+  })).toEqual({
+    analytics: { queryFolders },
+  });
+
+  expect(migrateConfigOverride("environment", {
+    analytics: { queryFolders: {} },
+  })).toEqual({
+    warehouse: { queryFolders: {} },
+  });
+
+  expect(migrateConfigOverride("environment", {
+    analytics: { queryFolders },
+    "apps.installed.warehouse.enabled": false,
+  })).toEqual({
+    warehouse: { queryFolders },
+    "apps.installed.warehouse.enabled": false,
+  });
+  expect(migrateConfigOverride("environment", {
+    analytics: { queryFolders },
+    apps: { installed: { warehouse: { enabled: false } } },
+  })).toEqual({
+    warehouse: { queryFolders },
+    apps: { installed: { warehouse: { enabled: false } } },
+  });
+
+  expect(migrateConfigOverride("environment", {
+    warehouse: { queryFolders },
+    "apps.installed.warehouse.enabled": true,
+  })).toEqual({
+    warehouse: { queryFolders },
+    "apps.installed.warehouse.enabled": true,
+  });
+});
+
 import.meta.vitest?.test("migrateConfigOverride renames deployments-alpha app installations to deploy", ({ expect }) => {
   expect(migrateConfigOverride("branch", {
     apps: { installed: { "deployments-alpha": { enabled: true } } },
@@ -765,6 +919,40 @@ import.meta.vitest?.test("migrateConfigOverride renames deployments-alpha app in
     "apps.installed.deploy.enabled": false,
   })).toEqual({
     "apps.installed.deploy.enabled": false,
+  });
+});
+
+import.meta.vitest?.test("migrateConfigOverride adds analytics_spans to existing analytics billing configs", ({ expect }) => {
+  expect(migrateConfigOverride("environment", {
+    payments: {
+      items: {
+        analytics_events: { displayName: "Analytics Events", customerType: "team" },
+      },
+      products: {
+        free: {
+          includedItems: {
+            analytics_events: { quantity: 100_000, repeat: "month", expires: "when-repeated" },
+          },
+        },
+      },
+    },
+  })).toMatchObject({
+    "payments.items.analytics_spans": { displayName: "Analytics Spans", customerType: "team" },
+    "payments.products.free.includedItems.analytics_spans": { quantity: 100_000, repeat: "month", expires: "when-repeated" },
+  });
+
+  expect(migrateConfigOverride("environment", {
+    "payments.items.analytics_events": { displayName: "Analytics Events", customerType: "team" },
+    "payments.items.analytics_spans": { displayName: "Custom", customerType: "team" },
+  })).toEqual({
+    "payments.items.analytics_events": { displayName: "Analytics Events", customerType: "team" },
+    "payments.items.analytics_spans": { displayName: "Custom", customerType: "team" },
+  });
+
+  expect(migrateConfigOverride("project", {
+    payments: { items: { analytics_events: { displayName: "Analytics Events", customerType: "team" } } },
+  })).toEqual({
+    payments: { items: { analytics_events: { displayName: "Analytics Events", customerType: "team" } } },
   });
 });
 
@@ -819,6 +1007,67 @@ function mapProperty(obj: Record<string, any>, pathCond: (path: string[]) => boo
   }
   return res;
 }
+
+function configOverrideHasPath(obj: unknown, prefix: string[], path: string[] = []): boolean {
+  if (!isObjectLike(obj)) return false;
+  return Object.entries(obj).some(([key, value]) => {
+    const newPath = [...path, ...key.split(".")];
+    if (newPath.length >= prefix.length && prefix.every((segment, i) => newPath[i] === segment)) return true;
+    return newPath.every((segment, i) => prefix[i] === segment) && configOverrideHasPath(value, prefix, newPath);
+  });
+}
+
+function collectAnalyticsEventsIncludedItems(obj: unknown, path: string[] = []): { spanKey: string, value: unknown }[] {
+  if (!isObjectLike(obj)) return [];
+  const found: { spanKey: string, value: unknown }[] = [];
+  for (const [key, value] of Object.entries(obj)) {
+    const newPath = [...path, ...key.split(".")];
+    const includedIdx = newPath.indexOf("includedItems");
+    if (
+      newPath[0] === "payments"
+      && newPath[1] === "products"
+      && includedIdx >= 2
+      && newPath[includedIdx + 1] === ITEM_IDS.analyticsEvents
+      && newPath.length === includedIdx + 2
+    ) {
+      found.push({
+        spanKey: [...newPath.slice(0, includedIdx + 1), ITEM_IDS.analyticsSpans].join("."),
+        value,
+      });
+    }
+    found.push(...collectAnalyticsEventsIncludedItems(value, newPath));
+  }
+  return found;
+}
+
+function ensureAnalyticsSpansPaymentConfig(res: Record<string, any>): Record<string, any> {
+  if (
+    !configOverrideHasPath(res, ["payments", "items", ITEM_IDS.analyticsEvents])
+    && collectAnalyticsEventsIncludedItems(res).length === 0
+  ) {
+    return res;
+  }
+
+  let next = res;
+  if (!configOverrideHasPath(res, ["payments", "items", ITEM_IDS.analyticsSpans])) {
+    next = {
+      ...next,
+      [`payments.items.${ITEM_IDS.analyticsSpans}`]: {
+        displayName: "Analytics Spans",
+        customerType: "team",
+      },
+    };
+  }
+
+  const additions: Record<string, unknown> = {};
+  for (const { spanKey, value } of collectAnalyticsEventsIncludedItems(next)) {
+    if (!configOverrideHasPath(next, spanKey.split(".")) && isObjectLike(value)) {
+      additions[spanKey] = value;
+    }
+  }
+  return Object.keys(additions).length === 0 ? next : { ...next, ...additions };
+}
+
 import.meta.vitest?.test("mapProperty - basic property mapping", ({ expect }) => {
   expect(mapProperty({ a: { b: { c: 1 } } }, p => p.join(".") === "a.b.c", (value) => value + 1)).toEqual({ a: { b: { c: 2 } } });
   expect(mapProperty({ a: { b: { c: 1 } } }, p => p.join(".") === "a.b.d", (value) => value + 1)).toEqual({ a: { b: { c: 1 } } });
@@ -910,6 +1159,10 @@ const projectConfigDefaults = {
 const branchConfigDefaults = {} as const satisfies DefaultsType<BranchRenderedConfigBeforeDefaults, [typeof projectConfigDefaults]>;
 
 const environmentConfigDefaults = {} as const satisfies DefaultsType<EnvironmentRenderedConfigBeforeDefaults, [typeof branchConfigDefaults, typeof projectConfigDefaults]>;
+
+// Widened from the literal-keyed Record so that rendered-config lookups of arbitrary (possibly retired)
+// grouping config ids type as `| undefined` instead of pretending every string key is present.
+const errorGroupingReadableConfigIdsDefault: Record<string, { enabled: boolean } | undefined> = typedFromEntries(GROUPING_CONFIG_IDS.map(configId => [configId, { enabled: false }]));
 
 const organizationConfigDefaults = {
   rbac: {
@@ -1075,7 +1328,7 @@ const organizationConfigDefaults = {
     }),
   },
 
-  analytics: {
+  warehouse: {
     queryFolders: (key: string) => ({
       displayName: "Unnamed Folder",
       sortOrder: 0,
@@ -1085,6 +1338,13 @@ const organizationConfigDefaults = {
         description: undefined,
       }),
     }),
+  },
+
+  observability: {
+    errorGrouping: {
+      activeConfigId: GROUPING_CONFIG_IDS[0],
+      readableConfigIds: errorGroupingReadableConfigIdsDefault,
+    },
   },
 
   customDashboards: (key: string) => ({

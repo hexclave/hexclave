@@ -26,6 +26,9 @@ const bodyBase = yupObject({
   scheduled_at_millis: yupNumber().optional().meta({
     openapiField: { description: "When to send the email. If not specified, the email will be sent immediately." }
   }),
+  idempotency_key: yupString().max(256).optional().meta({
+    openapiField: { description: "Stable request key used to deduplicate retries for each recipient." },
+  }),
 });
 
 export const POST = createSmartRouteHandler({
@@ -186,6 +189,7 @@ export const POST = createSmartRouteHandler({
       scheduledAt: scheduledAt,
       overrideSubject: overrideSubject,
       overrideNotificationCategoryId: overrideNotificationCategoryId,
+      idempotencyKey: body.idempotency_key,
     });
 
 

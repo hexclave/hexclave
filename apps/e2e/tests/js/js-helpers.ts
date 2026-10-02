@@ -83,6 +83,7 @@ export async function createApp(
     tokenStore: "memory",
     redirectMethod: "none",
     extraRequestHeaders: testExtraRequestHeaders,
+    telemetry: { resource: { service: { name: "e2e-server" } } },
     ...(appOverrides?.server ?? {}),
   });
 
@@ -93,6 +94,7 @@ export async function createApp(
     tokenStore: "memory",
     redirectMethod: "none",
     extraRequestHeaders: testExtraRequestHeaders,
+    telemetry: { resource: { service: { name: "e2e-client" } } },
     ...(appOverrides?.client ?? {}),
   });
 

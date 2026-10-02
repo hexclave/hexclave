@@ -79,19 +79,28 @@ const ENTRY_PAGE_VIEW_QUERY = `
     CAST(data.screen_height, 'Nullable(Int64)') AS screen_height,
     CAST(data.viewport_width, 'Nullable(Int64)') AS viewport_width,
     CAST(data.viewport_height, 'Nullable(Int64)') AS viewport_height
-  FROM default.events
-  WHERE session_replay_id = {replayId:String}
-    AND event_type = '$page-view'
-  ORDER BY event_at ASC
+  FROM (
+    SELECT CAST(data, 'JSON') AS data, started_at
+    FROM default.page_views
+    WHERE session_replay_id = {replayId:String}
+  )
+  ORDER BY started_at ASC
   LIMIT 1
 `;
 
 const ACTIVITY_COUNTS_QUERY = `
   SELECT
-    countIf(event_type = '$page-view') AS page_views,
-    countIf(event_type = '$click') AS clicks
-  FROM default.events
-  WHERE session_replay_id = {replayId:String}
+    (
+      SELECT count()
+      FROM default.page_views
+      WHERE session_replay_id = {replayId:String}
+    ) AS page_views,
+    (
+      SELECT count()
+      FROM default.events
+      WHERE session_replay_id = {replayId:String}
+        AND event_type = '$click'
+    ) AS clicks
 `;
 
 // Geo is only ever attached to `$token-refresh` events (it's derived from the

@@ -4,6 +4,12 @@ export {
   HexclaveServerApp,
 } from "./apps";
 
+export {
+  createErrorAttachmentTransport,
+  MAX_ERROR_ATTACHMENT_BYTES,
+  MAX_ERROR_ATTACHMENTS,
+} from "./apps/implementations/error-attachments";
+
 // Legacy Stack* aliases — same runtime symbols, kept for backwards compatibility.
 // Prefer the Hexclave* equivalents in new code.
 // The @deprecated JSDoc lives on the original declarations in ./apps/interfaces/*.ts
@@ -23,6 +29,26 @@ export type {
   HexclaveClientAppJson,
   HexclaveServerAppConstructor,
   HexclaveServerAppConstructorOptions,
+  CaptureEvent,
+  CaptureExceptionOptions,
+  CaptureMessageOptions,
+  ErrorAttachmentInput,
+  ErrorAttachmentMetadata,
+  ErrorAttachmentTransport,
+  ErrorAttachmentType,
+  ErrorAttachmentUploadRequest,
+  ErrorAttachmentUploadResult,
+  CapturedErrorEvent,
+  ErrorBeforeSend,
+  ErrorEventHint,
+  ErrorEventProcessor,
+  ErrorEventId,
+  ErrorLevel,
+  ErrorProcessorDecision,
+  ErrorProcessorResult,
+  ErrorScope,
+  ErrorScopeData,
+  PendingErrorAttachment,
 } from "./apps";
 
 // Legacy Stack* type aliases — @deprecated tags live on the original declarations

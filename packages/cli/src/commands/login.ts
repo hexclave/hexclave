@@ -19,6 +19,8 @@ export function registerLoginCommand(program: Command) {
         baseUrl: config.apiUrl,
         tokenStore: "memory",
         noAutomaticPrefetch: true,
+        analytics: { enabled: false },
+        observability: { enabled: false },
       });
 
       const anonRefreshToken =

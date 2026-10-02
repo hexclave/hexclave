@@ -11,6 +11,8 @@ import posthog from "posthog-js";
 
 export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
 
+const isDevelopment = process.env.NODE_ENV === "development";
+
 const postHogKey = getPublicEnvVar('NEXT_PUBLIC_POSTHOG_KEY') ?? "phc_vIUFi0HzHo7oV26OsaZbUASqxvs8qOmap1UBYAutU4k";
 if (postHogKey.length > 5) {
   posthog.init(postHogKey, {
@@ -32,20 +34,21 @@ Sentry.init({
 
   dsn: getPublicEnvVar('NEXT_PUBLIC_SENTRY_DSN'),
 
-  enabled: process.env.NODE_ENV !== "development" && !process.env.CI,
+  enabled: !isDevelopment && (process.env.CI === undefined || process.env.CI === ""),
 
   // You can remove this option if you're not planning to use the Sentry Session Replay feature:
   integrations: [
-    Sentry.replayIntegration({
-      // Additional Replay configuration goes in here, for example:
-      maskAllText: false,
-      maskAllInputs: false,
-      blockAllMedia: false,
-    }),
-    posthog.sentryIntegration({
-      organization: "stackframe-pw",
-      projectId: 4507084192219136,
-    }),
+    ...isDevelopment ? [] : [
+      Sentry.replayIntegration({
+        maskAllText: false,
+        maskAllInputs: false,
+        blockAllMedia: false,
+      }),
+      posthog.sentryIntegration({
+        organization: "stackframe-pw",
+        projectId: 4507084192219136,
+      }),
+    ],
   ],
 
   // Add exception metadata to the event

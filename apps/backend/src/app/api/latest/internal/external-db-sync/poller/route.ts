@@ -1,6 +1,7 @@
 import type { OutgoingRequest } from "@/generated/prisma/client";
 import { getExternalDbSyncFusebox } from "@/lib/external-db-sync-metadata";
 import { recoverStaleOutgoingRequests, type RecoverStaleResult } from "@/lib/external-db-sync-queue";
+import { decodeQstashMessage } from "@/lib/qstash-outbox";
 import { upstash } from "@/lib/upstash";
 import { globalPrismaClient, retryTransaction } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -93,6 +94,7 @@ export const GET = createSmartRouteHandler({
       span.setAttribute("stack.external-db-sync.poller-claim-limit", pollerClaimLimit);
 
       let totalRequestsProcessed = 0;
+      let totalRequestsFailed = 0;
       let iterationCount = 0;
 
       async function claimPendingRequests(): Promise<OutgoingRequest[]> {
@@ -176,8 +178,7 @@ export const GET = createSmartRouteHandler({
         });
       }
       async function processRequest(request: OutgoingRequest): Promise<void> {
-        // Prisma JsonValue doesn't carry a precise shape for this JSON blob.
-        const options = request.qstashOptions as any;
+        const options = decodeQstashMessage(request.qstashOptions);
         const baseUrl = getEnvVariable("NEXT_PUBLIC_SERVER_STACK_API_URL", "") || getEnvVariable("NEXT_PUBLIC_STACK_API_URL");
 
         let fullUrl = new URL(options.url, baseUrl).toString();
@@ -192,19 +193,20 @@ export const GET = createSmartRouteHandler({
           }
         }
 
-        await upstash.publishJSON({
+        const publishOptions: Parameters<typeof upstash.publishJSON>[0] = {
           url: fullUrl,
           body: options.body,
           flowControl: options.flowControl,
-        });
+        };
+        if (options.delay !== undefined) publishOptions.delay = options.delay;
+        await upstash.publishJSON(publishOptions);
         await deleteOutgoingRequest(request.id);
       }
 
       type UpstashRequest = PublishBatchRequest<unknown>;
 
       function buildUpstashRequest(request: OutgoingRequest): UpstashRequest {
-        // Prisma JsonValue doesn't carry a precise shape for this JSON blob.
-        const options = request.qstashOptions as any;
+        const options = decodeQstashMessage(request.qstashOptions);
         const baseUrl = getEnvVariable("NEXT_PUBLIC_SERVER_STACK_API_URL", "") || getEnvVariable("NEXT_PUBLIC_STACK_API_URL");
 
         let fullUrl = new URL(options.url, baseUrl).toString();
@@ -219,16 +221,16 @@ export const GET = createSmartRouteHandler({
           }
         }
 
-        const flowControl = options.flowControl as UpstashRequest["flowControl"];
-
-        return {
+        const upstashRequest: UpstashRequest = {
           url: fullUrl,
           body: options.body,
-          ...(flowControl ? { flowControl } : {}),
         };
+        if (options.flowControl !== undefined) upstashRequest.flowControl = options.flowControl;
+        if (options.delay !== undefined) upstashRequest.delay = options.delay;
+        return upstashRequest;
       }
 
-      async function processRequests(requests: OutgoingRequest[]): Promise<number> {
+      async function processRequests(requests: OutgoingRequest[]): Promise<{ processed: number, failed: number }> {
         return await traceSpan({
           description: "external-db-sync.poller.processRequests",
           attributes: {
@@ -239,17 +241,20 @@ export const GET = createSmartRouteHandler({
           let processed = 0;
 
           if (directSyncEnabled()) {
+            let failed = 0;
             for (const request of requests) {
               try {
                 await processRequest(request);
                 processed++;
               } catch (error) {
+                failed++;
                 processSpan.setAttribute("stack.external-db-sync.iteration-error", true);
                 captureError("poller-iteration-error", error);
               }
             }
             processSpan.setAttribute("stack.external-db-sync.processed-count", processed);
-            return processed;
+            processSpan.setAttribute("stack.external-db-sync.failed-count", failed);
+            return { processed, failed };
           }
 
           if (requests.length === 0) {
@@ -257,7 +262,8 @@ export const GET = createSmartRouteHandler({
             // caller passed no claimed rows (i.e. claimPendingRequests returned
             // an empty array).
             processSpan.setAttribute("stack.external-db-sync.processed-count", 0);
-            return 0;
+            processSpan.setAttribute("stack.external-db-sync.failed-count", 0);
+            return { processed: 0, failed: 0 };
           }
 
           try {
@@ -265,13 +271,15 @@ export const GET = createSmartRouteHandler({
             await upstash.batchJSON(batchPayload);
             await deleteOutgoingRequests(requests.map((request) => request.id));
             processSpan.setAttribute("stack.external-db-sync.processed-count", requests.length);
+            processSpan.setAttribute("stack.external-db-sync.failed-count", 0);
             console.log(`[Poller] Processed requests: ${requests.length}`);
-            return requests.length;
+            return { processed: requests.length, failed: 0 };
           } catch (error) {
             processSpan.setAttribute("stack.external-db-sync.iteration-error", true);
             captureError("poller-iteration-error", error);
             processSpan.setAttribute("stack.external-db-sync.processed-count", 0);
-            return 0;
+            processSpan.setAttribute("stack.external-db-sync.failed-count", requests.length);
+            return { processed: 0, failed: requests.length };
           }
         });
       }
@@ -279,6 +287,7 @@ export const GET = createSmartRouteHandler({
       type PollerIterationResult = {
         stopReason: "disabled" | null,
         processed: number,
+        failed: number,
       };
 
       while (performance.now() - startTime < maxDurationMs) {
@@ -291,7 +300,7 @@ export const GET = createSmartRouteHandler({
           const fusebox = await getExternalDbSyncFusebox();
           iterationSpan.setAttribute("stack.external-db-sync.poller-enabled", fusebox.pollerEnabled);
           if (!fusebox.pollerEnabled) {
-            return { stopReason: "disabled", processed: 0 };
+            return { stopReason: "disabled", processed: 0, failed: 0 };
           }
 
           const stale = await handleStaleRequests();
@@ -301,18 +310,21 @@ export const GET = createSmartRouteHandler({
           const pendingRequests = await claimPendingRequests();
           iterationSpan.setAttribute("stack.external-db-sync.pending-count", pendingRequests.length);
 
-          const processed = await processRequests(pendingRequests);
-          iterationSpan.setAttribute("stack.external-db-sync.processed-count", processed);
-          return { stopReason: null, processed };
+          const processing = await processRequests(pendingRequests);
+          iterationSpan.setAttribute("stack.external-db-sync.processed-count", processing.processed);
+          iterationSpan.setAttribute("stack.external-db-sync.failed-count", processing.failed);
+          return { stopReason: null, ...processing };
         });
 
         iterationCount++;
         totalRequestsProcessed += iterationResult.processed;
+        totalRequestsFailed += iterationResult.failed;
 
         await wait(pollIntervalMs);
       }
 
       span.setAttribute("stack.external-db-sync.requests-processed", totalRequestsProcessed);
+      span.setAttribute("stack.external-db-sync.requests-failed", totalRequestsFailed);
       span.setAttribute("stack.external-db-sync.iterations", iterationCount);
 
       return {

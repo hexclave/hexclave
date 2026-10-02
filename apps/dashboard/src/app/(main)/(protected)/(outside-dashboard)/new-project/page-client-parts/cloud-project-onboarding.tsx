@@ -9,6 +9,7 @@ import { type AdminOwnedProject } from "@hexclave/next";
 import { ALL_APPS, expandAppSoftRequirements, type AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { type EnvironmentConfigOverrideOverride } from "@hexclave/shared/dist/config/schema";
 import { DEFAULT_EMAIL_THEME_ID } from "@hexclave/shared/dist/helpers/emails";
+import { isRecord } from "@hexclave/shared/dist/utils/objects";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { useState } from "react";
 
@@ -120,42 +121,33 @@ export function createInitialCloudOnboardingState(): CloudProjectOnboardingState
 }
 
 export function isCloudProjectOnboardingState(value: unknown): value is CloudProjectOnboardingState {
-  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false;
   }
-  const version = Reflect.get(value, "version");
-  const step = Reflect.get(value, "step");
-  const journey = Reflect.get(value, "journey");
-  const primaryAppId = Reflect.get(value, "primary_app_id");
-  const additionalAppIds = Reflect.get(value, "additional_app_ids");
-  const selectedApps = Reflect.get(value, "selected_apps");
-  const selectedSignInMethods = Reflect.get(value, "selected_sign_in_methods");
-  const selectedEmailThemeId = Reflect.get(value, "selected_email_theme_id");
-  const projectLocation = Reflect.get(value, "project_location");
   return (
-    version === 1
-    && isCloudOnboardingStep(step)
-    && isCloudOnboardingJourney(journey)
-    && (primaryAppId === null || isAppId(primaryAppId))
-    && Array.isArray(additionalAppIds)
-    && additionalAppIds.every(isAppId)
-    && Array.isArray(selectedApps)
-    && selectedApps.every(isAppId)
-    && Array.isArray(selectedSignInMethods)
-    && selectedSignInMethods.every(isSignInMethod)
-    && (selectedEmailThemeId === null || typeof selectedEmailThemeId === "string")
-    && (projectLocation === null || isCloudProjectLocation(projectLocation))
+    value.version === 1
+    && isCloudOnboardingStep(value.step)
+    && isCloudOnboardingJourney(value.journey)
+    && (value.primary_app_id === null || isAppId(value.primary_app_id))
+    && Array.isArray(value.additional_app_ids)
+    && value.additional_app_ids.every(isAppId)
+    && Array.isArray(value.selected_apps)
+    && value.selected_apps.every(isAppId)
+    && Array.isArray(value.selected_sign_in_methods)
+    && value.selected_sign_in_methods.every(isSignInMethod)
+    && (value.selected_email_theme_id === null || typeof value.selected_email_theme_id === "string")
+    && (value.project_location === null || isCloudProjectLocation(value.project_location))
   );
 }
 
 function readLegacyOnboardingState(value: unknown): LegacyOnboardingState | null {
-  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return null;
   }
-  const configChoice = Reflect.get(value, "selected_config_choice");
-  const apps = Reflect.get(value, "selected_apps");
-  const methods = Reflect.get(value, "selected_sign_in_methods");
-  const emailThemeId = Reflect.get(value, "selected_email_theme_id");
+  const configChoice = value.selected_config_choice;
+  const apps = value.selected_apps;
+  const methods = value.selected_sign_in_methods;
+  const emailThemeId = value.selected_email_theme_id;
   if (
     (configChoice !== "create-new" && configChoice !== "link-existing")
     || !Array.isArray(apps)

@@ -14,10 +14,11 @@ import {
 } from "@/lib/config";
 import { assertConfigOverrideWriteAllowed } from "@/lib/development-environment";
 import { enqueueExternalDbSync } from "@/lib/external-db-sync-queue";
-import { globalPrismaClient, rawQuery } from "@/prisma-client";
+import { globalPrismaClient, rawQuery, retryTransaction } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { branchConfigSchema, environmentConfigSchema, getConfigOverrideErrors, migrateConfigOverride, projectConfigSchema } from "@hexclave/shared/dist/config/schema";
 import { adaptSchema, branchConfigSourceSchema, serverOrHigherAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { isRecord } from "@hexclave/shared/dist/utils/objects";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
 import * as yup from "yup";
 type BranchConfigSourceApi = yup.InferType<typeof branchConfigSourceSchema>;
@@ -31,14 +32,13 @@ function assertServerAccessAllowed(accessType: "server" | "admin", level: yup.In
 }
 
 function shouldEnqueueExternalDbSync(config: unknown): boolean {
-  if (!config || typeof config !== "object") return false;
-  const configRecord = config as Record<string, unknown>;
-  if (Object.prototype.hasOwnProperty.call(configRecord, "dbSync.externalDatabases")) {
+  if (!isRecord(config)) return false;
+  if (Object.prototype.hasOwnProperty.call(config, "dbSync.externalDatabases")) {
     return true;
   }
-  const dbSync = configRecord.dbSync;
-  if (dbSync && typeof dbSync === "object") {
-    return Object.prototype.hasOwnProperty.call(dbSync as Record<string, unknown>, "externalDatabases");
+  const dbSync = config.dbSync;
+  if (isRecord(dbSync)) {
+    return Object.prototype.hasOwnProperty.call(dbSync, "externalDatabases");
   }
   return false;
 }
@@ -279,22 +279,32 @@ export const PUT = createSmartRouteHandler({
       throw new StatusError(StatusError.BadRequest, 'source is required for branch level config');
     }
 
-    await levelConfig.set({
-      projectId: req.auth.tenancy.project.id,
-      branchId: req.auth.tenancy.branchId,
-      config: parsedConfig,
-      source: req.body.source as BranchConfigSourceApi,
-    });
+    if (req.params.level === "environment") {
+      await retryTransaction(globalPrismaClient, async (tx) => {
+        await setEnvironmentConfigOverride({
+          projectId: req.auth.tenancy.project.id,
+          branchId: req.auth.tenancy.branchId,
+          environmentConfigOverride: parsedConfig,
+          client: tx,
+        });
+        if (shouldEnqueueExternalDbSync(parsedConfig)) {
+          await enqueueExternalDbSync(req.auth.tenancy.id, tx);
+        }
+      });
+    } else {
+      await levelConfig.set({
+        projectId: req.auth.tenancy.project.id,
+        branchId: req.auth.tenancy.branchId,
+        config: parsedConfig,
+        source: req.body.source,
+      });
+    }
 
     await warnOnValidationFailure(levelConfig, {
       projectId: req.auth.tenancy.project.id,
       branchId: req.auth.tenancy.branchId,
       config: parsedConfig,
     });
-
-    if (req.params.level === "environment" && shouldEnqueueExternalDbSync(parsedConfig)) {
-      await enqueueExternalDbSync(req.auth.tenancy.id);
-    }
 
     return {
       statusCode: 200 as const,
@@ -330,21 +340,30 @@ export const PATCH = createSmartRouteHandler({
     const levelConfig = levelConfigs[req.params.level];
     const parsedConfig = await parseAndValidateConfig(req.body.config_override_string, levelConfig);
 
-    const newConfig = await levelConfig.override({
-      projectId: req.auth.tenancy.project.id,
-      branchId: req.auth.tenancy.branchId,
-      config: parsedConfig,
-    });
+    const newConfig = req.params.level === "environment"
+      ? await retryTransaction(globalPrismaClient, async (tx) => {
+        const updatedConfig = await overrideEnvironmentConfigOverride({
+          projectId: req.auth.tenancy.project.id,
+          branchId: req.auth.tenancy.branchId,
+          environmentConfigOverrideOverride: parsedConfig,
+          client: tx,
+        });
+        if (shouldEnqueueExternalDbSync(parsedConfig)) {
+          await enqueueExternalDbSync(req.auth.tenancy.id, tx);
+        }
+        return updatedConfig;
+      })
+      : await levelConfig.override({
+        projectId: req.auth.tenancy.project.id,
+        branchId: req.auth.tenancy.branchId,
+        config: parsedConfig,
+      });
 
     await warnOnValidationFailure(levelConfig, {
       projectId: req.auth.tenancy.project.id,
       branchId: req.auth.tenancy.branchId,
       config: newConfig,
     });
-
-    if (req.params.level === "environment" && shouldEnqueueExternalDbSync(parsedConfig)) {
-      await enqueueExternalDbSync(req.auth.tenancy.id);
-    }
 
     return {
       statusCode: 200 as const,

@@ -968,6 +968,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
     variables?: Record<string, any>,
     draftId?: string,
     scheduledAt?: Date,
+    idempotencyKey?: string,
   }): Promise<Result<void, KnownErrors["RequiresCustomEmailServer"] | KnownErrors["SchemaError"] | KnownErrors["UserIdDoesNotExist"]>> {
     const res = await this.sendServerRequest(
       "/emails/send-email",
@@ -988,6 +989,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
           variables: options.variables,
           draft_id: options.draftId,
           scheduled_at_millis: options.scheduledAt?.getTime(),
+          idempotency_key: options.idempotencyKey,
         }),
       },
       null,
@@ -1190,6 +1192,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
     if (typeof params?.last_event_at_from_millis === "number") qs.set("last_event_at_from_millis", String(params.last_event_at_from_millis));
     if (typeof params?.last_event_at_to_millis === "number") qs.set("last_event_at_to_millis", String(params.last_event_at_to_millis));
     if (typeof params?.click_count_min === "number") qs.set("click_count_min", String(params.click_count_min));
+    if (params?.user_kind) qs.set("user_kind", params.user_kind);
     const response = await this.sendServerRequest(
       `/session-replays${qs.size ? `?${qs.toString()}` : ""}`,
       { method: "GET" },

@@ -1,7 +1,7 @@
 import withPostHog from "@/analytics";
 import { arePlanLimitsEnforced } from "@/lib/plan-entitlements";
+import { tryDecreasePlanItemQuantities } from "@/lib/plan-metering";
 import { globalPrismaClient } from "@/prisma-client";
-import { getHexclaveServerApp } from "@/hexclave";
 import { runAsynchronouslyAndWaitUntil } from "@/utils/background-tasks";
 import { ITEM_IDS } from "@hexclave/shared/dist/plans";
 import { urlSchema, yupBoolean, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
@@ -12,9 +12,12 @@ import { filterUndefined, typedKeys } from "@hexclave/shared/dist/utils/objects"
 import { UnionToIntersection } from "@hexclave/shared/dist/utils/types";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import * as yup from "yup";
-import { getClickhouseAdminClient } from "./clickhouse";
+import { getClickhouseAdminClient, getClickhouseWriteAvailability } from "./clickhouse";
 import { getEndUserInfo } from "./end-users";
 import { DEFAULT_BRANCH_ID } from "./tenancies";
+import { resolveCustomerRequestObservability } from "./customer-request-observability";
+
+let hasReportedMissingRequestIpContext = false;
 
 export const endUserIpInfoSchema = yupObject({
   ip: yupString().defined(),
@@ -250,6 +253,18 @@ export const SystemEventTypes = stripEventTypeSuffixFromKeys({
 } as const);
 const systemEventTypesById = new Map(Object.values(SystemEventTypes).map(eventType => [eventType.id, eventType]));
 
+export const CLICKHOUSE_SYSTEM_EVENT_TYPE_IDS = new Set([
+  "$token-refresh",
+  "$sign-up-rule-trigger",
+  "$sign-in-attempt",
+  "$permission-check",
+  "$user-restricted",
+]);
+
+export function clickhouseEventTypesToInsert<T extends { id: string }>(eventTypes: readonly T[]): T[] {
+  return eventTypes.filter((eventType) => CLICKHOUSE_SYSTEM_EVENT_TYPE_IDS.has(eventType.id));
+}
+
 function stripEventTypeSuffixFromKeys<T extends Record<`${string}EventType`, unknown>>(t: T): { [K in keyof T as K extends `${infer Key}EventType` ? Key : never]: T[K] } {
   return Object.fromEntries(Object.entries(t).map(([key, value]) => [key.replace(/EventType$/, ""), value])) as any;
 }
@@ -323,10 +338,6 @@ export async function logEvent<T extends EventType[]>(
   }
 
 
-  // get end user information
-  const endUserInfo = await getEndUserInfo();  // this is a dynamic API, can't run it asynchronously
-  const endUserInfoInner = endUserInfo?.maybeSpoofed ? endUserInfo.spoofedInfo : endUserInfo?.exactInfo;
-  const eventTypesArray = [...allEventTypes];
   const dataRecord = data as Record<string, unknown> | null | undefined;
   const projectId =
     typeof dataRecord === "object" && dataRecord && typeof dataRecord.projectId === "string"
@@ -341,6 +352,18 @@ export async function logEvent<T extends EventType[]>(
       ? dataRecord.userId
       : "";
 
+  let requestIpInfo: EndUserIpInfo | null = null;
+  try {
+    requestIpInfo = await getEndUserIpInfoForEvent();
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "Backend request context is only available while handling a backend request") {
+      throw error;
+    }
+    if (!hasReportedMissingRequestIpContext) {
+      hasReportedMissingRequestIpContext = true;
+      console.warn("Event logging skipped request IP enrichment outside a backend request context", error);
+    }
+  }
 
   // rest is no more dynamic APIs so we can run it asynchronously
   runAsynchronouslyAndWaitUntil((async () => {
@@ -352,9 +375,10 @@ export async function logEvent<T extends EventType[]>(
       // the event anyway (treat the quota as available)
       let isDebited = true;
       try {
-        const app = getHexclaveServerApp();
-        const eventsItem = await app.getItem({ itemId: ITEM_IDS.analyticsEvents, teamId: billingTeamId });
-        isDebited = await eventsItem.tryDecreaseQuantity(1);
+        const debitResult = await tryDecreasePlanItemQuantities(billingTeamId, [
+          { itemId: ITEM_IDS.analyticsEvents, quantity: 1 },
+        ]);
+        isDebited = debitResult.insufficientItemId == null;
       } catch (error) {
         captureError("events:analytics-events-quota-check", error);
       }
@@ -363,21 +387,20 @@ export async function logEvent<T extends EventType[]>(
       }
     }
 
-    // log event in DB
     await globalPrismaClient.event.create({
       data: {
-        systemEventTypeIds: eventTypesArray.map(eventType => eventType.id),
+        systemEventTypeIds: [...allEventTypes].map(eventType => eventType.id),
         data: data as any,
-        isEndUserIpInfoGuessTrusted: !endUserInfo?.maybeSpoofed,
-        endUserIpInfoGuess: endUserInfoInner ? {
+        isEndUserIpInfoGuessTrusted: requestIpInfo?.isTrusted ?? true,
+        endUserIpInfoGuess: requestIpInfo ? {
           create: {
-            ip: endUserInfoInner.ip,
-            countryCode: endUserInfoInner.countryCode,
-            regionCode: endUserInfoInner.regionCode,
-            cityName: endUserInfoInner.cityName,
-            tzIdentifier: endUserInfoInner.tzIdentifier,
-            latitude: endUserInfoInner.latitude,
-            longitude: endUserInfoInner.longitude,
+            ip: requestIpInfo.ip,
+            countryCode: requestIpInfo.countryCode,
+            regionCode: requestIpInfo.regionCode,
+            cityName: requestIpInfo.cityName,
+            tzIdentifier: requestIpInfo.tzIdentifier,
+            latitude: requestIpInfo.latitude,
+            longitude: requestIpInfo.longitude,
           },
         } : undefined,
         isWide,
@@ -386,161 +409,167 @@ export async function logEvent<T extends EventType[]>(
       },
     });
 
-    // Log specific events to ClickHouse
-    const clickhouseEventTypes = [
-      '$token-refresh',
-      '$sign-up-rule-trigger',
-      '$sign-in-attempt',
-      '$permission-check',
-      '$user-restricted',
-    ];
-    const matchingEventType = eventTypesArray.find(e => clickhouseEventTypes.includes(e.id));
-    if (matchingEventType) {
-      let clickhouseEventData: Record<string, unknown>;
-      if (matchingEventType.id === "$token-refresh") {
-        const refreshTokenId =
-          typeof dataRecord === "object" && dataRecord && typeof dataRecord.refreshTokenId === "string"
-            ? dataRecord.refreshTokenId
-            : throwErr(new HexclaveAssertionError("refreshTokenId is required for $token-refresh ClickHouse event", { dataRecord }));
-        const isAnonymous =
-          typeof dataRecord === "object" && dataRecord && typeof dataRecord.isAnonymous === "boolean"
-            ? dataRecord.isAnonymous
-            : throwErr(new HexclaveAssertionError("isAnonymous is required for $token-refresh ClickHouse event", { dataRecord }));
-        const ipInfo =
+    const requestedClickhouseTypes = clickhouseEventTypesToInsert(eventTypes);
+    const tokenRefreshEvent = requestedClickhouseTypes.find((eventType) => eventType.id === "$token-refresh");
+    if (tokenRefreshEvent !== undefined) {
+      const resolvedRefreshTokenId = options.refreshTokenId
+        ?? (typeof dataRecord === "object" && dataRecord && typeof dataRecord.refreshTokenId === "string"
+          ? dataRecord.refreshTokenId
+          : null);
+      resolveCustomerRequestObservability({
+        projectId,
+        branchId,
+        userId: userId || null,
+        refreshTokenId: resolvedRefreshTokenId,
+      });
+    }
+
+    if (getClickhouseWriteAvailability() !== "absent") {
+      for (const matchingEventType of requestedClickhouseTypes) {
+        let clickhouseEventData: Record<string, unknown>;
+        if (matchingEventType.id === "$token-refresh") {
+          const refreshTokenId =
+            typeof dataRecord === "object" && dataRecord && typeof dataRecord.refreshTokenId === "string"
+              ? dataRecord.refreshTokenId
+              : throwErr(new HexclaveAssertionError("refreshTokenId is required for $token-refresh ClickHouse event", { dataRecord }));
+          const isAnonymous =
+            typeof dataRecord === "object" && dataRecord && typeof dataRecord.isAnonymous === "boolean"
+              ? dataRecord.isAnonymous
+              : throwErr(new HexclaveAssertionError("isAnonymous is required for $token-refresh ClickHouse event", { dataRecord }));
+          const ipInfo =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.ipInfo as EndUserIpInfo | null | undefined)
             : undefined;
-        clickhouseEventData = {
-          refresh_token_id: refreshTokenId,
-          is_anonymous: isAnonymous,
-          ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
-        };
-      } else if (matchingEventType.id === "$sign-up-rule-trigger") {
-        const ruleId =
+          clickhouseEventData = {
+            refresh_token_id: refreshTokenId,
+            is_anonymous: isAnonymous,
+            ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
+          };
+        } else if (matchingEventType.id === "$sign-up-rule-trigger") {
+          const ruleId =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.ruleId === "string"
             ? dataRecord.ruleId
             : throwErr(new HexclaveAssertionError("ruleId is required for $sign-up-rule-trigger ClickHouse event", { dataRecord }));
-        const action =
+          const action =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.action === "string"
             ? dataRecord.action
             : throwErr(new HexclaveAssertionError("action is required for $sign-up-rule-trigger ClickHouse event", { dataRecord }));
-        const email =
+          const email =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.email as string | null | undefined) ?? null
             : null;
-        const authMethod =
+          const authMethod =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.authMethod as string | null | undefined) ?? null
             : null;
-        const oauthProvider =
+          const oauthProvider =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.oauthProvider as string | null | undefined) ?? null
             : null;
-        clickhouseEventData = {
-          rule_id: ruleId,
-          action,
-          email,
-          auth_method: authMethod,
-          oauth_provider: oauthProvider,
-        };
-      } else if (matchingEventType.id === "$sign-in-attempt") {
-        const outcome =
+          clickhouseEventData = {
+            rule_id: ruleId,
+            action,
+            email,
+            auth_method: authMethod,
+            oauth_provider: oauthProvider,
+            ip_info: toClickhouseEndUserIpInfo(requestIpInfo),
+          };
+        } else if (matchingEventType.id === "$sign-in-attempt") {
+          const outcome =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.outcome === "string"
             ? dataRecord.outcome
             : throwErr(new HexclaveAssertionError("outcome is required for $sign-in-attempt ClickHouse event", { dataRecord }));
-        const method =
+          const method =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.method === "string"
             ? dataRecord.method
             : throwErr(new HexclaveAssertionError("method is required for $sign-in-attempt ClickHouse event", { dataRecord }));
-        const failureReason =
+          const failureReason =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.failureReason as string | null | undefined) ?? null
             : null;
-        const email =
+          const email =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.email as string | null | undefined) ?? null
             : null;
-        const oauthProvider =
+          const oauthProvider =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.oauthProvider as string | null | undefined) ?? null
             : null;
-        const ipInfo =
+          const ipInfo =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.ipInfo as EndUserIpInfo | null | undefined)
             : undefined;
-        clickhouseEventData = {
-          outcome,
-          method,
-          failure_reason: failureReason,
-          email,
-          oauth_provider: oauthProvider,
-          ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
-        };
-      } else if (matchingEventType.id === "$permission-check") {
-        const outcome =
+          clickhouseEventData = {
+            outcome,
+            method,
+            failure_reason: failureReason,
+            email,
+            oauth_provider: oauthProvider,
+            ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
+          };
+        } else if (matchingEventType.id === "$permission-check") {
+          const outcome =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.outcome === "string"
             ? dataRecord.outcome
             : throwErr(new HexclaveAssertionError("outcome is required for $permission-check ClickHouse event", { dataRecord }));
-        const permissionId =
+          const permissionId =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.permissionId === "string"
             ? dataRecord.permissionId
             : throwErr(new HexclaveAssertionError("permissionId is required for $permission-check ClickHouse event", { dataRecord }));
-        const scope =
+          const scope =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.scope === "string"
             ? dataRecord.scope
             : throwErr(new HexclaveAssertionError("scope is required for $permission-check ClickHouse event", { dataRecord }));
-        const teamId =
+          const teamId =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.teamId as string | null | undefined) ?? null
             : null;
-        const ipInfo =
+          const ipInfo =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.ipInfo as EndUserIpInfo | null | undefined)
             : undefined;
-        clickhouseEventData = {
-          outcome,
-          permission_id: permissionId,
-          team_id: teamId,
-          scope,
-          ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
-        };
-      } else if (matchingEventType.id === "$user-restricted") {
-        const restrictedReason =
+          clickhouseEventData = {
+            outcome,
+            permission_id: permissionId,
+            team_id: teamId,
+            scope,
+            ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
+          };
+        } else if (matchingEventType.id === "$user-restricted") {
+          const restrictedReason =
           typeof dataRecord === "object" && dataRecord && typeof dataRecord.restrictedReason === "string"
             ? dataRecord.restrictedReason
             : throwErr(new HexclaveAssertionError("restrictedReason is required for $user-restricted ClickHouse event", { dataRecord }));
-        const ipInfo =
+          const ipInfo =
           typeof dataRecord === "object" && dataRecord
             ? (dataRecord.ipInfo as EndUserIpInfo | null | undefined)
             : undefined;
-        clickhouseEventData = {
-          restricted_reason: restrictedReason,
-          ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
-        };
-      } else {
-        throw new HexclaveAssertionError(`Unhandled ClickHouse event type: ${matchingEventType.id}`, { matchingEventType });
-      }
+          clickhouseEventData = {
+            restricted_reason: restrictedReason,
+            ip_info: toClickhouseEndUserIpInfo(ipInfo ?? null),
+          };
+        } else {
+          throw new HexclaveAssertionError(`Unhandled ClickHouse event type: ${matchingEventType.id}`, { matchingEventType });
+        }
 
-      if (!projectId) {
-        throw new HexclaveAssertionError(
+        if (!projectId) {
+          throw new HexclaveAssertionError(
           `projectId is required for ClickHouse event insertion (${matchingEventType.id})`,
           { matchingEventType, dataRecord }
-        );
-      }
-      const clickhouseClient = getClickhouseAdminClient();
-      // Resolve refresh_token_id: prefer explicit option, fall back to data for $token-refresh events
-      const resolvedRefreshTokenId = options.refreshTokenId
+          );
+        }
+        const clickhouseClient = getClickhouseAdminClient();
+        // Resolve refresh_token_id: prefer explicit option, fall back to data for $token-refresh events
+        const resolvedRefreshTokenId = options.refreshTokenId
         ?? (matchingEventType.id === "$token-refresh" && typeof (clickhouseEventData as any).refresh_token_id === "string"
           ? (clickhouseEventData as any).refresh_token_id as string
           : null);
-      // Resolve team_id from the event data for $permission-check events.
-      const resolvedTeamId = matchingEventType.id === "$permission-check" && typeof (clickhouseEventData as any).team_id === "string"
-        ? (clickhouseEventData as any).team_id as string
-        : null;
+        // Resolve team_id from the event data for $permission-check events.
+        const resolvedTeamId = matchingEventType.id === "$permission-check" && typeof (clickhouseEventData as any).team_id === "string"
+          ? (clickhouseEventData as any).team_id as string
+          : null;
 
-      await clickhouseClient.insert({
-        table: "analytics_internal.events",
-        values: [{
+        const telemetryRow = {
           event_type: matchingEventType.id,
           event_at: timeRange.end,
           data: clickhouseEventData,
@@ -551,13 +580,17 @@ export async function logEvent<T extends EventType[]>(
           refresh_token_id: resolvedRefreshTokenId ?? null,
           session_replay_id: options.sessionReplayId ?? null,
           session_replay_segment_id: options.sessionReplaySegmentId ?? null,
-        }],
-        format: "JSONEachRow",
-        clickhouse_settings: {
-          date_time_input_format: "best_effort",
-          async_insert: 1,
-        },
-      });
+        };
+        await clickhouseClient.insert({
+          table: "analytics_internal.events",
+          values: [telemetryRow],
+          format: "JSONEachRow",
+          clickhouse_settings: {
+            date_time_input_format: "best_effort",
+            async_insert: 1,
+          },
+        });
+      }
     }
 
     // log event in PostHog
@@ -585,3 +618,5 @@ export async function logEvent<T extends EventType[]>(
     }
   })());
 }
+
+export const recordSystemTelemetry = logEvent;

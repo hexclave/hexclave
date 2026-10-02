@@ -25,6 +25,24 @@
         "default": "./dist/config.js"
       }
     },
+    "./otel": {
+      "types": "./dist/integrations/otel.d.ts",
+      "import": {
+        "default": "./dist/esm/integrations/otel.js"
+      },
+      "require": {
+        "default": "./dist/integrations/otel.js"
+      }
+    },
+    "./otel/browser": {
+      "types": "./dist/integrations/otel-browser.d.ts",
+      "import": {
+        "default": "./dist/esm/integrations/otel-browser.js"
+      },
+      "require": {
+        "default": "./dist/integrations/otel-browser.js"
+      }
+    },
     "./tanstack-start-server-context": {
       "types": "./dist/tanstack-start-server-context.combined.d.ts",
       "import": {
@@ -34,6 +52,15 @@
       "require": {
         "browser": "./dist/tanstack-start-server-context.default.js",
         "default": "./dist/tanstack-start-server-context.server.js"
+      }
+    },
+    "./tanstack-start": {
+      "types": "./dist/integrations/tanstack-start.d.ts",
+      "import": {
+        "default": "./dist/esm/integrations/tanstack-start.js"
+      },
+      "require": {
+        "default": "./dist/integrations/tanstack-start.js"
       }
     },
     "./convex.config": {
@@ -52,6 +79,42 @@
       },
       "require": {
         "default": "./dist/integrations/convex.js"
+      }
+    },
+    "./convex": {
+      "types": "./dist/integrations/convex.d.ts",
+      "import": {
+        "default": "./dist/esm/integrations/convex.js"
+      },
+      "require": {
+        "default": "./dist/integrations/convex.js"
+      }
+    },
+    "./trpc": {
+      "types": "./dist/integrations/trpc.d.ts",
+      "import": {
+        "default": "./dist/esm/integrations/trpc.js"
+      },
+      "require": {
+        "default": "./dist/integrations/trpc.js"
+      }
+    },
+    "./orpc": {
+      "types": "./dist/integrations/orpc.d.ts",
+      "import": {
+        "default": "./dist/esm/integrations/orpc.js"
+      },
+      "require": {
+        "default": "./dist/integrations/orpc.js"
+      }
+    },
+    "./elysia": {
+      "types": "./dist/integrations/elysia.d.ts",
+      "import": {
+        "default": "./dist/esm/integrations/elysia.js"
+      },
+      "require": {
+        "default": "./dist/integrations/elysia.js"
       }
     }
   },
@@ -81,6 +144,25 @@
     "LICENSE"
   ],
   "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": "^0.221.0",
+    "@opentelemetry/core": "^2.10.0",
+    "@opentelemetry/context-async-hooks": "^2.10.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/otlp-transformer": "^0.221.0",
+    "@opentelemetry/instrumentation": "^0.221.0",
+    "@opentelemetry/instrumentation-fetch": "^0.221.0",
+    "@opentelemetry/instrumentation-undici": "^0.31.0",
+    "@opentelemetry/instrumentation-xml-http-request": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@opentelemetry/sdk-trace-web": "^2.10.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
     "@ai-sdk/react": "^3.0.72",
     "ai": "^6.0.0",
     "@hookform/resolvers": "^5.2.2",
@@ -102,7 +184,7 @@
     "react-easy-crop": "^5.5.6",
     "react-hook-form": "^7.70.0",
     "tailwindcss-animate": "^1.0.7",
-    "rrweb": "^1.1.3",
+    "@rrweb/record": "^2.1.1",
     "yup": "^1.7.1"
   },
   "peerDependencies": {

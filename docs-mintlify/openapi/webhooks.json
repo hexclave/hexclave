@@ -35,9 +35,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": "johndoe@example.com",
                         "description": "Primary email"
                       },
@@ -55,9 +52,6 @@
                         "type": [
                           "string",
                           "null"
-                        ],
-                        "enum": [
-                          null
                         ],
                         "example": "John Doe",
                         "description": "Human-readable user display name. This is not a unique identifier."
@@ -98,9 +92,6 @@
                               "string",
                               "null"
                             ],
-                            "enum": [
-                              null
-                            ],
                             "example": "https://example.com/image.jpg",
                             "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                           },
@@ -136,9 +127,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": "team-id",
                         "description": "ID of the team currently selected by the user"
                       },
@@ -146,9 +134,6 @@
                         "type": [
                           "string",
                           "null"
-                        ],
-                        "enum": [
-                          null
                         ],
                         "example": "https://example.com/image.jpg",
                         "description": "URL of the profile image for user. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -232,9 +217,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": null,
                         "description": "Public reason shown to the user explaining why they are restricted. Optional."
                       },
@@ -243,9 +225,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": null,
                         "description": "Private details about the restriction (e.g., which sign-up rule triggered). Only visible to server access and above."
                       },
@@ -253,9 +232,6 @@
                         "type": [
                           "string",
                           "null"
-                        ],
-                        "enum": [
-                          null
                         ],
                         "example": "US",
                         "description": "Best-effort ISO country code captured at sign-up time from request geo headers."
@@ -362,9 +338,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": "johndoe@example.com",
                         "description": "Primary email"
                       },
@@ -382,9 +355,6 @@
                         "type": [
                           "string",
                           "null"
-                        ],
-                        "enum": [
-                          null
                         ],
                         "example": "John Doe",
                         "description": "Human-readable user display name. This is not a unique identifier."
@@ -425,9 +395,6 @@
                               "string",
                               "null"
                             ],
-                            "enum": [
-                              null
-                            ],
                             "example": "https://example.com/image.jpg",
                             "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                           },
@@ -463,9 +430,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": "team-id",
                         "description": "ID of the team currently selected by the user"
                       },
@@ -473,9 +437,6 @@
                         "type": [
                           "string",
                           "null"
-                        ],
-                        "enum": [
-                          null
                         ],
                         "example": "https://example.com/image.jpg",
                         "description": "URL of the profile image for user. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -559,9 +520,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": null,
                         "description": "Public reason shown to the user explaining why they are restricted. Optional."
                       },
@@ -570,9 +528,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": null,
                         "description": "Private details about the restriction (e.g., which sign-up rule triggered). Only visible to server access and above."
                       },
@@ -580,9 +535,6 @@
                         "type": [
                           "string",
                           "null"
-                        ],
-                        "enum": [
-                          null
                         ],
                         "example": "US",
                         "description": "Best-effort ISO country code captured at sign-up time from request geo headers."
@@ -783,9 +735,6 @@
                           "string",
                           "null"
                         ],
-                        "enum": [
-                          null
-                        ],
                         "example": "https://example.com/image.jpg",
                         "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
                       },
@@ -894,9 +843,6 @@
                         "type": [
                           "string",
                           "null"
-                        ],
-                        "enum": [
-                          null
                         ],
                         "example": "https://example.com/image.jpg",
                         "description": "URL of the profile image for team. Can be a Base64 encoded image. Must be smaller than 100KB. Please compress and crop to a square before passing in."
@@ -1278,6 +1224,801 @@
           }
         },
         "operationId": "team_permission.deleted"
+      }
+    },
+    "issue.created": {
+      "post": {
+        "summary": "issue.created",
+        "description": "This event is triggered the first time an error is grouped into a new issue. It does not fire again for subsequent occurrences of the same issue.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "example": "issue.created",
+                    "description": "issue.created"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "example": "3241a285-8329-4d69-8f3d-316e08cf140c",
+                        "description": "The unique identifier of the issue"
+                      },
+                      "short_id": {
+                        "type": "string",
+                        "example": "42",
+                        "description": "Per-project monotonic counter identifying the issue, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "type": {
+                        "type": "string",
+                        "example": "TypeError",
+                        "description": "The error type, eg. the constructor name of the thrown error"
+                      },
+                      "value": {
+                        "type": "string",
+                        "example": "Cannot read properties of undefined (reading 'id')",
+                        "description": "The error message"
+                      },
+                      "culprit": {
+                        "type": "string",
+                        "example": "app/dashboard/page.tsx in DashboardPage",
+                        "description": "The code location the issue was attributed to"
+                      },
+                      "level": {
+                        "type": "string",
+                        "example": "error",
+                        "description": "The severity the occurrence was reported with"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "unresolved",
+                          "resolved",
+                          "ignored"
+                        ],
+                        "example": "unresolved",
+                        "description": "The lifecycle status of the issue"
+                      },
+                      "substatus": {
+                        "type": "string",
+                        "enum": [
+                          "new",
+                          "ongoing",
+                          "regressed"
+                        ],
+                        "example": "new",
+                        "description": "A finer-grained view of an unresolved issue, derived from its timestamps"
+                      },
+                      "first_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was first seen, in milliseconds since epoch"
+                      },
+                      "last_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was most recently seen, in milliseconds since epoch"
+                      },
+                      "times_seen": {
+                        "type": "string",
+                        "example": "1337",
+                        "description": "Lifetime occurrence count, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "service_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "web",
+                        "description": "The service that reported the issue, if configured"
+                      },
+                      "environment": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "production",
+                        "description": "The environment the issue was reported from, if configured"
+                      },
+                      "release": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "1.4.2",
+                        "description": "The release the issue was reported from, if configured"
+                      },
+                      "url": {
+                        "type": "string",
+                        "example": "https://app.hexclave.com/projects/3241a285-8329-4d69-8f3d-316e08cf140c/observability/issues/8f3d316e-08cf-4d69-8329-140c3241a285",
+                        "description": "Deep link to the issue in the Hexclave dashboard"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "short_id",
+                      "type",
+                      "value",
+                      "culprit",
+                      "level",
+                      "status",
+                      "substatus",
+                      "first_seen_at_millis",
+                      "last_seen_at_millis",
+                      "times_seen",
+                      "url"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "data"
+                ],
+                "example": {
+                  "type": "issue.created"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Observability"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/webhooks/issue.created",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "operationId": "issue.created"
+      }
+    },
+    "issue.regressed": {
+      "post": {
+        "summary": "issue.regressed",
+        "description": "This event is triggered when an issue that had been resolved occurs again.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "example": "issue.regressed",
+                    "description": "issue.regressed"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "example": "3241a285-8329-4d69-8f3d-316e08cf140c",
+                        "description": "The unique identifier of the issue"
+                      },
+                      "short_id": {
+                        "type": "string",
+                        "example": "42",
+                        "description": "Per-project monotonic counter identifying the issue, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "type": {
+                        "type": "string",
+                        "example": "TypeError",
+                        "description": "The error type, eg. the constructor name of the thrown error"
+                      },
+                      "value": {
+                        "type": "string",
+                        "example": "Cannot read properties of undefined (reading 'id')",
+                        "description": "The error message"
+                      },
+                      "culprit": {
+                        "type": "string",
+                        "example": "app/dashboard/page.tsx in DashboardPage",
+                        "description": "The code location the issue was attributed to"
+                      },
+                      "level": {
+                        "type": "string",
+                        "example": "error",
+                        "description": "The severity the occurrence was reported with"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "unresolved",
+                          "resolved",
+                          "ignored"
+                        ],
+                        "example": "unresolved",
+                        "description": "The lifecycle status of the issue"
+                      },
+                      "substatus": {
+                        "type": "string",
+                        "enum": [
+                          "new",
+                          "ongoing",
+                          "regressed"
+                        ],
+                        "example": "regressed",
+                        "description": "A finer-grained view of an unresolved issue, derived from its timestamps"
+                      },
+                      "first_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was first seen, in milliseconds since epoch"
+                      },
+                      "last_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was most recently seen, in milliseconds since epoch"
+                      },
+                      "times_seen": {
+                        "type": "string",
+                        "example": "1337",
+                        "description": "Lifetime occurrence count, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "service_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "web",
+                        "description": "The service that reported the issue, if configured"
+                      },
+                      "environment": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "production",
+                        "description": "The environment the issue was reported from, if configured"
+                      },
+                      "release": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "1.4.2",
+                        "description": "The release the issue was reported from, if configured"
+                      },
+                      "url": {
+                        "type": "string",
+                        "example": "https://app.hexclave.com/projects/3241a285-8329-4d69-8f3d-316e08cf140c/observability/issues/8f3d316e-08cf-4d69-8329-140c3241a285",
+                        "description": "Deep link to the issue in the Hexclave dashboard"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "short_id",
+                      "type",
+                      "value",
+                      "culprit",
+                      "level",
+                      "status",
+                      "substatus",
+                      "first_seen_at_millis",
+                      "last_seen_at_millis",
+                      "times_seen",
+                      "url"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "data"
+                ],
+                "example": {
+                  "type": "issue.regressed"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Observability"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/webhooks/issue.regressed",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "operationId": "issue.regressed"
+      }
+    },
+    "issue.resolved": {
+      "post": {
+        "summary": "issue.resolved",
+        "description": "This event is triggered when an issue is marked as resolved.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "example": "issue.resolved",
+                    "description": "issue.resolved"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "example": "3241a285-8329-4d69-8f3d-316e08cf140c",
+                        "description": "The unique identifier of the issue"
+                      },
+                      "short_id": {
+                        "type": "string",
+                        "example": "42",
+                        "description": "Per-project monotonic counter identifying the issue, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "type": {
+                        "type": "string",
+                        "example": "TypeError",
+                        "description": "The error type, eg. the constructor name of the thrown error"
+                      },
+                      "value": {
+                        "type": "string",
+                        "example": "Cannot read properties of undefined (reading 'id')",
+                        "description": "The error message"
+                      },
+                      "culprit": {
+                        "type": "string",
+                        "example": "app/dashboard/page.tsx in DashboardPage",
+                        "description": "The code location the issue was attributed to"
+                      },
+                      "level": {
+                        "type": "string",
+                        "example": "error",
+                        "description": "The severity the occurrence was reported with"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "unresolved",
+                          "resolved",
+                          "ignored"
+                        ],
+                        "example": "resolved",
+                        "description": "The lifecycle status of the issue"
+                      },
+                      "substatus": {
+                        "type": "string",
+                        "enum": [
+                          "new",
+                          "ongoing",
+                          "regressed"
+                        ],
+                        "example": "ongoing",
+                        "description": "A finer-grained view of an unresolved issue, derived from its timestamps"
+                      },
+                      "first_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was first seen, in milliseconds since epoch"
+                      },
+                      "last_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was most recently seen, in milliseconds since epoch"
+                      },
+                      "times_seen": {
+                        "type": "string",
+                        "example": "1337",
+                        "description": "Lifetime occurrence count, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "service_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "web",
+                        "description": "The service that reported the issue, if configured"
+                      },
+                      "environment": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "production",
+                        "description": "The environment the issue was reported from, if configured"
+                      },
+                      "release": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "1.4.2",
+                        "description": "The release the issue was reported from, if configured"
+                      },
+                      "url": {
+                        "type": "string",
+                        "example": "https://app.hexclave.com/projects/3241a285-8329-4d69-8f3d-316e08cf140c/observability/issues/8f3d316e-08cf-4d69-8329-140c3241a285",
+                        "description": "Deep link to the issue in the Hexclave dashboard"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "short_id",
+                      "type",
+                      "value",
+                      "culprit",
+                      "level",
+                      "status",
+                      "substatus",
+                      "first_seen_at_millis",
+                      "last_seen_at_millis",
+                      "times_seen",
+                      "url"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "data"
+                ],
+                "example": {
+                  "type": "issue.resolved"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Observability"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/webhooks/issue.resolved",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "operationId": "issue.resolved"
+      }
+    },
+    "issue.ignored": {
+      "post": {
+        "summary": "issue.ignored",
+        "description": "This event is triggered when an issue is marked as ignored.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "example": "issue.ignored",
+                    "description": "issue.ignored"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "example": "3241a285-8329-4d69-8f3d-316e08cf140c",
+                        "description": "The unique identifier of the issue"
+                      },
+                      "short_id": {
+                        "type": "string",
+                        "example": "42",
+                        "description": "Per-project monotonic counter identifying the issue, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "type": {
+                        "type": "string",
+                        "example": "TypeError",
+                        "description": "The error type, eg. the constructor name of the thrown error"
+                      },
+                      "value": {
+                        "type": "string",
+                        "example": "Cannot read properties of undefined (reading 'id')",
+                        "description": "The error message"
+                      },
+                      "culprit": {
+                        "type": "string",
+                        "example": "app/dashboard/page.tsx in DashboardPage",
+                        "description": "The code location the issue was attributed to"
+                      },
+                      "level": {
+                        "type": "string",
+                        "example": "error",
+                        "description": "The severity the occurrence was reported with"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "unresolved",
+                          "resolved",
+                          "ignored"
+                        ],
+                        "example": "ignored",
+                        "description": "The lifecycle status of the issue"
+                      },
+                      "substatus": {
+                        "type": "string",
+                        "enum": [
+                          "new",
+                          "ongoing",
+                          "regressed"
+                        ],
+                        "example": "ongoing",
+                        "description": "A finer-grained view of an unresolved issue, derived from its timestamps"
+                      },
+                      "first_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was first seen, in milliseconds since epoch"
+                      },
+                      "last_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was most recently seen, in milliseconds since epoch"
+                      },
+                      "times_seen": {
+                        "type": "string",
+                        "example": "1337",
+                        "description": "Lifetime occurrence count, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "service_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "web",
+                        "description": "The service that reported the issue, if configured"
+                      },
+                      "environment": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "production",
+                        "description": "The environment the issue was reported from, if configured"
+                      },
+                      "release": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "1.4.2",
+                        "description": "The release the issue was reported from, if configured"
+                      },
+                      "url": {
+                        "type": "string",
+                        "example": "https://app.hexclave.com/projects/3241a285-8329-4d69-8f3d-316e08cf140c/observability/issues/8f3d316e-08cf-4d69-8329-140c3241a285",
+                        "description": "Deep link to the issue in the Hexclave dashboard"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "short_id",
+                      "type",
+                      "value",
+                      "culprit",
+                      "level",
+                      "status",
+                      "substatus",
+                      "first_seen_at_millis",
+                      "last_seen_at_millis",
+                      "times_seen",
+                      "url"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "data"
+                ],
+                "example": {
+                  "type": "issue.ignored"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Observability"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/webhooks/issue.ignored",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "operationId": "issue.ignored"
+      }
+    },
+    "issue.merged": {
+      "post": {
+        "summary": "issue.merged",
+        "description": "This event is triggered when issues are merged together. The payload describes the surviving primary issue; the issues merged into it no longer resolve on their own.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "example": "issue.merged",
+                    "description": "issue.merged"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "example": "3241a285-8329-4d69-8f3d-316e08cf140c",
+                        "description": "The unique identifier of the issue"
+                      },
+                      "short_id": {
+                        "type": "string",
+                        "example": "42",
+                        "description": "Per-project monotonic counter identifying the issue, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "type": {
+                        "type": "string",
+                        "example": "TypeError",
+                        "description": "The error type, eg. the constructor name of the thrown error"
+                      },
+                      "value": {
+                        "type": "string",
+                        "example": "Cannot read properties of undefined (reading 'id')",
+                        "description": "The error message"
+                      },
+                      "culprit": {
+                        "type": "string",
+                        "example": "app/dashboard/page.tsx in DashboardPage",
+                        "description": "The code location the issue was attributed to"
+                      },
+                      "level": {
+                        "type": "string",
+                        "example": "error",
+                        "description": "The severity the occurrence was reported with"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "unresolved",
+                          "resolved",
+                          "ignored"
+                        ],
+                        "example": "unresolved",
+                        "description": "The lifecycle status of the issue"
+                      },
+                      "substatus": {
+                        "type": "string",
+                        "enum": [
+                          "new",
+                          "ongoing",
+                          "regressed"
+                        ],
+                        "example": "ongoing",
+                        "description": "A finer-grained view of an unresolved issue, derived from its timestamps"
+                      },
+                      "first_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was first seen, in milliseconds since epoch"
+                      },
+                      "last_seen_at_millis": {
+                        "type": "number",
+                        "example": 1630000000000,
+                        "description": "When the issue was most recently seen, in milliseconds since epoch"
+                      },
+                      "times_seen": {
+                        "type": "string",
+                        "example": "1337",
+                        "description": "Lifetime occurrence count, as a decimal string (it is a 64-bit integer and does not fit a JSON number safely)"
+                      },
+                      "service_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "web",
+                        "description": "The service that reported the issue, if configured"
+                      },
+                      "environment": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "production",
+                        "description": "The environment the issue was reported from, if configured"
+                      },
+                      "release": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "example": "1.4.2",
+                        "description": "The release the issue was reported from, if configured"
+                      },
+                      "url": {
+                        "type": "string",
+                        "example": "https://app.hexclave.com/projects/3241a285-8329-4d69-8f3d-316e08cf140c/observability/issues/8f3d316e-08cf-4d69-8329-140c3241a285",
+                        "description": "Deep link to the issue in the Hexclave dashboard"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "short_id",
+                      "type",
+                      "value",
+                      "culprit",
+                      "level",
+                      "status",
+                      "substatus",
+                      "first_seen_at_millis",
+                      "last_seen_at_millis",
+                      "times_seen",
+                      "url"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "data"
+                ],
+                "example": {
+                  "type": "issue.merged"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Observability"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/webhooks/issue.merged",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "operationId": "issue.merged"
       }
     }
   }

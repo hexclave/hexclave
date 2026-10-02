@@ -34,3 +34,13 @@ export function workflowEventRetryDelayMs(nextAttempt: number): number {
   // numeric growth even if a permanently broken event survives for years.
   return Math.min(60 * 60 * 1000, 60 * 1000 * 2 ** Math.min(Math.max(nextAttempt - 1, 0), 6));
 }
+
+export function didAnySkippedWorkflowResume(
+  skippedPausedWorkflowIds: ReadonlySet<string>,
+  currentPausedWorkflowIds: ReadonlySet<string>,
+): boolean {
+  for (const workflowId of skippedPausedWorkflowIds) {
+    if (!currentPausedWorkflowIds.has(workflowId)) return true;
+  }
+  return false;
+}

@@ -34,6 +34,9 @@ const AVG_DAYS_PER_MONTH = 365.25 / 12;
 const MRR_SUBSCRIPTION_STATUSES = ["active", "trialing"];
 const REVENUE_INVOICE_STATUSES = ["paid", "succeeded"];
 
+// The public view keeps retained event history behind the derived span store.
+const PAGE_VIEW_SOURCE = "default.page_views";
+
 function ymd(date: Date): string {
   return date.toISOString().split("T")[0];
 }
@@ -254,8 +257,7 @@ export const GET = createSmartRouteHandler({
       country: Array<{ country_code: string, c: string | number }>,
       deadClicks: Array<{ clicks: string | number, dead: string | number }>,
       split: Array<{ day: string, total_count: string, new_count: string, retained_count: string, reactivated_count: string }>,
-      totalsByProject: CountRow[],
-      verifiedByProject: CountRow[],
+      userCountsByProject: Array<{ projectId: string, total: string | number, verified: string | number }>,
       signupsByProject: Array<{ projectId: string, cur: string | number, prev: string | number }>,
       activeByProject: Array<{ projectId: string, cur: string | number, prev: string | number }>,
       sparkByProject: Array<{ projectId: string, day: string, c: string | number }>,
@@ -289,7 +291,7 @@ export const GET = createSmartRouteHandler({
       const finalQuerySettings = "SETTINGS max_threads = 1, max_final_threads = 1, max_block_size = 1024";
       const [
         dauSeries, pvSeries, signupSeries, mauProjects, userCounts, country, deadClicks, split,
-        totalsByProject, verifiedByProject, signupsByProject, activeByProject, sparkByProject,
+        userCountsByProject, signupsByProject, activeByProject, sparkByProject,
         teamsByProject, oauthByProject, emailsByProject, analyticsByProject,
       ] = await Promise.all([
         // Platform daily DAU (active users) over the visible window.
@@ -301,17 +303,13 @@ export const GET = createSmartRouteHandler({
             AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
           GROUP BY day ORDER BY day ASC
         `, windowParams),
-        // Page views + unique visitors per day. Exact distinct counts are taken
-        // over hashed user ids: the state is kept once per day group, so 36-char
-        // uuids across every customer project overran the metrics memory limit.
         chQuery<{ day: string, pv: string | number, visitors: string | number }>(`
-          SELECT toDate(event_at) AS day,
-            countIf(event_type = '$page-view') AS pv,
-            uniqExactIf(sipHash64(assumeNotNull(user_id)), event_type = '$page-view') AS visitors
-          FROM analytics_internal.events
-          WHERE event_type IN ('$page-view', '$click')
-            AND ${customerEventScope}
-            AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
+          SELECT toDate(started_at) AS day,
+            count() AS pv,
+            uniqExact(sipHash64(assumeNotNull(user_id))) AS visitors
+          FROM ${PAGE_VIEW_SOURCE}
+          WHERE ${customerEventScope}
+            AND started_at >= {since:DateTime} AND started_at < {until:DateTime}
           GROUP BY day ORDER BY day ASC
         `, windowParams),
         // Signups per day (users table).
@@ -398,18 +396,13 @@ export const GET = createSmartRouteHandler({
           ) AS f USING (entity_id)
           GROUP BY w.day ORDER BY w.day ASC
         `, windowParams),
-        // Per-project total users.
-        chQuery<CountRow>(`
-          SELECT project_id AS projectId, count() AS c
+        chQuery<{ projectId: string, total: string | number, verified: string | number }>(`
+          SELECT project_id AS projectId,
+            count() AS total,
+            countIf(${verifiedSubquery}) AS verified
           FROM analytics_internal.users FINAL
-          WHERE ${customerUserScope} AND is_anonymous = 0 GROUP BY project_id
-          ${finalQuerySettings}
-        `, baseParams),
-        // Per-project verified users.
-        chQuery<CountRow>(`
-          SELECT project_id AS projectId, count() AS c
-          FROM analytics_internal.users FINAL
-          WHERE ${customerUserScope} AND is_anonymous = 0 AND ${verifiedSubquery} GROUP BY project_id
+          WHERE ${customerUserScope} AND is_anonymous = 0
+          GROUP BY project_id
           ${finalQuerySettings}
         `, baseParams),
         // Per-project signups, current vs prior window.
@@ -447,11 +440,11 @@ export const GET = createSmartRouteHandler({
         chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.teams FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
         chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.connected_accounts FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
         chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.email_outboxes FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.events WHERE event_type = '$page-view' AND branch_id = {branchId:String} AND ${customerEventScope} GROUP BY project_id`, baseParams),
+        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM ${PAGE_VIEW_SOURCE} WHERE branch_id = {branchId:String} AND ${customerEventScope} GROUP BY project_id`, baseParams),
       ]);
       ch = {
         dauSeries, pvSeries, signupSeries, mauProjects, userCounts, country, deadClicks, split,
-        totalsByProject, verifiedByProject, signupsByProject, activeByProject, sparkByProject,
+        userCountsByProject, signupsByProject, activeByProject, sparkByProject,
         teamsByProject, oauthByProject, emailsByProject, analyticsByProject,
       };
     } catch (cause) {
@@ -658,8 +651,8 @@ export const GET = createSmartRouteHandler({
     ];
 
     // ---- Per-project leaderboard ----
-    const totalsMap = rowsToMap(ch.totalsByProject);
-    const verifiedMap = rowsToMap(ch.verifiedByProject);
+    const totalsMap = new Map(ch.userCountsByProject.map((row) => [row.projectId, num(row.total)]));
+    const verifiedMap = new Map(ch.userCountsByProject.map((row) => [row.projectId, num(row.verified)]));
     const signupsMap = new Map(ch.signupsByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
     const activeMap = new Map(ch.activeByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
     const revenueMap = new Map(pg.revenueByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));

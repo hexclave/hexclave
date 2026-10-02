@@ -1,7 +1,7 @@
 import { ITEM_IDS, UNLIMITED } from "@hexclave/shared/dist/plans";
 import { describe, expect, it } from "vitest";
 import type { SubscriptionRow } from "./payments/schema/types";
-import { buildUsageRow, getNextPlanId, getPlanUsagePeriod, readBillingSubscriptionMapOrSkip } from "./plan-usage";
+import { buildUsageRow, getAnalyticsEventsUsageQueryForTest, getNextPlanId, getPlanUsagePeriod, readBillingSubscriptionMapOrSkip } from "./plan-usage";
 
 function createSubscriptionPeriod(startMillis: number, endMillis: number): SubscriptionRow {
   return {
@@ -115,6 +115,18 @@ describe("buildUsageRow", () => {
         "used": 250000,
       }
     `);
+  });
+});
+
+describe("analytics event usage query", () => {
+  it("counts the canonical telemetry destination once", () => {
+    const query = getAnalyticsEventsUsageQueryForTest();
+    expect(query).toContain("FROM analytics_internal.events");
+    expect(query).not.toContain("event_type NOT IN");
+    expect(query).toContain("PREWHERE project_id IN {projectIds:Array(String)}");
+    expect(query).toContain("event_at >= {periodStart:DateTime}");
+    expect(query).not.toContain("analytics_internal.telemetry");
+    expect(query).not.toContain("analytics_internal.logs");
   });
 });
 

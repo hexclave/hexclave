@@ -1,6 +1,6 @@
 import type { WorkflowManifestJson } from "@hexclave/shared/dist/interface/workflows";
 import { describe, expect, it } from "vitest";
-import { workflowDefinitionMatchesEvent, workflowEventRetryDelayMs } from "./event-processing";
+import { didAnySkippedWorkflowResume, workflowDefinitionMatchesEvent, workflowEventRetryDelayMs } from "./event-processing";
 
 describe("workflowDefinitionMatchesEvent", () => {
   it("matches schedule events only to the exact workflow and trigger revision", () => {
@@ -52,5 +52,12 @@ describe("workflowEventRetryDelayMs", () => {
       3_600_000,
       3_600_000,
     ]);
+  });
+});
+
+describe("didAnySkippedWorkflowResume", () => {
+  it("keeps an event pending when a skipped workflow resumed before processing commits", () => {
+    expect(didAnySkippedWorkflowResume(new Set(["first", "second"]), new Set(["first"]))).toBe(true);
+    expect(didAnySkippedWorkflowResume(new Set(["first", "second"]), new Set(["first", "second"]))).toBe(false);
   });
 });

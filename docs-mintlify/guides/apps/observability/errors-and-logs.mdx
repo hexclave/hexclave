@@ -1,0 +1,163 @@
+---
+title: "Errors and logs"
+description: "Automatic error and console log capture, plus structured OpenTelemetry logs correlated with your traces"
+---
+
+Hexclave Observability captures **`$error` occurrences** from uncaught errors on both tiers and **`$log` records** from console output or `app.logger`. They use dedicated `errors` and `logs` read models while carrying the same trace context and session correlation as [custom telemetry](/guides/apps/analytics/custom-events-and-spans): each record names the trace it happened in (`trace_id`), the span it happened inside (`span_id`), and the page, tab, and sign-in session it came from.
+
+## Automatic Error Capture
+
+Observability is opt-in: pass `observability: { enabled: true }` in your app options (and enable the Observability app on your project). Once it is on, error capture is included by default — nothing else to set up:
+
+- **Browser**: uncaught errors (`window.onerror`) and unhandled promise rejections become error-severity OpenTelemetry LogRecords. The SDK chains through any handlers you or your framework already installed and never changes their behavior.
+- **Server**: uncaught exceptions are observed via Node's `uncaughtExceptionMonitor` — observation-only, so your process's crash behavior is untouched. The monitor installs automatically when your `HexclaveServerApp` is constructed with observability enabled; no instrumentation wiring needed. In Next.js, additionally wire up [`hexclaveInstrumentation`](/guides/apps/observability/cross-tier-tracing#server-side-instrumentation): its `onRequestError` reports every error Next catches during request handling, linked to the caller's client session.
+
+Each `$error` LogRecord records the error's `name`, `message`, and raw `stack` (bounded to 8 KB each), where it was caught (`data.mechanism_type`, e.g. `global.onerror`, `global.unhandledrejection`, `node.uncaughtexception`, `next.onRequestError`), the page `url`/`path` on the client, and a client-side `fingerprint` used for local flood control.
+
+The SDK ships the raw stack and nothing more: **grouping happens server-side at ingest**, which parses the stack and collapses occurrences into [Issues](/guides/apps/observability/error-tracking) with a resolve/ignore/regression lifecycle. Nothing extra to instrument.
+
+### Configuration
+
+```tsx
+import { HexclaveClientApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  // ...your existing client app options
+  telemetry: {
+    resource: { service: { name: "stack-dashboard" } },
+  },
+  observability: {
+    enabled: true,                             // observability is opt-in
+    release: process.env.NEXT_PUBLIC_GIT_SHA,  // default: VERCEL_GIT_COMMIT_SHA when unset
+    environment: "production",                 // default: VERCEL_ENV, then NODE_ENV
+    errorCapture: {
+      // enabled: false,                       // turn error capture off
+      ignoreErrors: ["ChunkLoadError"],        // message substrings to drop locally
+    },
+  },
+});
+```
+
+- `release` and `environment` are stamped on every `$error` LogRecord, so you can tie an error to the deploy that produced it. When you don't set them, the SDK picks up platform defaults: `release` falls back to `VERCEL_GIT_COMMIT_SHA`, and `environment` falls back to `VERCEL_ENV`, then `NODE_ENV`. Explicit options always win. The same options (and defaults) exist on the server app.
+- `ignoreErrors` entries are plain **substrings** matched against the error message; matching errors are dropped before they leave the page. The SDK always drops the noise classics (`"Script error"`, `"ResizeObserver loop"`) on top of your list.
+
+### Behavior worth knowing
+
+- The same error object is never reported twice (rethrown errors surfacing at both a boundary and a rejection handler count once).
+- Flood control: at most 10 errors per error group and 100 total per page view — a broken render loop can't blow up your event quota. The caps reset on every navigation.
+- Errors thrown *inside* a `withSpan` callback are additionally recorded on that span's `data.error` (and rethrown) — that path is about span outcomes; global capture is about errors nothing caught.
+
+## Logs
+
+### Automatic console capture
+
+With Observability enabled, every `console.warn` and `console.error` — on both the client and the server — becomes a `$log` record automatically. There is nothing to set up: construct your app, and warnings and errors from your existing code start showing up in **Observability -> Logs**, linked to the session, page, and request they happened in.
+
+When console.error receives an actual Error argument, the SDK also emits a handled $error occurrence so it appears in **Observability -> Issues**; the $log row is retained for the surrounding console context. Plain string diagnostics remain logs-only.
+
+The original console method always runs first — capture never eats or delays your own output.
+
+To capture more console levels, or to turn console capture off, list the levels you want:
+
+```tsx
+import { HexclaveClientApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  // ...your existing client app options
+  telemetry: {
+    resource: { service: { name: "stack-dashboard" } },
+  },
+  observability: {
+    enabled: true,
+    logs: {
+      captureConsole: ["log", "info", "debug", "warn", "error"],  // widen to all levels
+      // captureConsole: [],                                      // turn console capture off
+    },
+  },
+});
+```
+
+The default is `["warn", "error"]` — routine `console.log`/`info`/`debug` output tends to be noisy (and may contain things you never meant to persist), so widening it is a deliberate decision. `console.log` maps to the `info` level, and the originating console method is recorded as `data.console_level`. The same option (and default) exists on the server app.
+
+### Structured logging with `app.logger`
+
+For logs you write deliberately, every app instance — client and server — exposes `app.logger` with five leveled methods:
+
+```tsx
+import { hexclaveClientApp } from "./hexclave";
+
+hexclaveClientApp.logger.info("import finished", { rows: 1200 });
+hexclaveClientApp.logger.error("payment declined", { code: "card_declined" });
+// also: .trace(), .debug(), .warn()
+```
+
+Each call becomes an OpenTelemetry LogRecord with the message as its body and the corresponding standard severity (`trace`/`debug`/`info`/`warn`/`error`). The optional second argument is stored as structured `hexclave.data` — this is what makes `app.logger` the better choice over `console.*` for logs you intend to query: the message stays clean and the fields stay structured.
+
+The logger is built for hot paths: it's fire-and-forget, guaranteed never to throw into your code, and bounded (messages truncate at 8 KB). In environments where logs can't be delivered at all, it warns once in the console and drops silently.
+
+**Logs inherit context automatically** — console-captured and `app.logger` logs alike. On the client, a log names its enclosing `withSpan` span and carries the current page view. On the server, a log emitted inside a `withSpan({ request })` scope — or any [adapter](/guides/apps/observability/framework-adapters)-wrapped handler, or (on Next.js with [`hexclaveInstrumentation().register()`](/guides/apps/observability/cross-tier-tracing#bare-calls-on-next-js) in place) any bare `logger` call inside a request scope — lands in the caller's trace, alongside the exact `fetch` that triggered the request, with no context threading:
+
+```tsx
+export const POST = hexclave.routeHandler(async ({ user }) => {
+  hexclaveServerApp.logger.info("checkout started");  // linked to the caller's session
+  // ...
+});
+```
+
+## Querying
+
+Use the dedicated `errors` and `logs` read models from **Warehouse -> Queries**. Product events remain isolated in `events`.
+
+Recent errors, grouped by issue:
+
+```sql
+SELECT
+  service_name,
+  issue_hash,
+  any(error_type) AS type,
+  any(message) AS message,
+  any(error_culprit) AS culprit,
+  count() AS occurrences,
+  max(event_at) AS last_seen
+FROM errors
+WHERE event_at > now() - INTERVAL 1 DAY
+  AND issue_hash != ''
+GROUP BY service_name, issue_hash
+ORDER BY occurrences DESC;
+```
+
+`issue_hash` is the **server-computed** grouping key, and it is what the [Issues](/guides/apps/observability/error-tracking) surface groups on. It is produced at ingest by parsing the stack into normalized frames and hashing the exception type together with each frame's module (or filename) and function name — never line or column numbers, with content hashes stripped from minified chunk names, and with variable content in messages parameterized first.
+
+Every row also still carries `data.fingerprint`, the SDK's **client-side** grouping key: a djb2 hash over `name`, `message`, and the first raw stack line. It exists for local flood control and as a server-side hint, and it groups noticeably worse — it splits on any id or URL in the message, on any edit that shifts a line number, and on every redeploy that renames a chunk. Group by `data.fingerprint` only when you specifically need to reproduce what the client computed; otherwise use `issue_hash`.
+
+See [Querying Errors](/guides/apps/observability/querying-errors) for the full column list and more queries.
+
+Warn-or-worse logs with their trace context:
+
+```sql
+SELECT event_at, service_name, level, message, data, user_id, trace_id, span_id
+FROM logs
+WHERE service_name = 'stack-backend'
+  AND level IN ('warn', 'error')
+ORDER BY event_at DESC
+LIMIT 100;
+```
+
+Because `trace_id` is shared across both tiers, one id pivots from a backend log to the browser `fetch` that caused it:
+
+```sql
+SELECT service_name, span_id, parent_span_id, name, started_at, ended_at
+FROM spans
+WHERE trace_id = '0af7651916cd43dd8448eb211c80319c'  -- from the log above
+ORDER BY started_at;
+```
+
+Use the explicit `service_name` column to separate browser, API, worker, and mobile telemetry that shares a Hexclave project. A record with no service is invalid ingestion, not an "unknown" service bucket.
+
+## Next Steps
+
+- [Error Tracking](/guides/apps/observability/error-tracking) — what happens to a captured `$error` after it arrives: grouping, Issues, and triage
+- [Custom Events & Spans](/guides/apps/analytics/custom-events-and-spans) — the telemetry API these signals build on
+- [Cross-Tier Tracing](/guides/apps/observability/cross-tier-tracing) — how server errors and logs link to the client session

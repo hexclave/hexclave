@@ -1,17 +1,20 @@
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { uploadBytes } from "@/s3";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { Prisma } from "@/generated/prisma/client";
+import { getSharedClickhouseAdminClient } from "@/lib/clickhouse";
 import { arePlanLimitsEnforced, getBillingTeamId } from "@/lib/plan-entitlements";
-import { findRecentSessionReplay } from "@/lib/session-replays";
-import { getHexclaveServerApp } from "@/hexclave";
+import { rollbackPlanItemDebits, tryDecreasePlanItemQuantities, type PlanItemDebit } from "@/lib/plan-metering";
+import { MAX_JAVASCRIPT_TIMESTAMP_MILLIS, telemetryMeteredAt } from "@/lib/telemetry-metering-time";
+import { aggregateSessionReplaySegmentBounds, findRecentSessionReplay } from "@/lib/session-replays";
+import { insertSessionReplaySpans } from "@/lib/spans";
 import { KnownErrors } from "@hexclave/shared";
 import { ITEM_IDS } from "@hexclave/shared/dist/plans";
 import { adaptSchema, clientOrHigherAuthTypeSchema, yupArray, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
-import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { getTelemetryResourceError, isTelemetryResource, type TelemetryResource } from "@hexclave/shared/dist/utils/analytics-wire";
+import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { gzip as gzipCb, gunzipSync } from "node:zlib";
+import { constants as zlibConstants, gzip as gzipCb, gunzipSync } from "node:zlib";
 
 const gzip = promisify(gzipCb);
 
@@ -83,13 +86,25 @@ export const POST = createSmartRouteHandler({
       refreshTokenId: adaptSchema
     }).defined(),
     body: yupObject({
+      schema_version: yupNumber().optional().integer().oneOf([2]),
+      resource: yupMixed().optional().test(
+        "telemetry-resource",
+        "Invalid telemetry resource",
+        (value) => value === undefined || getTelemetryResourceError(value) === null,
+      ),
       browser_session_id: yupString().defined().matches(UUID_RE, "Invalid browser_session_id"),
       session_replay_segment_id: yupString().defined().matches(UUID_RE, "Invalid session_replay_segment_id"),
       batch_id: yupString().defined().matches(UUID_RE, "Invalid batch_id"),
-      started_at_ms: yupNumber().defined().integer().min(0),
-      sent_at_ms: yupNumber().defined().integer().min(0),
+      started_at_ms: yupNumber().defined().integer().min(0).max(MAX_JAVASCRIPT_TIMESTAMP_MILLIS),
+      sent_at_ms: yupNumber().defined().integer().min(0).max(MAX_JAVASCRIPT_TIMESTAMP_MILLIS),
       events: yupArray(yupMixed().defined()).defined(),
-    }).defined().transform((_value, originalValue) => maybeDecodeBinaryBody(originalValue)),
+    }).defined().test(
+      "wire-version",
+      "Legacy session replay batches must omit schema_version and resource; versioned batches require schema_version 2 and a telemetry resource",
+      (body) => body.schema_version === undefined
+        ? body.resource === undefined
+        : body.schema_version === 2 && isTelemetryResource(body.resource),
+    ).transform((_value, originalValue) => maybeDecodeBinaryBody(originalValue)),
   }),
   response: yupObject({
     statusCode: yupNumber().oneOf([200]).defined(),
@@ -102,6 +117,16 @@ export const POST = createSmartRouteHandler({
     }).defined(),
   }),
   async handler({ auth, body }, fullReq) {
+    let resource: TelemetryResource | null;
+    if (body.schema_version === undefined) {
+      resource = null;
+    } else {
+      if (!isTelemetryResource(body.resource)) {
+        throw new HexclaveAssertionError("The request schema accepted an invalid telemetry resource");
+      }
+      resource = body.resource;
+    }
+
     if (!auth.tenancy.config.apps.installed["analytics"]?.enabled) {
       throw new KnownErrors.AnalyticsNotEnabled();
     }
@@ -138,124 +163,186 @@ export const POST = createSmartRouteHandler({
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const recentSession = await findRecentSessionReplay(prisma, { tenancyId, refreshTokenId });
 
-    const app = getHexclaveServerApp();
-
     const isNewSession = recentSession == null;
     const billingTeamId = getBillingTeamId(auth.tenancy.project);
+    const sessionReplayDebit: PlanItemDebit = {
+      itemId: ITEM_IDS.sessionReplays,
+      quantity: 1,
+      idempotency: {
+        key: `session-replay:${tenancyId}:${batchId}`,
+        createdAt: telemetryMeteredAt(body.sent_at_ms, body.started_at_ms, new Date()),
+      },
+    };
+    let sessionReplayQuotaDebited = false;
+    let ownedPlanChangeIds = new Set<string>();
     if (isNewSession && billingTeamId != null && arePlanLimitsEnforced()) {
-      const replaysItem = await app.getItem({ itemId: ITEM_IDS.sessionReplays, teamId: billingTeamId });
-      const isDebited = await replaysItem.tryDecreaseQuantity(1);
-      if (!isDebited) {
+      const debitResult = await tryDecreasePlanItemQuantities(billingTeamId, [sessionReplayDebit]);
+      if (debitResult.insufficientItemId != null) {
         throw new KnownErrors.ItemQuantityInsufficientAmount(ITEM_IDS.sessionReplays, billingTeamId, 1);
       }
+      ownedPlanChangeIds = new Set(debitResult.createdChangeIds);
+      sessionReplayQuotaDebited = ownedPlanChangeIds.size > 0;
     }
 
     const replayId = recentSession?.id ?? randomUUID();
     const s3Key = `session-replays/${projectId}/${branchId}/${replayId}/${batchId}.json.gz`;
 
-    const newStartedAtMs = Math.min(recentSession?.startedAt.getTime() ?? Number.POSITIVE_INFINITY, firstMs);
-    const newLastEventAtMs = Math.max(recentSession?.lastEventAt.getTime() ?? 0, lastMs);
-    await prisma.sessionReplay.upsert({
-      where: { tenancyId_id: { tenancyId, id: replayId } },
-      create: {
-        id: replayId,
-        tenancyId,
-        projectUserId,
-        refreshTokenId,
-        startedAt: new Date(firstMs),
-        lastEventAt: new Date(newLastEventAtMs),
-        shouldUpdateSequenceId: true,
-      },
-      update: {
-        startedAt: new Date(newStartedAtMs),
-        lastEventAt: new Date(newLastEventAtMs),
-        shouldUpdateSequenceId: true,
-      },
-    });
-
-    // If we already have this batch for this session, return deduped without touching S3.
-    const existingChunk = await prisma.sessionReplayChunk.findUnique({
-      where: { tenancyId_sessionReplayId_batchId: { tenancyId, sessionReplayId: replayId, batchId } },
-      select: { s3Key: true },
-    });
-    if (existingChunk) {
-      return {
-        statusCode: 200,
-        bodyType: "json",
-        body: {
-          session_replay_id: replayId,
-          batch_id: batchId,
-          s3_key: existingChunk.s3Key,
-          deduped: true,
-        },
-      };
-    }
-
-    const payload = {
-      v: 1,
-      session_replay_id: replayId,
-      browser_session_id: browserSessionId,
-      session_replay_segment_id: sessionReplaySegmentId,
-      batch_id: batchId,
-      started_at_ms: body.started_at_ms,
-      sent_at_ms: body.sent_at_ms,
-      events: body.events,
-    };
-    const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
-    const gzipped = new Uint8Array(await gzip(payloadBytes));
-
-    await uploadBytes({
-      key: s3Key,
-      body: gzipped,
-      contentType: "application/json",
-      contentEncoding: "gzip",
-      private: true,
-    });
-
-    try {
-      await prisma.sessionReplayChunk.create({
-        data: {
-          tenancyId,
-          sessionReplayId: replayId,
-          batchId,
-          sessionReplaySegmentId,
-          browserSessionId,
-          s3Key,
-          eventCount: body.events.length,
-          byteLength: gzipped.byteLength,
-          firstEventAt: new Date(firstMs),
-          lastEventAt: new Date(lastMs),
+    let chunk: {
+      s3Key: string,
+      sessionReplaySegmentId: string,
+      firstEventAt: Date,
+      lastEventAt: Date,
+    } | null;
+    if (recentSession == null) {
+      try {
+        await prisma.sessionReplay.create({
+          data: {
+            id: replayId,
+            tenancyId,
+            projectUserId,
+            refreshTokenId,
+            startedAt: new Date(firstMs),
+            lastEventAt: new Date(lastMs),
+            shouldUpdateSequenceId: true,
+          },
+        });
+      } catch (error) {
+        if (sessionReplayQuotaDebited && billingTeamId != null) {
+          try {
+            await rollbackPlanItemDebits(billingTeamId, [sessionReplayDebit], ownedPlanChangeIds);
+          } catch (refundError) {
+            captureError("session-replay-create-refund", refundError);
+          }
+        }
+        throw error;
+      }
+      chunk = null;
+    } else {
+      chunk = await prisma.sessionReplayChunk.findUnique({
+        where: { tenancyId_sessionReplayId_batchId: { tenancyId, sessionReplayId: replayId, batchId } },
+        select: {
+          s3Key: true,
+          sessionReplaySegmentId: true,
+          firstEventAt: true,
+          lastEventAt: true,
         },
       });
-    } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-        return {
-          statusCode: 200,
-          bodyType: "json",
-          body: {
-            session_replay_id: replayId,
-            batch_id: batchId,
-            s3_key: s3Key,
-            deduped: true,
-          },
+    }
+    let deduped = chunk != null;
+
+    if (chunk == null) {
+      const payload = resource === null
+        ? {
+          v: 1,
+          session_replay_id: replayId,
+          browser_session_id: browserSessionId,
+          session_replay_segment_id: sessionReplaySegmentId,
+          batch_id: batchId,
+          started_at_ms: body.started_at_ms,
+          sent_at_ms: body.sent_at_ms,
+          events: body.events,
+        }
+        : {
+          schema_version: 2,
+          resource,
+          session_replay_id: replayId,
+          browser_session_id: browserSessionId,
+          session_replay_segment_id: sessionReplaySegmentId,
+          batch_id: batchId,
+          started_at_ms: body.started_at_ms,
+          sent_at_ms: body.sent_at_ms,
+          events: body.events,
         };
+      const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+      const gzipped = new Uint8Array(await gzip(payloadBytes, { level: zlibConstants.Z_BEST_SPEED }));
+
+      await uploadBytes({
+        key: s3Key,
+        body: gzipped,
+        contentType: "application/json",
+        contentEncoding: "gzip",
+        private: true,
+      });
+
+      const chunkRows = await prisma.$queryRaw<Array<{
+        s3Key: string,
+        sessionReplaySegmentId: string,
+        firstEventAt: Date,
+        lastEventAt: Date,
+        inserted: boolean,
+      }>>`
+        INSERT INTO "SessionReplayChunk" (
+          "id", "tenancyId", "sessionReplayId", "batchId",
+          "sessionReplaySegmentId", "browserSessionId", "s3Key",
+          "eventCount", "byteLength", "firstEventAt", "lastEventAt"
+        ) VALUES (
+          ${randomUUID()}::uuid, ${tenancyId}::uuid, ${replayId}::uuid, ${batchId}::uuid,
+          ${sessionReplaySegmentId}, ${browserSessionId}, ${s3Key},
+          ${body.events.length}, ${gzipped.byteLength}, ${new Date(firstMs)}, ${new Date(lastMs)}
+        )
+        ON CONFLICT ("tenancyId", "sessionReplayId", "batchId") DO UPDATE
+          SET "id" = "SessionReplayChunk"."id"
+        RETURNING "s3Key", "sessionReplaySegmentId", "firstEventAt", "lastEventAt", (xmax = 0) AS "inserted"
+      `;
+      if (chunkRows.length !== 1) {
+        throw new HexclaveAssertionError("Session replay chunk upsert did not return exactly one row");
       }
-      throw e;
+      const insertedChunk = chunkRows[0];
+      chunk = insertedChunk;
+      deduped = !insertedChunk.inserted;
     }
 
-    await prisma.sessionReplay.update({
-      where: { tenancyId_id: { tenancyId, id: replayId } },
-      data: { shouldUpdateSequenceId: true },
-    });
+    const replayRowsPromise = prisma.$queryRaw<{ startedAt: Date, lastEventAt: Date }[]>`
+      UPDATE "SessionReplay"
+      SET
+        "startedAt" = LEAST("startedAt", ${chunk.firstEventAt}),
+        "lastEventAt" = GREATEST("lastEventAt", ${chunk.lastEventAt}),
+        "shouldUpdateSequenceId" = TRUE,
+        "updatedAt" = NOW()
+      WHERE "tenancyId" = ${tenancyId}::uuid AND "id" = ${replayId}::uuid
+      RETURNING "startedAt", "lastEventAt"
+    `;
 
+    if (resource === null) {
+      const replayRows = await replayRowsPromise;
+      if (replayRows.length !== 1) {
+        throw new HexclaveAssertionError("Session replay bounds update did not return exactly one replay row");
+      }
+    } else {
+      const [replayRows, segmentBounds] = await Promise.all([
+        replayRowsPromise,
+        aggregateSessionReplaySegmentBounds(prisma.$primary(), {
+          tenancyId,
+          sessionReplayId: replayId,
+          sessionReplaySegmentId: chunk.sessionReplaySegmentId,
+        }),
+      ]);
+      if (replayRows.length !== 1) {
+        throw new HexclaveAssertionError("Session replay bounds update did not return exactly one replay row");
+      }
+      const replay = replayRows[0];
+      await insertSessionReplaySpans(getSharedClickhouseAdminClient(), {
+        projectId,
+        branchId,
+        replayId,
+        sessionReplaySegmentId: chunk.sessionReplaySegmentId,
+        projectUserId,
+        refreshTokenId,
+        replayStartedAt: replay.startedAt,
+        replayLastEventAt: replay.lastEventAt,
+        segmentStartedAt: segmentBounds.firstEventAt,
+        segmentLastEventAt: segmentBounds.lastEventAt,
+        resource,
+      });
+    }
     return {
       statusCode: 200,
       bodyType: "json",
       body: {
         session_replay_id: replayId,
         batch_id: batchId,
-        s3_key: s3Key,
-        deduped: false,
+        s3_key: chunk.s3Key,
+        deduped,
       },
     };
   },

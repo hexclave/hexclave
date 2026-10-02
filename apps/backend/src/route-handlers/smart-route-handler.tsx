@@ -1,8 +1,10 @@
 import "../polyfills";
 
 import { recordRequestStats } from "@/lib/dev-request-stats";
+import { captureInternalRequestError, runWithInternalRequestObservability } from "@/lib/internal-observability";
 import { getInboundRequestHost } from "@/lib/request-api-url";
 import { requestContextALS } from "@/lib/runtime/request-context";
+import { isTelemetryIngestionPath } from "@/lib/telemetry/ingestion-paths";
 import { isRequestBodyTooLargeError } from "@/server/request-body-limit";
 import * as Sentry from "@sentry/node";
 import { EndpointDocumentation } from "@hexclave/shared/dist/crud";
@@ -40,7 +42,7 @@ function isCommonError(error: unknown): boolean {
  * Catches the given error, logs it if needed and returns it as a StatusError. Errors that are not actually errors
  * (such as Next.js redirects) will be re-thrown.
  */
-function catchError(error: unknown, requestId: string): StatusError {
+async function catchError(error: unknown, request: Request | null, requestId: string): Promise<StatusError> {
   // catch some Next.js non-errors and rethrow them
   if (error instanceof Error) {
     const digest = getErrorDigest(error);
@@ -63,6 +65,13 @@ function catchError(error: unknown, requestId: string): StatusError {
   if (StatusError.isStatusError(error)) return error;
 
   captureError(`route-handler`, error);
+  if (request !== null) {
+    // Reporting must finish before the serverless response is returned, but a
+    // telemetry outage must not replace the route's original sanitized 500.
+    await captureInternalRequestError(error, request, requestId).then(undefined, (captureFailure: unknown) => {
+      captureError("route-handler-internal-issue-capture", captureFailure);
+    });
+  }
   return new InternalServerError(error, requestId);
 }
 
@@ -111,7 +120,7 @@ export function handleApiRequest(handler: (req: Request, options: any, requestId
         ...(normalizedPath == null ? {} : { route: normalizedPath }),
         ...(host == null ? {} : { host }),
       });
-      return await traceSpan({
+      return await runWithInternalRequestObservability(req, requestId, async () => await traceSpan({
         description: 'handling API request',
         attributes: {
           "stack.request.request-id": requestId,
@@ -157,7 +166,11 @@ export function handleApiRequest(handler: (req: Request, options: any, requestId
             ...allowedLongRequestPathPrefixes,
             ...allowedLongRequestPathPrefixes.map(path => path.replace(/^\/api\/latest\//, "/api/v1/")),
           ];
-          const warnAfterSeconds = allAllowedLongRequestPaths.includes(requestUrl.pathname) || allAllowedLongRequestPathPrefixes.some(prefix => requestUrl.pathname.startsWith(prefix)) ? 240 : 12;
+          const warnAfterSeconds = isTelemetryIngestionPath(requestUrl.pathname)
+            || allAllowedLongRequestPaths.includes(requestUrl.pathname)
+            || allAllowedLongRequestPathPrefixes.some(prefix => requestUrl.pathname.startsWith(prefix))
+            ? 240
+            : 12;
           runAsynchronously(async () => {
             // This diagnostic timer must not keep a drained server process alive.
             await waitForTimeout(warnAfterSeconds * 1000, undefined, { ref: false });
@@ -182,7 +195,7 @@ export function handleApiRequest(handler: (req: Request, options: any, requestId
         } catch (e) {
           let statusError: StatusError;
           try {
-            statusError = catchError(e, requestId);
+            statusError = await catchError(e, req, requestId);
           } catch (e) {
             if (shouldLogExtendedRequestDetails) console.log(`[    EXC] [${requestId}] ${req.method} ${requestUrl.pathname}: Non-error caught (such as a redirect), will be re-thrown. Digest: ${String(getErrorDigest(e))}`);
             throw e;
@@ -208,7 +221,7 @@ export function handleApiRequest(handler: (req: Request, options: any, requestId
         } finally {
           hasRequestFinished = true;
         }
-      });
+      }));
     } finally {
       concurrentRequestsInProcess--;
     }
@@ -301,7 +314,7 @@ export function createSmartRouteHandler<
       if (reqsErrors.length === 1) {
         throw reqsErrors[0];
       } else {
-        const caughtErrors = reqsErrors.map(e => catchError(e, requestId));
+        const caughtErrors = await Promise.all(reqsErrors.map(async (error) => await catchError(error, nextRequest, requestId)));
         throw createOverloadsError(caughtErrors);
       }
     }
@@ -313,6 +326,11 @@ export function createSmartRouteHandler<
     let smartRes = await traceSpan({
       description: 'calling smart route handler callback',
       attributes: {
+        "user.id": fullReq.auth?.user?.id ?? "<none>",
+        "stack.smart-request.project.id": fullReq.auth?.project.id ?? "<none>",
+        "stack.smart-request.project.display_name": fullReq.auth?.project.display_name ?? "<none>",
+        "stack.smart-request.user.id": fullReq.auth?.user?.id ?? "<none>",
+        "stack.smart-request.user.authenticated": fullReq.auth?.user != null,
         "stack.smart-request.access-type": fullReq.auth?.type ?? "<none>",
         "stack.smart-request.client-version.platform": fullReq.clientVersion?.platform ?? "<none>",
         "stack.smart-request.client-version.version": fullReq.clientVersion?.version ?? "<none>",

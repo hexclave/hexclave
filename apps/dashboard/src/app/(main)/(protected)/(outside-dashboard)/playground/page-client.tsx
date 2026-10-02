@@ -13,6 +13,7 @@ import {
 import { DesignAnalyticsCard, DesignAnalyticsCardHeader, DesignChartLegend } from "@/components/design-components/analytics-card";
 import { Typography } from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { typedEntries } from "@hexclave/shared/dist/utils/objects";
 import {
   CheckCircle,
   Cube,
@@ -205,6 +206,18 @@ const DEMO_PRODUCTS: DemoProduct[] = [
   { id: "3", name: "Tool Max", category: "Software", price: 49.99, status: "archived" },
   { id: "4", name: "Sensor Hub", category: "Hardware", price: 79.99, status: "active" },
 ];
+
+const BADGE_PALETTE_LABELS = {
+  zinc: "Zinc (neutral)",
+  blue: "Blue",
+  cyan: "Cyan",
+  purple: "Purple",
+  green: "Green",
+  orange: "Orange",
+  red: "Red",
+} as const satisfies Record<DesignBadgeColor, string>;
+
+const BADGE_PALETTE: readonly DesignBadgeColor[] = typedEntries(BADGE_PALETTE_LABELS).map(([color]) => color);
 
 const STATUS_BADGE: Record<DemoProduct["status"], { label: string, color: DesignBadgeColor }> = {
   active: { label: "Active", color: "green" },
@@ -827,14 +840,21 @@ export default function PageClient() {
         ? CheckCircle
         : (badgeIcon ? CheckCircle : undefined);
       return (
-        <DesignBadge
-          label={badgeLabel || "Badge"}
-          color={badgeColor}
-          size={badgeSize}
-          icon={badgeIconProp}
-          iconClassName={badgeSpin ? "animate-spin" : undefined}
-          contentMode={badgeContentMode}
-        />
+        <div className="flex flex-col items-center gap-4">
+          <DesignBadge
+            label={badgeLabel || "Badge"}
+            color={badgeColor}
+            size={badgeSize}
+            icon={badgeIconProp}
+            iconClassName={badgeSpin ? "animate-spin" : undefined}
+            contentMode={badgeContentMode}
+          />
+          <div className="flex flex-wrap items-center justify-center gap-1.5">
+            {BADGE_PALETTE.map((color) => (
+              <DesignBadge key={color} label={color} color={color} size="sm" />
+            ))}
+          </div>
+        </div>
       );
     }
     if (selected === "button") {
@@ -1464,20 +1484,11 @@ export default function PageClient() {
             <DesignSelectorDropdown
               value={badgeColor}
               onValueChange={(v) => {
-                if (v === "blue" || v === "cyan" || v === "purple" || v === "green" || v === "orange" || v === "red") {
-                  setBadgeColor(v);
-                  return;
-                }
-                throw new Error(`Unknown badge color "${v}"`);
+                const color = BADGE_PALETTE.find((candidate) => candidate === v);
+                if (color == null) throw new Error(`Unknown badge color "${v}"`);
+                setBadgeColor(color);
               }}
-              options={[
-                { value: "blue", label: "Blue" },
-                { value: "cyan", label: "Cyan" },
-                { value: "purple", label: "Purple" },
-                { value: "green", label: "Green" },
-                { value: "orange", label: "Orange" },
-                { value: "red", label: "Red" },
-              ]}
+              options={BADGE_PALETTE.map((color) => ({ value: color, label: BADGE_PALETTE_LABELS[color] }))}
               size="sm"
             />
           </PropField>

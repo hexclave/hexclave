@@ -10,7 +10,36 @@ import { HookPrefetcher, HookPrefetcherCallback } from "./hook-prefetcher";
 
 // note that URL prefetchers are allowed to return early before execution of all hooks (but not call hook conditionally beyond that)
 // this is because we suspend the component
-const urlPrefetchers: Record<string, ((match: RegExpMatchArray, query: URLSearchParams, hash: string) => void | HookPrefetcherCallback[])[]> = {
+
+type UrlPrefetcher = (match: RegExpMatchArray, query: URLSearchParams, hash: string) => void | HookPrefetcherCallback[];
+
+const usageLimitBannerPrefetchers = (itemId: "analytics_events" | "session_replays"): UrlPrefetcher[] => [
+  ([_, projectId]) => {
+    useAdminApp(projectId).usePlanUsage();
+  },
+  () => {
+    useDashboardInternalUser().useTeams();
+  },
+  ([_, projectId]) => {
+    const adminApp = useAdminApp(projectId);
+    const project = adminApp.useProject();
+    const planUsage = adminApp.usePlanUsage();
+    const teams = useDashboardInternalUser().useTeams();
+    const ownerTeam = teams.find((t) => t.id === project.ownerTeamId);
+    if (planUsage.arePlanLimitsEnforced && ownerTeam != null) {
+      return [
+        () => {
+          ownerTeam.useItem(itemId);
+        },
+        () => {
+          ownerTeam.useProducts();
+        },
+      ];
+    }
+  },
+];
+
+const urlPrefetchers: Record<string, UrlPrefetcher[]> = {
   "/projects/*": [
     ([_, projectId]) => {
       (useAdminApp(projectId) as any)[hexclaveAppInternalsSymbol].useMetrics(false);
@@ -18,6 +47,22 @@ const urlPrefetchers: Record<string, ((match: RegExpMatchArray, query: URLSearch
     ([_, projectId]) => {
       useAdminApp(projectId).useUsers({ limit: 1 });
     },
+    ...usageLimitBannerPrefetchers("analytics_events"),
+  ],
+  "/projects/*/warehouse/queries": [
+    ...usageLimitBannerPrefetchers("analytics_events"),
+  ],
+  "/projects/*/observability/traces": [
+    ...usageLimitBannerPrefetchers("analytics_events"),
+  ],
+  "/projects/*/observability/logs": [
+    ...usageLimitBannerPrefetchers("analytics_events"),
+  ],
+  "/projects/*/warehouse/tables": [
+    ...usageLimitBannerPrefetchers("analytics_events"),
+  ],
+  "/projects/*/session-replays": [
+    ...usageLimitBannerPrefetchers("session_replays"),
   ],
   "/projects/*/**": [
     ([_, projectId]) => {

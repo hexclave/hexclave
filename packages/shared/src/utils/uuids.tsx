@@ -89,6 +89,27 @@ import.meta.vitest?.test("generateUuid", ({ expect }) => {
 export function isUuid(str: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(str);
 }
+
+// Accepts any RFC 9562 version (1–8) with the standard variant. Unlike
+// `isUuid`, this does not pin the version nibble to `4` — observability IDs are
+// generated with different UUID versions depending on the source, so callers
+// that only care about well-formedness use this pattern instead.
+export const anyVersionUuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isAnyVersionUuid(str: string) {
+  return anyVersionUuidPattern.test(str);
+}
+import.meta.vitest?.test("isAnyVersionUuid", ({ expect }) => {
+  expect(isAnyVersionUuid("123e4567-e89b-42d3-a456-426614174000")).toBe(true); // v4
+  expect(isAnyVersionUuid("123e4567-e89b-12d3-a456-426614174000")).toBe(true); // v1
+  expect(isAnyVersionUuid("123e4567-e89b-72d3-a456-426614174000")).toBe(true); // v7
+  expect(isAnyVersionUuid("123e4567-e89b-82d3-a456-426614174000")).toBe(true); // v8
+  expect(isAnyVersionUuid("123E4567-E89B-42D3-A456-426614174000")).toBe(true); // case-insensitive
+  expect(isAnyVersionUuid("not-a-uuid")).toBe(false);
+  expect(isAnyVersionUuid("123e4567-e89b-02d3-a456-426614174000")).toBe(false); // version 0
+  expect(isAnyVersionUuid("123e4567-e89b-92d3-a456-426614174000")).toBe(false); // version 9
+  expect(isAnyVersionUuid("123e4567-e89b-42d3-c456-426614174000")).toBe(false); // wrong variant
+});
 import.meta.vitest?.test("isUuid", ({ expect }) => {
   // Test with valid UUIDs
   expect(isUuid("123e4567-e89b-42d3-a456-426614174000")).toBe(true);

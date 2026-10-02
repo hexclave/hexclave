@@ -1,8 +1,8 @@
-import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client, S3ServiceException } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client, S3ServiceException, type PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
-import { ignoreUnhandledRejection } from "@hexclave/shared/dist/utils/promises";
+import { ignoreUnhandledRejection, wait } from "@hexclave/shared/dist/utils/promises";
 import { ImageProcessingError, parseBase64Image } from "./lib/images";
 import { getOptionalRequestAbortSignal } from "./lib/runtime/request-context";
 
@@ -58,13 +58,14 @@ export async function uploadBytes(options: {
     throw new HexclaveAssertionError(options.private ? "S3 private bucket is not configured" : "S3 bucket is not configured");
   }
 
-  const command = new PutObjectCommand({
+  const putInput: PutObjectCommandInput = {
     Bucket: bucket,
     Key: options.key,
     Body: options.body,
-    ...(options.contentType ? { ContentType: options.contentType } : {}),
-    ...(options.contentEncoding ? { ContentEncoding: options.contentEncoding } : {}),
-  });
+  };
+  if (options.contentType) putInput.ContentType = options.contentType;
+  if (options.contentEncoding) putInput.ContentEncoding = options.contentEncoding;
+  const command = new PutObjectCommand(putInput);
 
   await s3Client.send(command);
 
@@ -72,6 +73,90 @@ export async function uploadBytes(options: {
     key: options.key,
   };
 }
+
+const CONDITIONAL_PUT_CONFLICT_RETRIES = 3;
+const CONDITIONAL_PUT_CONFLICT_RETRY_BASE_MS = 100;
+
+export async function uploadBytesIfAbsent(options: {
+  key: string,
+  body: Uint8Array,
+  contentType?: string,
+  contentEncoding?: string,
+  private?: boolean,
+}): Promise<boolean> {
+  const { client, bucket } = getS3Target(options.private === true);
+  const putInput: PutObjectCommandInput = {
+    Bucket: bucket,
+    Key: options.key,
+    Body: options.body,
+    IfNoneMatch: "*",
+  };
+  if (options.contentType) putInput.ContentType = options.contentType;
+  if (options.contentEncoding) putInput.ContentEncoding = options.contentEncoding;
+  return await sendConditionalPutWithConflictRetry(async () => {
+    await client.send(new PutObjectCommand(putInput));
+  });
+}
+
+async function sendConditionalPutWithConflictRetry(sendConditionalPut: () => Promise<void>): Promise<boolean> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await sendConditionalPut();
+      return true;
+    } catch (error) {
+      if (error instanceof S3ServiceException) {
+        const statusCode = error.$metadata.httpStatusCode;
+        if (statusCode === 412) {
+          return false;
+        }
+        if (statusCode === 409 && attempt < CONDITIONAL_PUT_CONFLICT_RETRIES) {
+          await wait(CONDITIONAL_PUT_CONFLICT_RETRY_BASE_MS * (attempt + 1));
+          continue;
+        }
+      }
+      throw error;
+    }
+  }
+}
+
+import.meta.vitest?.test("conditional PUT retries 409 conflicts and reserves false for 412", async ({ expect }) => {
+  const makeS3Error = (httpStatusCode: number) => new S3ServiceException({
+    name: "TestS3Error",
+    $fault: "client",
+    $metadata: { httpStatusCode },
+  });
+
+  let attempts412 = 0;
+  await expect(sendConditionalPutWithConflictRetry(async () => {
+    attempts412++;
+    throw makeS3Error(412);
+  })).resolves.toBe(false);
+  expect(attempts412).toBe(1);
+
+  const conflictThenExists = [makeS3Error(409), makeS3Error(412)];
+  await expect(sendConditionalPutWithConflictRetry(async () => {
+    const error = conflictThenExists.shift();
+    if (error !== undefined) throw error;
+    throw new Error("unexpected extra attempt");
+  })).resolves.toBe(false);
+
+  const conflictThenSuccess = [makeS3Error(409)];
+  await expect(sendConditionalPutWithConflictRetry(async () => {
+    const error = conflictThenSuccess.shift();
+    if (error !== undefined) throw error;
+  })).resolves.toBe(true);
+
+  let persistentAttempts = 0;
+  await expect(sendConditionalPutWithConflictRetry(async () => {
+    persistentAttempts++;
+    throw makeS3Error(409);
+  })).rejects.toBeInstanceOf(S3ServiceException);
+  expect(persistentAttempts).toBe(CONDITIONAL_PUT_CONFLICT_RETRIES + 1);
+
+  await expect(sendConditionalPutWithConflictRetry(async () => {
+    throw makeS3Error(500);
+  })).rejects.toBeInstanceOf(S3ServiceException);
+});
 
 function getS3Target(privateBucket: boolean): { client: S3Client, bucket: string } {
   if (!s3Client) {
@@ -84,28 +169,55 @@ function getS3Target(privateBucket: boolean): { client: S3Client, bucket: string
   return { client: s3Client, bucket };
 }
 
-/**
- * Grants temporary write access to one exact object key without exposing the
- * backend's S3/R2 credentials. Callers must send the returned content type
- * because it is part of the signature.
- */
-export async function createPresignedUploadUrl(options: {
+type PresignedUploadOptions = {
   key: string,
   expiresInSeconds: number,
   contentType: string,
+  contentEncoding?: string,
+  createOnly?: boolean,
   private?: boolean,
-}): Promise<string> {
+};
+
+export function createPresignedUploadCommand(options: PresignedUploadOptions, bucket: string): PutObjectCommand {
+  const putInput: PutObjectCommandInput = {
+    Bucket: bucket,
+    Key: options.key,
+    ContentType: options.contentType,
+  };
+  if (options.createOnly === true) putInput.IfNoneMatch = "*";
+  if (options.contentEncoding) putInput.ContentEncoding = options.contentEncoding;
+  return new PutObjectCommand(putInput);
+}
+
+export async function createPresignedUploadUrl(options: PresignedUploadOptions): Promise<string> {
   const { client, bucket } = getS3Target(options.private === true);
   return await getSignedUrl(
     client,
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: options.key,
-      ContentType: options.contentType,
-    }),
+    createPresignedUploadCommand(options, bucket),
     { expiresIn: options.expiresInSeconds },
   );
 }
+
+import.meta.vitest?.test("create-only presigned upload URLs sign If-None-Match as a required header", async ({ expect }) => {
+  const testClient = new S3Client({
+    region: "us-east-1",
+    endpoint: "https://s3.example.com",
+    forcePathStyle: true,
+    credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  });
+  const options = {
+    key: "test-key.js",
+    contentType: "application/javascript",
+    expiresInSeconds: 900,
+    createOnly: true,
+  };
+  const command = createPresignedUploadCommand(options, "test-bucket");
+  expect(command.input.IfNoneMatch).toBe("*");
+  const url = await getSignedUrl(testClient, command, { expiresIn: options.expiresInSeconds });
+  const signedHeaders = new URL(url).searchParams.get("X-Amz-SignedHeaders")?.split(";") ?? [];
+  expect(signedHeaders).toContain("if-none-match");
+  expect(new URL(url).searchParams.has("If-None-Match")).toBe(false);
+});
 
 export async function headBytes(options: { key: string, private?: boolean, signal?: AbortSignal }): Promise<{
   byteLength: number,

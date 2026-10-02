@@ -1,12 +1,13 @@
-import { getHexclaveServerApp } from "@/hexclave";
 import { getClickhouseExternalClient } from "@/lib/clickhouse";
 import { getSafeClickhouseErrorMessage } from "@/lib/clickhouse-errors";
 import { arePlanLimitsEnforced, getBillingTeamId } from "@/lib/plan-entitlements";
+import { getAnalyticsPlanItemQuantities } from "@/lib/plan-metering";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { ITEM_IDS, PLAN_LIMITS } from "@hexclave/shared/dist/plans";
 import { adaptSchema, jsonSchema, serverOrHigherAuthTypeSchema, yupArray, yupBoolean, yupMixed, yupNumber, yupObject, yupRecord, yupString } from "@hexclave/shared/dist/schema-fields";
 import type { Json } from "@hexclave/shared/dist/utils/json";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { randomUUID } from "crypto";
 
@@ -55,16 +56,17 @@ export const POST = createSmartRouteHandler({
     let effectiveTimeoutMs = body.timeout_ms;
     const billingTeamId = getBillingTeamId(auth.tenancy.project);
     if (billingTeamId != null && arePlanLimitsEnforced()) {
-      const app = getHexclaveServerApp();
-      const timeoutItem = await app.getItem({ itemId: ITEM_IDS.analyticsTimeoutSeconds, teamId: billingTeamId });
+      const quantities = await getAnalyticsPlanItemQuantities(billingTeamId, [ITEM_IDS.analyticsTimeoutSeconds]);
+      const timeoutQuantity = quantities.get(ITEM_IDS.analyticsTimeoutSeconds)
+        ?? throwErr("Requested analytics timeout quantity is missing from the billing snapshot");
       // clickHouse treats max_execution_time=0 as
       // "unlimited", so a customer with zero timeout entitlement (no active
       // plan in the plans line, or a transient gap between paid-plan end
       // and free regrant) would otherwise get unbounded query execution.
-      if (timeoutItem.quantity <= 0) {
+      if (timeoutQuantity <= 0) {
         throw new KnownErrors.ItemQuantityInsufficientAmount(ITEM_IDS.analyticsTimeoutSeconds, billingTeamId, 1);
       }
-      const maxAllowedMs = timeoutItem.quantity * 1000;
+      const maxAllowedMs = timeoutQuantity * 1000;
       effectiveTimeoutMs = Math.min(body.timeout_ms, maxAllowedMs);
     }
 
@@ -103,4 +105,3 @@ export const POST = createSmartRouteHandler({
     };
   },
 });
-

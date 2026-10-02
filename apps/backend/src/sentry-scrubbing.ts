@@ -158,7 +158,11 @@ function scrubDiagnosticString(value: string): string {
   return `${scrubbed.slice(0, sentryBaseConfig.maxValueLength)}…`;
 }
 
-function scrubValue(value: unknown, key: string | undefined, depth: number): unknown {
+// The scrub output: JSON-safe diagnostic data, with `undefined` kept visible
+// so object entries drop naturally when Sentry serializes the event.
+type ScrubbedDiagnosticValue = string | number | boolean | null | undefined | ScrubbedDiagnosticValue[] | { [key: string]: ScrubbedDiagnosticValue };
+
+function scrubValue(value: unknown, key: string | undefined, depth: number): ScrubbedDiagnosticValue {
   if (key != null && isSensitiveDiagnosticKey(key) && value != null) {
     return "[redacted]";
   }
@@ -168,18 +172,29 @@ function scrubValue(value: unknown, key: string | undefined, depth: number): unk
   if (typeof value === "bigint") {
     return scrubDiagnosticString(value.toString());
   }
-  if (value == null || typeof value !== "object") {
+  if (typeof value === "symbol" || typeof value === "function") {
+    // Previously passed through untouched; Sentry's own normalization then
+    // stringified them. Naming them here keeps the scrub output JSON-safe.
+    return `[${typeof value}]`;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || value == null) {
     return value;
+  }
+  if (typeof value !== "object") {
+    // Unreachable: every non-object typeof is handled above. The guard stays
+    // so the compiler carries an object type into the branches below.
+    return `[${typeof value}]`;
   }
   if (depth >= maxDiagnosticDepth) {
     return "[truncated]";
   }
   if (value instanceof Error) {
-    return {
+    const scrubbedError: { name: string, message: ScrubbedDiagnosticValue, cause?: ScrubbedDiagnosticValue } = {
       name: value.name,
       message: scrubDiagnosticString(value.message),
-      ...(value.cause !== undefined ? { cause: scrubValue(value.cause, undefined, depth + 1) } : {}),
     };
+    if (value.cause !== undefined) scrubbedError.cause = scrubValue(value.cause, undefined, depth + 1);
+    return scrubbedError;
   }
   if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
     return `[bytes ${value.byteLength}]`;
@@ -196,14 +211,15 @@ function scrubValue(value: unknown, key: string | undefined, depth: number): unk
 /**
  * `cause` plus `{ ...error }` — extraData is the enumerable own field — then redact.
  */
-function getExceptionExtra(error: unknown): Record<string, unknown> {
+function getExceptionExtra(error: unknown): { cause?: ScrubbedDiagnosticValue, errorProps?: ScrubbedDiagnosticValue } {
   if (!(error instanceof Error)) {
     return {};
   }
-  return {
-    ...(error.cause !== undefined ? { cause: scrubValue(error.cause, undefined, 0) } : {}),
+  const extra: { cause?: ScrubbedDiagnosticValue, errorProps: ScrubbedDiagnosticValue } = {
     errorProps: scrubValue({ ...error }, undefined, 0),
   };
+  if (error.cause !== undefined) extra.cause = scrubValue(error.cause, undefined, 0);
+  return extra;
 }
 
 /**
@@ -287,12 +303,14 @@ export function sanitizeBackendSentryEvent<T extends Event>(event: T): T {
     traceContext.tags = undefined;
     traceContext.links = undefined;
   }
-  event.contexts = traceContext == null && safeRequestContext == null
-    ? undefined
-    : {
-      ...(traceContext == null ? {} : { trace: traceContext }),
-      ...(safeRequestContext == null ? {} : { "stack-request": safeRequestContext }),
-    };
+  if (traceContext == null && safeRequestContext == null) {
+    event.contexts = undefined;
+  } else {
+    const contexts: NonNullable<Event["contexts"]> = {};
+    if (traceContext != null) contexts.trace = traceContext;
+    if (safeRequestContext != null) contexts["stack-request"] = safeRequestContext;
+    event.contexts = contexts;
+  }
 
   return event;
 }
@@ -305,10 +323,10 @@ export function prepareBackendSentryEvent<T extends Event>(event: T, hint?: Even
   const location = typeof event.extra?.location === "string" ? event.extra.location : undefined;
   sanitizeBackendSentryEvent(event);
 
-  const extra = {
-    ...(location != null ? { location } : {}),
+  const extra: { location?: string, cause?: ScrubbedDiagnosticValue, errorProps?: ScrubbedDiagnosticValue } = {
     ...getExceptionExtra(hint?.originalException),
   };
+  if (location != null) extra.location = location;
   event.extra = Object.keys(extra).length > 0 ? extra : undefined;
   return event;
 }

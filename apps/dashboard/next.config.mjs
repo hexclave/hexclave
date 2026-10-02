@@ -78,6 +78,16 @@ const nextConfig = {
   output: process.env.NEXT_CONFIG_OUTPUT,
   distDir: process.env.HEXCLAVE_DASHBOARD_NEXT_DIST_DIR,
   outputFileTracingRoot: path.join(__dirname, "../.."),
+  // next@16.3.1 + pnpm + Node >= 22.10: NFT traces only CJS `@swc/helpers`,
+  // but Node's `module-sync` condition resolves to
+  // `esm/_interop_require_default.js`. The standalone server then exits
+  // before `hexclave dev` can spawn the app. Force the full helper package
+  // into the trace. https://github.com/vercel/next.js/issues/97358
+  outputFileTracingIncludes: {
+    "/**": [
+      "../../node_modules/.pnpm/@swc+helpers@*/node_modules/@swc/helpers/**",
+    ],
+  },
   // The claude-agent-sdk spawns cli.js as a child process (resolved via
   // import.meta.url). Keeping it external ensures the entire package directory
   // is included in the standalone trace, so cli.js, vendor/, etc. survive
@@ -87,6 +97,20 @@ const nextConfig = {
   pageExtensions: ["js", "jsx", "mdx", "ts", "tsx"],
 
   cacheComponents: true,
+
+  // Dashboard auth is client-session based: useUser() intentionally bails out of
+  // SSR (NoSuspenseBoundaryError / BAILOUT_TO_CLIENT_SIDE_RENDERING). That pattern
+  // is incompatible with Instant Navigations' default per-page validation, which
+  // treats the CSR bailout as a failed `instant` check. Keep Instant Insights
+  // opt-in (`export const instant = true` on ready segments) until those routes
+  // are restructured to stream/cache a real shell instead of CSR-bailing.
+  // https://nextjs.org/docs/app/api-reference/file-conventions/route-segment-config/instant#configuring-validation-defaults
+  experimental: {
+    instantInsights: {
+      validationLevel: "manual-warning",
+    },
+    turbopackFileSystemCacheForDev: true,
+  },
 
   // we're open-source, so we can provide source maps — but skip them for
   // RDE standalone builds where they just take up space for no reason
@@ -144,6 +168,21 @@ const nextConfig = {
       {
         source: "/consume/decide",
         destination: "https://eu.i.posthog.com/decide",
+      },
+    ];
+  },
+
+  async redirects() {
+    return [
+      {
+        source: "/projects/:projectId/analytics/funnel-graph",
+        destination: "/projects/:projectId/analytics/paths?mode=compare",
+        permanent: true,
+      },
+      {
+        source: "/projects/:projectId/analytics/funnels",
+        destination: "/projects/:projectId/analytics/paths?mode=compare",
+        permanent: true,
       },
     ];
   },

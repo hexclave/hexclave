@@ -58,16 +58,33 @@ import type {
   RowId,
 } from "./types";
 
-// Viewport-relative fallback height for infinite-scroll grids that the caller left unbounded
-// (no `fillHeight`, no `maxHeight`). Leaves ~16rem of room for the top bar, page header, and grid
-// toolbar. See the `effectiveMaxHeight` comment in DataGrid for why an infinite grid must be bounded.
-const DEFAULT_INFINITE_MAX_HEIGHT = "calc(100dvh - 16rem)";
 const DATA_GRID_SCROLLBAR_CLASS_NAME = cn(
   "[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar]:h-1.5",
   "[&::-webkit-scrollbar-track]:bg-transparent",
   "[&::-webkit-scrollbar-thumb]:bg-foreground/[0.08] [&::-webkit-scrollbar-thumb]:rounded-full",
   "[&::-webkit-scrollbar-thumb]:hover:bg-foreground/[0.15]",
 );
+
+const SCROLLABLE_OVERFLOW_VALUES = new Set(["auto", "scroll", "overlay"]);
+
+/**
+ * The scrollport an unbounded infinite grid virtualizes against.
+ *
+ * A bounded grid (`fillHeight`, or an explicit `maxHeight`) scrolls its own row
+ * area, so the virtualizer can just watch that element. An unbounded grid is as
+ * tall as its rows — nothing inside it ever scrolls — so the virtualizer has to
+ * watch whatever page-level element does, or it measures the grid as fully
+ * visible and renders every loaded row into the DOM.
+ */
+function findScrollAncestor(element: HTMLElement): HTMLElement | null {
+  let current = element.parentElement;
+  while (current != null) {
+    const { overflowY } = window.getComputedStyle(current);
+    if (SCROLLABLE_OVERFLOW_VALUES.has(overflowY)) return current;
+    current = current.parentElement;
+  }
+  return null;
+}
 
 // ─── Row click target ────────────────────────────────────────────────
 
@@ -504,6 +521,7 @@ function SelectionCheckbox({
   const Icon = indeterminate ? MinusSquare : checked ? CheckSquare : Square;
   return (
     <button
+      type="button"
       className={cn(
         "flex items-center justify-center w-full h-full",
         "hover:bg-foreground/[0.04] transition-colors duration-75",
@@ -598,7 +616,7 @@ function DefaultFooter<TRow>({
     onChange((s) => ({ ...s, pagination: { ...s.pagination, pageSize, pageIndex: 0 } }));
 
   return (
-    <div className="flex items-center justify-between px-4 py-2.5 border-t border-foreground/[0.06] text-xs text-muted-foreground">
+    <div className="flex items-center justify-between px-3 py-2.5 border-t border-foreground/[0.06] text-xs text-muted-foreground">
       <div className="flex items-center gap-3">
         {selectedRowCount > 0 && (
           <span className="font-medium text-foreground">{strings.rowsSelected(selectedRowCount)}</span>
@@ -973,21 +991,37 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
     [onChange, onSelectionChange, rows, getRowId],
   );
 
+  const applySelection = useCallback(
+    (rowId: RowId, event: React.MouseEvent, options?: { toggle?: boolean }) => {
+      if (selectionMode === "none") return;
+      const next = nextSelection({
+        current: state.selection,
+        rowId,
+        mode: selectionMode,
+        modifiers: {
+          shift: event.shiftKey,
+          ctrl: event.metaKey || event.ctrlKey || options?.toggle === true,
+        },
+        allRowIds: rowIds,
+      });
+      fireSelection(next);
+    },
+    [selectionMode, state.selection, rowIds, fireSelection],
+  );
+
   const handleRowClick = useCallback(
     (row: TRow, rowId: RowId, event: React.MouseEvent) => {
-      if (selectionMode !== "none") {
-        const next = nextSelection({
-          current: state.selection,
-          rowId,
-          mode: selectionMode,
-          modifiers: { shift: event.shiftKey, ctrl: event.metaKey || event.ctrlKey },
-          allRowIds: rowIds,
-        });
-        fireSelection(next);
-      }
+      applySelection(rowId, event);
       onRowClick?.(row, rowId, event);
     },
-    [selectionMode, state.selection, rowIds, fireSelection, onRowClick],
+    [applySelection, onRowClick],
+  );
+
+  const handleCheckboxClick = useCallback(
+    (rowId: RowId, event: React.MouseEvent) => {
+      applySelection(rowId, event, { toggle: true });
+    },
+    [applySelection],
   );
 
   const handleSelectAll = useCallback(() => {
@@ -1013,11 +1047,75 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
   const gridRef = useRef<HTMLDivElement>(null);
   const measureElementFn = useCallback((el: Element) => el.getBoundingClientRect().height, []);
 
+  // A grid is "bounded" when the caller gave it a height to scroll inside of.
+  // Unbounded grids grow to fit their rows and let the page scroll instead —
+  // that is what the ~15 `fillHeight={false}` grids across the dashboard do, and
+  // infinite grids get the same treatment via the page scrollport below.
+  const isBounded = fillHeight || maxHeight != null;
+  // Unbounded grids have no scrollport of their own — their body is exactly as
+  // tall as its rows — so the virtualizer has to watch the page instead. Without
+  // this it measures a non-scrolling body as fully visible: the window is
+  // computed from a permanently-zero scroll offset and never advances, so rows
+  // past the first screenful are simply never rendered.
+  const usesPageScroll = !isBounded;
+
+  // `undefined` = not resolved yet, `null` = resolved and there is no scrolling
+  // ancestor. Resolved in a layout effect (so it never paints unresolved)
+  // because it depends on the computed styles of elements above the grid.
+  const [pageScrollElement, setPageScrollElement] = useState<HTMLElement | null | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!usesPageScroll) {
+      setPageScrollElement(undefined);
+      return;
+    }
+    const gridEl = gridRef.current;
+    if (gridEl == null) return;
+    setPageScrollElement(findScrollAncestor(gridEl));
+  }, [usesPageScroll]);
+
+  // Distance from the top of the page scrollport's content to the first row, so
+  // the virtualizer can translate page scroll offsets into row indices. Anything
+  // rendered above the grid (page header, banners, the grid's own toolbar) counts.
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const measureScrollMargin = useCallback(() => {
+    const clipEl = rowsClipRef.current;
+    if (!usesPageScroll || pageScrollElement == null || clipEl == null) {
+      setScrollMargin(0);
+      return;
+    }
+    // Measured in the scrollport's content space, so the value is independent of
+    // how far the page happens to be scrolled right now.
+    const offset = clipEl.getBoundingClientRect().top
+      - pageScrollElement.getBoundingClientRect().top
+      + pageScrollElement.scrollTop;
+    // Thresholded so sub-pixel jitter can't drive a setState → re-measure loop.
+    setScrollMargin((current) => (Math.abs(current - offset) < 0.5 ? current : offset));
+  }, [usesPageScroll, pageScrollElement]);
+
+  // Every render, because anything appearing above the rows (an error alert, a
+  // usage banner, a newly-loaded chart) shifts them down without necessarily
+  // resizing the scrollport — and a stale margin offsets every row.
+  useLayoutEffect(measureScrollMargin);
+
+  // …plus the resizes that happen without a React render of this grid.
+  useLayoutEffect(() => {
+    if (pageScrollElement == null) return;
+    const observer = new ResizeObserver(measureScrollMargin);
+    observer.observe(pageScrollElement);
+    if (stickyChromeRef.current != null) observer.observe(stickyChromeRef.current);
+    window.addEventListener("resize", measureScrollMargin);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measureScrollMargin);
+    };
+  }, [measureScrollMargin, pageScrollElement]);
+
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
-    getScrollElement: () => scrollContainerRef.current,
+    getScrollElement: () => (usesPageScroll ? pageScrollElement ?? scrollContainerRef.current : scrollContainerRef.current),
     estimateSize: () => estimatedRowHeight,
     overscan,
+    scrollMargin,
     getItemKey: (index) => {
       const row = rows[index];
       return row != null ? String(getRowId(row)) : index;
@@ -1122,19 +1220,27 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
   const allSelected = rowIds.length > 0 && rowIds.every((id) => state.selection.selectedIds.has(id));
   const someSelected = !allSelected && rowIds.some((id) => state.selection.selectedIds.has(id));
 
-  // An infinite-scroll grid MUST have a height-bounded scroll container, otherwise the container
-  // grows to fit every loaded row, the virtualizer measures it as fully visible, and it renders
-  // all rows into the DOM — unbounded memory growth that eventually OOMs the tab (rows never stop
-  // accumulating as the user scrolls). When the caller didn't bound it (no fillHeight, no maxHeight),
-  // fall back to a viewport-relative cap so virtualization can actually window. Only applied to
-  // infinite mode; paginated grids cap rows at the page size and are safe to render unbounded.
-  const effectiveMaxHeight =
-    maxHeight ?? (paginationMode === "infinite" && !fillHeight ? DEFAULT_INFINITE_MAX_HEIGHT : undefined);
+  // An infinite grid must virtualize against *something* that scrolls, or every
+  // loaded row lands in the DOM — unbounded memory growth that eventually OOMs
+  // the tab, since rows never stop accumulating as the user scrolls. Normally
+  // that is the page (`pageScrollElement`); when the grid has no scrolling
+  // ancestor at all there is nothing to fall back to, so bound the grid itself
+  // instead. Leaves ~16rem for the top bar, page header, and toolbar. Paginated
+  // grids cap rows at the page size, so they are safe to render unbounded.
+  const effectiveMaxHeight = maxHeight
+    ?? (paginationMode === "infinite" && usesPageScroll && pageScrollElement === null
+      ? "calc(100dvh - 16rem)"
+      : undefined);
 
-  const infiniteScrollRootRef =
-    paginationMode === "infinite" && (fillHeight || effectiveMaxHeight != null)
-      ? scrollContainerRef
-      : undefined;
+  // The sentinel has to observe against whatever actually scrolls, otherwise it
+  // never intersects and the next page never loads.
+  const pageScrollElementRef = useRef<HTMLElement | null>(null);
+  pageScrollElementRef.current = pageScrollElement ?? null;
+  const infiniteScrollRootRef = paginationMode !== "infinite"
+    ? undefined
+    : usesPageScroll && pageScrollElement != null
+      ? pageScrollElementRef
+      : scrollContainerRef;
 
   // ── Header rendering helper (TanStack header objects, in order) ──
   const headers: Header<TRow, unknown>[] = useMemo(
@@ -1149,8 +1255,6 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
     for (const h of headers) m.set(h.column.id, h);
     return m;
   }, [headers]);
-
-  const isBounded = fillHeight || effectiveMaxHeight != null;
 
   return (
     <>
@@ -1167,7 +1271,7 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
         className={cn(
           "isolate flex w-full min-w-0 max-w-full flex-col bg-transparent rounded-[calc(var(--radius)*2)]",
           fillHeight ? "min-h-0 h-full" : "min-h-0 h-auto",
-          isBounded && "overflow-hidden",
+          (isBounded || effectiveMaxHeight != null) && "overflow-hidden",
           className,
         )}
         style={effectiveMaxHeight != null ? { ...cssVars, maxHeight: effectiveMaxHeight } : cssVars}
@@ -1253,7 +1357,7 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
           // Top scrollbar: body is y-only so the horizontal thumb isn't duplicated
           // under the rows. scrollLeft is still set programmatically from the header.
           horizontalScrollbarAtTop ? "overflow-y-auto overflow-x-hidden" : "overflow-auto",
-          isBounded ? "min-h-0 flex-1" : "flex-none",
+          isBounded || effectiveMaxHeight != null ? "min-h-0 flex-1" : "flex-none",
           DATA_GRID_SCROLLBAR_CLASS_NAME,
         )}
           onScroll={handleBodyScroll}
@@ -1305,6 +1409,9 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
             {!isLoading && rows.length > 0 && (
               <div
                 style={{
+                  // `getTotalSize()` already nets out `scrollMargin`; only each
+                  // item's `start` carries it, which is why the row transform
+                  // below subtracts it but this height must not.
                   height: rowVirtualizer.getTotalSize(),
                   width: "100%",
                   minWidth: totalContentWidth,
@@ -1338,7 +1445,7 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
                         ...(isDynamicRowHeight
                           ? { minHeight: estimatedRowHeight }
                           : { height: fixedRowHeight }),
-                        transform: `translateY(${virtualRow.start}px)`,
+                        transform: `translateY(${virtualRow.start - scrollMargin}px)`,
                       }}
                       onClick={(e) => { if (!shouldIgnoreRowClick(e)) handleRowClick(row, rowId, e); }}
                       onDoubleClick={(e) => { if (!shouldIgnoreRowClick(e)) onRowDoubleClick?.(row, rowId, e); }}
@@ -1355,7 +1462,7 @@ export function DataGrid<TRow>(props: DataGridProps<TRow>) {
                         >
                           <SelectionCheckbox
                             checked={isSelected}
-                            onChange={(event) => handleRowClick(row, rowId, event)}
+                            onChange={(event) => handleCheckboxClick(rowId, event)}
                             ariaLabel={`Select row ${rowId}`}
                           />
                         </div>

@@ -12,6 +12,12 @@ import {
   waitForItemQuantityToStabilize,
 } from "../../../payment-quota-helpers";
 
+async function setupAnalyticsProject() {
+  const project = await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  return project;
+}
+
 async function uploadEventBatch(options: {
   sessionReplaySegmentId: string,
   batchId: string,
@@ -31,19 +37,14 @@ async function uploadEventBatch(options: {
 }
 
 it("requires a user token", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   backendContext.set({ userAuth: null });
 
-  const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
-    method: "POST",
-    accessType: "client",
-    body: {
-      session_replay_segment_id: randomUUID(),
-      batch_id: randomUUID(),
-      sent_at_ms: Date.now(),
-      events: [{ event_type: "$page-view", event_at_ms: Date.now(), data: {} }],
-    },
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: randomUUID(),
+    batchId: randomUUID(),
+    sentAtMs: Date.now(),
+    events: [{ event_type: "$page-view", event_at_ms: Date.now(), data: {} }],
   });
 
   expect(res).toMatchInlineSnapshot(`
@@ -55,6 +56,73 @@ it("requires a user token", async ({ expect }) => {
       },
       "headers": Headers {
         "x-stack-known-error": "USER_AUTHENTICATION_REQUIRED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
+it("returns ACCESS_TYPE_REQUIRED instead of crashing when no project access is provided", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+
+  const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
+    method: "POST",
+    body: {
+      session_replay_segment_id: randomUUID(),
+      batch_id: randomUUID(),
+      sent_at_ms: Date.now(),
+      events: [{ event_type: "$page-view", event_at_ms: Date.now(), data: {} }],
+    },
+  });
+
+  expect(res).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "ACCESS_TYPE_REQUIRED",
+        "error": deindent\`
+          You must specify an access level for this Hexclave project. Make sure project API keys are provided (eg. x-hexclave-publishable-client-key) and you set the x-hexclave-access-type header to 'client', 'server', or 'admin'. (The legacy x-stack-* equivalents are also accepted.)
+          
+          For more information, see the docs on REST API authentication: https://docs.hexclave.com/api/overview#authentication
+        \`,
+      },
+      "headers": Headers {
+        "x-stack-known-error": "ACCESS_TYPE_REQUIRED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
+it("rejects a literal null JSON body instead of crashing", async ({ expect }) => {
+  await setupAnalyticsProject();
+  await Auth.Otp.signIn();
+
+  const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
+    method: "POST",
+    accessType: "client",
+    rawBody: new TextEncoder().encode("null"),
+    rawContentType: "application/json",
+  });
+
+  expect(res).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "SCHEMA_ERROR",
+        "details": {
+          "message": deindent\`
+            Request validation failed on POST /api/v1/analytics/events/batch:
+              - body cannot be null
+          \`,
+        },
+        "error": deindent\`
+          Request validation failed on POST /api/v1/analytics/events/batch:
+            - body cannot be null
+        \`,
+      },
+      "headers": Headers {
+        "x-stack-known-error": "SCHEMA_ERROR",
         <some fields may have been hidden>,
       },
     }
@@ -78,8 +146,7 @@ it("throws error when analytics is not enabled", async ({ expect }) => {
 });
 
 it("accepts valid $page-view events", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   const now = Date.now();
@@ -131,8 +198,7 @@ it("accepts valid $page-view events", async ({ expect }) => {
 });
 
 it("accepts valid $click events", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   const now = Date.now();
@@ -170,8 +236,7 @@ it("accepts valid $click events", async ({ expect }) => {
 });
 
 it("accepts a gzipped binary body (adblocker-evasion encoding)", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   const now = Date.now();
@@ -212,8 +277,7 @@ it("accepts a gzipped binary body (adblocker-evasion encoding)", async ({ expect
 });
 
 it("rejects a binary body that isn't valid gzip", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
@@ -232,8 +296,7 @@ it("rejects a binary body that isn't valid gzip", async ({ expect }) => {
 });
 
 it("rejects a binary body larger than the compressed size cap", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   // Random bytes don't compress, so even before gunzip the byteLength check
@@ -256,8 +319,7 @@ it("rejects a binary body larger than the compressed size cap", async ({ expect 
 });
 
 it("rejects a gzipped body that decompresses past the server size cap", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   // 9 MB of zeros gzips to ~9 KB but decompresses past the 8 MB server cap.
@@ -279,8 +341,7 @@ it("rejects a gzipped body that decompresses past the server size cap", async ({
 });
 
 it("handles click event data containing a truncated surrogate pair (lone high surrogate)", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   // Simulate what the client-side event tracker does: .substring(0, 200) can
@@ -324,8 +385,7 @@ it("handles click event data containing a truncated surrogate pair (lone high su
 });
 
 it("rejects empty events array", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   const res = await uploadEventBatch({
@@ -360,8 +420,7 @@ it("rejects empty events array", async ({ expect }) => {
 });
 
 it("rejects too many events (>500)", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   const tooManyEvents = Array.from({ length: 501 }, (_, i) => ({
@@ -402,19 +461,14 @@ it("rejects too many events (>500)", async ({ expect }) => {
 });
 
 it("rejects invalid session_replay_segment_id", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
-  const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
-    method: "POST",
-    accessType: "client",
-    body: {
-      session_replay_segment_id: "not-a-uuid",
-      batch_id: randomUUID(),
-      sent_at_ms: Date.now(),
-      events: [{ event_type: "$page-view", event_at_ms: Date.now(), data: {} }],
-    },
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: "not-a-uuid",
+    batchId: randomUUID(),
+    sentAtMs: Date.now(),
+    events: [{ event_type: "$page-view", event_at_ms: Date.now(), data: {} }],
   });
 
   expect(res).toMatchInlineSnapshot(`
@@ -442,19 +496,14 @@ it("rejects invalid session_replay_segment_id", async ({ expect }) => {
 });
 
 it("rejects invalid batch_id", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
-  const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
-    method: "POST",
-    accessType: "client",
-    body: {
-      session_replay_segment_id: randomUUID(),
-      batch_id: "not-a-uuid",
-      sent_at_ms: Date.now(),
-      events: [{ event_type: "$page-view", event_at_ms: Date.now(), data: {} }],
-    },
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: randomUUID(),
+    batchId: "not-a-uuid",
+    sentAtMs: Date.now(),
+    events: [{ event_type: "$page-view", event_at_ms: Date.now(), data: {} }],
   });
 
   expect(res).toMatchInlineSnapshot(`
@@ -482,19 +531,14 @@ it("rejects invalid batch_id", async ({ expect }) => {
 });
 
 it("rejects invalid event_type", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
-  const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
-    method: "POST",
-    accessType: "client",
-    body: {
-      session_replay_segment_id: randomUUID(),
-      batch_id: randomUUID(),
-      sent_at_ms: Date.now(),
-      events: [{ event_type: "$invalid-type", event_at_ms: Date.now(), data: {} }],
-    },
+  const res = await uploadEventBatch({
+    sessionReplaySegmentId: randomUUID(),
+    batchId: randomUUID(),
+    sentAtMs: Date.now(),
+    events: [{ event_type: "$invalid-type", event_at_ms: Date.now(), data: {} }],
   });
 
   expect(res).toMatchInlineSnapshot(`
@@ -521,9 +565,55 @@ it("rejects invalid event_type", async ({ expect }) => {
   `);
 });
 
+it("rejects a batch carrying the withdrawn versioned fields (schema_version/resource/spans)", async ({ expect }) => {
+  await setupAnalyticsProject();
+  await Auth.fastSignUp();
+
+  const now = Date.now();
+  const res = await niceBackendFetch("/api/v1/analytics/events/batch", {
+    method: "POST",
+    accessType: "client",
+    body: {
+      schema_version: 3,
+      resource: {
+        service: { namespace: "e2e", name: "test-client", version: "test" },
+        deploymentEnvironmentName: "test",
+        attributes: { suite: "analytics-events-batch" },
+      },
+      session_replay_segment_id: randomUUID(),
+      batch_id: randomUUID(),
+      sent_at_ms: now,
+      events: [{ event_type: "$page-view", event_at_ms: now, data: {} }],
+      spans: [],
+    },
+  });
+
+  expect(res).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "SCHEMA_ERROR",
+        "details": {
+          "message": deindent\`
+            Request validation failed on POST /api/v1/analytics/events/batch:
+              - body contains unknown properties: schema_version, resource, spans
+          \`,
+        },
+        "error": deindent\`
+          Request validation failed on POST /api/v1/analytics/events/batch:
+            - body contains unknown properties: schema_version, resource, spans
+        \`,
+      },
+      "headers": Headers {
+        "x-stack-known-error": "SCHEMA_ERROR",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
 it("inserted events are queryable via analytics query endpoint", async ({ expect }) => {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await setupAnalyticsProject();
   await Auth.fastSignUp();
 
   const sessionReplaySegmentId = randomUUID();
@@ -597,8 +687,7 @@ it("inserted events are queryable via analytics query endpoint", async ({ expect
 // ============================================================================
 
 async function setupProjectWithPlan(planId: PlanId) {
-  const { createProjectResponse } = await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  const { createProjectResponse } = await setupAnalyticsProject();
   const ownerTeamId = createProjectResponse.body.owner_team_id;
 
   if (planId !== "free") {
@@ -668,6 +757,35 @@ it("accepts batch and debits event quota correctly", { timeout: 120_000 }, async
 
   const afterQuantity = await getItemQuantity(ownerTeamId, ITEM_IDS.analyticsEvents);
   expect(afterQuantity).toBe(quantityBeforeBatch - eventCount);
+});
+
+it("allows only one concurrent batch to spend the final analytics event credit", { timeout: 120_000 }, async ({ expect }) => {
+  const { ownerTeamId } = await setupProjectWithPlan("free");
+  await Auth.Otp.signIn();
+
+  await waitForItemQuantityToStabilize(
+    ownerTeamId,
+    ITEM_IDS.analyticsEvents,
+    { minimumElapsedMs: 10_000 },
+  );
+  await setItemQuantity(ownerTeamId, ITEM_IDS.analyticsEvents, 1);
+  await waitForItemQuantityToReach(ownerTeamId, ITEM_IDS.analyticsEvents, 1);
+
+  const sessionReplaySegmentId = randomUUID();
+  const sentAtMs = Date.now();
+  const responses = await Promise.all([randomUUID(), randomUUID()].map(async (batchId) => (
+    await uploadEventBatch({
+      sessionReplaySegmentId,
+      batchId,
+      sentAtMs,
+      events: [{ event_type: "$page-view", event_at_ms: sentAtMs, data: {} }],
+    })
+  )));
+
+  expect(responses.map((response) => response.status).sort((a, b) => a - b)).toEqual([200, 400]);
+  const rejected = responses.find((response) => response.status === 400);
+  expect(rejected?.body.code).toBe("ITEM_QUANTITY_INSUFFICIENT_AMOUNT");
+  expect(await getItemQuantity(ownerTeamId, ITEM_IDS.analyticsEvents)).toBe(0);
 });
 
 // We don't support metered pricing or partial batches for now, so the entire

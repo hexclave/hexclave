@@ -245,6 +245,13 @@ These are the `type` values you may receive. Each links to its API reference pag
 - [`team_membership.deleted`](/api/webhooks/teams/team_membershipdeleted)
 - [`team_permission.created`](/api/webhooks/teams/team_permissioncreated)
 - [`team_permission.deleted`](/api/webhooks/teams/team_permissiondeleted)
+- [`issue.created`](/api/webhooks/observability/issuecreated)
+- [`issue.regressed`](/api/webhooks/observability/issueregressed)
+- [`issue.resolved`](/api/webhooks/observability/issueresolved)
+- [`issue.ignored`](/api/webhooks/observability/issueignored)
+- [`issue.merged`](/api/webhooks/observability/issuemerged)
+
+The `issue.*` events come from error tracking and behave differently from the rest — they are deduplicated, throttled, and carry two 64-bit fields as decimal strings. See [Issue Webhooks](/guides/apps/observability/webhooks) before consuming them.
 
 ## Examples
 

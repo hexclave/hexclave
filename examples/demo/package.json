@@ -20,12 +20,15 @@
     "@hexclave/next": "workspace:*",
     "@hexclave/shared": "workspace:*",
     "@hexclave/ui": "workspace:*",
+    "import-in-the-middle": "1.14.2",
     "next": "15.5.19",
     "next-themes": "^0.4.3",
     "react": "19.0.1",
-    "react-dom": "19.0.1"
+    "react-dom": "19.0.1",
+    "require-in-the-middle": "^7.4.0"
   },
   "devDependencies": {
+    "@types/node": "20.17.6",
     "@types/react": "19.0.12",
     "@types/react-dom": "19.0.4",
     "autoprefixer": "^10.4.20",

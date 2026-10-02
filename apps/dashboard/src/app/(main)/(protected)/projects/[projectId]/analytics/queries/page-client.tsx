@@ -29,6 +29,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { generateSecureRandomString } from "@hexclave/shared/dist/utils/crypto";
+import type { AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { useCallback, useMemo, useState } from "react";
 import { AppEnabledGuard } from "../../app-enabled-guard";
@@ -349,10 +350,8 @@ function QueriesContent() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ type: "folder" | "query", folderId: string, queryId?: string } | null>(null);
 
-  // Get folders and queries from environment config
   const folders = useMemo((): FolderWithId[] => {
-    const analyticsConfig = config.analytics;
-    const queryFolders = analyticsConfig.queryFolders;
+    const queryFolders = config.warehouse.queryFolders;
 
     return Object.entries(queryFolders)
       .map(([id, folder]) => ({
@@ -412,7 +411,7 @@ function QueriesContent() {
     await updateConfig({
       adminApp,
       configUpdate: {
-        [`analytics.queryFolders.${folderId}`]: {
+        [`warehouse.queryFolders.${folderId}`]: {
           displayName,
           sortOrder: folders.length,
           queries: {},
@@ -427,7 +426,7 @@ function QueriesContent() {
     await updateConfig({
       adminApp,
       configUpdate: {
-        [`analytics.queryFolders.${folderId}.queries.${queryId}`]: {
+        [`warehouse.queryFolders.${folderId}.queries.${queryId}`]: {
           displayName,
           sqlQuery,
           ...(description ? { description } : {}),
@@ -448,7 +447,7 @@ function QueriesContent() {
     await updateConfig({
       adminApp,
       configUpdate: {
-        [`analytics.queryFolders.${selectedFolderId}.queries.${selectedQueryId}`]: {
+        [`warehouse.queryFolders.${selectedFolderId}.queries.${selectedQueryId}`]: {
           displayName: currentQuery.displayName,
           sqlQuery,
           ...(currentQuery.description ? { description: currentQuery.description } : {}),
@@ -462,7 +461,7 @@ function QueriesContent() {
     await updateConfig({
       adminApp,
       configUpdate: {
-        [`analytics.queryFolders.${folderId}`]: null,
+        [`warehouse.queryFolders.${folderId}`]: null,
       },
       pushable: false,
     });
@@ -482,7 +481,7 @@ function QueriesContent() {
     await updateConfig({
       adminApp,
       configUpdate: {
-        [`analytics.queryFolders.${folderId}.queries.${queryId}`]: null,
+        [`warehouse.queryFolders.${folderId}.queries.${queryId}`]: null,
       },
       pushable: false,
     });
@@ -836,9 +835,9 @@ function FolderItem({
   );
 }
 
-export default function PageClient() {
+export default function PageClient({ appId }: { appId: AppId }) {
   return (
-    <AppEnabledGuard appId="analytics">
+    <AppEnabledGuard appId={appId}>
       <PageLayout fillWidth noPadding>
         <AnalyticsEventLimitBanner />
         <QueriesContent />

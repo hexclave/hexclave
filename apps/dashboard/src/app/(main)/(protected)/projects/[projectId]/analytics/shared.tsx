@@ -12,6 +12,8 @@ import { SimpleTooltip } from "@/components/ui/simple-tooltip";
 import { cn } from "@/lib/utils";
 import {
   ArrowClockwiseIcon,
+  CaretRightIcon,
+  SpinnerGapIcon,
   WarningCircleIcon
 } from "@phosphor-icons/react";
 import { Alert, AlertDescription, Button } from "@/components/ui";
@@ -19,17 +21,24 @@ import { Link } from "@/components/link";
 import { useDashboardInternalUser } from "@/lib/dashboard-user";
 import { PLAN_LIMITS, resolvePlanId } from "@hexclave/shared/dist/plans";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ErrorBoundary } from "next/dist/client/components/error-boundary";
-import { Suspense, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAdminApp } from "../use-admin-app";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export type RowData = Record<string, unknown>;
+/**
+ * One row of an analytics (ClickHouse) query result. Rows arrive as the
+ * deserialized JSON response body, so every column value is a `Json` — and
+ * which columns exist depends on the query, so any individual column may be
+ * absent. Callers parse the columns they need into their own named types.
+ */
+export type RowData = Record<string, Json | undefined>;
 
 export type ConfigFolder = {
   displayName: string,
@@ -142,46 +151,93 @@ export function CellValue({ value, truncate = true }: { value: unknown, truncate
   return <span>{str}</span>;
 }
 
-/**
- * Dialog for displaying all fields of a single row
- */
+export function RowDetailField({ column, value }: { column: string, value: unknown }) {
+  return (
+    <div className="space-y-1">
+      <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {column}
+      </Label>
+      <div className="font-mono text-sm bg-muted/30 rounded px-3 py-2 overflow-auto max-h-48">
+        {isJsonValue(value) ? (
+          <pre className="whitespace-pre-wrap break-all">
+            {JSON.stringify(value, null, 2)}
+          </pre>
+        ) : (
+          <CellValue value={value} truncate={false} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function RowDetailDialog({
   row,
   columns,
   open,
+  loading = false,
   onOpenChange,
+  title = "Row Details",
+  technicalColumns = [],
+  extraContent,
 }: {
   row: RowData | null,
   columns: string[],
   open: boolean,
+  loading?: boolean,
   onOpenChange: (open: boolean) => void,
+  title?: string,
+  technicalColumns?: readonly string[],
+  extraContent?: ReactNode,
 }) {
+  const [technicalOpen, setTechnicalOpen] = useState(false);
+  useEffect(() => {
+    setTechnicalOpen(false);
+  }, [row]);
+
   if (!row) return null;
+
+  const technicalSet = new Set(technicalColumns);
+  const mainColumns = columns.filter((column) => !technicalSet.has(column));
+  const presentTechnicalColumns = columns.filter((column) => technicalSet.has(column));
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[80vh]">
         <DialogHeader>
-          <DialogTitle>Row Details</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
         <DialogBody>
           <div className="space-y-4">
-            {columns.map((column) => (
-              <div key={column} className="space-y-1">
-                <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {column}
-                </Label>
-                <div className="font-mono text-sm bg-muted/30 rounded px-3 py-2 overflow-auto max-h-48">
-                  {isJsonValue(row[column]) ? (
-                    <pre className="whitespace-pre-wrap break-all">
-                      {JSON.stringify(row[column], null, 2)}
-                    </pre>
-                  ) : (
-                    <CellValue value={row[column]} truncate={false} />
-                  )}
-                </div>
+            {loading && (
+              <div className="flex items-center gap-2 rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                <SpinnerGapIcon className="h-3.5 w-3.5 animate-spin" />
+                Loading complete row…
               </div>
+            )}
+            {extraContent}
+            {mainColumns.map((column) => (
+              <RowDetailField key={column} column={column} value={row[column]} />
             ))}
+            {presentTechnicalColumns.length > 0 && (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setTechnicalOpen((current) => !current)}
+                  className="flex items-center gap-1.5 rounded text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors hover:transition-none"
+                  aria-expanded={technicalOpen}
+                >
+                  <CaretRightIcon className={cn("h-3.5 w-3.5", technicalOpen && "rotate-90")} />
+                  Technical details
+                </button>
+                {technicalOpen && (
+                  <div className="mt-3 space-y-4">
+                    {presentTechnicalColumns.map((column) => (
+                      <RowDetailField key={column} column={column} value={row[column]} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </DialogBody>
       </DialogContent>

@@ -766,8 +766,9 @@ export async function setEnvironmentConfigOverride(options: {
   projectId: string,
   branchId: string,
   environmentConfigOverride: EnvironmentConfigOverride,
+  client?: PrismaClientTransaction,
 }): Promise<void> {
-  const blockReason = await getEnvironmentConfigWriteBlockReason(options.projectId);
+  const blockReason = await getEnvironmentConfigWriteBlockReason(options.projectId, options.client ?? globalPrismaClient);
   if (blockReason != null) {
     throw new HexclaveAssertionError(blockReason, {
       projectId: options.projectId,
@@ -790,7 +791,8 @@ export async function setEnvironmentConfigOverride(options: {
   if (overrideErrors.status === "error") {
     captureError("setEnvironmentConfigOverride", new HexclaveAssertionError(`Config override is invalid — at a place where it should have already been validated! ${overrideErrors.error}`, { projectId: options.projectId, branchId: options.branchId }));
   }
-  await globalPrismaClient.environmentConfigOverride.upsert({
+  const client = options.client ?? globalPrismaClient;
+  await client.environmentConfigOverride.upsert({
     where: {
       projectId_branchId: {
         projectId: options.projectId,
@@ -872,9 +874,11 @@ export async function overrideEnvironmentConfigOverride(options: {
   projectId: string,
   branchId: string,
   environmentConfigOverrideOverride: EnvironmentConfigOverrideOverride,
+  client?: PrismaClientTransaction,
 }): Promise<EnvironmentConfigOverride> {
   // TODO put this in a serializable transaction (or a single SQL query) to prevent race conditions
-  const oldConfig = await rawQuery(globalPrismaClient, getEnvironmentConfigOverrideQuery(options));
+  const client = options.client ?? globalPrismaClient;
+  const oldConfig = await rawQuery(client, getEnvironmentConfigOverrideQuery(options));
   const newConfigUnmigrated = override(
     oldConfig,
     options.environmentConfigOverrideOverride,
@@ -884,6 +888,7 @@ export async function overrideEnvironmentConfigOverride(options: {
     projectId: options.projectId,
     branchId: options.branchId,
     environmentConfigOverride: newConfigUnmigrated,
+    client,
   });
 
   return newConfigUnmigrated;

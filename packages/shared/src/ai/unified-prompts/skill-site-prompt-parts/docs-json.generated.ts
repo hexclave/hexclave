@@ -153,8 +153,36 @@ const docsJson = {
                 "icon": "/images/app-icons/analytics.svg",
                 "pages": [
                   "guides/apps/analytics/overview",
-                  "guides/apps/analytics/queries-and-tables",
+                  "guides/apps/analytics/custom-events-and-spans",
                   "guides/apps/analytics/replays-and-clickmaps"
+                ]
+              },
+              {
+                "group": "Observability",
+                "icon": "/images/app-icons/observability.svg",
+                "pages": [
+                  "guides/apps/observability/overview",
+                  "guides/apps/observability/errors-and-logs",
+                  "guides/apps/observability/cross-tier-tracing",
+                  "guides/apps/observability/ai-tracing",
+                  "guides/apps/observability/framework-adapters",
+                  {
+                    "group": "Error tracking",
+                    "pages": [
+                      "guides/apps/observability/error-tracking",
+                      "guides/apps/observability/grouping",
+                      "guides/apps/observability/issues",
+                      "guides/apps/observability/querying-errors",
+                      "guides/apps/observability/webhooks"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "Warehouse",
+                "icon": "/images/app-icons/warehouse.svg",
+                "pages": [
+                  "guides/apps/warehouse/overview"
                 ]
               },
               {
@@ -290,6 +318,30 @@ const docsJson = {
     ]
   },
   "redirects": [
+    {
+      "source": "/guides/apps/analytics/opentelemetry",
+      "destination": "/guides/apps/observability/cross-tier-tracing"
+    },
+    {
+      "source": "/guides/apps/analytics/queries-and-tables",
+      "destination": "/guides/apps/warehouse/overview"
+    },
+    {
+      "source": "/guides/apps/analytics/errors-and-logs",
+      "destination": "/guides/apps/observability/errors-and-logs"
+    },
+    {
+      "source": "/guides/apps/analytics/cross-tier-tracing",
+      "destination": "/guides/apps/observability/cross-tier-tracing"
+    },
+    {
+      "source": "/guides/apps/analytics/ai-tracing",
+      "destination": "/guides/apps/observability/ai-tracing"
+    },
+    {
+      "source": "/guides/apps/analytics/framework-adapters",
+      "destination": "/guides/apps/observability/framework-adapters"
+    },
     {
       "source": "/sdk/objects/stack-app",
       "destination": "/sdk/objects/hexclave-app"

@@ -1,0 +1,215 @@
+---
+title: "Querying Errors"
+sidebarTitle: "Querying Errors"
+description: "The errors read model in SQL — group by issue_hash, count affected users, isolate unhandled crashes, and chart error rate over time"
+---
+
+Every `$error` occurrence is available as SQL through the `errors` read model in **Warehouse -> Queries**. Because grouping happens at ingest, each row already carries the group it belongs to — you never have to reconstruct grouping in a query.
+
+## The `errors` Read Model
+
+`errors` is the `$error` slice of the telemetry log table. It carries every column a `$log` record has, plus ten columns produced by [server-side grouping](/guides/apps/observability/grouping).
+
+**Grouping and error columns**
+
+| Column | Type | Meaning |
+|---|---|---|
+| `issue_hash` | `String` | **The owning group.** Exactly one per occurrence. This is what you group by. |
+| `issue_hashes` | `Array(String)` | The owning hash plus alias variants. Diagnostic only — never resolve an occurrence with this. |
+| `occurrence_id` | `String` | Deterministic id for this occurrence, stable across ingest retries. |
+| `batch_id` | `String` | The ingest batch the occurrence arrived in. |
+| `issue_grouping_config` | `LowCardinality(String)` | Which grouping algorithm produced the hash. |
+| `issue_variant` | `LowCardinality(String)` | `app`, `system`, `message`, or `degraded`. |
+| `grouping_degraded` | `UInt8` | `1` when grouping fell back to the degraded hash. |
+| `error_type` | `LowCardinality(String)` | Exception type, e.g. `TypeError`. |
+| `error_culprit` | `String` | Human-readable "where it happened". |
+| `error_frames` | `String` | The parsed stack frames, as a JSON array string. |
+
+**Shared telemetry columns**
+
+`event_at`, `message`, `level`, `data`, `producer`, `runtime`, `user_id`, `team_id`, `refresh_token_id`, `session_replay_id`, `session_replay_segment_id`, `trace_id`, `span_id`, `page_view_span_id`, `service_namespace`, `service_name`, `service_version`, `service_instance_id`, `deployment_environment_name`, `resource_attributes`, `created_at`.
+
+On an `$error` row, `message` and `level` are stamped **server-side**: `message` is the error's message and `level` is always `error`. Everything the SDK sent — `name`, `stack`, `handled`, `synthetic`, `mechanism_type`, `release`, `environment`, `url`, `path`, `fingerprint` — is in the `data` JSON column.
+
+<Info>
+Every grouping column has a default rather than being nullable, so rows that predate grouping read back as `''` / `[]` / `0`. `issue_hash != ''` is the single "is this grouped" test.
+
+`errors` is queryable from the Queries editor but does not appear in the Tables browser, and `DESCRIBE TABLE errors` returns no column descriptions.
+</Info>
+
+## Group by `issue_hash`, not `data.fingerprint`
+
+`data.fingerprint` is still on every row, but it is the SDK's **client-side** grouping key: a djb2 hash over `name`, `message`, and the first raw stack line. It exists for local flood control and as a server-side hint, and it groups materially worse than `issue_hash` does:
+
+| | `data.fingerprint` | `issue_hash` |
+|---|---|---|
+| Where it is computed | In the browser, before the event is sent | On the server, at ingest |
+| Stack handling | The first raw stack line, verbatim | The full stack, parsed into normalized frames |
+| Line/column numbers | Hashed — an unrelated edit splits the issue | Never hashed |
+| Minified chunk names | Hashed — every redeploy splits every issue | Content hashes stripped first |
+| Variable message content | Hashed verbatim — one issue per user id in the message | Parameterized before hashing |
+| App vs library frames | No distinction | Separate app and system variants |
+
+Use `issue_hash` for anything you care about. `data.fingerprint` remains useful only if you need to reproduce exactly what the client computed.
+
+## Useful Queries
+
+### Top issues by volume
+
+```sql
+SELECT
+  issue_hash,
+  any(error_type) AS type,
+  any(message) AS message,
+  any(error_culprit) AS culprit,
+  count() AS occurrences,
+  max(event_at) AS last_seen
+FROM errors
+WHERE event_at > now() - INTERVAL 1 DAY
+  AND issue_hash != ''
+GROUP BY issue_hash
+ORDER BY occurrences DESC
+LIMIT 50;
+```
+
+Add `service_name` to both the `SELECT` and the `GROUP BY` when several apps share the project and you want them counted separately.
+
+### Users affected per issue
+
+Volume tells you how loud a bug is; affected users tell you how much it matters. A render loop can produce ten thousand occurrences from one unlucky person.
+
+```sql
+SELECT
+  issue_hash,
+  any(error_type) AS type,
+  any(message) AS message,
+  uniq(user_id) AS users_affected,
+  count() AS occurrences,
+  round(count() / uniq(user_id), 1) AS occurrences_per_user
+FROM errors
+WHERE event_at > now() - INTERVAL 7 DAY
+  AND issue_hash != ''
+  AND user_id IS NOT NULL
+GROUP BY issue_hash
+ORDER BY users_affected DESC
+LIMIT 50;
+```
+
+### Unhandled crashes only
+
+`data.handled` is `false` for errors nothing in your code caught — a global `onerror`, an unhandled rejection, a Node `uncaughtException`. These are the ones that broke something for the user.
+
+```sql
+SELECT
+  issue_hash,
+  any(error_type) AS type,
+  any(message) AS message,
+  any(toString(data.mechanism_type)) AS mechanism,
+  count() AS occurrences,
+  uniq(user_id) AS users_affected
+FROM errors
+WHERE event_at > now() - INTERVAL 1 DAY
+  AND issue_hash != ''
+  AND data.handled = false
+GROUP BY issue_hash
+ORDER BY occurrences DESC
+LIMIT 50;
+```
+
+### Error rate over time
+
+```sql
+SELECT
+  toStartOfHour(event_at) AS bucket,
+  service_name,
+  count() AS errors,
+  countIf(data.handled = false) AS unhandled,
+  uniq(issue_hash) AS distinct_issues,
+  uniq(user_id) AS users_affected
+FROM errors
+WHERE event_at > now() - INTERVAL 7 DAY
+GROUP BY bucket, service_name
+ORDER BY bucket ASC;
+```
+
+`uniq(issue_hash)` is often the more interesting series than raw volume: a spike in *occurrences* with a flat number of *distinct issues* is one bug getting louder, while a spike in both usually means a bad deploy.
+
+### Issues that first appeared after a deploy
+
+```sql
+SELECT
+  issue_hash,
+  any(error_type) AS type,
+  any(message) AS message,
+  any(error_culprit) AS culprit,
+  min(event_at) AS first_seen,
+  groupUniqArray(5)(toString(data.release)) AS releases,
+  count() AS occurrences
+FROM errors
+WHERE event_at > now() - INTERVAL 7 DAY
+  AND issue_hash != ''
+GROUP BY issue_hash
+HAVING first_seen > now() - INTERVAL 1 DAY
+ORDER BY occurrences DESC;
+```
+
+`first_seen` here is the first occurrence **within the queried window**, not the issue's all-time first occurrence — occurrences are retained for 90 days, while the issue's lifetime `first seen` lives in the dashboard. Widen the window or check the issue in the UI before concluding a bug is new.
+
+### Checking grouping quality
+
+```sql
+SELECT
+  issue_variant,
+  count() AS occurrences,
+  uniq(issue_hash) AS distinct_issues
+FROM errors
+WHERE event_at > now() - INTERVAL 7 DAY
+GROUP BY issue_variant
+ORDER BY occurrences DESC;
+```
+
+A large `degraded` population means grouping is failing on some shape of error and falling back to a type+message hash; a large `message` population usually means stacks are arriving without anything hashable in them.
+
+### From an error to everything around it
+
+Because `trace_id` is shared across tiers, one occurrence pivots into the full request:
+
+```sql
+SELECT event_at, occurrence_id, trace_id, span_id, user_id, session_replay_id, error_culprit
+FROM errors
+WHERE issue_hash = '4a1f0c9b2d3e4f5061728394a5b6c7d8'
+ORDER BY event_at DESC
+LIMIT 20;
+```
+
+Then take a `trace_id` into `spans` or `logs` — see [Errors & Logs](/guides/apps/observability/errors-and-logs#querying).
+
+### Reading stack frames
+
+`error_frames` is a JSON array string, oldest frame first, so the crash site is the last element:
+
+```sql
+SELECT
+  occurrence_id,
+  JSONExtractString(arrayElement(JSONExtractArrayRaw(error_frames), -1), 'function') AS top_function,
+  JSONExtractString(arrayElement(JSONExtractArrayRaw(error_frames), -1), 'filename') AS top_file
+FROM errors
+WHERE issue_hash = '4a1f0c9b2d3e4f5061728394a5b6c7d8'
+  AND error_frames != ''
+LIMIT 20;
+```
+
+Each frame object has `filename`, `function`, `module`, `absPath`, `lineno`, `colno`, and `inApp`.
+
+## Things to Watch For
+
+- **Retention is 90 days.** Every query above is bounded by what is retained; an issue's all-time counters live in the dashboard, not here.
+- **A retried ingest batch can be counted twice.** `occurrence_id` is deterministic across retries, so `uniq(occurrence_id)` is the deduplicated count where `count()` is not.
+- **Always filter `issue_hash != ''`** when grouping, so occurrences that predate grouping don't collapse into one giant empty-string bucket.
+- **Use `service_name` to separate apps.** A record with no service is invalid ingestion, not an "unknown" bucket.
+
+## Next Steps
+
+- [Error Grouping](/guides/apps/observability/grouping) — what `issue_hash` actually hashes
+- [Triaging Issues](/guides/apps/observability/issues) — the same data with a lifecycle attached
+- [Errors & Logs](/guides/apps/observability/errors-and-logs) — the `logs` read model and capture configuration
