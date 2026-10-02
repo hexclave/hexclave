@@ -67,7 +67,7 @@ export function assertIssueActionsEnabled(tenancy: Tenancy): void {
 }
 
 export function actorUserId(fullReq: SmartRequest): string | null {
-  return fullReq.auth?.user?.id ?? null;
+  return fullReq.auth?.user?.id ?? fullReq.auth?.adminUserId ?? null;
 }
 
 export function isIssueRowVanishedError(error: unknown): boolean {

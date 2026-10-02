@@ -8,6 +8,10 @@ describe("normalizeUrlPath", () => {
     expect(normalizeUrlPath("/orders/12345/items/67890")).toBe("/orders/:id/items/:id");
   });
 
+  it("keeps one placeholder per dynamic segment so comparison patterns match the original depth", () => {
+    expect(normalizeUrlPath("/orgs/12345/67890/settings")).toBe("/orgs/:id/:id/settings");
+  });
+
   it("does not group ordinary static route segments", () => {
     expect(normalizeUrlPath("/projects/internal/analytics/paths")).toBe("/projects/internal/analytics/paths");
   });

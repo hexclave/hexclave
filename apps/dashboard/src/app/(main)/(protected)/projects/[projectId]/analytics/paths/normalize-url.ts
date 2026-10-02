@@ -32,12 +32,5 @@ export function normalizeUrlPath(path: string): string {
     isLikelyDynamicSegment(seg) ? ":id" : seg
   );
 
-  // Collapse consecutive :id segments (e.g. /a/:id/:id → /a/:id)
-  const collapsed: string[] = [];
-  for (const seg of normalized) {
-    if (seg === ":id" && collapsed[collapsed.length - 1] === ":id") continue;
-    collapsed.push(seg);
-  }
-
-  return collapsed.join("/") || "/";
+  return normalized.join("/") || "/";
 }

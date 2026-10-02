@@ -90,9 +90,9 @@ describe("resolveGroupingConfig", () => {
     });
   });
 
-  it("fails closed when the readable chain contains an unknown id", () => {
-    expect(() => resolveGroupingConfig({
+  it("ignores retired ids in the readable chain", () => {
+    expect(resolveGroupingConfig({
       readableConfigIds: { "hexclave-js:retired": { enabled: true } },
-    })).toThrow("Unknown readable grouping config id");
+    }).readableConfigIds).toEqual([]);
   });
 });

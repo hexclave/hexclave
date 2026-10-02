@@ -25,7 +25,7 @@ export async function findRecentSessionReplay(prisma: PrismaClientWithReplica<Pr
   });
 }
 
-export async function aggregateSessionReplaySegmentBounds(prisma: PrismaClientWithReplica<PrismaClient>, options: {
+export async function aggregateSessionReplaySegmentBounds(prisma: Omit<PrismaClient, "$on">, options: {
   tenancyId: string,
   sessionReplayId: string,
   sessionReplaySegmentId: string,

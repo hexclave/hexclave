@@ -56,7 +56,8 @@ export async function sendEmailToMany(options: {
     throw new HexclaveAssertionError("Email idempotency keys must contain 1-256 characters");
   }
   await globalPrismaClient.emailOutbox.createMany({
-    data: options.recipients.map((recipient, recipientIndex) => {
+    data: options.recipients.map((recipient) => {
+      const serializedRecipient = serializeRecipient(recipient)!;
       const row: Prisma.EmailOutboxCreateManyInput = {
         tenancyId: options.tenancy.id,
         tsxSource: options.tsxSource,
@@ -65,7 +66,7 @@ export async function sendEmailToMany(options: {
         createdWith: options.createdWith.type === "draft" ? EmailOutboxCreatedWith.DRAFT : EmailOutboxCreatedWith.PROGRAMMATIC_CALL,
         emailDraftId: options.createdWith.type === "draft" ? options.createdWith.draftId : undefined,
         emailProgrammaticCallTemplateId: options.createdWith.type === "programmatic-call" ? options.createdWith.templateId : undefined,
-        to: serializeRecipient(recipient)!,
+        to: serializedRecipient,
         extraRenderVariables: options.extraVariables,
         scheduledAt: options.scheduledAt,
         shouldSkipDeliverabilityCheck: options.shouldSkipDeliverabilityCheck,
@@ -73,7 +74,7 @@ export async function sendEmailToMany(options: {
         overrideNotificationCategoryId: options.overrideNotificationCategoryId,
       };
       if (options.idempotencyKey !== undefined) {
-        row.id = emailOutboxIdForIdempotencyKey(options.tenancy.id, options.idempotencyKey, recipientIndex);
+        row.id = emailOutboxIdForIdempotencyKey(options.tenancy.id, options.idempotencyKey, JSON.stringify(serializedRecipient));
       }
       return row;
     }),
@@ -87,13 +88,13 @@ export async function sendEmailToMany(options: {
   }
 }
 
-export function emailOutboxIdForIdempotencyKey(tenancyId: string, idempotencyKey: string, recipientIndex: number): string {
+export function emailOutboxIdForIdempotencyKey(tenancyId: string, idempotencyKey: string, recipientKey: string): string {
   const digest = createHash("sha256")
     .update(tenancyId)
     .update("\0")
     .update(idempotencyKey)
     .update("\0")
-    .update(String(recipientIndex))
+    .update(recipientKey)
     .digest();
   // RFC 4122 variant + v5 bits make the deterministic digest a valid UUID for
   // the existing EmailOutbox primary key. SHA-256 retains substantially more

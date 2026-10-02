@@ -53,14 +53,8 @@ export function resolveGroupingConfig(settings: GroupingRuntimeConfig | undefine
   const configuredActive = settings?.activeConfigId;
   const activeConfigId = resolveActiveGroupingConfigId(settings);
 
+  // Readable ids only widen lookups, so retired ids are ignored rather than failing ingestion.
   const configuredReadable = settings?.readableConfigIds;
-  if (configuredReadable !== undefined) {
-    for (const id of Object.keys(configuredReadable)) {
-      if (!isGroupingConfigId(id)) {
-        throw new Error(`Unknown readable grouping config id ${JSON.stringify(id)}`);
-      }
-    }
-  }
 
   const activeIds = new Set<GroupingConfigId>([activeConfigId]);
   const readableConfigIds = configuredReadable === undefined

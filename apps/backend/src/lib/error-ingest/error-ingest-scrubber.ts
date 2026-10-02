@@ -55,7 +55,7 @@ const AUTH_SCHEME_PATTERN = /\b(Bearer|Basic|Digest)\s+[^\s,;]+/gi;
 const PRIVATE_KEY_PATTERN = /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g;
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const URL_AUTH_PATTERN = /((?:[a-z][a-z\d+.-]*:)?\/\/)(?:[^/@\s:]+):(?:[^/\s?#]+)@/gi;
-const SENSITIVE_ASSIGNMENT_PATTERN = /((["']?)(?:access[-_.]?token|api[-_.]?key|authorization|client[-_.]?secret|cookie|credential|id[-_.]?token|password|passwd|private[-_.]?key|refresh[-_.]?token|secret|session[-_.]?token|signature|token)\2\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:(?:Bearer|Basic|Digest)\s+)?(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s"'&,;}\]]+))/gi;
+const SENSITIVE_ASSIGNMENT_PATTERN = /((["']?)(?:access[-_.]?token|api[-_.]?key|auth(?:orization)?|client[-_.]?secret|cookie|credential|id[-_.]?token|password|passwd|private[-_.]?key|refresh[-_.]?token|secret|session[-_.]?token|signature|token)\2\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:(?:Bearer|Basic|Digest)\s+)?(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s"'&,;}\]]+))/gi;
 const SENSITIVE_QUERY_VALUE_PATTERN = /([?&](?:access[-_.]?token|api[-_.]?key|authorization|body|client[-_.]?secret|form[-_.]?data|id[-_.]?token|password|refresh[-_.]?token|secret|session[-_.]?id|signature|token)=)[^&#\s]*/gi;
 const SENSITIVE_COMPACT_KEY_PARTS: readonly string[] = [
   "access_token",

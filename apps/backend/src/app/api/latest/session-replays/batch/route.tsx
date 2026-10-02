@@ -311,7 +311,7 @@ export const POST = createSmartRouteHandler({
     } else {
       const [replayRows, segmentBounds] = await Promise.all([
         replayRowsPromise,
-        aggregateSessionReplaySegmentBounds(prisma, {
+        aggregateSessionReplaySegmentBounds(prisma.$primary(), {
           tenancyId,
           sessionReplayId: replayId,
           sessionReplaySegmentId: chunk.sessionReplaySegmentId,

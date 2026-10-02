@@ -1,4 +1,5 @@
 import { getPrismaClientForTenancy } from "@/prisma-client";
+import { createHash } from "node:crypto";
 import type { Tenancy } from "@/lib/tenancies";
 import { isWebhooksAppEnabled, sendIssueCreatedWebhook, sendIssueIgnoredWebhook, sendIssueMergedWebhook, sendIssueRegressedWebhook, sendIssueResolvedWebhook } from "@/lib/webhooks";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
@@ -8,6 +9,11 @@ import type { IssueBatchApplyOutcome } from "./issue-store";
 
 
 export const ISSUE_WEBHOOK_THROTTLE_MS = 5 * 60 * 1000;
+
+/** Svix event ids are length- and charset-restricted; a digest keeps composite ids deterministic and valid. */
+export function issueWebhookEventId(rawEventId: string): string {
+  return `issue_${createHash("sha256").update(rawEventId).digest("hex")}`;
+}
 
 type IssueStatusColumn = "UNRESOLVED" | "RESOLVED" | "IGNORED";
 
@@ -124,9 +130,9 @@ export async function emitIssueWebhooks(options: {
     return [sendIssueRegressedWebhook({
       projectId: tenancy.project.id,
       data: buildIssueWebhookData(tenancy, row, "regressed"),
-      eventId: batchId === undefined
+      eventId: issueWebhookEventId(batchId === undefined
         ? `${row.id}:${(row.regressedAt ?? now).getTime()}`
-        : `${row.id}:${batchId}:regression`,
+        : `${row.id}:${batchId}:regression`),
     })];
   }));
 }
@@ -157,7 +163,7 @@ export async function emitIssueLifecycleWebhook(options: {
     ...buildIssueWebhookData(tenancy, row, "ongoing"),
     ...event === "merged" ? {} : { status: event },
   };
-  const eventId = options.eventId ?? `${row.id}:${event}:${now.getTime()}`;
+  const eventId = issueWebhookEventId(options.eventId ?? `${row.id}:${event}:${now.getTime()}`);
 
   switch (event) {
     case "resolved": {

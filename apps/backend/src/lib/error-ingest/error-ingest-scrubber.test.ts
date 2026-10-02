@@ -65,6 +65,12 @@ describe("scrubErrorIngestPayload", () => {
     expect(JSON.stringify(result.value)).not.toContain("bare-secret");
   });
 
+  it("filters bare auth assignments", () => {
+    const result = scrubErrorIngestPayload({ message: "connect failed auth: hunter2 auth=other-secret" });
+
+    expect(result.value).toEqual({ message: "connect failed auth: [Filtered] auth=[Filtered]" });
+  });
+
   it("filters quoted credentials following authorization schemes", () => {
     const result = scrubErrorIngestPayload({
       message: String.raw`authorization=Bearer "two words,still secret" credential=Basic 'alpha;beta'`,

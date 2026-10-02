@@ -10,6 +10,10 @@ export const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
 export const MAX_SOURCE_MAP_BYTES = 100 * 1024 * 1024;
 export const MAX_SOURCE_MAP_GZIPPED_BYTES = 50 * 1024 * 1024;
 export const MAX_METADATA_BYTES = 256;
+// Match the release catalog's limits so a finalized manifest can always be projected.
+export const MAX_RELEASE_BYTES = 250;
+export const MAX_DIST_BYTES = 64;
+export const MAX_ENVIRONMENT_BYTES = 255;
 export const MAX_ARTIFACT_PATH_BYTES = 1_024;
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
@@ -97,9 +101,12 @@ export function validateArtifactManifest(input: unknown, scopeInput: ArtifactSco
     throw invalidManifest("Artifact manifest projectId does not match the authenticated project.");
   }
 
-  const release = validateArtifactMetadata(record.release, "Artifact manifest release");
-  const dist = validateArtifactMetadata(record.dist, "Artifact manifest dist");
-  const environment = validateArtifactMetadata(record.environment, "Artifact manifest environment");
+  const release = validateArtifactMetadata(record.release, "Artifact manifest release", MAX_RELEASE_BYTES);
+  if (release !== null && (release === "." || release === ".." || release.toLowerCase() === "latest")) {
+    throw invalidManifest("Artifact manifest release must not be '.', '..', or 'latest'.");
+  }
+  const dist = validateArtifactMetadata(record.dist, "Artifact manifest dist", MAX_DIST_BYTES);
+  const environment = validateArtifactMetadata(record.environment, "Artifact manifest environment", MAX_ENVIRONMENT_BYTES);
   if (dist !== null && release === null) {
     throw invalidManifest("Artifact manifest dist requires a release.");
   }
@@ -159,10 +166,10 @@ export function validateSha256(value: string, label: string): string {
   return value;
 }
 
-export function validateArtifactMetadata(value: unknown, label: string): string | null {
+export function validateArtifactMetadata(value: unknown, label: string, maxBytes = MAX_METADATA_BYTES): string | null {
   if (value == null) return null;
-  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > MAX_METADATA_BYTES || /[\u0000-\u001f\u007f]/u.test(value)) {
-    throw invalidManifest(`${label} must be a non-empty value of at most ${MAX_METADATA_BYTES} UTF-8 bytes without control characters.`);
+  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > maxBytes || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw invalidManifest(`${label} must be a non-empty value of at most ${maxBytes} UTF-8 bytes without control characters.`);
   }
   return value;
 }

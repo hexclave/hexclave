@@ -768,7 +768,7 @@ export async function setEnvironmentConfigOverride(options: {
   environmentConfigOverride: EnvironmentConfigOverride,
   client?: PrismaClientTransaction,
 }): Promise<void> {
-  const blockReason = await getEnvironmentConfigWriteBlockReason(options.projectId);
+  const blockReason = await getEnvironmentConfigWriteBlockReason(options.projectId, options.client ?? globalPrismaClient);
   if (blockReason != null) {
     throw new HexclaveAssertionError(blockReason, {
       projectId: options.projectId,
