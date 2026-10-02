@@ -23,7 +23,7 @@ it("dogfoods the SDK-managed OpenTelemetry provider", async () => {
     }),
     telemetry: {
       resource: {
-        service: { name: "hexclave-backend" },
+        service: expect.objectContaining({ name: "hexclave-backend" }),
       },
     },
   }));

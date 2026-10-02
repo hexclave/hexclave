@@ -1,3 +1,4 @@
+import { getBillingTeamId } from "@/lib/plan-entitlements";
 import { getSoleTenancyFromProjectBranch, DEFAULT_BRANCH_ID, type Tenancy } from "@/lib/tenancies";
 import { IssueAlertDeliveryOutcome, IssueAlertDeliveryState, WorkflowRunState } from "@/generated/prisma/enums";
 import { globalPrismaClient, retryTransaction } from "@/prisma-client";
@@ -36,6 +37,7 @@ let databaseRule: IssueAlertRuleRecord | undefined;
 let issueId: string | undefined;
 let issueShortId: bigint | undefined;
 let recipientIds: string[] = [];
+let recipientOwnerTeamId: string | undefined;
 let service: IssueAlertPersistenceService | undefined;
 let workflowWasCreated = false;
 const eventIds: string[] = [];
@@ -243,14 +245,32 @@ describe.sequential("issue alert workflow delivery proof", () => {
     scope = { tenancyId: tenancy.id, projectId: tenancy.project.id, branchId: tenancy.branchId };
     service = new IssueAlertPersistenceService();
 
-    const users = await globalPrismaClient.projectUser.findMany({
-      where: { tenancyId: tenancy.id },
-      orderBy: { projectUserId: "asc" },
-      take: 2,
-      select: { projectUserId: true },
-    });
-    if (users.length < 2) throw new Error("Issue alert delivery proof needs two users in the seeded internal tenancy");
-    recipientIds = users.map((user) => user.projectUserId);
+    // Explicit alert recipients must be owner-team members with a primary email.
+    const ownerTeamId = getBillingTeamId(tenancy.project);
+    if (ownerTeamId === null) throw new Error("Issue alert delivery proof needs an internal project owner team");
+    recipientOwnerTeamId = ownerTeamId;
+    recipientIds = [randomUUID(), randomUUID()];
+    for (const [index, projectUserId] of recipientIds.entries()) {
+      await globalPrismaClient.projectUser.create({
+        data: {
+          tenancyId: tenancy.id,
+          projectUserId,
+          mirroredProjectId: tenancy.project.id,
+          mirroredBranchId: tenancy.branchId,
+          contactChannels: {
+            create: {
+              type: "EMAIL",
+              isPrimary: "TRUE",
+              isVerified: true,
+              value: `${RUN_PREFIX}-${index}@example.com`,
+            },
+          },
+        },
+      });
+      await globalPrismaClient.teamMember.create({
+        data: { tenancyId: tenancy.id, projectUserId, teamId: ownerTeamId },
+      });
+    }
 
     const counter = await globalPrismaClient.issueCounter.upsert({
       where: { tenancyId: tenancy.id },
@@ -308,6 +328,14 @@ describe.sequential("issue alert workflow delivery proof", () => {
       }
       if (workflowWasCreated) {
         await deleteWorkflow(tenancy, ISSUE_ALERT_EMAIL_WORKFLOW_ID);
+      }
+      if (recipientOwnerTeamId !== undefined && recipientIds.length > 0) {
+        await globalPrismaClient.teamMember.deleteMany({
+          where: { tenancyId: tenancy.id, teamId: recipientOwnerTeamId, projectUserId: { in: recipientIds } },
+        });
+        await globalPrismaClient.projectUser.deleteMany({
+          where: { tenancyId: tenancy.id, projectUserId: { in: recipientIds } },
+        });
       }
     }
     vi.restoreAllMocks();

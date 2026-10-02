@@ -223,52 +223,165 @@ export async function tryDecreasePlanItemQuantities(
     createdAt: debit.idempotency?.createdAt ?? new Date(),
   }));
 
-  // The in-process queue keeps same-instance callers from each holding a pool
-  // connection while blocked on the advisory lock; the lock itself provides
-  // cross-instance serialization of the read-check-write sequence.
+  return await enqueuePlanDebit(tenancy, prisma, billingTeamId, changes);
+}
+
+type PlanDebitResult = { insufficientItemId: MeteredPlanItemId | null, createdChangeIds: string[] };
+
+type PendingPlanDebit = {
+  changes: PlanItemQuantityChange[],
+  resolve: (result: PlanDebitResult) => void,
+  reject: (error: unknown) => void,
+};
+
+const pendingPlanDebitBatches = new Map<string, PendingPlanDebit[]>();
+
+// Debits for one customer that arrive while an earlier transaction holds the
+// per-process queue are coalesced into a single advisory-locked transaction, so
+// throughput does not degrade to one transaction plus Bulldozer round-trip per
+// event. The advisory lock still provides cross-instance serialization.
+function enqueuePlanDebit(
+  tenancy: Awaited<ReturnType<typeof getBillingContext>>["tenancy"],
+  prisma: Awaited<ReturnType<typeof getPrismaClientForTenancy>>,
+  billingTeamId: string,
+  changes: PlanItemQuantityChange[],
+): Promise<PlanDebitResult> {
+  return new Promise<PlanDebitResult>((resolve, reject) => {
+    const key = `${tenancy.id}\0${billingTeamId}`;
+    const existingBatch = pendingPlanDebitBatches.get(key);
+    if (existingBatch != null) {
+      existingBatch.push({ changes, resolve, reject });
+      return;
+    }
+    const batch: PendingPlanDebit[] = [{ changes, resolve, reject }];
+    pendingPlanDebitBatches.set(key, batch);
+    const flushed = withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => {
+      if (pendingPlanDebitBatches.get(key) === batch) {
+        pendingPlanDebitBatches.delete(key);
+      }
+      await settlePlanDebitBatch(tenancy.id, prisma, billingTeamId, batch);
+    });
+    flushed.catch((error: unknown) => {
+      for (const pending of batch) pending.reject(error);
+    });
+  });
+}
+
+async function settlePlanDebitBatch(
+  tenancyId: string,
+  prisma: Awaited<ReturnType<typeof getPrismaClientForTenancy>>,
+  billingTeamId: string,
+  batch: readonly PendingPlanDebit[],
+): Promise<void> {
+  const batchResult = await Result.fromPromise(applyPlanDebits(tenancyId, prisma, billingTeamId, batch.map(({ changes }) => changes)));
+  if (batchResult.status === "ok") {
+    batch.forEach((pending, index) => pending.resolve(batchResult.data[index]));
+    return;
+  }
+  if (batch.length === 1) {
+    batch[0].reject(batchResult.error);
+    return;
+  }
+  // Isolate the failure so one bad request cannot fail every coalesced caller.
+  for (const pending of batch) {
+    const singleResult = await Result.fromPromise(applyPlanDebits(tenancyId, prisma, billingTeamId, [pending.changes]));
+    if (singleResult.status === "ok") {
+      pending.resolve(singleResult.data[0]);
+    } else {
+      pending.reject(singleResult.error);
+    }
+  }
+}
+
+async function applyPlanDebits(
+  tenancyId: string,
+  prisma: Awaited<ReturnType<typeof getPrismaClientForTenancy>>,
+  billingTeamId: string,
+  requests: readonly PlanItemQuantityChange[][],
+): Promise<PlanDebitResult[]> {
   let postedChanges: PlanItemQuantityChange[] = [];
-  return await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => await withPostedChangeCompensation(prisma, () => postedChanges, async () => await retryTransaction(prisma, async (tx) => {
-    await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
+  let finalBulldozerIds = new Set<string>();
+  const results = await withPostedChangeCompensation(prisma, () => postedChanges, async () => await retryTransaction(prisma, async (tx) => {
+    await lockPlanMeteringCustomer(tx, tenancyId, billingTeamId);
 
     const existingChanges = await tx.itemQuantityChange.findMany({
-      where: { tenancyId: tenancy.id, id: { in: changes.map(({ id }) => id) } },
+      where: { tenancyId, id: { in: requests.flatMap((changes) => changes.map(({ id }) => id)) } },
     });
-    const existingIds = new Set(existingChanges.map(({ id }) => id));
-    const ownedChanges = changes.filter(({ id }) => !existingIds.has(id));
-    if (ownedChanges.length === 0) {
-      // Prisma-first dual-write can leave a committed row whose Bulldozer set
-      // never landed. Re-POST the same row id through the existing set API.
-      await bulldozerWriteItemQuantityChanges(existingChanges);
-      return { insufficientItemId: null, createdChangeIds: [] };
-    }
+    const existingById = new Map(existingChanges.map((change) => [change.id, change]));
+    const claimedIds = new Set(existingById.keys());
 
-    const quantities = await getItemQuantitiesForCustomer({
-      prisma: tx,
-      tenancyId: tenancy.id,
-      customerType: "team",
-      customerId: billingTeamId,
-    });
-    const remainingQuantities = new Map(Object.entries(quantities));
-    for (const change of ownedChanges) {
-      const remaining = (remainingQuantities.get(change.itemId) ?? 0) + change.quantity;
-      if (remaining < 0) {
-        return { insufficientItemId: change.itemId, createdChangeIds: [] };
+    let remainingQuantities: Map<string, number> | null = null;
+    const results: PlanDebitResult[] = [];
+    const acceptedChanges: PlanItemQuantityChange[] = [];
+    const replayedChanges: typeof existingChanges = [];
+    for (const changes of requests) {
+      const ownedChanges = changes.filter(({ id }) => !claimedIds.has(id));
+      if (ownedChanges.length === 0) {
+        // Prisma-first dual-write can leave a committed row whose Bulldozer set
+        // never landed. Re-POST the same row id through the existing set API.
+        for (const { id } of changes) {
+          const existing = existingById.get(id);
+          if (existing != null) replayedChanges.push(existing);
+        }
+        results.push({ insufficientItemId: null, createdChangeIds: [] });
+        continue;
       }
-      remainingQuantities.set(change.itemId, remaining);
+
+      remainingQuantities ??= new Map(Object.entries(await getItemQuantitiesForCustomer({
+        prisma: tx,
+        tenancyId,
+        customerType: "team",
+        customerId: billingTeamId,
+      })));
+      const nextQuantities: Map<string, number> = new Map(remainingQuantities);
+      let insufficientItemId: MeteredPlanItemId | null = null;
+      for (const change of ownedChanges) {
+        const remaining = (nextQuantities.get(change.itemId) ?? 0) + change.quantity;
+        if (remaining < 0) {
+          insufficientItemId = change.itemId;
+          break;
+        }
+        nextQuantities.set(change.itemId, remaining);
+      }
+      if (insufficientItemId != null) {
+        results.push({ insufficientItemId, createdChangeIds: [] });
+        continue;
+      }
+      remainingQuantities = nextQuantities;
+      for (const { id } of ownedChanges) claimedIds.add(id);
+      acceptedChanges.push(...ownedChanges);
+      results.push({ insufficientItemId: null, createdChangeIds: ownedChanges.map(({ id }) => id) });
     }
 
-    const persistResult = await Result.fromPromise(tx.itemQuantityChange.createMany({
-      data: ownedChanges,
-      skipDuplicates: true,
-    }));
-    if (persistResult.status === "error") {
-      throw persistResult.error;
+    if (acceptedChanges.length > 0) {
+      const persistResult = await Result.fromPromise(tx.itemQuantityChange.createMany({
+        data: acceptedChanges,
+        skipDuplicates: true,
+      }));
+      if (persistResult.status === "error") {
+        throw persistResult.error;
+      }
+      const postedIds = new Set(postedChanges.map(({ id }) => id));
+      postedChanges = [...postedChanges, ...acceptedChanges.filter(({ id }) => !postedIds.has(id))];
     }
+    const bulldozerChanges = [...replayedChanges, ...acceptedChanges];
+    if (bulldozerChanges.length > 0) {
+      await bulldozerWriteItemQuantityChanges(bulldozerChanges);
+    }
+    finalBulldozerIds = new Set(bulldozerChanges.map(({ id }) => id));
+    return results;
+  }));
 
-    postedChanges = ownedChanges;
-    await bulldozerWriteItemQuantityChanges(ownedChanges);
-    return { insufficientItemId: null, createdChangeIds: ownedChanges.map(({ id }) => id) };
-  })));
+  // A retried transaction attempt may have posted rows that the committed
+  // attempt no longer accepted (e.g. the balance changed in between).
+  const abandoned = postedChanges.filter(({ id }) => !finalBulldozerIds.has(id));
+  if (abandoned.length > 0) {
+    const compensation = await Result.fromPromise(bulldozerWriteItemQuantityChanges(abandoned.map((change) => ({ ...change, quantity: 0 }))));
+    if (compensation.status === "error") {
+      captureError("plan-metering-bulldozer-compensation", compensation.error);
+    }
+  }
+  return results;
 }
 
 export async function rollbackPlanItemDebits(

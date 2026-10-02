@@ -191,4 +191,66 @@ describe("plan metering persistence", () => {
     expect(mocks.createMany).not.toHaveBeenCalled();
     expect(mocks.bulldozerWriteItemQuantityChanges).not.toHaveBeenCalled();
   });
+
+  it("coalesces concurrent debits for one customer into a single locked transaction", async () => {
+    const debit = { itemId: ITEM_IDS.analyticsEvents, quantity: 1 } as const;
+    const results = await Promise.all([
+      tryDecreasePlanItemQuantities("billing-team", [debit]),
+      tryDecreasePlanItemQuantities("billing-team", [debit]),
+      tryDecreasePlanItemQuantities("billing-team", [debit]),
+    ]);
+
+    expect(results.every((result) => result.insufficientItemId === null && result.createdChangeIds.length === 1)).toBe(true);
+    expect(new Set(results.flatMap((result) => result.createdChangeIds)).size).toBe(3);
+    expect(mocks.executeRaw).toHaveBeenCalledTimes(1);
+    expect(mocks.createMany).toHaveBeenCalledTimes(1);
+    expect(mocks.bulldozerWriteItemQuantityChanges).toHaveBeenCalledTimes(1);
+    expect(mocks.bulldozerWriteItemQuantityChanges.mock.calls[0][0]).toHaveLength(3);
+  });
+
+  it("rejects only the coalesced debit that exceeds the remaining balance", async () => {
+    mocks.getItemQuantitiesForCustomer.mockResolvedValue({ [ITEM_IDS.analyticsEvents]: 2 });
+    const results = await Promise.all([
+      tryDecreasePlanItemQuantities("billing-team", [{ itemId: ITEM_IDS.analyticsEvents, quantity: 1 }]),
+      tryDecreasePlanItemQuantities("billing-team", [{ itemId: ITEM_IDS.analyticsEvents, quantity: 5 }]),
+      tryDecreasePlanItemQuantities("billing-team", [{ itemId: ITEM_IDS.analyticsEvents, quantity: 1 }]),
+    ]);
+
+    expect(results.map((result) => result.insufficientItemId)).toEqual([null, ITEM_IDS.analyticsEvents, null]);
+    expect(results[1].createdChangeIds).toEqual([]);
+    expect(mocks.createMany.mock.calls[0][0].data).toHaveLength(2);
+  });
+
+  it("isolates a failing coalesced batch by retrying each debit on its own", async () => {
+    const persistenceError = new Error("batch failed");
+    mocks.createMany.mockRejectedValueOnce(persistenceError);
+    const results = await Promise.all([
+      tryDecreasePlanItemQuantities("billing-team", [{ itemId: ITEM_IDS.analyticsEvents, quantity: 1 }]),
+      tryDecreasePlanItemQuantities("billing-team", [{ itemId: ITEM_IDS.analyticsEvents, quantity: 1 }]),
+    ]);
+
+    expect(results.every((result) => result.createdChangeIds.length === 1)).toBe(true);
+    expect(mocks.createMany).toHaveBeenCalledTimes(3);
+    expect(mocks.bulldozerWriteItemQuantityChanges).toHaveBeenCalledTimes(2);
+  });
+
+  it("zeroes Bulldozer rows posted by a retried attempt that the committed attempt rejected", async () => {
+    mocks.getItemQuantitiesForCustomer
+      .mockResolvedValueOnce({ [ITEM_IDS.analyticsEvents]: 10 })
+      .mockResolvedValueOnce({ [ITEM_IDS.analyticsEvents]: 0 });
+    mocks.retryTransaction.mockImplementationOnce(async (_prisma, callback) => {
+      const tx = {
+        $executeRaw: mocks.executeRaw,
+        itemQuantityChange: { createMany: mocks.createMany, deleteMany: mocks.deleteMany, findMany: mocks.findMany },
+      };
+      await callback(tx);
+      return await callback(tx);
+    });
+
+    const result = await tryDecreasePlanItemQuantities("billing-team", [{ itemId: ITEM_IDS.analyticsEvents, quantity: 1 }]);
+
+    expect(result.insufficientItemId).toBe(ITEM_IDS.analyticsEvents);
+    const posted = mocks.bulldozerWriteItemQuantityChanges.mock.calls[0][0][0];
+    expect(mocks.bulldozerWriteItemQuantityChanges).toHaveBeenLastCalledWith([{ ...posted, quantity: 0 }]);
+  });
 });

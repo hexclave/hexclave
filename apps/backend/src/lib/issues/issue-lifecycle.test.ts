@@ -14,8 +14,8 @@ import {
 } from "./issue-lifecycle";
 
 const TEST_PREFIX = `issue-lifecycle-${randomUUID()}`;
-const ACTOR_USER_ID = "00000000-0000-4000-8000-000000000001";
-const ASSIGNEE_USER_ID = "00000000-0000-4000-8000-000000000002";
+let ACTOR_USER_ID: string;
+let ASSIGNEE_USER_ID: string;
 const TEAM_ID = "00000000-0000-4000-8000-000000000003";
 
 const unresolvedState: IssueLifecycleState = {
@@ -133,16 +133,30 @@ async function createTestIssue(target: Tenancy = tenancy): Promise<string> {
 }
 
 beforeAll(async () => {
-  const rows = await globalPrismaClient.tenancy.findMany({
-    orderBy: { id: "asc" },
-    select: { id: true },
-    take: 2,
-  });
+  const rows = await globalPrismaClient.$queryRaw<Array<{ id: string }>>`
+    SELECT t."id"::text AS "id"
+    FROM "Tenancy" t
+    LEFT JOIN "ProjectUser" u ON u."tenancyId" = t."id"
+    GROUP BY t."id"
+    ORDER BY count(u."projectUserId") DESC, t."id" ASC
+    LIMIT 2
+  `;
   const first = rows.at(0);
   if (first === undefined) throw new Error("Issue lifecycle integration tests need a seeded tenancy.");
   const resolved = await getTenancy(first.id);
   if (resolved === null) throw new Error("The primary test tenancy disappeared.");
   tenancy = resolved;
+  const users = await globalPrismaClient.projectUser.findMany({
+    where: { tenancyId: tenancy.id },
+    orderBy: { projectUserId: "asc" },
+    take: 2,
+    select: { projectUserId: true },
+  });
+  const actor = users.at(0);
+  const assignee = users.at(1);
+  if (actor === undefined || assignee === undefined) throw new Error("Issue lifecycle integration tests need a tenancy with two users.");
+  ACTOR_USER_ID = actor.projectUserId;
+  ASSIGNEE_USER_ID = assignee.projectUserId;
   const second = rows.at(1);
   if (second !== undefined) otherTenancy = await getTenancy(second.id);
 });

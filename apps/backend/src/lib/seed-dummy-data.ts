@@ -2647,6 +2647,20 @@ async function seedDummyIssues(options: {
     return;
   }
 
+  // Seeding runs against whatever schema is migrated, which may predate the
+  // issue tables during rolling deployments.
+  const [{ issueTablesExist }] = await prisma.$queryRaw<{ issueTablesExist: boolean }[]>`
+    SELECT (
+      to_regclass('"Issue"') IS NOT NULL
+      AND to_regclass('"IssueMaterialization"') IS NOT NULL
+      AND to_regclass('"IssueCounter"') IS NOT NULL
+    ) AS "issueTablesExist"
+  `;
+  if (!issueTablesExist) {
+    console.warn("Skipping dummy issue seeding because the issue tables have not been migrated yet");
+    return;
+  }
+
   if (!freshProject) {
     await prisma.$executeRaw`DELETE FROM "Issue" WHERE "tenancyId" = ${tenancy.id}::uuid`;
     await prisma.$executeRaw`DELETE FROM "IssueMaterialization" WHERE "tenancyId" = ${tenancy.id}::uuid`;
