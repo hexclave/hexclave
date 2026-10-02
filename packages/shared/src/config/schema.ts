@@ -1041,7 +1041,10 @@ function collectAnalyticsEventsIncludedItems(obj: unknown, path: string[] = []):
 }
 
 function ensureAnalyticsSpansPaymentConfig(res: Record<string, any>): Record<string, any> {
-  if (!configOverrideHasPath(res, ["payments", "items", ITEM_IDS.analyticsEvents])) {
+  if (
+    !configOverrideHasPath(res, ["payments", "items", ITEM_IDS.analyticsEvents])
+    && collectAnalyticsEventsIncludedItems(res).length === 0
+  ) {
     return res;
   }
 

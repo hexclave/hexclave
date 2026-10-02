@@ -5,7 +5,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 import { ArrowRightIcon, CaretRightIcon, ChartLineIcon, ClockIcon, KeyboardIcon, LinkSimpleIcon, StackIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AiSpanChip, aiSpanSummaryFromRaw } from "./ai-span";
+import { AiSpanChip, tryAiSpanSummaryFromRaw } from "./ai-span";
 import {
   eventMatchesHighlight,
   formatDuration,
@@ -673,7 +673,7 @@ export function TraceWaterfall({
               const widthPct = Math.max(rightPct - leftPct, 0.4);
               const fades = open || futureEndLabel !== undefined;
               const hasError = spanHasError(span);
-              const aiSummary = aiSpanSummaryFromRaw(span.raw);
+              const aiSummary = tryAiSpanSummaryFromRaw(span.raw);
               const isHighlighted = highlightedRowIndex === rowIndex;
               return (
                 <div

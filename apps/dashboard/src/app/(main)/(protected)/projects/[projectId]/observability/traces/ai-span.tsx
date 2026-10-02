@@ -5,6 +5,7 @@ import { Label } from "@/components/ui/label";
 import { CopyButton } from "@/components/ui/copy-button";
 import { cn } from "@/lib/utils";
 import type { Json } from "@hexclave/shared/dist/utils/json";
+import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { isRecord } from "@hexclave/shared/dist/utils/objects";
 import { ArrowElbowDownRightIcon, SparkleIcon, WrenchIcon, type Icon } from "@phosphor-icons/react";
 import { Fragment, useState } from "react";
@@ -47,6 +48,15 @@ function tokenCountColumn(column: string, value: Json | undefined): string | nul
     return BigInt(value).toString();
   }
   throw new Error(`AI token column ${column} must be a non-negative integer, received ${JSON.stringify(value)}`);
+}
+
+export function tryAiSpanSummaryFromRaw(raw: RowData): AiSpanSummary | null {
+  try {
+    return aiSpanSummaryFromRaw(raw);
+  } catch (error) {
+    captureError("observability-ai-span-summary-invalid", error);
+    return null;
+  }
 }
 
 export function aiSpanSummaryFromRaw(raw: RowData): AiSpanSummary | null {
@@ -611,7 +621,7 @@ function ToolInvocationSection({ summary, invocation }: { summary: AiSpanSummary
  * it can be mounted unconditionally next to the other extra content.
  */
 export function AiSpanDetailSection({ row }: { row: RowData }) {
-  const summary = aiSpanSummaryFromRaw(row);
+  const summary = tryAiSpanSummaryFromRaw(row);
   if (summary == null) return null;
   const fields = aiSpanDetailFields(summary);
   const invocation = aiToolInvocationFromData(row.data);

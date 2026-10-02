@@ -51,7 +51,7 @@ To use analytics in your project:
 2. Initialize Hexclave on your frontend with `HexclaveClientApp`/`HexclaveProvider` and a persistent `tokenStore` (e.g. `"cookie"`, or `"nextjs-cookie"` in Next.js)
 3. Sign in with a real user session
 4. Open the app and navigate/click around
-5. Open **Warehouse -> Tables** and inspect the `events` table to confirm events are arriving
+5. Enable the Warehouse app (**Apps -> Warehouse**), then open **Warehouse -> Tables** and inspect the `events` table to confirm events are arriving
 
 SDK analytics capture and session replay recording are **on by default** once the Analytics app is enabled — you do not need to set `analytics.enabled` or `analytics.replays.enabled` unless you want to opt out (pass `analytics: { enabled: false }` or `analytics: { replays: { enabled: false } }`).
 
