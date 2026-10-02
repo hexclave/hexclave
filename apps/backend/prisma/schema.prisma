@@ -1353,15 +1353,7 @@ enum DraftThemeMode {
   CUSTOM
 }
 
-// These legacy tables are deliberately kept in place (no migration drops them)
-// as the only rollback
-// copy of historical data. They stay declared here with
-// @@ignore (no Prisma Client API) because `db:migration-gen` diffs the LIVE
-// database against this schema: without these models, the next generated
-// migration for any unrelated change would silently include
-// DROP TABLE "Event"/"EventIpInfo" and destroy that rollback copy. Remove
-// these models only together with the deliberate
-// retention migration that drops the tables.
+//#region Events
 
 model Event {
   id String @id @default(uuid()) @db.Uuid
@@ -1369,26 +1361,32 @@ model Event {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // if isWide == false, then eventEndedAt is always equal to eventStartedAt
   isWide         Boolean
   eventStartedAt DateTime
   eventEndedAt   DateTime
 
-  // Prisma does not support nullable scalar lists. This ignored model is
-  // retained only so migration diff does not propose dropping the nullable
-  // legacy TEXT[] column; it has no Prisma Client API or write path.
+  // TODO: add event_type, and at least one of either system_event_type or event_type is always set
   systemEventTypeIds String[]
   data               Json
 
+  // ============================== BEGIN END USER PROPERTIES ==============================
+  // Below are properties describing the end user that caused this event to be logged
+  // This is different from a request IP. See: apps/backend/src/lib/end-users.tsx
+
+  // Note that the IP may have been spoofed, unless isEndUserIpInfoGuessTrusted is true
   endUserIpInfoGuessId        String?      @db.Uuid
   endUserIpInfoGuess          EventIpInfo? @relation("EventIpInfo", fields: [endUserIpInfoGuessId], references: [id])
+  // If true, then endUserIpInfoGuess is not spoofed (might still be behind VPNs/proxies). If false, then the values may be spoofed.
   isEndUserIpInfoGuessTrusted Boolean      @default(false)
+  // =============================== END END USER PROPERTIES ===============================
 
   @@index([data(ops: JsonbPathOps)], type: Gin)
   @@index([createdAt])
   @@index([createdAt, id])
-  @@ignore
 }
 
+// An IP address that was seen in an event. Use the location fields instead of refetching the location from the ip, as the real-world geoip data may have changed since the event was logged.
 model EventIpInfo {
   id String @id @default(uuid()) @db.Uuid
 
@@ -1405,9 +1403,9 @@ model EventIpInfo {
   updatedAt DateTime @updatedAt
 
   events Event[] @relation("EventIpInfo")
-
-  @@ignore
 }
+
+//#endregion
 
 
 model CliAuthAttempt {

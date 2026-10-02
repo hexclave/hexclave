@@ -1,3 +1,4 @@
+import { assertObservabilityEnabled } from "@/lib/issues/observability-gate";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, serverOrHigherAuthTypeSchema, yupArray, yupBoolean, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { isRecord } from "@hexclave/shared/dist/utils/objects";
@@ -211,6 +212,7 @@ export function createArtifactRegistrationRoute(service: ArtifactUploadService) 
       body: artifactRegistrationResponseSchema,
     }),
     handler: async ({ auth, body }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const result = await registerArtifactManifest(service, auth.tenancy, body);
         const statusCode: 200 | 201 = result.status === "registered" ? 201 : 200;
@@ -245,6 +247,7 @@ export function createArtifactFinalizeRoute(service: Pick<ArtifactPublicationSer
       body: artifactFinalizeResponseSchema,
     }),
     handler: async ({ auth, body }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const result = await finalizeArtifactManifest(service, auth.tenancy, body);
         return {
@@ -278,6 +281,7 @@ export function createArtifactLookupRoute(service: ArtifactUploadService) {
       body: artifactLookupResponseSchema,
     }),
     handler: async ({ auth, query }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const result = await lookupArtifact(service, auth.tenancy, query);
         if (result === null) {

@@ -1,6 +1,6 @@
 import { OTLP_METRIC_TYPES, queryOtlpMetrics } from "@/lib/otlp/metric-query";
+import { assertObservabilityEnabled } from "@/lib/issues/observability-gate";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { KnownErrors } from "@hexclave/shared";
 import {
   adaptSchema,
   adminAuthTypeSchema,
@@ -34,9 +34,7 @@ export const POST = createSmartRouteHandler({
     body: jsonSchema.defined(),
   }),
   async handler({ auth, body }) {
-    if (auth.tenancy.config.apps.installed["observability"]?.enabled !== true) {
-      throw new KnownErrors.ObservabilityNotEnabled();
-    }
+    assertObservabilityEnabled(auth.tenancy);
 
     return {
       statusCode: 200,

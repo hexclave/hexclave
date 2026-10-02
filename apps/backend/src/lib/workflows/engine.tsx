@@ -161,6 +161,11 @@ type ScheduledDefinitionRow = {
 const SCHEDULE_EVENT_INSERT_CHUNK_SIZE = 1000;
 
 async function materializeScheduleOccurrences(tenancyCache: Map<string, Tenancy | null>, deadlineMs: number): Promise<boolean> {
+  // Paused definitions are filtered out rather than materialized-then-dropped:
+  // an every-minute schedule paused for a month would otherwise write ~43k
+  // outbox rows that the event gate immediately discards. The resume path
+  // fast-forwards the schedule cursors (see setWorkflowPaused), so the
+  // interval spent paused cannot come back as a catch-up burst.
   const definitions = await globalPrismaClient.$queryRaw<ScheduledDefinitionRow[]>(Prisma.sql`
     SELECT d."tenancyId", d."workflowId", d."latestVersion", v."manifest", v."createdAt" AS "deployedAt"
     FROM "WorkflowDefinition" d
@@ -273,6 +278,11 @@ async function materializeDefinitionSchedules(definition: ScheduledDefinitionRow
       }
       didWork = true;
     }
+    // GREATEST, not a blind write: `now` was captured before this (possibly
+    // slow, chunked) pass began, so an unconditional update can move the
+    // cursor BACKWARDS past a value written since — including a resume's
+    // fast-forward, which would hand the paused interval back as catch-up.
+    // Also stops two overlapping ticks from undoing each other's progress.
     await globalPrismaClient.$executeRaw(Prisma.sql`
       UPDATE "WorkflowScheduleCursor"
       SET "lastMaterializedAt" = GREATEST("lastMaterializedAt", ${now})
@@ -301,6 +311,15 @@ type DefinitionWithManifest = {
   manifest: WorkflowManifestJson,
 };
 
+/**
+ * Workflow ids paused at THIS moment. Deliberately not folded into the cached
+ * definition list: that cache lives for a whole batch, and a batch can span an
+ * entire tick (run-key derivation is a sandbox invocation). A resume landing
+ * mid-batch would then keep matching events against a stale `pausedAt` and
+ * drop them — permanently, because they get marked processed either way. An
+ * extra dispatch shortly after a resume is the accepted approximation; a
+ * permanent drop after one is not.
+ */
 async function listPausedWorkflowIdsForTenancy(tenancyId: string): Promise<Set<string>> {
   const rows = await globalPrismaClient.$queryRaw<{ workflowId: string }[]>(Prisma.sql`
     SELECT "workflowId" FROM "WorkflowDefinition"
@@ -313,6 +332,10 @@ async function listDefinitionsForTenancy(tenancyId: string, cache: Map<string, D
   const cached = cache.get(tenancyId);
   if (cached != null) return cached;
   // This read controls the irreversible processedAt decision below, so it
+  // must observe the primary rather than a potentially stale replica. Raw
+  // queries are not in the read-replicas extension's routing list (only the
+  // model-level finders and findRaw/aggregateRaw are), so this stays on the
+  // primary. Rewriting it as a findMany would silently move it to a replica.
   const rows = await globalPrismaClient.$queryRaw<DefinitionWithManifest[]>(Prisma.sql`
     SELECT d."workflowId", d."latestVersion", v."manifest"
     FROM "WorkflowDefinition" d
@@ -526,14 +549,23 @@ async function processWorkflowEvents(tenancyCache: Map<string, Tenancy | null>, 
       if (tenancy != null) {
         const definitions = await listDefinitionsForTenancy(event.tenancyId, definitionCache);
         const matching = definitions.filter((definition) => workflowDefinitionMatchesEvent(definition.workflowId, definition.manifest, event));
+        // Only costs a query for events that actually match something.
         const pausedWorkflowIds = matching.length === 0 ? new Set<string>() : await listPausedWorkflowIdsForTenancy(event.tenancyId);
         const skippedPausedWorkflowIds = new Set<string>();
         let processedEveryDefinition = true;
         for (const definition of matching) {
+          // Paused workflows consume their matching events without dispatching
+          // them. The event is still marked processed below (it may match
+          // other, unpaused definitions), so events the engine sees during a
+          // pause are dropped rather than queued up for the resume.
           if (pausedWorkflowIds.has(definition.workflowId)) {
             skippedPausedWorkflowIds.add(definition.workflowId);
             continue;
           }
+          // runKey derivation is itself a sandbox invocation. Leave the
+          // event unprocessed once the latest-start deadline arrives;
+          // deterministic run ids make replay safe for definitions that
+          // were already handled in this partial pass.
           if (Date.now() >= deadlineMs) {
             processedEveryDefinition = false;
             break;

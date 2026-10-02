@@ -1,6 +1,7 @@
 import withPostHog from "@/analytics";
 import { arePlanLimitsEnforced } from "@/lib/plan-entitlements";
 import { tryDecreasePlanItemQuantities } from "@/lib/plan-metering";
+import { globalPrismaClient } from "@/prisma-client";
 import { runAsynchronouslyAndWaitUntil } from "@/utils/background-tasks";
 import { ITEM_IDS } from "@hexclave/shared/dist/plans";
 import { urlSchema, yupBoolean, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
@@ -385,6 +386,28 @@ export async function logEvent<T extends EventType[]>(
         return;
       }
     }
+
+    await globalPrismaClient.event.create({
+      data: {
+        systemEventTypeIds: [...allEventTypes].map(eventType => eventType.id),
+        data: data as any,
+        isEndUserIpInfoGuessTrusted: requestIpInfo?.isTrusted ?? true,
+        endUserIpInfoGuess: requestIpInfo ? {
+          create: {
+            ip: requestIpInfo.ip,
+            countryCode: requestIpInfo.countryCode,
+            regionCode: requestIpInfo.regionCode,
+            cityName: requestIpInfo.cityName,
+            tzIdentifier: requestIpInfo.tzIdentifier,
+            latitude: requestIpInfo.latitude,
+            longitude: requestIpInfo.longitude,
+          },
+        } : undefined,
+        isWide,
+        eventStartedAt: timeRange.start,
+        eventEndedAt: timeRange.end,
+      },
+    });
 
     const requestedClickhouseTypes = clickhouseEventTypesToInsert(eventTypes);
     const tokenRefreshEvent = requestedClickhouseTypes.find((eventType) => eventType.id === "$token-refresh");

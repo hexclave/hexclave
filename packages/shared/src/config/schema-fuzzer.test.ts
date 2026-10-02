@@ -276,9 +276,10 @@ const environmentSchemaFuzzerConfig = [{
       }],
     }],
     errorGrouping: [{
-      activeConfigId: [undefined, "hexclave-js:2026-08-01"] as const,
+      activeConfigId: [undefined, "hexclave-js:2026-08-01", "hexclave-js:2026-08-20"] as const,
       readableConfigIds: [{
         "hexclave-js:2026-08-01": [{ enabled: [true, false] }],
+        "hexclave-js:2026-08-20": [{ enabled: [true, false] }],
       }],
     }],
   }],

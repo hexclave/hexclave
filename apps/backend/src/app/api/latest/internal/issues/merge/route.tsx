@@ -1,8 +1,8 @@
 import { mergeIssues } from "@/lib/issues/issue-merge";
 import { emitIssueLifecycleWebhook } from "@/lib/issues/issue-webhooks";
 import { runAsynchronouslyAndWaitUntil } from "@/utils/background-tasks";
+import { assertObservabilityEnabled } from "@/lib/issues/observability-gate";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { KnownErrors } from "@hexclave/shared";
 import { IssueMergeRequestSchema, IssueMergeResponseSchema } from "@hexclave/shared/dist/interface/admin-issues";
 import { adaptSchema, adminAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { mapWithConcurrency } from "@hexclave/shared/dist/utils/promises";
@@ -25,9 +25,7 @@ export const POST = createSmartRouteHandler({
     body: IssueMergeResponseSchema,
   }),
   handler: async ({ auth, body }) => {
-    if (auth.tenancy.config.apps.installed["observability"]?.enabled !== true) {
-      throw new KnownErrors.ObservabilityNotEnabled();
-    }
+    assertObservabilityEnabled(auth.tenancy);
 
     const { primaryIssueId, mergedIssueIds } = await mergeIssues({
       tenancy: auth.tenancy,

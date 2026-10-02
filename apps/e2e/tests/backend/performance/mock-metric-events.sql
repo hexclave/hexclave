@@ -186,6 +186,120 @@ SELECT
   (SELECT COUNT(*) FROM insert_otp_methods) AS otp_created,
   (SELECT COUNT(*) FROM insert_oauth_methods) AS oauth_created;
 
-SELECT 0 AS events_created;
+-- Insert user-activity events across 100 countries, 20 per user
+WITH run_meta AS (
+  SELECT gen_random_uuid()::text AS seed_run_id
+),
+tenancy AS (
+  SELECT id
+  FROM "Tenancy"
+  WHERE "projectId" = 'internal'
+    AND "branchId" = 'main'
+    AND "organizationId" IS NULL
+  LIMIT 1
+),
+country_list AS (
+  SELECT country_code, ordinality
+  FROM unnest(ARRAY[
+    'US','IN','BR','DE','GB','ID','FR','CA','VN','AU','PK','HK','NL','JP','ES','NG','BD','PH','KE','ZA',
+    'TH','TR','SG','IT','NO','CH','PL','MX','SE','PT','AR','EG','MY','NP','AE','TW','LK','KR','MA','RO',
+    'CO','DK','UA','SA','GH','IL','CN','TN','BE','CL','AT','ET','CZ','DZ','RS','NZ','IE','FI','PE','RU',
+    'UG','GR','CM','HU','UZ','IQ','RW','EE','KZ','KH','SK','GE','AO','HR','SN','SI','LV','JO','EC','LB',
+    'CG','VE','PA','UY','TZ','BG','LT','LU','ZW','DO','BJ','BO','BY','MG','MW','XK','CI','IR','GT','MQ'
+  ]) WITH ORDINALITY AS t(country_code, ordinality)
+),
+country_data AS (
+  SELECT
+    country_code,
+    ordinality,
+    'Region-' || country_code AS region_code,
+    'City-' || country_code AS city_name,
+    (-60 + ((ordinality * 7) % 120))::double precision AS latitude,
+    (((ordinality * 13) % 360) - 180)::double precision AS longitude,
+    'TZ/' || country_code AS tz_identifier
+  FROM country_list
+),
+activity_users AS (
+  SELECT
+    "tenancyId",
+    "projectUserId",
+    ROW_NUMBER() OVER (ORDER BY "createdAt" DESC, "projectUserId") AS rn
+  FROM "ProjectUser"
+  WHERE "tenancyId" = (SELECT id FROM tenancy)
+  LIMIT 300
+),
+event_matrix AS (
+  SELECT
+    gen_random_uuid() AS event_id,
+    gen_random_uuid() AS ip_info_id,
+    au."tenancyId",
+    au."projectUserId",
+    au.rn,
+    occ AS occurrence_index,
+    (
+      (current_date - ((au.rn + occ) % 30) * INTERVAL '1 day')::timestamp
+      + (((au.rn + occ) % 24) + 1) * INTERVAL '1 hour'
+      + ((au.rn * 11 + occ * 17) % 60) * INTERVAL '1 minute'
+    ) AS started_at,
+    cd.country_code,
+    cd.region_code,
+    cd.city_name,
+    cd.latitude,
+    cd.longitude,
+    cd.tz_identifier,
+    ((au.rn + occ) % 500) AS geo_variant
+  FROM activity_users au
+  CROSS JOIN generate_series(0, 999) AS occ
+  JOIN country_data cd ON cd.ordinality = ((au.rn + occ) % 100) + 1
+),
+insert_ip_info AS (
+  INSERT INTO "EventIpInfo"
+    ("id","ip","countryCode","regionCode","cityName","latitude","longitude","tzIdentifier","createdAt","updatedAt")
+  SELECT
+    em.ip_info_id,
+    FORMAT('%s.%s.%s.%s',
+      10 + (em.geo_variant % 200),
+      1 + ((em.rn + em.geo_variant) % 200),
+      1 + ((em.occurrence_index * 3 + em.geo_variant) % 200),
+      1 + ((em.rn * 11 + em.occurrence_index + em.geo_variant) % 200)
+    ),
+    em.country_code,
+    em.region_code,
+    em.city_name,
+    em.latitude,
+    em.longitude,
+    em.tz_identifier,
+    em.started_at,
+    em.started_at
+  FROM event_matrix em
+),
+insert_events AS (
+  INSERT INTO "Event"
+    ("id","createdAt","updatedAt","isWide","eventStartedAt","eventEndedAt",
+     "systemEventTypeIds","data","endUserIpInfoGuessId","isEndUserIpInfoGuessTrusted")
+  SELECT
+    em.event_id,
+    em.started_at,
+    em.started_at + INTERVAL '5 minutes',
+    false,
+    em.started_at,
+    em.started_at + INTERVAL '5 minutes',
+    ARRAY['$user-activity'],
+    jsonb_build_object(
+      'userId', em."projectUserId"::text,
+      'projectId', 'internal',
+      'branchId', 'main',
+      'isAnonymous', 'false',
+      'seedTag', 'perf-metrics-mock',
+      'seedRunId', rm.seed_run_id,
+      'countryCode', em.country_code
+    ),
+    em.ip_info_id,
+    ((em.rn + em.occurrence_index) % 2 = 0)
+  FROM event_matrix em
+  CROSS JOIN run_meta rm
+  RETURNING 1
+)
+SELECT COUNT(*) AS events_created FROM insert_events;
 
 COMMIT;

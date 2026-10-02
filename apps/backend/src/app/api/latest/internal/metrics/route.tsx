@@ -270,38 +270,59 @@ async function loadActiveUsersByCountry(
 // by `loadActiveUsersByCountry`. This is the "live users right now" number on
 // the overview globe and works independently of whether the analytics app is
 // installed (unlike `analytics_overview.online_live`, which relies on
+// `$page-view` events).
 async function loadLiveUsersCount(
   tenancy: Tenancy,
   now: Date,
   includeAnonymous: boolean = false,
 ): Promise<number> {
   const since = new Date(now.getTime() - ACTIVE_USERS_BY_COUNTRY_WINDOW_MS);
-  const clickhouseClient = getClickhouseAdminClientForMetrics();
-  const res = await clickhouseClient.query({
-    query: `
-      SELECT uniqExact(user_id) AS live_users
-      FROM analytics_internal.events
-      WHERE event_type = '$token-refresh'
-        AND project_id = {projectId:String}
-        AND branch_id = {branchId:String}
-        AND user_id IS NOT NULL
-        AND event_at >= {since:DateTime}
-        AND ({includeAnonymous:UInt8} = 1 OR coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0)
-    `,
-    query_params: {
-      projectId: tenancy.project.id,
-      branchId: tenancy.branchId,
-      includeAnonymous: includeAnonymous ? 1 : 0,
-      since: formatClickhouseDateTimeParam(since),
-    },
-    format: "JSONEachRow",
-  });
-  const rows: { live_users: number | string }[] = await res.json();
-  const liveUsers = Number(rows[0]?.live_users ?? 0);
-  if (!Number.isSafeInteger(liveUsers) || liveUsers < 0) {
-    throw new HexclaveAssertionError("ClickHouse returned an invalid live-user count.", { rows });
+  try {
+    const clickhouseClient = getClickhouseAdminClientForMetrics();
+    const res = await clickhouseClient.query({
+      query: `
+        SELECT uniqExact(user_id) AS live_users
+        FROM analytics_internal.events
+        WHERE event_type = '$token-refresh'
+          AND project_id = {projectId:String}
+          AND branch_id = {branchId:String}
+          AND user_id IS NOT NULL
+          AND event_at >= {since:DateTime}
+          AND ({includeAnonymous:UInt8} = 1 OR coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0)
+      `,
+      query_params: {
+        projectId: tenancy.project.id,
+        branchId: tenancy.branchId,
+        includeAnonymous: includeAnonymous ? 1 : 0,
+        since: formatClickhouseDateTimeParam(since),
+      },
+      format: "JSONEachRow",
+    });
+    const rows: { live_users: number | string }[] = await res.json();
+    const liveUsers = Number(rows[0]?.live_users ?? 0);
+    if (!Number.isSafeInteger(liveUsers) || liveUsers < 0) {
+      throw new HexclaveAssertionError("ClickHouse returned an invalid live-user count.", { rows });
+    }
+    return liveUsers;
+  } catch (error) {
+    // Best-effort: a missing ClickHouse table or CH outage must not break the
+    // main metrics call. Sentry-log ClickHouseError vs. everything else so a
+    // noisy CH outage doesn't drown out real bugs.
+    const captureId = error instanceof ClickHouseError
+      ? "internal-metrics-load-live-users-count-clickhouse-error"
+      : "internal-metrics-load-live-users-count-unexpected-error";
+    captureError(captureId, new HexclaveAssertionError(
+      "Failed to load live users count for internal metrics.",
+      {
+        cause: error,
+        tenancyId: tenancy.id,
+        projectId: tenancy.project.id,
+        branchId: tenancy.branchId,
+        windowMs: ACTIVE_USERS_BY_COUNTRY_WINDOW_MS,
+      },
+    ));
+    return 0;
   }
-  return liveUsers;
 }
 
 export async function loadTotalUsers(tenancy: Tenancy, now: Date, includeAnonymous: boolean = false): Promise<DataPoints> {
@@ -772,38 +793,56 @@ async function loadMonthlyActiveUsers(tenancy: Tenancy, now: Date, includeAnonym
   const { since, untilExclusive } = getMetricsWindowBounds(now);
 
   const clickhouseClient = getClickhouseAdminClientForMetrics();
-  const result = await clickhouseClient.query({
-    query: `
-      SELECT uniqExact(sipHash64(normalized_user_id)) AS mau
-      FROM (
-        SELECT lower(trim(assumeNotNull(user_id))) AS normalized_user_id
-        FROM analytics_internal.events
-        WHERE event_type = '$token-refresh'
-          AND project_id = {projectId:String}
-          AND branch_id = {branchId:String}
-          AND user_id IS NOT NULL
-          AND event_at >= {since:DateTime}
-          AND event_at < {untilExclusive:DateTime}
-          AND ({includeAnonymous:UInt8} = 1 OR coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0)
-      )
-      WHERE match(normalized_user_id, {uuidRe:String})
-    `,
-    query_params: {
-      projectId: tenancy.project.id,
-      branchId: tenancy.branchId,
-      since: formatClickhouseDateTimeParam(since),
-      untilExclusive: formatClickhouseDateTimeParam(untilExclusive),
-      includeAnonymous: includeAnonymous ? 1 : 0,
-      uuidRe: MAU_UUID_V4_REGEX,
-    },
-    format: "JSONEachRow",
-  });
-  const rows: { mau: string | number }[] = await result.json();
-  const mau = Number(rows[0]?.mau ?? 0);
-  if (!Number.isSafeInteger(mau) || mau < 0) {
-    throw new HexclaveAssertionError("ClickHouse returned an invalid monthly-active-user count.", { rows });
+  try {
+    const result = await clickhouseClient.query({
+      query: `
+        SELECT uniqExact(sipHash64(normalized_user_id)) AS mau
+        FROM (
+          SELECT lower(trim(assumeNotNull(user_id))) AS normalized_user_id
+          FROM analytics_internal.events
+          WHERE event_type = '$token-refresh'
+            AND project_id = {projectId:String}
+            AND branch_id = {branchId:String}
+            AND user_id IS NOT NULL
+            AND event_at >= {since:DateTime}
+            AND event_at < {untilExclusive:DateTime}
+            AND ({includeAnonymous:UInt8} = 1 OR coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0)
+        )
+        WHERE match(normalized_user_id, {uuidRe:String})
+      `,
+      query_params: {
+        projectId: tenancy.project.id,
+        branchId: tenancy.branchId,
+        since: formatClickhouseDateTimeParam(since),
+        untilExclusive: formatClickhouseDateTimeParam(untilExclusive),
+        includeAnonymous: includeAnonymous ? 1 : 0,
+        uuidRe: MAU_UUID_V4_REGEX,
+      },
+      format: "JSONEachRow",
+    });
+    const rows: { mau: string | number }[] = await result.json();
+    const mau = Number(rows[0]?.mau ?? 0);
+    if (!Number.isSafeInteger(mau) || mau < 0) {
+      throw new HexclaveAssertionError("ClickHouse returned an invalid monthly-active-user count.", { rows });
+    }
+    return mau;
+  } catch (error) {
+    // Only swallow real ClickHouse errors (e.g. project hasn't enabled
+    // analytics yet, transient query failure). Anything else is a programming
+    // bug and should propagate to the smart route handler.
+    if (!(error instanceof ClickHouseError)) {
+      throw error;
+    }
+    captureError("internal-metrics-load-monthly-active-users-failed", new HexclaveAssertionError(
+      "Failed to load monthly active users for internal metrics.",
+      {
+        cause: error,
+        projectId: tenancy.project.id,
+        branchId: tenancy.branchId,
+      },
+    ));
+    return 0;
   }
-  return mau;
 }
 
 

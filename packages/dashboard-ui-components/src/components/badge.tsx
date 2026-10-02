@@ -61,6 +61,22 @@ function getShowLabelShowIcon(
   }
 }
 
+/**
+ * Small pill used for status tags, roles, categories, and other short
+ * labels. Not a variant-based component — pick a semantic `color` and
+ * optionally pass an `icon` (as a component type, not a rendered node).
+ *
+ * ```tsx
+ * <DesignBadge label="Verified" color="green" icon={CheckIcon} />
+ * <DesignBadge label="Beta" color="purple" />
+ * <DesignBadge label="Error" color="red" size="sm" />
+ * ```
+ *
+ * Notes:
+ * - Props are `label` + `color`, NOT `variant` + children.
+ * - `color` is one of: `"blue" | "cyan" | "purple" | "green" | "orange" | "red" | "zinc"`.
+ * - `icon` is optional but, if set via `contentMode: "icon"`, is required.
+ */
 export function DesignBadge({
   label,
   color,

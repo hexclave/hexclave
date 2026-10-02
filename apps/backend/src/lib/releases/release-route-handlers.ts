@@ -18,6 +18,7 @@ import {
   type ReleaseDetail,
   type ReleaseService,
 } from "@/lib/releases/release-service";
+import { assertObservabilityEnabled } from "@/lib/issues/observability-gate";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import {
   adaptSchema,
@@ -269,6 +270,7 @@ export function createReleaseLookupRoute(service: ReleaseService = releaseServic
       body: ReleaseDetailResponseSchema,
     }),
     handler: async ({ auth, query }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const detail = await service.getReleaseDetail({ tenancy: auth.tenancy }, query.version);
         if (detail === null) throw new StatusError(StatusError.NotFound, "Release not found");
@@ -298,6 +300,7 @@ export function createReleaseListRoute(service: ReleaseService = releaseService)
       body: ReleaseListResponseSchema,
     }),
     handler: async ({ auth, query }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const releases = await service.listReleases(
           { tenancy: auth.tenancy },
@@ -337,6 +340,7 @@ export function createReleaseArtifactListRoute(service: ReleaseService = release
       body: CatalogArtifactPageResponseSchema,
     }),
     handler: async ({ auth, query }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const page = await service.listReleaseArtifacts({ tenancy: auth.tenancy }, {
           releaseId: query.release_id,
@@ -369,6 +373,7 @@ export function createReleaseUpsertRoute(service: ReleaseService = releaseServic
       body: ReleaseResponseSchema,
     }),
     handler: async ({ auth, body }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const release = await service.upsertRelease({ tenancy: auth.tenancy }, {
           version: body.version,
@@ -406,6 +411,7 @@ export function createDeploymentRegistrationRoute(service: ReleaseService = rele
       body: DeploymentResponseSchema,
     }),
     handler: async ({ auth, body }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const deployment = await service.upsertDeployment({ tenancy: auth.tenancy }, {
           releaseId: body.release_id,
@@ -443,6 +449,7 @@ export function createCommitRegistrationRoute(service: ReleaseService = releaseS
       body: CommitResponseSchema,
     }),
     handler: async ({ auth, body }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const commit = await service.upsertCommit({ tenancy: auth.tenancy }, {
           releaseId: body.release_id,
@@ -481,6 +488,7 @@ export function createReleaseArtifactRegistrationRoute(service: ReleaseService =
       body: ArtifactResponseSchema,
     }),
     handler: async ({ auth, body }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const artifact = await service.upsertArtifact({ tenancy: auth.tenancy }, {
           releaseId: body.release_id,
@@ -517,6 +525,7 @@ export function createDebugIdAssociationRoute(service: ReleaseService = releaseS
       body: DebugIdResponseSchema,
     }),
     handler: async ({ auth, body }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const debugId = await service.upsertArtifactDebugId({ tenancy: auth.tenancy }, {
           releaseArtifactId: body.release_artifact_id,
@@ -558,6 +567,7 @@ export function createDebugIdLookupRoute(service: ReleaseService = releaseServic
       body: DebugIdLookupResponseSchema,
     }),
     handler: async ({ auth, query }) => {
+      assertObservabilityEnabled(auth.tenancy);
       try {
         const rows = await service.lookupArtifactDebugId({ tenancy: auth.tenancy }, {
           debugId: query.debug_id,

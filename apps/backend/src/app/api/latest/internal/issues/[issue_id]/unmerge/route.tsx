@@ -1,7 +1,7 @@
 import { resolveIssueIdentity } from "@/lib/issues/issue-identity";
 import { unmergeIssue } from "@/lib/issues/issue-merge";
+import { assertObservabilityEnabled } from "@/lib/issues/observability-gate";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { KnownErrors } from "@hexclave/shared";
 import { IssueUnmergeRequestSchema, IssueUnmergeResponseSchema } from "@hexclave/shared/dist/interface/admin-issues";
 import { adaptSchema, adminAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
@@ -25,9 +25,7 @@ export const POST = createSmartRouteHandler({
     body: IssueUnmergeResponseSchema,
   }),
   handler: async ({ auth, params, body }) => {
-    if (auth.tenancy.config.apps.installed["observability"]?.enabled !== true) {
-      throw new KnownErrors.ObservabilityNotEnabled();
-    }
+    assertObservabilityEnabled(auth.tenancy);
 
     const identity = await resolveIssueIdentity(auth.tenancy, params.issue_id);
     if (identity === null) throw new StatusError(StatusError.NotFound, "Issue not found");

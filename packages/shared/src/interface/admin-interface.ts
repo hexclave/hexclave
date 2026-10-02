@@ -7,7 +7,7 @@ import { AccessToken, InternalSession, RefreshToken } from "../sessions";
 import type { MoneyAmount } from "../utils/currency-constants";
 import { Result } from "../utils/results";
 import { urlString } from "../utils/urls";
-import { MetricsResponseBodySchema, type AnalyticsClickmapDevice, type AnalyticsClickmapKind, type AnalyticsClickmapResponse, type AnalyticsClickmapTokenResponse, type MetricsResponse, type MetricsUserCounts, type UserActivityResponse } from "./admin-metrics";
+import type { AnalyticsClickmapDevice, AnalyticsClickmapKind, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse, MetricsResponse, MetricsUserCounts, UserActivityResponse } from "./admin-metrics";
 import { EmailOutboxCrud } from "./crud/email-outbox";
 import { InternalEmailsCrud } from "./crud/emails";
 import { InternalApiKeysCrud } from "./crud/internal-api-keys";
@@ -701,7 +701,36 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       },
       null,
     );
-    return await MetricsResponseBodySchema.validate(await response.json());
+    const body = (await response.json()) as MetricsResponse;
+    // The yup schema's .optional().default(...) fallbacks only run during
+    // backend response validation, not on this client-side cast — apply them
+    // here too so the one-release-cycle tolerance for older servers that the
+    // schema comments promise actually holds for dashboard consumers. The
+    // Partial views widen the static type (which claims these are always
+    // defined) to match what an older server can actually send.
+    const rawBody: Partial<MetricsResponse> = body;
+    const rawAnalytics: Partial<MetricsResponse["analytics_overview"]> = body.analytics_overview;
+    return {
+      ...body,
+      live_users: rawBody.live_users ?? 0,
+      hourly_users: rawBody.hourly_users ?? [],
+      hourly_active_users: rawBody.hourly_active_users ?? [],
+      analytics_overview: {
+        ...body.analytics_overview,
+        hourly_page_views: rawAnalytics.hourly_page_views ?? [],
+        hourly_active_users: rawAnalytics.hourly_active_users ?? [],
+        hourly_visitors: rawAnalytics.hourly_visitors ?? [],
+        daily_anonymous_visitors_fallback: rawAnalytics.daily_anonymous_visitors_fallback ?? [],
+        anonymous_visitors_fallback: rawAnalytics.anonymous_visitors_fallback ?? 0,
+        top_regions: rawAnalytics.top_regions ?? [],
+        bounce_rate: rawAnalytics.bounce_rate ?? 0,
+        daily_bounce_rate: rawAnalytics.daily_bounce_rate ?? [],
+        daily_avg_session_seconds: rawAnalytics.daily_avg_session_seconds ?? [],
+        top_browsers: rawAnalytics.top_browsers ?? [],
+        top_operating_systems: rawAnalytics.top_operating_systems ?? [],
+        top_devices: rawAnalytics.top_devices ?? [],
+      },
+    };
   }
 
   async getPlanUsage(): Promise<PlanUsageResponse> {
