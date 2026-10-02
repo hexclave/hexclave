@@ -1,5 +1,5 @@
-import PageClient from "./page-client";
+import LegacyPageClient from "./legacy-page-client";
 
 export default function Page() {
-  return <PageClient appId="analytics" />;
+  return <LegacyPageClient />;
 }
