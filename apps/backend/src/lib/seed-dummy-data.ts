@@ -3,6 +3,7 @@ import { teamsCrudHandlers } from '@/app/api/latest/teams/crud';
 import { BooleanTrue, ContactChannelType, CustomerType, EmailOutboxCreatedWith, Prisma, PurchaseCreationSource, SubscriptionStatus } from '@/generated/prisma/client';
 import { getClickhouseAdminClient, type ClickHouseClient } from '@/lib/clickhouse';
 import { buildTelemetryWritePlan, insertBatchEvents, normalizeBatchEvents } from '@/lib/analytics-telemetry-writers';
+import { deleteFromIssueOccurrenceRollup } from '@/lib/issues/issue-rollup-storage';
 import { materializeIssuesFromBatch } from '@/lib/issues/issue-store';
 import { overrideBranchConfigOverride, overrideEnvironmentConfigOverride, setBranchConfigOverrideSource } from '@/lib/config';
 import { isPreviewModeEnabled } from '@/lib/preview-mode';
@@ -2669,9 +2670,9 @@ async function seedDummyIssues(options: {
       query: `DELETE FROM analytics_internal.events WHERE project_id = {projectId:String} AND event_type = '$error'`,
       query_params: { projectId },
     });
-    await clickhouseClient.command({
-      query: 'DELETE FROM analytics_internal.issue_occurrence_rollup WHERE project_id = {projectId:String}',
-      query_params: { projectId },
+    await deleteFromIssueOccurrenceRollup(clickhouseClient, {
+      whereSql: 'project_id = {projectId:String}',
+      queryParams: { projectId },
     });
   }
 

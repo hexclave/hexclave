@@ -4,6 +4,7 @@ import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IssueBatchDelta } from "./issue-materialization-contract";
+import { deleteFromIssueOccurrenceRollup } from "./issue-rollup-storage";
 import { materializeIssuesFromBatch } from "./issue-store";
 import { DEFAULT_GROUPING_CONFIG_ID } from "./grouping-config";
 import {
@@ -638,9 +639,9 @@ describe("unmerge counter seeding (real ClickHouse)", () => {
       query: `ALTER TABLE analytics_internal.events DELETE WHERE issue_hash IN ({moved:String}, {kept:String})`,
       query_params: { moved: movedHash, kept: keptHash },
     });
-    await client.command({
-      query: `ALTER TABLE analytics_internal.issue_occurrence_rollup DELETE WHERE issue_hash IN ({moved:String}, {kept:String})`,
-      query_params: { moved: movedHash, kept: keptHash },
+    await deleteFromIssueOccurrenceRollup(client, {
+      whereSql: "issue_hash IN ({moved:String}, {kept:String})",
+      queryParams: { moved: movedHash, kept: keptHash },
     });
   });
 

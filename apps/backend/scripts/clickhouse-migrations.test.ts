@@ -38,7 +38,6 @@ import {
   TRACE_SERVICES_COLUMNS,
   TRACE_SERVICES_SOURCE_SELECT_SQL,
   buildColumnUpgradeSql,
-  computeIssuesSubsystemFingerprint,
   computeSpansSubsystemFingerprint,
   buildIssueOccurrenceRollupCreateTableSql,
   buildIssueOccurrenceRollupMvSql,
@@ -400,35 +399,6 @@ describe("issue occurrence rollup", () => {
       "service_name", "deployment_environment_name",
       "occurrences", "users_state", "first_seen", "last_seen",
     ]);
-  });
-});
-
-describe("issues subsystem fingerprint", () => {
-  test("responds to a change in either object it owns", () => {
-    const current = computeIssuesSubsystemFingerprint();
-    expect(current).toMatch(/^[0-9a-f]{32}$/);
-    expect(current).not.toBe(computeIssuesSubsystemFingerprint(
-      buildIssueOccurrenceRollupCreateTableSql("analytics_internal").replace("INTERVAL 90", "INTERVAL 30"),
-    ));
-    expect(current).not.toBe(computeIssuesSubsystemFingerprint(
-      undefined,
-      buildIssueOccurrenceRollupMvSql("analytics_internal").replace("toStartOfHour", "toStartOfDay"),
-    ));
-    expect(current).not.toBe(computeSpansSubsystemFingerprint());
-  });
-
-  test("does NOT cover the logs grouping columns", () => {
-    const fingerprintInputs = [
-      buildIssueOccurrenceRollupCreateTableSql("analytics_internal"),
-      buildIssueOccurrenceRollupMvSql("analytics_internal"),
-    ].join("\n");
-    for (const name of ERROR_GROUPING_COLUMN_NAMES.filter((n) => n !== "issue_hash")) {
-      expect(fingerprintInputs, `${name} must not feed the issues fingerprint`).not.toContain(name);
-    }
-    const baseline = computeIssuesSubsystemFingerprint();
-    const widenedLogs: ClickhouseColumn[] = [...LOGS_COLUMNS, { name: "issue_platform", type: "LowCardinality(String)", default: "''" }];
-    expect(buildColumnUpgradeSql("analytics_internal.events", widenedLogs)).toContain("issue_platform");
-    expect(computeIssuesSubsystemFingerprint()).toBe(baseline);
   });
 });
 

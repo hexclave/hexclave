@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { getClickhouseAdminClient, type ClickHouseClient } from "@/lib/clickhouse";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { ensureDerivedRollupCurrent, type DerivedRollupSpec } from "./clickhouse-derived-rebuild";
 
 export async function runClickhouseMigrations() {
   const start = performance.now();
@@ -34,10 +35,7 @@ export async function runClickhouseMigrations() {
   const spansSubsystemFingerprint = computeSpansSubsystemFingerprint();
   await resetSpansSubsystemIfFingerprintChanged(client, spansSubsystemFingerprint);
 
-  // Apply the same fail-closed validation to the derived issue rollup and its
-  // materialized view only — never to the non-derivable telemetry columns.
-  const issuesSubsystemFingerprint = computeIssuesSubsystemFingerprint();
-  await resetIssuesSubsystemIfFingerprintChanged(client, issuesSubsystemFingerprint);
+  await client.command({ query: "DROP TABLE IF EXISTS analytics_internal.issues_schema_fingerprint" });
 
   // Create all tables in parallel
   await Promise.all([
@@ -62,7 +60,6 @@ export async function runClickhouseMigrations() {
     client.command({ query: SPAN_WRITES_TABLE_SQL }),
     client.command({ query: TRACE_ROOTS_TABLE_SQL }),
     client.command({ query: TRACE_SERVICES_TABLE_SQL }),
-    client.command({ query: ISSUE_OCCURRENCE_ROLLUP_TABLE_SQL }),
     client.command({ query: OTEL_METRICS_TABLE_BASE_SQL }),
   ]);
 
@@ -133,8 +130,10 @@ export async function runClickhouseMigrations() {
     client.command({ query: TRACE_ROOTS_MV_SQL }),
     client.command({ query: TRACE_SERVICES_MV_SQL }),
     client.command({ query: SPAN_WRITES_MV_SQL }),
-    client.command({ query: ISSUE_OCCURRENCE_ROLLUP_MV_SQL }),
   ]);
+
+  // Blue/green: readers keep the previous rollup until the new one holds all history.
+  await ensureDerivedRollupCurrent(client, buildIssueOccurrenceRollupSpec("analytics_internal"));
 
   // Only after the materialized views above are attached, so no span written
   // during the backfill can slip through unrecorded.
@@ -200,10 +199,7 @@ export async function runClickhouseMigrations() {
     client.command({ query: `GRANT SELECT ON default.${table} TO limited_user;` })
   ));
 
-  await Promise.all([
-    writeSpansSubsystemFingerprint(client, spansSubsystemFingerprint),
-    writeIssuesSubsystemFingerprint(client, issuesSubsystemFingerprint),
-  ]);
+  await writeSpansSubsystemFingerprint(client, spansSubsystemFingerprint);
 
   const elapsed = ((performance.now() - start) / 1000).toFixed(1);
   console.log(`[Clickhouse] Clickhouse migrations complete (${elapsed}s)`);
@@ -549,60 +545,6 @@ export async function resetSpansSubsystemIfFingerprintChanged(
 
 export async function writeSpansSubsystemFingerprint(client: ClickHouseClient, fingerprint: string): Promise<void> {
   await writeSubsystemFingerprint(client, SPANS_SUBSYSTEM_FINGERPRINT_TABLE, fingerprint);
-}
-
-const ISSUES_SUBSYSTEM_FINGERPRINT_TABLE = "analytics_internal.issues_schema_fingerprint";
-const ISSUES_SUBSYSTEM_MATERIALIZED_VIEWS = ["issue_occurrence_rollup_mv"] as const;
-const ISSUES_SUBSYSTEM_TABLES = ["issue_occurrence_rollup"] as const;
-
-export function computeIssuesSubsystemFingerprint(
-  rollupTableSql: string = ISSUE_OCCURRENCE_ROLLUP_TABLE_SQL,
-  rollupMvSql: string = ISSUE_OCCURRENCE_ROLLUP_MV_SQL,
-): string {
-  const canonical = JSON.stringify([rollupTableSql, rollupMvSql]);
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
-}
-
-function getIssuesFingerprintExpectedObjects(): readonly FingerprintExpectedObject[] {
-  return [
-    {
-      name: "issue_occurrence_rollup",
-      columns: [
-        { name: "project_id", type: "String" },
-        { name: "branch_id", type: "String" },
-        { name: "issue_hash", type: "String" },
-        { name: "bucket_start", type: "DateTime('UTC')" },
-        { name: "service_name", type: "LowCardinality(String)" },
-        { name: "deployment_environment_name", type: "LowCardinality(String)" },
-        { name: "occurrences", type: "SimpleAggregateFunction(sum, UInt64)" },
-        { name: "users_state", type: "AggregateFunction(uniq, Nullable(String))" },
-        { name: "first_seen", type: "SimpleAggregateFunction(min, DateTime64(3,'UTC'))" },
-        { name: "last_seen", type: "SimpleAggregateFunction(max, DateTime64(3,'UTC'))" },
-      ],
-    },
-    {
-      name: "issue_occurrence_rollup_mv",
-      asSelect: getMaterializedViewSelectBody(buildIssueOccurrenceRollupMvSql("analytics_internal")),
-    },
-  ];
-}
-
-export async function resetIssuesSubsystemIfFingerprintChanged(
-  client: ClickHouseClient,
-  fingerprint: string,
-): Promise<boolean> {
-  return await resetSubsystemIfFingerprintChanged(client, {
-    label: "Issues",
-    fingerprintTable: ISSUES_SUBSYSTEM_FINGERPRINT_TABLE,
-    materializedViews: ISSUES_SUBSYSTEM_MATERIALIZED_VIEWS,
-    tables: ISSUES_SUBSYSTEM_TABLES,
-    fingerprint,
-    expectedObjects: getIssuesFingerprintExpectedObjects(),
-  });
-}
-
-export async function writeIssuesSubsystemFingerprint(client: ClickHouseClient, fingerprint: string): Promise<void> {
-  await writeSubsystemFingerprint(client, ISSUES_SUBSYSTEM_FINGERPRINT_TABLE, fingerprint);
 }
 
 /**
@@ -1098,9 +1040,9 @@ WHERE event_type = '$error';
 //    Unique users across several hashes (a merged issue) or several hours must
 //    be `uniqMerge`d, never summed — summing double-counts anyone active in
 //    more than one bucket.
-export function buildIssueOccurrenceRollupCreateTableSql(database: string): string {
+export function buildIssueOccurrenceRollupStorageTableSql(fullTableName: string): string {
   return `
-CREATE TABLE IF NOT EXISTS ${database}.issue_occurrence_rollup (
+CREATE TABLE IF NOT EXISTS ${fullTableName} (
     project_id String, branch_id String, issue_hash String,
     bucket_start DateTime('UTC'),
     service_name LowCardinality(String), deployment_environment_name LowCardinality(String),
@@ -1115,19 +1057,16 @@ TTL toDateTime(bucket_start) + INTERVAL ${TELEMETRY_TTL_DAYS} DAY DELETE;
 `;
 }
 
-// The SELECT is shared with nothing — there is NO BACKFILL, on purpose.
-//
-// The obvious move is to generalize `backfillDerivedSpanTable` and point it at
-// this table. Do not. That helper guards on "destination is empty", which is
-// sound for the ReplacingMergeTree it was written for (a row copied twice
-// collapses) and unsound here. The materialized view is attached before any
-// backfill could run, so the moment ingest is live the first insert either
-// makes the destination non-empty — silently skipping ALL history, with no
-// error and no second chance — or lands concurrently with the
-// `INSERT … SELECT`, double-counting occurrences into an aggregate that has no
-// way to detect or undo it. Both failures are permanent and invisible in the
-// numbers. This table starts empty and fills forward; pre-grouping rows carry
-// `issue_hash = ''`, are excluded by the WHERE below, and age out on the TTL.
+export function buildIssueOccurrenceRollupCreateTableSql(database: string): string {
+  return buildIssueOccurrenceRollupStorageTableSql(`${database}.issue_occurrence_rollup`);
+}
+
+// History is backfilled only through `ensureDerivedRollupCurrent`, never by
+// copying into a live table. `backfillDerivedSpanTable` must not be pointed at
+// this rollup: its overlap between the attached view and the copy is harmless
+// for a ReplacingMergeTree, but double-counts occurrences in an aggregate that
+// has no way to detect or undo it. The rebuild instead splits source rows on a
+// `created_at` cutoff so every event is counted exactly once.
 //
 // `coalesce(…, '')` on the two service columns is NOT cosmetic. They are
 // `LowCardinality(Nullable(String))` on `telemetry` while the rollup columns
@@ -1138,11 +1077,8 @@ TTL toDateTime(bucket_start) + INTERVAL ${TELEMETRY_TTL_DAYS} DAY DELETE;
 //
 // Column ORDER must match the CREATE TABLE above exactly: a `TO table`
 // materialized view pairs its SELECT with the target positionally.
-export function buildIssueOccurrenceRollupMvSql(database: string): string {
+export function buildIssueOccurrenceRollupSelectSql(options: { source: string, createdAtFilter: string }): string {
   return `
-CREATE MATERIALIZED VIEW IF NOT EXISTS ${database}.issue_occurrence_rollup_mv
-TO ${database}.issue_occurrence_rollup
-AS
 SELECT
   project_id,
   branch_id,
@@ -1154,14 +1090,31 @@ SELECT
   uniqState(user_id) AS users_state,
   min(event_at) AS first_seen,
   max(event_at) AS last_seen
-FROM ${database}.events
-WHERE event_type = '$error' AND issue_hash != ''
-GROUP BY project_id, branch_id, issue_hash, bucket_start, service_name, deployment_environment_name;
+FROM ${options.source}
+WHERE event_type = '$error' AND issue_hash != '' AND ${options.createdAtFilter}
+GROUP BY project_id, branch_id, issue_hash, bucket_start, service_name, deployment_environment_name
 `;
 }
 
-const ISSUE_OCCURRENCE_ROLLUP_TABLE_SQL = buildIssueOccurrenceRollupCreateTableSql("analytics_internal");
-const ISSUE_OCCURRENCE_ROLLUP_MV_SQL = buildIssueOccurrenceRollupMvSql("analytics_internal");
+export function buildIssueOccurrenceRollupMvSql(database: string): string {
+  return `
+CREATE MATERIALIZED VIEW IF NOT EXISTS ${database}.issue_occurrence_rollup_mv
+TO ${database}.issue_occurrence_rollup
+AS
+${buildIssueOccurrenceRollupSelectSql({ source: `${database}.events`, createdAtFilter: "1" }).trim()};
+`;
+}
+
+export function buildIssueOccurrenceRollupSpec(database: string): DerivedRollupSpec {
+  return {
+    database,
+    name: "issue_occurrence_rollup",
+    legacyMaterializedView: "issue_occurrence_rollup_mv",
+    sourceTable: "events",
+    buildStorageTableSql: buildIssueOccurrenceRollupStorageTableSql,
+    buildSelectSql: buildIssueOccurrenceRollupSelectSql,
+  };
+}
 
 // FINAL for the same reason as default.spans/span_links: the SDK re-exports a
 // long-lived span at end after its open-marker snapshot, so events present at
