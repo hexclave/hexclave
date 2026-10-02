@@ -734,7 +734,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   // Retain domains across token-store snapshots because a later update can see cookies already deleted by an earlier update.
   private readonly _knownCustomRefreshCookieDomains = new Set<string>();
 
-  private _anonymousSignUpInProgress: Promise<{ accessToken: string, refreshToken: string }> | null = null;
+  private _anonymousSignUpInProgress: Promise<{ accessToken: string, refreshToken: string } | null> | null = null;
   private _prefetchedCrossDomainHandoffParams: CrossDomainHandoffParams | null = null;
   private _prefetchedCrossDomainHandoffParamsFetchedAt = 0;
   private _isPrefetchingCrossDomainHandoffParams = false;
@@ -2110,7 +2110,14 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   // END_PLATFORM
 
   private _signInAttemptCounter = 0;
+  private _latestSignIn: Promise<void> = Promise.resolve();
   protected async _signInToAccountWithTokens(tokens: { accessToken: string | null, refreshToken: string }) {
+    const signIn = this._doSignInToAccountWithTokens(tokens);
+    this._latestSignIn = signIn.catch(() => {});
+    return await signIn;
+  }
+
+  private async _doSignInToAccountWithTokens(tokens: { accessToken: string | null, refreshToken: string }) {
     if (!("accessToken" in tokens) || !("refreshToken" in tokens)) {
       throw new HexclaveAssertionError("Invalid tokens object; can't sign in with this", { tokens });
     }
@@ -3904,7 +3911,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
         case 'anonymous': {
           const tokens = await this._signUpAnonymously();
-          return await this.getUser({ tokenStore: tokens, or: "anonymous-if-exists[deprecated]", includeRestricted: true }) ?? throwErr("Something went wrong while signing up anonymously");
+          return await this.getUser({ ...tokens === null ? {} : { tokenStore: tokens }, or: "anonymous-if-exists[deprecated]", includeRestricted: true }) ?? throwErr("Something went wrong while signing up anonymously");
         }
         case undefined:
         case "anonymous-if-exists[deprecated]":
@@ -4290,20 +4297,25 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
 
     if (!this._anonymousSignUpInProgress) {
       this._anonymousSignUpInProgress = (async () => {
-        this._ensurePersistentTokenStore();
-        const session = await this._getSession();
-        const signInAttemptAtStart = this._signInAttemptCounter;
-        const result = await this._interface.signUpAnonymously(session);
-        if (result.status === "ok") {
-          // An explicit sign-in that landed while this request was in flight owns the token store.
-          if (signInAttemptAtStart === this._signInAttemptCounter) {
-            await this._signInToAccountWithTokens(result.data);
+        try {
+          this._ensurePersistentTokenStore();
+          const signInAttemptAtStart = this._signInAttemptCounter;
+          const session = await this._getSession();
+          const result = await this._interface.signUpAnonymously(session);
+          if (result.status !== "ok") {
+            throw new HexclaveAssertionError("signUpAnonymously() should never return an error");
           }
-        } else {
-          throw new HexclaveAssertionError("signUpAnonymously() should never return an error");
+          if (signInAttemptAtStart !== this._signInAttemptCounter) {
+            // A sign-in that started while this request was in flight owns the token store; don't replace it.
+            await this._latestSignIn;
+            const tokenStore = this._getOrCreateTokenStore(await this._createCookieHelper());
+            if (tokenStore.get().refreshToken !== null) return null;
+          }
+          await this._signInToAccountWithTokens(result.data);
+          return result.data;
+        } finally {
+          this._anonymousSignUpInProgress = null;
         }
-        this._anonymousSignUpInProgress = null;
-        return result.data;
       })();
     }
 
