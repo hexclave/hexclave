@@ -1,4 +1,4 @@
-import { ProxyTracerProvider, trace as otelTrace, type Context } from "@opentelemetry/api";
+import { trace as otelTrace, type Context } from "@opentelemetry/api";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import type { AnalyticsReplayOptions } from "./analytics-config";
@@ -8,7 +8,8 @@ import type { EventTracker } from "./event-tracker";
 import type { TelemetryResource } from "./telemetry-config";
 import type { NetworkCaptureConfig } from "./network-capture";
 import type { SessionRecorder } from "./session-replay";
-import { buildAmbientSessionContext, getActiveOtelSpanContext } from "./otel-context";
+import { buildAmbientSessionContext, generateOtelSpanId, getActiveOtelSpanContext } from "./otel-context";
+import { createInertSpanHandle } from "./span-handle";
 import { buildPropagationHeaderValues, fetchWithSpanPropagation } from "./span-propagation";
 import { getCustomTelemetryDataError, getCustomTelemetryNameError, preCaught, rejectedPreCaught, resolveSpanParent, type Span, type SpanContext, type StartSpanOptions, type TrackOptions } from "./telemetry-core";
 import { getActiveErrorScope, mergeErrorScopeData } from "./error-scope";
@@ -707,11 +708,21 @@ export class ClientAnalytics {
         ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
       };
     this.ensureProviderForExplicitSignal();
+    if (this._browserOtelRegistrationFailed) {
+      return createInertSpanHandle({
+        traceId: resolved.traceId,
+        spanId: generateOtelSpanId(),
+        spanType,
+        startedAtMs: options?.startedAtMs ?? Date.now(),
+        parentSpanId: resolved.parentSpanId,
+        initialData: { ...options?.data ?? {} },
+        ...resolved.traceFlags === undefined ? {} : { traceFlags: resolved.traceFlags },
+        ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
+      });
+    }
     const pageViewSpanId = this.getCurrentPageViewSpanId();
     const span = createOtelSpanFacade({
-      tracer: this._browserOtelRegistrationFailed
-        ? new ProxyTracerProvider().getTracer("@hexclave/sdk-browser", this._deps.sdkVersion)
-        : otelTrace.getTracer("@hexclave/sdk-browser", this._deps.sdkVersion),
+      tracer: otelTrace.getTracer("@hexclave/sdk-browser", this._deps.sdkVersion),
       spanType,
       startOptions: {
         ...options,
