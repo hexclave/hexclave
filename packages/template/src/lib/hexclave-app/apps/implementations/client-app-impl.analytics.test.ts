@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
-import { trace } from "@opentelemetry/api";
+import { context, trace } from "@opentelemetry/api";
 import { logs } from "@opentelemetry/api-logs";
 import { InMemoryLogRecordExporter, LoggerProvider, SimpleLogRecordProcessor } from "@opentelemetry/sdk-logs";
-import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { StackContextManager } from "@opentelemetry/sdk-trace-web";
 import { isW3cSpanId, isW3cTraceId } from "@hexclave/shared/dist/utils/analytics-wire";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -501,6 +502,60 @@ describe("browser analytics startup", () => {
     Reflect.set(spanning, "_registerManagedBrowserOtel", () => ({ forceFlush: async () => {} }));
     spanning.startSpan("db.query");
     expect(Reflect.get(spanning, "_browserOtelRegistration")).not.toBeNull();
+  });
+
+  it("keeps span handles valid but unexported after managed registration conflicts", async () => {
+    const exporter = new InMemorySpanExporter();
+    if (!trace.setGlobalTracerProvider(new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] }))) {
+      throw new Error("Test could not install its existing OTel provider");
+    }
+    context.setGlobalContextManager(new StackContextManager().enable());
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const analytics = new ClientAnalytics({
+      projectId: "00000000-0000-4000-8000-000000000001",
+      resource: TEST_TELEMETRY.resource,
+      sendReplayBatch: async () => Result.ok(new Response()),
+      getSessionRootContext: async () => ({ traceId: "a".repeat(32), spanId: "b".repeat(16) }),
+      replayOptions: { enabled: false },
+      productAnalyticsEnabled: true,
+      getPropagationPolicy: () => ({ selfOrigin: null, allowedOrigins: [], allowLocalhost: false, correlationBaggage: true }),
+      integritySignals: false,
+      networkCapture: normalizeNetworkCaptureOptions(undefined),
+      traceSampleRate: 1,
+      errorCapture: { enabled: false, ignoreErrors: [] },
+      release: null,
+      environment: null,
+      sdkVersion: "0.0.0-test",
+      analyticsBaseUrl: "https://api.example.test",
+      openTelemetryProvider: "managed",
+      automaticSideEffects: false,
+      getOtlpRequestHeaders: async () => ({}),
+    });
+    Reflect.set(analytics, "_registerManagedBrowserOtelOrThrow", () => {
+      throw new Error("Hexclave browser OpenTelemetry is already configured for a different project or resource on this page");
+    });
+
+    const parent = analytics.startSpan("checkout");
+    expect(isW3cTraceId(parent.traceId)).toBe(true);
+    expect(isW3cSpanId(parent.spanId)).toBe(true);
+    expect(() => analytics.startSpan("")).toThrow();
+
+    const child = parent.startSpan("db.query");
+    expect(child.traceId).toBe(parent.traceId);
+    expect(isW3cSpanId(child.spanId)).toBe(true);
+    const detached = parent.startSpan("detached", { root: true });
+    expect(detached.traceId).not.toBe(parent.traceId);
+
+    const ambientChild = await parent.run(() => analytics.startSpan("ambient"));
+    expect(ambientChild.traceId).toBe(parent.traceId);
+
+    analytics.setGlobalSpan(parent);
+    await parent.trackEvent("step", { n: 1 });
+    await Promise.all([child.end(), detached.end(), ambientChild.end(), parent.end()]);
+    await analytics.flush();
+    expect(exporter.getFinishedSpans()).toEqual([]);
+    trace.disable();
+    context.disable();
   });
 
   it("routes console.error promotion through the shared capture policy (dedupe + ignores)", async () => {

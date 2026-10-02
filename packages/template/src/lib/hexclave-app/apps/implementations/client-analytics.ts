@@ -1,4 +1,5 @@
-import { trace as otelTrace, type Context } from "@opentelemetry/api";
+import { trace as otelTrace, type Context, type Tracer } from "@opentelemetry/api";
+import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import type { AnalyticsReplayOptions } from "./analytics-config";
@@ -8,8 +9,7 @@ import type { EventTracker } from "./event-tracker";
 import type { TelemetryResource } from "./telemetry-config";
 import type { NetworkCaptureConfig } from "./network-capture";
 import type { SessionRecorder } from "./session-replay";
-import { buildAmbientSessionContext, generateOtelSpanId, getActiveOtelSpanContext } from "./otel-context";
-import { createInertSpanHandle } from "./span-handle";
+import { buildAmbientSessionContext, getActiveOtelSpanContext } from "./otel-context";
 import { buildPropagationHeaderValues, fetchWithSpanPropagation } from "./span-propagation";
 import { getCustomTelemetryDataError, getCustomTelemetryNameError, preCaught, rejectedPreCaught, resolveSpanParent, type Span, type SpanContext, type StartSpanOptions, type TrackOptions } from "./telemetry-core";
 import { getActiveErrorScope, mergeErrorScopeData } from "./error-scope";
@@ -93,6 +93,7 @@ export class ClientAnalytics {
   private readonly _integrationBreadcrumbs: ErrorBreadcrumb[] = [];
   private _browserOtelRegistration: BrowserManagedOtelRegistration | null;
   private _browserOtelRegistrationFailed = false;
+  private _unexportedTracerProvider: BasicTracerProvider | null = null;
   private readonly _pendingErrorProcessing = new Set<Promise<void>>();
   private _resolvedSessionRoot: SpanContext | null = null;
   private _preTrackerAmbient: { segmentId: string, context: Context } | null = null;
@@ -708,21 +709,9 @@ export class ClientAnalytics {
         ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
       };
     this.ensureProviderForExplicitSignal();
-    if (this._browserOtelRegistrationFailed) {
-      return createInertSpanHandle({
-        traceId: resolved.traceId,
-        spanId: generateOtelSpanId(),
-        spanType,
-        startedAtMs: options?.startedAtMs ?? Date.now(),
-        parentSpanId: resolved.parentSpanId,
-        initialData: { ...options?.data ?? {} },
-        ...resolved.traceFlags === undefined ? {} : { traceFlags: resolved.traceFlags },
-        ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
-      });
-    }
     const pageViewSpanId = this.getCurrentPageViewSpanId();
     const span = createOtelSpanFacade({
-      tracer: otelTrace.getTracer("@hexclave/sdk-browser", this._deps.sdkVersion),
+      tracer: this._getSpanTracer(),
       spanType,
       startOptions: {
         ...options,
@@ -742,6 +731,15 @@ export class ClientAnalytics {
       },
     });
     return span;
+  }
+
+  private _getSpanTracer(): Tracer {
+    if (!this._browserOtelRegistrationFailed) {
+      return otelTrace.getTracer("@hexclave/sdk-browser", this._deps.sdkVersion);
+    }
+    // Unregistered provider without span processors: spans keep valid IDs and full handle semantics but are never exported.
+    this._unexportedTracerProvider ??= new BasicTracerProvider();
+    return this._unexportedTracerProvider.getTracer("@hexclave/sdk-browser", this._deps.sdkVersion);
   }
 
   private _preloadSpanPropagationHeaders(_span: Span): Record<string, string> {
