@@ -234,6 +234,32 @@ describe("plan metering persistence", () => {
     expect(mocks.bulldozerWriteItemQuantityChanges).toHaveBeenCalledTimes(2);
   });
 
+  it("reverts a rolled-back attempt's Bulldozer rows before the retry reads the balance", async () => {
+    let bulldozerBalance = 1;
+    const bulldozerRows = new Map<string, number>();
+    mocks.bulldozerWriteItemQuantityChanges.mockImplementation(async (changes: { id: string, quantity: number }[]) => {
+      for (const change of changes) {
+        bulldozerBalance += change.quantity - (bulldozerRows.get(change.id) ?? 0);
+        bulldozerRows.set(change.id, change.quantity);
+      }
+    });
+    mocks.getItemQuantitiesForCustomer.mockImplementation(async () => ({ [ITEM_IDS.analyticsEvents]: bulldozerBalance }));
+    mocks.retryTransaction.mockImplementationOnce(async (_prisma, callback) => {
+      const tx = {
+        $executeRaw: mocks.executeRaw,
+        itemQuantityChange: { createMany: mocks.createMany, deleteMany: mocks.deleteMany, findMany: mocks.findMany },
+      };
+      await callback(tx);
+      return await callback(tx);
+    });
+
+    const result = await tryDecreasePlanItemQuantities("billing-team", [{ itemId: ITEM_IDS.analyticsEvents, quantity: 1 }]);
+
+    expect(result.insufficientItemId).toBeNull();
+    expect(result.createdChangeIds).toHaveLength(1);
+    expect(bulldozerBalance).toBe(0);
+  });
+
   it("zeroes Bulldozer rows posted by a retried attempt that the committed attempt rejected", async () => {
     mocks.getItemQuantitiesForCustomer
       .mockResolvedValueOnce({ [ITEM_IDS.analyticsEvents]: 10 })

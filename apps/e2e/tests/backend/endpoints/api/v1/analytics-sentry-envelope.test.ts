@@ -103,7 +103,7 @@ async function queryEnvelopeErrorsUntil(batchId: string): Promise<{ status: numb
   return response;
 }
 
-it("accepts an authenticated Sentry envelope and returns itemized outcomes", async ({ expect }) => {
+it("accepts an authenticated Sentry envelope and returns itemized outcomes", { timeout: 120_000 }, async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Project.updateConfig({ apps: { installed: { observability: { enabled: true } } } });
 

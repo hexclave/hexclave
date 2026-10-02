@@ -810,7 +810,7 @@ it("attributes an existing anonymous session replay to the user after upgrade", 
     throw new Error("Expected session replay id.");
   }
 
-  const beforeUpgrade = await niceBackendFetch(`/api/v1/internal/session-replays/${recordingId}`, {
+  const beforeUpgrade = await niceBackendFetch(`/api/v1/session-replays/${recordingId}`, {
     method: "GET",
     accessType: "admin",
   });

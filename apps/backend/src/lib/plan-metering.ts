@@ -311,6 +311,16 @@ async function applyPlanDebits(
     const existingById = new Map(existingChanges.map((change) => [change.id, change]));
     const claimedIds = new Set(existingById.keys());
 
+    // A retried attempt runs after the previous one rolled back, but Bulldozer
+    // still holds the rows that attempt posted. Revert them before reading the
+    // balance so this attempt does not see its own uncommitted debits.
+    const staleChanges = postedChanges.filter(({ id }) => !existingById.has(id));
+    if (staleChanges.length > 0) {
+      await bulldozerWriteItemQuantityChanges(staleChanges.map((change) => ({ ...change, quantity: 0 })));
+      const staleIds = new Set(staleChanges.map(({ id }) => id));
+      postedChanges = postedChanges.filter(({ id }) => !staleIds.has(id));
+    }
+
     let remainingQuantities: Map<string, number> | null = null;
     const results: PlanDebitResult[] = [];
     const acceptedChanges: PlanItemQuantityChange[] = [];

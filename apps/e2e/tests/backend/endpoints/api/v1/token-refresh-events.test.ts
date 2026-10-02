@@ -383,6 +383,7 @@ it("OAuth refresh token grant creates exactly one additional $token-refresh even
       }],
     },
   });
+  await Project.updateConfig({ apps: { installed: { observability: { enabled: true } } } });
   await InternalApiKey.createAndSetProjectKeys();
 
   // Sign in via OAuth to get initial tokens

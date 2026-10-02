@@ -376,7 +376,7 @@ describe.sequential("issue alert workflow delivery proof", () => {
 
     const rows = await outboxRows(subjects[0]);
     expect(rows).toHaveLength(recipientIds.length);
-    expect(rows.map((row) => row.to)).toEqual(expect.arrayContaining(recipientIds.map((userId) => ({ type: "user-primary-email", userId }))));
+    expect(rows.map((row) => row.to)).toEqual(expect.arrayContaining(recipientIds.map((_, index) => ({ type: "custom-emails", emails: [`${RUN_PREFIX}-${index}@example.com`] }))));
     const delivery = await getService().inspectDelivery(getScope(), created.deliveryId);
     expect(delivery).toMatchObject({
       state: IssueAlertDeliveryState.DELIVERED,
@@ -426,7 +426,7 @@ describe.sequential("issue alert workflow delivery proof", () => {
 
     const rows = await outboxRows(subjects[1]);
     expect(rows).toHaveLength(recipientIds.length);
-    expect(rows.map((row) => row.to)).toEqual(expect.arrayContaining(recipientIds.map((userId) => ({ type: "user-primary-email", userId }))));
+    expect(rows.map((row) => row.to)).toEqual(expect.arrayContaining(recipientIds.map((_, index) => ({ type: "custom-emails", emails: [`${RUN_PREFIX}-${index}@example.com`] }))));
     await expect(getService().inspectDelivery(getScope(), created.deliveryId)).resolves.toMatchObject({
       state: IssueAlertDeliveryState.DELIVERED,
       outcome: IssueAlertDeliveryOutcome.WORKFLOW_DELIVERED,
