@@ -91,6 +91,7 @@ export class ClientAnalytics {
   private _errorIntegrationRegistry: ErrorIntegrationRegistry | null = null;
   private readonly _integrationBreadcrumbs: ErrorBreadcrumb[] = [];
   private _browserOtelRegistration: BrowserManagedOtelRegistration | null;
+  private _browserOtelRegistrationFailed = false;
   private readonly _pendingErrorProcessing = new Set<Promise<void>>();
   private _resolvedSessionRoot: SpanContext | null = null;
   private _preTrackerAmbient: { segmentId: string, context: Context } | null = null;
@@ -241,7 +242,18 @@ export class ClientAnalytics {
     this._integrationBreadcrumbs.length = 0;
   }
 
-  private _registerManagedBrowserOtel(): BrowserManagedOtelRegistration {
+  private _registerManagedBrowserOtel(): BrowserManagedOtelRegistration | null {
+    if (this._browserOtelRegistrationFailed) return null;
+    try {
+      return this._registerManagedBrowserOtelOrThrow();
+    } catch (error) {
+      this._browserOtelRegistrationFailed = true;
+      console.warn("Hexclave analytics: managed browser OpenTelemetry could not be registered; telemetry from this app instance will be dropped.", error);
+      return null;
+    }
+  }
+
+  private _registerManagedBrowserOtelOrThrow(): BrowserManagedOtelRegistration {
     const deps = this._deps;
     return registerManagedBrowserOtel({
       analyticsBaseUrl: deps.analyticsBaseUrl,

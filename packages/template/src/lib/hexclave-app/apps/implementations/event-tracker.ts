@@ -909,7 +909,7 @@ export class EventTracker {
 
   private _sampleScrollDepth() {
     const bottom = window.scrollY + window.innerHeight;
-    const height = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+    const height = Math.max(document.scrollingElement?.scrollHeight ?? 0, window.innerHeight);
     if (bottom > this._maxScrollDepthPx) this._maxScrollDepthPx = bottom;
     const ratio = height > 0 ? Math.min(bottom / height, 1) : 0;
     if (ratio > this._maxScrollDepthRatio) this._maxScrollDepthRatio = ratio;
