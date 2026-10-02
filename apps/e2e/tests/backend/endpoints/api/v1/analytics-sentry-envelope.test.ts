@@ -93,7 +93,7 @@ async function queryEnvelopeErrorsUntil(batchId: string): Promise<{ status: numb
       method: "POST",
       accessType: "admin",
       body: {
-        query: "SELECT occurrence_id FROM logs WHERE batch_id = {batchId:String} AND event_type = '$error' ORDER BY occurrence_id LIMIT 2",
+        query: "SELECT occurrence_id FROM errors WHERE batch_id = {batchId:String} ORDER BY occurrence_id LIMIT 2",
         params: { batchId },
       },
     });

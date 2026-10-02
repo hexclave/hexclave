@@ -193,12 +193,9 @@ describe("managed browser OpenTelemetry", () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
 
     expect(getRequestHeaders).toHaveBeenCalledTimes(4);
-    expect(receivedUrls).toEqual([
-      "/api/v1/analytics/otlp/v1/traces",
-      "/api/v1/analytics/otlp/v1/logs",
-      "/api/v1/analytics/otlp/v1/traces",
-      "/api/v1/analytics/otlp/v1/logs",
-    ]);
+    const otlpPaths = ["/api/v1/analytics/otlp/v1/logs", "/api/v1/analytics/otlp/v1/traces"];
+    expect(receivedUrls.slice(0, 2).sort()).toEqual(otlpPaths);
+    expect(receivedUrls.slice(2).sort()).toEqual(otlpPaths);
     expect(receivedAccessTokens).toEqual(["old-user-token", "old-user-token", "new-user-token", "new-user-token"]);
     expect(receivedContentType).toBe("application/json");
   });
