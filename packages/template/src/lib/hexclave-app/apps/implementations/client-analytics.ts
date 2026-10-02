@@ -1,4 +1,4 @@
-import { trace as otelTrace, type Context } from "@opentelemetry/api";
+import { ProxyTracerProvider, trace as otelTrace, type Context } from "@opentelemetry/api";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import type { AnalyticsReplayOptions } from "./analytics-config";
@@ -121,7 +121,7 @@ export class ClientAnalytics {
       }, { noErrorLogging: true }));
     }
 
-    if (deps.automaticSideEffects !== false) {
+    if (deps.automaticSideEffects !== false && !this._browserOtelRegistrationFailed) {
       const kickOff = () => runAsynchronously(async () => {
         await this._ensureLoaded();
       }, { noErrorLogging: true });
@@ -139,6 +139,7 @@ export class ClientAnalytics {
   }
 
   private _isInstrumentationEnabled(): boolean {
+    if (this._browserOtelRegistrationFailed) return false;
     return this._deps.instrumentationEnabled ?? this._deps.openTelemetryProvider !== "disabled";
   }
 
@@ -327,6 +328,9 @@ export class ClientAnalytics {
   }
 
   private async _doLoad(): Promise<EventTracker> {
+    if (this._browserOtelRegistrationFailed) {
+      throw new Error("Hexclave analytics: managed browser OpenTelemetry is unavailable for this app instance");
+    }
     const trackerImport = Result.fromPromise(import("./event-tracker"));
     const recorderImport = this._deps.replayOptions.enabled ? Result.fromPromise(import("./session-replay")) : null;
     const sessionRootResultPromise = this._getSessionRootResult();
@@ -484,6 +488,7 @@ export class ClientAnalytics {
     const enclosing = this._resolvePreloadEnclosingSpan(options);
     if ("error" in enclosing) return rejectedPreCaught(enclosing.error);
     this.ensureProviderForExplicitSignal();
+    if (this._browserOtelRegistrationFailed) return preCaught(Promise.resolve());
     const pageViewSpanId = this.getCurrentPageViewSpanId();
     emitHexclaveOtelEvent({
       eventName: eventType,
@@ -630,6 +635,7 @@ export class ClientAnalytics {
 
   private _trackAcceptedErrorEvent(data: CapturedErrorEvent, attachments: readonly ErrorAttachmentInput[] = []): void {
     this._deps.onErrorEventId?.(data.event_id);
+    if (this._browserOtelRegistrationFailed) return;
     const enclosing = this._resolvePreloadEnclosingSpan(undefined);
     if ("error" in enclosing) return;
     const pageViewSpanId = this.getCurrentPageViewSpanId();
@@ -703,7 +709,9 @@ export class ClientAnalytics {
     this.ensureProviderForExplicitSignal();
     const pageViewSpanId = this.getCurrentPageViewSpanId();
     const span = createOtelSpanFacade({
-      tracer: otelTrace.getTracer("@hexclave/sdk-browser", this._deps.sdkVersion),
+      tracer: this._browserOtelRegistrationFailed
+        ? new ProxyTracerProvider().getTracer("@hexclave/sdk-browser", this._deps.sdkVersion)
+        : otelTrace.getTracer("@hexclave/sdk-browser", this._deps.sdkVersion),
       spanType,
       startOptions: {
         ...options,
@@ -770,6 +778,7 @@ export class ClientAnalytics {
    * delivery guarantee — anything queued pre-load can only ship through it.
    */
   async flush(): Promise<void> {
+    if (this._browserOtelRegistrationFailed) return;
     const tracker = await preCaught(this._ensureLoaded());
     await this._drainPendingErrorProcessing();
     await Promise.all([
