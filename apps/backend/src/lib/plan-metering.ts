@@ -51,6 +51,27 @@ async function lockPlanMeteringCustomer(
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`plan-metering:${tenancyId}:${billingTeamId}`}, 0))`;
 }
 
+const planMeteringCustomerQueues = new Map<string, Promise<unknown>>();
+
+async function withPlanMeteringCustomerQueue<T>(
+  tenancyId: string,
+  billingTeamId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = `${tenancyId}\0${billingTeamId}`;
+  const previous = planMeteringCustomerQueues.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(fn);
+  const tail = current.catch(() => {});
+  planMeteringCustomerQueues.set(key, tail);
+  try {
+    return await current;
+  } finally {
+    if (planMeteringCustomerQueues.get(key) === tail) {
+      planMeteringCustomerQueues.delete(key);
+    }
+  }
+}
+
 function deterministicPlanChangeId(parts: readonly string[]): string {
   const hex = createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 32);
   const variantNibble = ((Number.parseInt(hex.slice(16, 17), 16) & 0x3) | 0x8).toString(16);
@@ -169,46 +190,58 @@ export async function tryDecreasePlanItemQuantities(
     createdAt: debit.idempotency?.createdAt ?? new Date(),
   }));
 
-  return await retryTransaction(prisma, async (tx) => {
-    await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
-
-    const existingChanges = await tx.itemQuantityChange.findMany({
-      where: { tenancyId: tenancy.id, id: { in: changes.map(({ id }) => id) } },
-    });
-    const existingIds = new Set(existingChanges.map(({ id }) => id));
-    const ownedChanges = changes.filter(({ id }) => !existingIds.has(id));
-    if (ownedChanges.length === 0) {
-      // Prisma-first dual-write can leave a committed row whose Bulldozer set
-      // never landed. Re-POST the same row id through the existing set API.
-      await bulldozerWriteItemQuantityChanges(existingChanges);
-      return { insufficientItemId: null, createdChangeIds: [] };
-    }
-
+  return await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => {
+    // Bulldozer reads and writes are HTTP round-trips; keep them outside the
+    // Postgres transaction so a slow Bulldozer cannot pin pool connections.
     const quantities = await getItemQuantitiesForCustomer({
-      prisma: tx,
+      prisma,
       tenancyId: tenancy.id,
       customerType: "team",
       customerId: billingTeamId,
     });
-    const remainingQuantities = new Map(Object.entries(quantities));
-    for (const change of ownedChanges) {
-      const remaining = (remainingQuantities.get(change.itemId) ?? 0) + change.quantity;
-      if (remaining < 0) {
-        return { insufficientItemId: change.itemId, createdChangeIds: [] };
+
+    const persisted = await retryTransaction(prisma, async (tx) => {
+      await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
+
+      const existingChanges = await tx.itemQuantityChange.findMany({
+        where: { tenancyId: tenancy.id, id: { in: changes.map(({ id }) => id) } },
+      });
+      const existingIds = new Set(existingChanges.map(({ id }) => id));
+      const ownedChanges = changes.filter(({ id }) => !existingIds.has(id));
+      if (ownedChanges.length === 0) {
+        return { status: "replay" as const, existingChanges };
       }
-      remainingQuantities.set(change.itemId, remaining);
-    }
 
-    const persistResult = await Result.fromPromise(tx.itemQuantityChange.createMany({
-      data: ownedChanges,
-      skipDuplicates: true,
-    }));
-    if (persistResult.status === "error") {
-      throw persistResult.error;
-    }
+      const remainingQuantities = new Map(Object.entries(quantities));
+      for (const change of ownedChanges) {
+        const remaining = (remainingQuantities.get(change.itemId) ?? 0) + change.quantity;
+        if (remaining < 0) {
+          return { status: "insufficient" as const, itemId: change.itemId };
+        }
+        remainingQuantities.set(change.itemId, remaining);
+      }
 
-    await bulldozerWriteItemQuantityChanges(ownedChanges);
-    return { insufficientItemId: null, createdChangeIds: ownedChanges.map(({ id }) => id) };
+      const persistResult = await Result.fromPromise(tx.itemQuantityChange.createMany({
+        data: ownedChanges,
+        skipDuplicates: true,
+      }));
+      if (persistResult.status === "error") {
+        throw persistResult.error;
+      }
+      return { status: "created" as const, ownedChanges };
+    });
+
+    if (persisted.status === "insufficient") {
+      return { insufficientItemId: persisted.itemId, createdChangeIds: [] };
+    }
+    if (persisted.status === "replay") {
+      // Prisma-first dual-write can leave a committed row whose Bulldozer set
+      // never landed. Re-POST the same row id through the existing set API.
+      await bulldozerWriteItemQuantityChanges(persisted.existingChanges);
+      return { insufficientItemId: null, createdChangeIds: [] };
+    }
+    await bulldozerWriteItemQuantityChanges(persisted.ownedChanges);
+    return { insufficientItemId: null, createdChangeIds: persisted.ownedChanges.map(({ id }) => id) };
   });
 }
 
@@ -251,8 +284,7 @@ export async function rollbackPlanItemDebits(
   const ownedChanges = changes.filter(({ id }) => ownedChangeIds.has(id));
   if (ownedChanges.length === 0) return;
 
-  await retryTransaction(prisma, async (tx) => {
-    await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
+  await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => {
     // The public item-quantity set API replaces a row. Writing quantity 0
     // undoes the debit without a delete route, and keeps the same id so a
     // later retry can set the debit again.
@@ -260,11 +292,14 @@ export async function rollbackPlanItemDebits(
       ...change,
       quantity: 0,
     })));
-    await tx.itemQuantityChange.deleteMany({
-      where: {
-        tenancyId: tenancy.id,
-        id: { in: ownedChanges.map(({ id }) => id) },
-      },
+    await retryTransaction(prisma, async (tx) => {
+      await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
+      await tx.itemQuantityChange.deleteMany({
+        where: {
+          tenancyId: tenancy.id,
+          id: { in: ownedChanges.map(({ id }) => id) },
+        },
+      });
     });
   });
 }
