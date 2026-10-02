@@ -114,7 +114,9 @@ async function createDelivery(target: Tenancy, rule: IssueAlertRuleRecord): Prom
   if (claim.status !== "claimed") throw new Error(`Expected a claimed delivery, got ${claim.status}`);
   createdDeliveries.push({ tenancyId: target.id, id: claim.delivery.id });
   createdCooldowns.push({ tenancyId: target.id, key: claim.delivery.cooldownKey });
-  const enqueue = await enqueueIssueAlertWorkflowEvent(globalPrismaClient, target, evaluation);
+  // Recipient resolution against the owner team is covered by the delivery-proof
+  // and owner-team-recipients suites; these route tests only need a stored event.
+  const enqueue = await enqueueIssueAlertWorkflowEvent(globalPrismaClient, { id: target.id }, evaluation);
   if (enqueue.status !== "enqueued") throw new Error(`Expected a workflow event, got ${enqueue.status}`);
   createdWorkflowEvents.push({ tenancyId: target.id, id: enqueue.eventId });
   await service.recordWorkflowUpdate(scope(target), claim.delivery.id, {
