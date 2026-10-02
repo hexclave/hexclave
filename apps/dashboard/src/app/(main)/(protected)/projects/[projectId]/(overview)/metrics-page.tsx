@@ -43,7 +43,7 @@ import { useUser } from "@hexclave/next";
 import { ALL_APPS } from "@hexclave/shared/dist/apps/apps-config";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
-import { StickyPageHeader } from "../sticky-page-header";
+import { LayoutGroup, motion, useReducedMotion, type Transition } from "motion/react";
 import { ErrorBoundary } from "next/dist/client/components/error-boundary";
 import { type ElementType, type ReactNode, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnalyticsEventLimitBanner } from "../analytics/shared";
@@ -113,6 +113,99 @@ function pagesPerVisitor(pageViews: number, visitors: number): number {
 function formatPagesPerVisitor(value: number): string {
   if (!Number.isFinite(value)) return "0.0";
   return value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+}
+
+const OVERVIEW_HEADER_COMPACT_SCROLL_TOP = 24;
+const OVERVIEW_HEADER_MORPH_MS = 520;
+const OVERVIEW_HEADER_TITLE_EXIT_MS = 150;
+const overviewHeaderLayoutTransition: Transition = {
+  duration: OVERVIEW_HEADER_MORPH_MS / 1000,
+  ease: [0.32, 0.72, 0, 1],
+};
+const reducedOverviewHeaderLayoutTransition: Transition = {
+  duration: 0,
+};
+
+const scrollableOverflowValues = new Set(["auto", "scroll", "overlay"]);
+
+function findScrollContainer(element: HTMLElement): HTMLElement | null {
+  let current = element.parentElement;
+  while (current != null) {
+    const overflowY = window.getComputedStyle(current).overflowY;
+    if (scrollableOverflowValues.has(overflowY) && current.scrollHeight > current.clientHeight) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function useOverviewHeaderCompacted(enabled: boolean) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const [compacted, setCompacted] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) {
+      setCompacted(false);
+      return;
+    }
+
+    const sentinel = sentinelRef.current;
+    if (sentinel == null) return;
+
+    const scrollContainer = findScrollContainer(sentinel);
+
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      const nextCompacted = !entry.isIntersecting;
+      setCompacted((current) => current === nextCompacted ? current : nextCompacted);
+    }, {
+      root: scrollContainer,
+      rootMargin: `-${OVERVIEW_HEADER_COMPACT_SCROLL_TOP}px 0px 0px 0px`,
+      threshold: 0,
+    });
+
+    observer.observe(sentinel);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [enabled]);
+
+  return { compacted, sentinelRef };
+}
+
+function useRenderWhileClosing(open: boolean, durationMs: number): boolean {
+  const [shouldRender, setShouldRender] = useState(open);
+
+  useEffect(() => {
+    if (open) {
+      setShouldRender(true);
+      return;
+    }
+
+    const timeout = setTimeout(() => setShouldRender(false), durationMs);
+    return () => clearTimeout(timeout);
+  }, [durationMs, open]);
+
+  return open || shouldRender;
+}
+
+function useDelayedTrue(value: boolean, delayMs: number): boolean {
+  const [delayedValue, setDelayedValue] = useState(value);
+
+  useEffect(() => {
+    if (!value) {
+      setDelayedValue(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => setDelayedValue(true), delayMs);
+    return () => clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return delayedValue;
 }
 
 const BROWSER_SLUGS = new Map<string, string>([
@@ -551,6 +644,122 @@ function ViewToggle({ view, onChange }: { view: "overview" | "globe", onChange: 
         throw new Error(`Unsupported project overview view selected: ${id}`);
       }}
     />
+  );
+}
+
+function OverviewHeaderChrome({
+  title,
+  actions,
+  compacted,
+  layoutCompacted,
+  renderTitle,
+  layoutTransition,
+  animateLayout,
+}: {
+  title: string,
+  actions: ReactNode,
+  compacted: boolean,
+  layoutCompacted: boolean,
+  renderTitle: boolean,
+  layoutTransition: Transition,
+  animateLayout: boolean,
+}) {
+  return (
+    <motion.div
+      layout={animateLayout}
+      transition={layoutTransition}
+      className={cn(
+        "pointer-events-auto relative w-full max-w-full",
+        layoutCompacted && "ml-auto w-fit",
+      )}
+    >
+      <motion.div
+        layout={animateLayout}
+        transition={layoutTransition}
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-0 z-0 rounded-2xl border border-black/[0.06] bg-white/90 shadow-[0_2px_12px_rgba(0,0,0,0.04)] backdrop-blur-xl will-change-transform transition-[background-color,border-color,box-shadow,opacity] [transition-duration:520ms] [transition-timing-function:cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none dark:border-0 dark:bg-transparent dark:shadow-none dark:backdrop-blur-none",
+          layoutCompacted && "rounded-xl border-black/[0.08] bg-white/[0.78] shadow-[0_14px_34px_rgba(15,23,42,0.14)] ring-1 ring-white/[0.55] dark:border-white/[0.08] dark:bg-background/[0.72] dark:shadow-[0_14px_34px_rgba(0,0,0,0.26)] dark:ring-white/[0.08] dark:backdrop-blur-xl",
+        )}
+      />
+      <div
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-x-5 top-0 z-10 h-px bg-gradient-to-r from-transparent via-white/70 to-transparent opacity-0 transition-opacity [transition-duration:520ms] motion-reduce:transition-none dark:via-white/20",
+          layoutCompacted && "opacity-100",
+        )}
+      />
+      <div
+        className={cn(
+          "relative z-10 flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:py-4 dark:px-0 dark:py-0 dark:sm:px-0 dark:sm:py-0",
+          layoutCompacted && "gap-0 sm:gap-0",
+          layoutCompacted && "px-3 py-2 sm:px-4 sm:py-2.5 dark:px-4 dark:py-2.5 dark:sm:px-4 dark:sm:py-2.5",
+        )}
+      >
+        {renderTitle && (
+          <div
+            className={cn(
+              "min-w-0 transition-[opacity,transform,filter] duration-150 ease-out motion-reduce:transition-none sm:flex-1",
+              compacted && "pointer-events-none opacity-0 blur-[1px]",
+            )}
+          >
+            <Typography
+              type="h2"
+              className="truncate text-xl font-semibold tracking-tight sm:text-2xl"
+            >
+              {title}
+            </Typography>
+          </div>
+        )}
+        <motion.div
+          layout={animateLayout}
+          transition={layoutTransition}
+          className={cn(
+            "relative z-10 min-w-0 max-w-full flex-shrink-0 overflow-x-auto will-change-transform [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+            "transition-opacity [transition-duration:520ms] motion-reduce:transition-none",
+            layoutCompacted && "opacity-95",
+          )}
+        >
+          {actions}
+        </motion.div>
+      </div>
+    </motion.div>
+  );
+}
+
+function OverviewHeader({ title, actions, sticky }: { title: string, actions: ReactNode, sticky: boolean }) {
+  const { compacted, sentinelRef } = useOverviewHeaderCompacted(sticky);
+  const renderTitle = useRenderWhileClosing(!compacted, OVERVIEW_HEADER_TITLE_EXIT_MS);
+  const shouldReduceMotion = useReducedMotion();
+  const delayedCompacted = useDelayedTrue(compacted, shouldReduceMotion ? 0 : OVERVIEW_HEADER_TITLE_EXIT_MS);
+  const layoutCompacted = sticky && (shouldReduceMotion ? compacted : delayedCompacted);
+  const layoutTransition = shouldReduceMotion ? reducedOverviewHeaderLayoutTransition : overviewHeaderLayoutTransition;
+
+  return (
+    <>
+      {sticky && (
+        <div key="sentinel" ref={sentinelRef} aria-hidden className="-mb-[17px] h-px w-px" />
+      )}
+      <div
+        key="header"
+        className={cn(
+          "relative z-30 w-full pointer-events-none",
+          sticky && "sticky top-[4.25rem] mb-2 dark:top-[5.75rem]",
+        )}
+      >
+        <LayoutGroup id="overview-sticky-header">
+          <OverviewHeaderChrome
+            title={title}
+            actions={actions}
+            compacted={sticky ? compacted : false}
+            layoutCompacted={layoutCompacted}
+            renderTitle={sticky ? renderTitle : true}
+            layoutTransition={layoutTransition}
+            animateLayout
+          />
+        </LayoutGroup>
+      </div>
+    </>
   );
 }
 
@@ -1263,7 +1472,7 @@ export default function MetricsPage() {
     >
       {/* The globe tab is a contained, no-scroll scene. A sticky top offset would
           shift this bar over the globe card and clip the live-users badge. */}
-      <StickyPageHeader title={headerTitle} actions={headerActions} sticky={view === "overview"} layoutGroupId="overview-sticky-header" />
+      <OverviewHeader title={headerTitle} actions={headerActions} sticky={view === "overview"} />
       {view === "overview" && <AnalyticsEventLimitBanner />}
       <ErrorBoundary errorComponent={MetricsErrorComponent}>
         {/* Inside the error boundary so a failed filtered fetch surfaces the
@@ -1414,7 +1623,10 @@ function MetricsContent({
   const allComposedData = useMemo<ComposedDataPoint[]>(() => {
     const dailyRev = analytics.daily_revenue;
     const dailyPageViews = analytics.daily_page_views;
-    const dailyVis = analyticsEnabled ? analytics.daily_visitors : [];
+    // When the analytics app isn't installed there are no `$page-view` events,
+    // so fall back to token-refresh-derived anonymous visitors so the card has
+    // something meaningful to render instead of a flat zero line.
+    const dailyVis = analyticsEnabled ? analytics.daily_visitors : analytics.daily_anonymous_visitors_fallback;
 
     const visitorMap = new Map(dailyVis.map(d => [d.date, d.activity]));
     const pageViewMap = new Map(dailyPageViews.map(d => [d.date, d.activity]));
@@ -1437,7 +1649,7 @@ function MetricsContent({
     })).sort((a, b) => stringCompare(a.date, b.date));
 
     return points;
-  }, [analytics.daily_revenue, analytics.daily_page_views, analytics.daily_visitors, dauStackedData, dauTotalsByDate, analyticsEnabled, paymentsEnabled]);
+  }, [analytics.daily_revenue, analytics.daily_page_views, analytics.daily_visitors, analytics.daily_anonymous_visitors_fallback, dauStackedData, dauTotalsByDate, analyticsEnabled, paymentsEnabled]);
   const hourlyComposedData = useMemo<ComposedDataPoint[]>(() => {
     const activeUserMap = new Map(analytics.hourly_active_users.map((point) => [point.date, point.activity]));
     const visitorMap = new Map(analytics.hourly_visitors.map((point) => [point.date, point.activity]));
