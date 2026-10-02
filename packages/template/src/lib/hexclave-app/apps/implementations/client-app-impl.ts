@@ -4292,9 +4292,13 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       this._anonymousSignUpInProgress = (async () => {
         this._ensurePersistentTokenStore();
         const session = await this._getSession();
+        const signInAttemptAtStart = this._signInAttemptCounter;
         const result = await this._interface.signUpAnonymously(session);
         if (result.status === "ok") {
-          await this._signInToAccountWithTokens(result.data);
+          // An explicit sign-in that landed while this request was in flight owns the token store.
+          if (signInAttemptAtStart === this._signInAttemptCounter) {
+            await this._signInToAccountWithTokens(result.data);
+          }
         } else {
           throw new HexclaveAssertionError("signUpAnonymously() should never return an error");
         }
