@@ -105,7 +105,8 @@ export function resolveClientOpenTelemetryProvider(
       }
     }
   }
-  return analyticsEnabled ? "managed" : "disabled";
+  if (!analyticsEnabled) return "disabled";
+  return provider === "existing-provider" ? "existing-provider" : "managed";
 }
 
 export function existingProviderConflictFor(provider: OpenTelemetryProviderMode): "throw" | "adopt" {
