@@ -2544,6 +2544,14 @@ const COLUMN_COMMENT_STATEMENTS: string[] = [
   ...OTEL_VIEW_COLUMN_COMMENT_STATEMENTS,
 ];
 
+const SPANS_VIEW_COMMENT_PREFIX = "ALTER TABLE default.spans COMMENT COLUMN ";
+COLUMN_COMMENT_STATEMENTS.push(...buildOtelViewColumnCommentStatements("spans", SPANS_COLUMNS, [
+  "version",
+  ...COLUMN_COMMENT_STATEMENTS
+    .filter((statement) => statement.startsWith(SPANS_VIEW_COMMENT_PREFIX))
+    .map((statement) => statement.slice(SPANS_VIEW_COMMENT_PREFIX.length).split(" ", 1)[0]),
+]));
+
 const COLUMN_COMMENT_TABLES = [
   "events",
   "spans",
