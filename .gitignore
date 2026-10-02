@@ -6,6 +6,7 @@ node-compile-cache/
 *.heapsnapshot
 
 debug.log
+turbo.log
 
 *.cpuprofile
 

@@ -1,4 +1,4 @@
-import { asHeapObject, isPiledriverHeapObjectSymbol, PiledriverHeapObject, PiledriverObject } from "../index.js";
+import { asHeapObject, isPiledriverHeapObjectSymbol, PiledriverHeapObject, piledriverObjectEquals, PiledriverObject } from "../index.js";
 
 type AsyncImmutableMap<K, V> = {
   get(key: K): Promise<V | undefined>,
@@ -72,6 +72,18 @@ type AugmentedTreeMultiMapObject = {
   type: "AugmentedTreeMultiMap",
   tree: PiledriverObject,
 };
+
+export type PersistedTreeIntegrityIssue = {
+  code: string,
+  message: string,
+};
+
+export function treeVerificationNodeLoadBudget(persistedSize: number): number {
+  const size = Number.isSafeInteger(persistedSize) && persistedSize >= 0 ? persistedSize : 0;
+  // Keep the work budget proportional to the persisted size; the high absolute ceiling only
+  // protects against nonsense sizes, which are also caught by the recomputed-size invariant.
+  return Math.min(10_000_000, size * 4 + 32);
+}
 
 const lowerEntryId = Symbol("lower-entry-id");
 const upperEntryId = Symbol("upper-entry-id");
@@ -174,6 +186,105 @@ export class AugmentedTreeMultiMap<Key extends PiledriverObject, Value extends P
 
   toTreePiledriverObject(): PiledriverObject {
     return { type: "AugmentedTreeMap", root: this.root };
+  }
+
+  async verifyDataIntegrity(): Promise<PersistedTreeIntegrityIssue[]> {
+    const issues: PersistedTreeIntegrityIssue[] = [];
+    if (this.root === null) return issues;
+    type Summary = { height: number, size: number, entryCount: number, minKey: MultiKey<Key, EntryId>, maxKey: MultiKey<Key, EntryId>, augmentation: Augmentation };
+    type Frame = { child: Child<MultiKey<Key, EntryId>, Augmentation>, node: Node<MultiKey<Key, EntryId>, Value, Augmentation>, path: number[], nextChild: number, children: Array<Summary | undefined> };
+    const stack: Frame[] = [];
+    const maxNodeLoads = treeVerificationNodeLoadBudget(this.root.size);
+    let nodeLoads = 1;
+    const loadFrame = async (child: Child<MultiKey<Key, EntryId>, Augmentation>, path: number[]): Promise<Frame> => {
+      const node = await this.node(child.ref);
+      if (node === null) throw new Error("Missing persisted tree node");
+      return { child, node, path, nextChild: 0, children: [] };
+    };
+    let frame = await loadFrame(this.root, []);
+    stack.push(frame);
+    while (stack.length > 0) {
+      frame = stack[stack.length - 1];
+      if (frame.nextChild < frame.node.children.length) {
+        const childIndex = frame.nextChild;
+        frame.nextChild++;
+        const child = frame.node.children[childIndex];
+        if (nodeLoads >= maxNodeLoads) {
+          issues.push({ code: "cycle", message: "A tree loaded more nodes than its persisted size can justify, indicating a cycle or corrupt structure" });
+          break;
+        }
+        nodeLoads++;
+        stack.push(await loadFrame(child, [...frame.path, childIndex]));
+        continue;
+      }
+      const node = frame.node;
+      const maxEntries = this.arity() - 1;
+      if (frame.child.entryCount !== node.entries.length) issues.push({ code: "entry_count", message: "A tree child entry count does not match its node" });
+      if (node.entries.length > maxEntries) issues.push({ code: "node_arity", message: "A tree node exceeds the maximum entry count" });
+      if (frame.path.length > 0 && node.entries.length < this.minEntries()) issues.push({ code: "node_occupancy", message: "A non-root tree node has too few entries" });
+      if (node.children.length > 0 && node.children.length !== node.entries.length + 1) issues.push({ code: "children_count", message: "A tree node must have one more child than entries" });
+      for (let index = 1; index < node.entries.length; index++) {
+        if (this.compareKeys(node.entries[index - 1][0], node.entries[index][0]) >= 0) issues.push({ code: "key_order", message: "Tree entries are not strictly ordered" });
+      }
+      const heights = frame.children.flatMap(child => child === undefined ? [] : [child.height]);
+      if (heights.some(height => height !== heights[0])) issues.push({ code: "child_height", message: "Tree children do not have equal heights" });
+      const augmentations: Augmentation[] = [];
+      let size = node.entries.length;
+      let entryCount = node.entries.length;
+      for (let index = 0; index < node.entries.length; index++) {
+        const child = frame.children[index];
+        if (child !== undefined) {
+          augmentations.push(child.augmentation);
+          size += child.size;
+          entryCount += child.entryCount;
+          if (index > 0 && this.compareKeys(child.minKey, node.entries[index - 1][0]) <= 0) issues.push({ code: "key_boundary", message: "A child key range crosses its previous parent entry" });
+          if (this.compareKeys(child.maxKey, node.entries[index][0]) >= 0) issues.push({ code: "key_boundary", message: "A child key range crosses its parent entry" });
+        }
+        const value = await this.loadValue(node.entries[index][1]);
+        const entryAugmentation = await this.options.extractAugmentation(value, node.entries[index][0].key, node.entries[index][0].id);
+        const persistedEntryAugmentation = (node.version ?? 0) >= 1 ? node.entryAugmentations?.[index] : undefined;
+        if (persistedEntryAugmentation !== undefined && !piledriverObjectEquals(persistedEntryAugmentation, entryAugmentation)) {
+          issues.push({ code: "entry_augmentation", message: "A persisted entry augmentation does not match its recomputation" });
+        }
+        augmentations.push(entryAugmentation);
+      }
+      const lastChild = frame.children[node.entries.length];
+      if (frame.children.length > node.entries.length && lastChild !== undefined) {
+        augmentations.push(lastChild.augmentation);
+        size += lastChild.size;
+        entryCount += lastChild.entryCount;
+        if (node.entries.length > 0 && this.compareKeys(node.entries[node.entries.length - 1][0], lastChild.minKey) >= 0) issues.push({ code: "key_boundary", message: "A child key range crosses its parent entry" });
+      }
+      const augmentation = await this.options.mergeAugmentations(...augmentations);
+      if (!piledriverObjectEquals(node.augmentation, augmentation)) issues.push({ code: "augmentation", message: "Persisted tree augmentation does not match its recomputation" });
+      if (node.size !== size) issues.push({ code: "size", message: "A tree node size does not match its contents" });
+      const firstChild = frame.children.find(child => child !== undefined);
+      const summary: Summary = {
+        height: (heights[0] ?? 0) + 1,
+        size,
+        entryCount,
+        minKey: firstChild === undefined ? node.entries[0]?.[0] ?? node.minKey : firstChild.minKey,
+        maxKey: lastChild === undefined ? node.entries[node.entries.length - 1]?.[0] ?? node.maxKey : lastChild.maxKey,
+        augmentation,
+      };
+      stack.pop();
+      const compareChild = (persistedChild: Child<MultiKey<Key, EntryId>, Augmentation>) => {
+        if (persistedChild.size !== summary.size) issues.push({ code: "child_size", message: "A persisted child size does not match its contents" });
+        if (!piledriverObjectEquals(persistedChild.minKey, summary.minKey)) issues.push({ code: "child_min_key", message: "A persisted child minimum key does not match its contents" });
+        if (!piledriverObjectEquals(persistedChild.maxKey, summary.maxKey)) issues.push({ code: "child_max_key", message: "A persisted child maximum key does not match its contents" });
+        if (!piledriverObjectEquals(persistedChild.augmentation, summary.augmentation)) issues.push({ code: "child_augmentation", message: "A persisted child augmentation does not match its contents" });
+      };
+      if (stack.length > 0) {
+        const parent = stack[stack.length - 1];
+        const childIndex = frame.path[frame.path.length - 1];
+        const persistedChild = parent.node.children[childIndex];
+        compareChild(persistedChild);
+        parent.children.push(summary);
+      } else {
+        compareChild(frame.child);
+      }
+    }
+    return issues;
   }
 
   static fromPiledriverObject<K extends PiledriverObject, V extends PiledriverObject, A extends PiledriverObject, I extends PiledriverObject = string>(object: PiledriverObject, options: MultiMapOptions<K, V, A, I>) {
@@ -730,6 +841,10 @@ export class AugmentedTreeMap<K extends PiledriverObject, V extends PiledriverOb
 
   async getAugmentation(range: { lte?: K, gte?: K, lt?: K, gt?: K }): Promise<A> {
     return await this.multiMap.getAugmentation(range);
+  }
+
+  async verifyDataIntegrity(): Promise<PersistedTreeIntegrityIssue[]> {
+    return await this.multiMap.verifyDataIntegrity();
   }
 
   toPiledriverObject(): AugmentedTreeMapObject {

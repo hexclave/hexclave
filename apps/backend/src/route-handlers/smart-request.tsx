@@ -30,6 +30,7 @@ export type SmartRequestAuth = {
   user?: UsersCrud["Admin"]["Read"] | undefined,
   type: "client" | "server" | "admin",
   refreshTokenId?: string,
+  adminUserId?: string,
 };
 
 export type DeepPartialSmartRequestWithSentinel<T = SmartRequest> = (T extends object ? {
@@ -345,6 +346,7 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: Request):
   const isAdminKeyValid = await queriesResults.isAdminKeyValid;
   const requiresPublishableClientKey = tenancy?.config.project.requirePublishableClientKey ?? true;
 
+  let authenticatedAdminUserId: string | undefined;
   if (developmentKeyOverride) {
     if (!["development", "test"].includes(getNodeEnvironment()) && getEnvVariable("STACK_ALLOW_DEVELOPMENT_KEY_OVERRIDE_DESPITE_PRODUCTION", "") !== "this-is-dangerous") {  // it's not actually that dangerous, but it changes the security model
       throw new StatusError(401, "Development key override is only allowed in development or test environments");
@@ -365,11 +367,12 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: Request):
     });
   } else if (adminAccessToken) {
     // TODO put this into the bundled queries above (not so important because this path is quite rare)
-    await extractUserFromAdminAccessToken({
+    const adminUser = await extractUserFromAdminAccessToken({
       token: adminAccessToken,
       projectId,
       allowAnonymous: project.is_development_environment,
     });  // assert that the admin token is valid
+    authenticatedAdminUserId = adminUser.id;
   } else {
     switch (requestType) {
       case "client": {
@@ -423,6 +426,7 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: Request):
     project,
     branchId,
     refreshTokenId: refreshTokenId ?? undefined,
+    adminUserId: authenticatedAdminUserId,
     tenancy,
     user: user ?? undefined,
     type: requestType,

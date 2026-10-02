@@ -1,0 +1,4 @@
+#!/usr/bin/python3 -B
+from hexclave_tv_box.support import main
+
+main()

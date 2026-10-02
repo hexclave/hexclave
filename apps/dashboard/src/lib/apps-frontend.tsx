@@ -324,13 +324,22 @@ export const ALL_APPS_FRONTEND = {
     icon: TelevisionSimpleIcon,
     href: "tv-mode",
     navigationItems: [
-      { displayName: "TV mode", href: "." },
+      {
+        displayName: "Profiles",
+        href: ".",
+        matchPath: (relativePart) => /^\/projects\/[^/]+\/tv-mode(?:\/profiles(?:\/.*)?)?\/?$/.test(new URL(relativePart, DUMMY_ORIGIN).pathname),
+      },
+      {
+        displayName: "Displays",
+        href: "displays",
+        matchPath: (relativePart) => /^\/projects\/[^/]+\/tv-mode\/displays\/?$/.test(new URL(relativePart, DUMMY_ORIGIN).pathname),
+      },
     ],
     screenshots: [],
     storeDescription: (
       <>
-        <p>TV mode is a large-type metrics wall for a monitor in the office.</p>
-        <p>It shows who is online, visitors, MAU, page views, and revenue from the same metrics the overview uses.</p>
+        <p>TV Mode turns your project activity into an ambient, full-screen company pulse.</p>
+        <p>Build named presentation profiles, rotate through office-safe metrics, and preview incident or celebration takeovers.</p>
       </>
     ),
   },

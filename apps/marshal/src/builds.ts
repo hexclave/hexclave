@@ -1,8 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { BASE_IMAGE, BASE_IMAGE_WORKDIR, BUILDER_GUEST, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, RAILPACK_BUILDER_GUEST, RAILPACK_BUILDKIT_TMPFS_SIZE, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, getConfig, resolveNamespaceOrg } from "./config.js";
-import { flyClientForNamespaceOrg } from "./fly/client.js";
-import { builderAppName, builderNetworkName } from "./naming.js";
-import { presignValidatedUploadGet } from "./store.js";
+import { BASE_IMAGE, BASE_IMAGE_WORKDIR, getConfig } from "./config.js";
 import type { ReconciliationLeaseGuard } from "./reconciliation-lock.js";
 import type { EnvValue } from "./types.js";
 
@@ -20,14 +17,16 @@ export function buildCompletionPath(deploymentId: string): string {
 // Builders start a build for an uploaded source tarball; completion always flows through
 // the webhook path (POST /internal/deployments/:deploymentId/complete →
 // services.completeBuild), so the two implementations stay behaviorally identical:
-//  - fly:  ephemeral per-build Machine running BuildKit; the machine calls the webhook.
+//  - fly:  ephemeral per-build Fly Machine running BuildKit (fly/provider.ts).
+//  - gcp:  ephemeral per-build Compute Engine VM running BuildKit (gcp/provider.ts).
+//          Either one calls the webhook.
 //  - mock: dev/e2e only; "completes" in-process on the next tick with a deterministic
-//          fake digest (the fly-mock accepts any image ref).
+//          fake digest.
 
 // One image to build within a deployment's single builder machine.
 export type BuildTarget = {
   serviceKey: string,
-  // Where to push the built image: the service's own Fly app repository.
+  // Where to push the built image in the tenant's Artifact Registry repository.
   pushTarget: string,
   // Upload-root-relative Dockerfile to build from; null = Railpack
   // auto-detection, unless `baseImage` selects a generated Dockerfile instead.
@@ -155,6 +154,10 @@ export type StartBuildOptions = {
   // Built in this order, in ONE machine. The first failure aborts the rest: the
   // whole deployment fails, so there is no half-built cluster to salvage.
   targets: BuildTarget[],
+  // The builder size the deployment asked for, or null to let the build shape
+  // decide. One value per build, because there is one machine — see
+  // builderMachineFor, which also applies the floor this must not skip.
+  builderMemoryMb: number | null,
 };
 
 // ONE env channel, Vercel-style: every declared env var goes to both the build and the
@@ -168,7 +171,13 @@ export type StartBuildOptions = {
 // rolled out yet, so at build time there is nothing to resolve it to. Nothing to flag or
 // reject — it simply isn't there.
 export function buildTimeEnv(env: Record<string, EnvValue>): Record<string, string> {
-  const entries: [string, string][] = [];
+  // CI=true is what every package manager, test runner and framework reads to
+  // decide it is not talking to a human: no progress spinners, no interactive
+  // prompts, no "run this again with --fix" offers. It is set here rather than
+  // on the spec because it is only ever true of the BUILD — the service this
+  // produces then runs as an ordinary process, not as a CI job. First in the
+  // list, so a service that declares its own CI still wins.
+  const entries: [string, string][] = [["CI", "true"]];
   for (const [key, value] of Object.entries(env)) {
     if ("value" in value) entries.push([key, value.value]);
   }
@@ -201,8 +210,8 @@ export function verifyWebhookToken(token: string, deploymentId: string, ns: stri
   return provided.length === wanted.length && timingSafeEqual(provided, wanted);
 }
 
-// The harness: BuildKit plus a small shell wrapper, injected via the machine `files` API.
-// Its stdout doubles as the live build log (Fly logs API). The machine's env block carries
+// The harness: BuildKit plus a small shell wrapper, injected through VM metadata.
+// Its stdout doubles as the live build log (Compute Engine serial output). The VM env block carries
 // only Marshal's own credentials (tarball URL, registry auth, webhook callback) — the
 // TENANT's env arrives as files instead, one per var under $BUILD_ENV_DIR, so that a value
 // can never be confused with a credential and `env` in a log dump stays free of both.
@@ -246,14 +255,15 @@ echo "MARSHAL_BUILD_START"
 #    RAILPACK_BUILDER_GUEST). Undersized, this is what an 8g guest with a 6g tmpfs died of:
 #    the store filled and a large "next build" hit ENOSPC, and a hungrier one is OOM-killed
 #    at ~1.3g RSS while the kernel holds ~6g of snapshots it cannot reclaim.
-#  - the ext4 device Fly backs the rootfs overlay with, which it also mounts at
-#    $BUILDKIT_DISK_DIR. A real filesystem and a legal upperdir, costing no RAM — but real-Fly
-#    QA measured a pnpm install of ~1.1g of node_modules taking 404s there against ~40s on
-#    tmpfs, enough on its own to blow BUILD_TIMEOUT_SECONDS. Hence second, not first.
+#  - a disk-backed ext4 directory mounted at $BUILDKIT_DISK_DIR. It is a legal upperdir and
+#    costs no RAM, but is materially slower than tmpfs. Hence second, not first.
 #
 # It is still far better than the third outcome: on the native snapshotter a build does not
 # fail, it silently gets slow enough to time out.
-BUILDKIT_DISK_DIR=/.fly-upper-layer
+# Set by the builder that started this machine: the disk-backed directory differs per
+# runtime (Fly mounts its rootfs overlay device at /.fly-upper-layer; the GCP startup script
+# mounts a data disk at /.marshal-buildkit-disk).
+BUILDKIT_DISK_DIR="\${BUILDKIT_DISK_DIR:-/.marshal-buildkit-disk}"
 BUILDKIT_ROOT=""
 BUILDKIT_STORE_READY=""
 if [ -n "\${BUILDKIT_TMPFS_SIZE:-}" ]; then
@@ -474,114 +484,8 @@ echo "MARSHAL_BUILD_DONE"
 `;
 }
 
-export function createFlyBuilder(): Builder {
-  return {
-    name: "fly",
-    async startBuild(options, lease) {
-      const config = getConfig();
-      if (config.publicUrl === null) {
-        throw new Error("MARSHAL_PUBLIC_URL must be set for real Fly builds — the builder machine calls the completion webhook on it");
-      }
-      const org = resolveNamespaceOrg(options.ns);
-      const fly = flyClientForNamespaceOrg(org);
-      const builderApp = builderAppName(config.envId);
-      await lease.assertOwned();
-      await fly.ensureApp(builderApp, builderNetworkName(config.envId));
-
-      const tarballUrl = await presignValidatedUploadGet(options.ns, options.deploymentId, BUILD_TIMEOUT_SECONDS + 60);
-      const webhookToken = computeWebhookToken(options.deploymentId, options.ns);
-      const webhookUrl = `${config.publicUrl}${buildCompletionPath(options.deploymentId)}?ns=${encodeURIComponent(options.ns)}`;
-
-      // The tab-separated manifest the harness loops over. Every field has been
-      // validated (service keys, image refs and paths contain no tabs, newlines
-      // or control characters), which is what lets /bin/sh read it with `read`
-      // instead of parsing JSON without jq.
-      const targetsManifest = options.targets
-        .map((target) => [target.serviceKey, target.pushTarget, target.dockerfilePath ?? "", target.rootDirectory ?? ""].join("\t"))
-        .join("\n");
-      // A Railpack build needs the bigger guest; one machine builds every target,
-      // so ANY auto-detected target decides the size for the whole run.
-      //
-      // A GENERATED Dockerfile is not one of them: it is an ordinary
-      // FROM/COPY/RUN build like the author's own, with no railpack-builder base
-      // image to extract and no plan to compute — so it gets the ordinary guest,
-      // and a base-image target sitting next to a Railpack one still gets the big
-      // one, because the machine is shared.
-      const isRailpackBuild = options.targets.some((target) => target.dockerfilePath === null && target.baseImage === null);
-      await lease.assertOwned();
-      const machine = await fly.createMachine(builderApp, {
-        name: `build-${options.deploymentId.toLowerCase()}`,
-        region: config.fly.region,
-        config: {
-          image: BUILDER_IMAGE,
-          guest: isRailpackBuild ? RAILPACK_BUILDER_GUEST : BUILDER_GUEST,
-          // One microVM per DEPLOYMENT = tenant isolation; auto_destroy reclaims it on exit
-          // (logs survive destruction — smoke-verified). Every service of one deployment
-          // source shares it, which is the point: they share a source tree, and a machine
-          // per service would re-fetch and re-extract it for each.
-          auto_destroy: true,
-          restart: { policy: "no" },
-          init: { exec: ["/bin/sh", "/marshal-build.sh"] },
-          files: [
-            {
-              guest_path: "/marshal-build.sh",
-              raw_value: Buffer.from(buildHarnessScript()).toString("base64"),
-            },
-            {
-              guest_path: "/marshal-targets.tsv",
-              raw_value: Buffer.from(`${targetsManifest}\n`, "utf8").toString("base64"),
-            },
-            // Tenant env, one directory per TARGET and one file per var. NOT in the env
-            // block below: that one holds Marshal's org token and registry auth, and a
-            // tenant value sitting next to them is one careless `env` away from being
-            // logged as a credential — and one careless credential away from being handed
-            // to `railpack prepare`, which runs unsandboxed in the harness.
-            // An EMPTY value is skipped: it would mean a files entry whose raw_value is the
-            // empty string, which the API is free to read as "no content supplied" rather
-            // than "supplied, and empty". There is nothing to inline either way, and the
-            // runtime env still carries the var — so the ambiguity is simply not worth
-            // entering. The harness's `[ -f "$f" ]` guard makes the absence a non-event.
-            ...options.targets.flatMap((target) => Object.entries(target.buildEnv).flatMap(([key, value]) => value === "" ? [] : [{
-              guest_path: `${BUILD_ENV_DIR}/${target.serviceKey}/${key}`,
-              raw_value: Buffer.from(value, "utf8").toString("base64"),
-            }])),
-            // The Dockerfiles Marshal generates, one directory per target. Their
-            // PRESENCE is what selects the build kind in the harness, which is why
-            // a target that needs neither contributes no file at all.
-            //
-            // Outside the build context on purpose: /ctx is the author's own
-            // source, and anything written there would be swept up by their
-            // `COPY . .`.
-            ...options.targets.flatMap((target) => {
-              const generated = generatedDockerfile(target);
-              return generated === null ? [] : [{
-                guest_path: `${BUILD_DOCKERFILE_DIR}/${target.serviceKey}/${generated.path}`,
-                raw_value: Buffer.from(generated.contents, "utf8").toString("base64"),
-              }];
-            }),
-          ],
-          metadata: { marshal_deployment_id: options.deploymentId },
-          env: {
-            // Paths, not values: the harness reads the values out of the files above.
-            BUILD_ENV_DIR,
-            BUILD_DOCKERFILE_DIR,
-            TARBALL_URL: tarballUrl,
-            REGISTRY_HOST: config.fly.registryHost,
-            REGISTRY_AUTH_B64: fly.registryAuthBase64(),
-            WEBHOOK_URL: webhookUrl,
-            WEBHOOK_TOKEN: webhookToken,
-            BUILD_TIMEOUT_SECONDS: String(BUILD_TIMEOUT_SECONDS),
-            RAILPACK_CLI_URL,
-            RAILPACK_CLI_SHA256,
-            RAILPACK_FRONTEND_IMAGE,
-            ...(isRailpackBuild ? { BUILDKIT_TMPFS_SIZE: RAILPACK_BUILDKIT_TMPFS_SIZE } : {}),
-          },
-        },
-      });
-      return { builderApp, builderMachineId: machine.id };
-    },
-  };
-}
+// The real builders live with their runtimes: fly/provider.ts and gcp/provider.ts. Both
+// inject the harness above and speak the same completion webhook.
 
 export type CompleteBuildFn = (options: {
   ns: string,

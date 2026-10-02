@@ -1,5 +1,9 @@
+"use client";
+
 import { cn, Typography } from "@/components/ui";
 import React from "react";
+
+const PageLayoutContext = React.createContext(false);
 
 export function PageLayout(props: {
   children?: React.ReactNode,
@@ -19,7 +23,12 @@ export function PageLayout(props: {
 } | {
   width?: number,
 })) {
-  return (
+  const isNested = React.useContext(PageLayoutContext);
+  // Only the outermost PageLayout may control the shell's scroll model; nested
+  // layouts are content and must not change how the page itself scrolls.
+  const exposesShellAttributes = !isNested;
+
+  const pageLayout = (
     <div
       className={cn(
         "flex min-h-0 flex-1 flex-col",
@@ -28,9 +37,9 @@ export function PageLayout(props: {
           : "[--page-content-gap:1rem] [--page-header-extra-gap:0.5rem]",
         !props.noPadding && (props.spacing === "compact" ? "p-3" : "px-4 py-4 sm:px-6 sm:py-6"),
       )}
-      data-contained-height={props.containedHeight ? "true" : undefined}
-      data-scroll-main={props.scrollMain ? "true" : undefined}
-      data-full-bleed={props.fullBleed ? "true" : undefined}
+      data-contained-height={exposesShellAttributes && props.containedHeight ? "true" : undefined}
+      data-scroll-main={exposesShellAttributes && props.scrollMain ? "true" : undefined}
+      data-full-bleed={exposesShellAttributes && props.fullBleed ? "true" : undefined}
     >
       <div
         className={cn(
@@ -81,5 +90,11 @@ export function PageLayout(props: {
         </div>
       </div>
     </div>
+  );
+
+  return (
+    <PageLayoutContext.Provider value={true}>
+      {pageLayout}
+    </PageLayoutContext.Provider>
   );
 }

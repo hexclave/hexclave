@@ -86,6 +86,11 @@ model Tenancy {
   conversations       Conversation[]
   conversationEntryPoints ConversationEntryPoint[]
   conversationMessages ConversationMessage[]
+  tvPresentationProfiles TvPresentationProfile[]
+  tvEventOccurrences TvEventOccurrence[]
+  tvEventEvaluatorStates TvEventEvaluatorState[]
+  tvProfileEventPresentations TvProfileEventPresentation[]
+  tvDisplays TvDisplay[]
   deploymentSources   DeploymentSource[]
   deploymentServices  DeploymentService[]
   deploymentVolumes   DeploymentVolume[]
@@ -124,6 +129,231 @@ model Tenancy {
   @@unique([projectId, branchId, organizationId])
   @@unique([projectId, branchId, hasNoOrganization])
   @@unique([id, projectId, branchId], map: "Tenancy_id_projectId_branchId_key")
+}
+
+enum TvPresentationMode {
+  GENERAL
+}
+
+enum TvFinancialVisibility {
+  REDACTED
+  EXACT
+}
+
+model TvPresentationProfile {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String  @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  displayName           String @db.VarChar(80)
+  normalizedDisplayName String @db.VarChar(80)
+  description           String @default("") @db.VarChar(240)
+  mode                  TvPresentationMode @default(GENERAL)
+
+  defaultDurationSeconds  Int
+  playlist                Json
+  interruptionPreferences Json
+  financialVisibility     TvFinancialVisibility @default(REDACTED)
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenancyId, normalizedDisplayName], map: "TvPresentationProfile_tenancy_name_key")
+  @@index([tenancyId, updatedAt(sort: Desc), id], name: "TvPresentationProfile_tenancy_updatedAt_id_idx")
+}
+
+enum TvDisplayPairingState {
+  PENDING
+  APPROVED
+  CONSUMED
+  REJECTED
+}
+
+model TvDisplay {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String  @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  profileId            String @db.VarChar(128)
+  displayName          String @db.VarChar(80)
+
+  pairedByAdminUserId String @db.Uuid
+  pairedAt             DateTime @default(now())
+  lastSeenAt           DateTime?
+  credentialVersion    Int @default(1)
+
+  financialVisibilityAcknowledgedAt DateTime?
+  financialVisibilityAcknowledgedByAdminUserId String? @db.Uuid
+
+  credentials TvDisplayCredential[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenancyId, updatedAt(sort: Desc), id], name: "TvDisplay_tenancy_updatedAt_id_idx")
+  @@index([tenancyId, profileId], name: "TvDisplay_profile_assignment_idx")
+}
+
+model TvDisplayPairingChallenge {
+  id               String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pairingCode      String @unique @db.VarChar(8)
+  deviceSecretHash String @unique @db.VarChar(64)
+  state            TvDisplayPairingState @default(PENDING)
+
+  expiresAt       DateTime
+  lastPolledAt    DateTime?
+  invalidAttempts Int @default(0)
+
+  approvedTenancyId String? @db.Uuid
+  approvedProfileId String? @db.VarChar(128)
+  approvedDisplayName String? @db.VarChar(80)
+  approvedByAdminUserId String? @db.Uuid
+  approvedAt DateTime?
+  financialVisibilityAcknowledgedAt DateTime?
+  consumedAt DateTime?
+  rejectedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt], name: "TvDisplayPairingChallenge_expiresAt_idx")
+}
+
+model TvDisplayCredential {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  displayId String @db.Uuid
+  display   TvDisplay @relation(fields: [displayId], references: [id], onDelete: Cascade)
+
+  familyId        String @db.Uuid
+  tokenHash       String @unique @db.VarChar(64)
+  parentId        String? @db.Uuid
+  issuedAt        DateTime @default(now())
+  expiresAt       DateTime
+  usedAt          DateTime?
+  revokedAt       DateTime?
+  replacementId  String? @db.Uuid
+
+  @@index([displayId, familyId, revokedAt], name: "TvDisplayCredential_family_idx")
+}
+
+model TvDisplayPairingRateLimitBucket {
+  keyHash   String @db.VarChar(64)
+  operation String @db.VarChar(40)
+  windowStart DateTime
+  attempts  Int @default(0)
+  expiresAt DateTime
+
+  @@id([keyHash, operation, windowStart])
+  @@index([expiresAt], name: "TvDisplayPairingRateLimitBucket_expiresAt_idx")
+}
+
+enum TvEventType {
+  EMAIL_DELIVERY_DEGRADATION
+  USER_MILESTONE
+  SUBSCRIPTION_COLLECTION_DEGRADATION
+}
+
+enum TvEventPresentationClass {
+  CELEBRATION
+  INCIDENT
+  CRITICAL_INCIDENT
+}
+
+enum TvEventOccurrenceLifecycle {
+  OCCURRED
+  ACTIVE
+  RESOLVED
+}
+
+enum TvPresentationSupersededReason {
+  NEWER_CELEBRATION
+  EXPIRED_BEFORE_PRESENTATION
+  POLICY_DISABLED
+  OCCURRENCE_REPLACED
+}
+
+model TvEventOccurrence {
+  id        String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenancyId String @db.Uuid
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  eventType         TvEventType
+  presentationClass TvEventPresentationClass
+  lifecycle         TvEventOccurrenceLifecycle
+  deduplicationKey  String @db.VarChar(200)
+
+  title         String @db.VarChar(160)
+  summary       String @db.VarChar(480)
+  metricLabel   String @db.VarChar(80)
+  metricValue   String @db.VarChar(120)
+  expectedRange String? @db.VarChar(160)
+  sourceLabel   String @db.VarChar(120)
+
+  aggregateEvidence Json
+
+  occurredAt  DateTime
+  detectedAt  DateTime
+  activatedAt DateTime?
+  escalatedAt DateTime?
+  resolvedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  evaluatorStates TvEventEvaluatorState[] @relation("TvEvaluatorActiveOccurrence")
+  profilePresentations TvProfileEventPresentation[]
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, deduplicationKey], map: "TvEventOccurrence_tenancy_deduplication_key")
+  @@index([tenancyId, lifecycle, presentationClass, activatedAt(sort: Desc), id], name: "TvEventOccurrence_active_lookup_idx")
+  @@index([tenancyId, occurredAt(sort: Desc), id], name: "TvEventOccurrence_occurred_lookup_idx")
+  @@index([tenancyId, resolvedAt(sort: Desc), id], name: "TvEventOccurrence_resolved_lookup_idx")
+}
+
+model TvEventEvaluatorState {
+  tenancyId    String @db.Uuid
+  evaluatorKey String @db.VarChar(100)
+  tenancy      Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  nextEvaluationAt    DateTime
+  breachCount         Int @default(0)
+  criticalBreachCount Int @default(0)
+  recoveryCount       Int @default(0)
+  milestoneBaseline   BigInt?
+  typedState          Json
+
+  activeOccurrenceId String? @db.Uuid
+  // The migration's composite foreign key narrows SET NULL to activeOccurrenceId;
+  // tenancyId remains required and continues to own this evaluator state.
+  activeOccurrence   TvEventOccurrence? @relation("TvEvaluatorActiveOccurrence", fields: [tenancyId, activeOccurrenceId], references: [tenancyId, id], onDelete: SetNull, onUpdate: Cascade, map: "TvEventEvaluatorState_activeOccurrence_fkey")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([tenancyId, evaluatorKey])
+}
+
+model TvProfileEventPresentation {
+  tenancyId    String @db.Uuid
+  profileId    String @db.VarChar(128)
+  occurrenceId String @db.Uuid
+  tenancy      Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  occurrence   TvEventOccurrence @relation(fields: [tenancyId, occurrenceId], references: [tenancyId, id], onDelete: Cascade, onUpdate: Cascade, map: "TvProfileEventPresentation_occurrence_fkey")
+
+  takeoverStartedAt  DateTime?
+  takeoverEndsAt     DateTime?
+  recoveryEndsAt     DateTime?
+  highlightExpiresAt DateTime?
+  animationExpiresAt DateTime?
+  supersededAt       DateTime?
+  supersededReason   TvPresentationSupersededReason?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([tenancyId, profileId, occurrenceId])
+  @@index([tenancyId, profileId, supersededAt, highlightExpiresAt], name: "TvProfileEventPresentation_active_lookup_idx")
 }
 
 enum ManagedEmailDomainStatus {
@@ -1081,6 +1311,7 @@ model EmailOutbox {
   tenancy Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
 
   @@id([tenancyId, id])
+  @@index([tenancyId, createdAt], name: "EmailOutbox_tenancyId_createdAt_idx")
   @@index([tenancyId, finishedSendingAt(sort: Desc), scheduledAtIfNotYetQueued(sort: Desc), priority, id], map: "EmailOutbox_ordering_idx")
   @@index([tenancyId, startedSendingAt], name: "EmailOutbox_tenancyId_startedSendingAt_idx")
   @@index([tenancyId, simpleStatus], map: "EmailOutbox_simple_status_tenancy_idx")
@@ -1427,6 +1658,7 @@ model Subscription {
 
   @@id([tenancyId, id])
   @@unique([tenancyId, stripeSubscriptionId])
+  @@index([tenancyId, createdAt], name: "Subscription_tenancyId_createdAt_idx")
 }
 
 model ProductVersion {
@@ -1464,6 +1696,9 @@ model OneTimePurchase {
   product               Json
   quantity              Int
   stripePaymentIntentId String?
+  amountReceived        Int?
+  currency              String?
+  paidAt                DateTime?
   createdAt             DateTime               @default(now())
   revokedAt             DateTime?
   refundedAt            DateTime?
@@ -1508,6 +1743,13 @@ model SubscriptionInvoice {
   status                        String?
   amountTotal                   Int?
   hostedInvoiceUrl              String?
+  paidAt                        DateTime?
+  // Event time of the newest exact invoice outcome applied; NULL means no exact outcome has been applied.
+  paymentOutcomeEventAt         DateTime?
+  markedUncollectibleAt         DateTime?
+  voidedAt                      DateTime?
+  currency                      String?
+  amountPaid                    Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1516,6 +1758,7 @@ model SubscriptionInvoice {
 
   @@id([tenancyId, id])
   @@unique([tenancyId, stripeInvoiceId])
+  @@index([tenancyId, createdAt], name: "SubscriptionInvoice_tenancyId_createdAt_idx")
 }
 
 // Durable backup of Bulldozer `payments-manual-transactions` (refunds today).
@@ -1642,8 +1885,8 @@ model DeletedRow {
 // plaintext never touches this table. Only the feature consuming a secret
 // decrypts it, server-side.
 //
-// Deployments are the only consumer today (`secret()` env vars in the config
-// file's `services` export name a key here), but the store deliberately isn't
+// Deployments are the only consumer today (`secret()` env vars in the deploy
+// file's `deploy` export name a key here), but the store deliberately isn't
 // deployments-specific — see @/lib/project-secrets.
 //
 // Keyed by project, not tenancy: these are infrastructure credentials that
@@ -1675,7 +1918,7 @@ model ProjectSecret {
 //
 // A project owns DEPLOYMENT SOURCES; a source is deployed one or more times;
 // each deployment ships a set of SERVICES. A source is one deploy file
-// (hexclave.deploy.ts, named by its own `id` export) and what one
+// (hexclave.deploy.ts, named by its own `deploymentGroupId` export) and what one
 // `hexclave deploy` ships — one upload, one build — so a project deployed from
 // several repositories gives each of them a source of its own. Service ids stay
 // unique per PROJECT, so a reference never has to name a source.
@@ -1702,11 +1945,30 @@ model DeploymentSource {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // The deploy file's own `id` export — which deploy file (and so which
-  // repository) these services were deployed from. Deployments declared in
-  // hexclave.config.ts, which has no id of its own, belong to a source named
-  // after that file. Created implicitly by the first deploy that names it.
+  // The deploy file's own `deploymentGroupId` export — which deploy file (and so
+  // which repository) these services were deployed from. Created implicitly by
+  // the first deploy that names it. Projects deployed before services moved out
+  // of hexclave.config.ts still have a source named after that file; nothing
+  // writes one any more.
   sourceId String
+
+  // How much memory this source's BUILDER machine gets, in megabytes. Null = the
+  // deployment picks the floor its build shape needs.
+  //
+  // On the source rather than on a service because one `hexclave deploy` builds
+  // every service of the source on ONE machine: there is a single builder to
+  // size, and a per-service column could only ever record a request that another
+  // service's request overrode. Written by the same sync that stores the service
+  // definitions, so it rides that sync's fence rather than needing one of its own.
+  builderMemoryMb Int?
+
+  // Which infrastructure runtime this source's services run on: "fly" (the
+  // default, and what an absent `version` export in the deploy file means) or
+  // "gcp" (opted into with an internal `version` token). Written by the same
+  // sync that stores the definitions. Every source of one project must agree —
+  // services share a private network, which cannot span providers — and the
+  // sync route refuses one that does not; see syncSourceServices.
+  runtime String @default("fly")
 
   tenancy     Tenancy             @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
   services    DeploymentService[]
@@ -1742,6 +2004,35 @@ model DeploymentService {
   // is no foreign id to store, only the fact that provisioning happened.
   provisionedAt DateTime?
 
+  // When this service last STARTED running the tenant's own image, which is what
+  // the Free plan's 24-hour limit is measured from. Set on every successful
+  // deploy, so a redeploy buys another 24 hours.
+  //
+  // NULL MEANS NO LIMIT, not "unknown". Every row that existed before this column
+  // shipped has null here and is grandfathered: the limit applies to deployments
+  // made after it, not retroactively to work whose authors were never told about
+  // a window. The first redeploy writes this and opts that service in, so the
+  // exempt set only ever shrinks. See windowStartedAt in
+  // apps/backend/src/lib/deployments/parking.tsx.
+  //
+  // A column of its own rather than `updatedAt`, which any edit to the row bumps
+  // (a definition sync, a domain change), and rather than the newest Deployment
+  // row, which would make the sweeper's candidate query a join over a table it
+  // otherwise never touches.
+  runningSince DateTime?
+
+  // Set while the service is PARKED: stopped, with the platform's parked page
+  // served in its place on every hostname it holds. See parkService in
+  // apps/marshal/src/services.ts for what parking does to the runtime, and
+  // apps/backend/src/lib/deployments/parking.tsx for what decides it.
+  //
+  // Two columns rather than one enum: `parkedReason` is passed through to Marshal
+  // (which passes it to the parked page, which picks its copy from it) and is
+  // expected to grow values that have nothing to do with plans — a platform
+  // pause, an abuse suspension — while `parkedAt` is what every query filters on.
+  parkedAt     DateTime?
+  parkedReason String?
+
   // The definition as last synced from the deploy file's `services` export.
   // `definitionSyncId` is regenerated once per source sync and fenced by the
   // deploy that follows it, so two CLIs cannot silently combine one checkout's
@@ -1769,6 +2060,20 @@ model DeploymentService {
   ports         Json   @default("{}")
   minInstances  Int?
   maxInstances  Int?
+  // How much memory the container gets, in megabytes. Null = the type's default
+  // (see defaultDeploymentMemoryForType), which is what every service ran at
+  // before compute was configurable — so an existing row needs no backfill and
+  // deploys the machine it already had.
+  //
+  // Stored as a number rather than the "4GB" token the deploy file writes: the
+  // token is an authoring spelling with exactly one canonical form per size, and
+  // a column that stores it would have to be re-validated against that ladder on
+  // every read. A megabyte count off the ladder reads back as "unset".
+  //
+  // CPU is not stored because it is not declared: it is derived from this by the
+  // runtime, which is what keeps every size valid on both a whole-VM "server"
+  // and a "serverless" container.
+  memoryMb      Int?
   // Where the service's code lives inside the deployment source's upload, relative to the
   // deploy file. The build CONTEXT is the whole upload (a monorepo service
   // usually has to reach shared code above its own directory); this only scopes
@@ -2353,6 +2658,58 @@ model ErrorAttachment {
   @@unique([tenancyId, projectId, branchId, eventId, sha256, filename], map: "ErrorAttachment_scope_event_digest_filename_key")
   @@index([tenancyId, projectId, branchId, eventId, createdAt(sort: Desc)], map: "ErrorAttachment_scope_event_createdAt_idx")
 }
+
+// Platform-wide (cross-tenant) switches for the Deployments app.
+//
+// A singleton: one row for the whole Hexclave instance, matching
+// ExternalDbSyncMetadata's shape. Not per-project and not per-tenancy — this is
+// the operator's control over the alpha as a whole, and a per-project override
+// is deliberately not modelled until something needs one.
+//
+// Its own table rather than a column on ExternalDbSyncMetadata: the two features
+// share nothing but the singleton pattern, and a deployments switch living in a
+// table named after the DB-sync pipeline is exactly the confusion an emergency
+// switch must not cause.
+//
+// Every column defaults to today's behaviour, and a MISSING row reads as those
+// defaults (see getDeploymentsPlatformConfig) — so this table needs no backfill
+// and there is no window in which deploys are off because nobody has written to
+// it yet.
+model DeploymentsPlatformConfig {
+  id String @id @default(dbgenerated("gen_random_uuid()"))
+
+  singleton BooleanTrue @unique @default(TRUE)
+
+  // The emergency fusebox. False = no NEW deployment may be created anywhere on
+  // this instance: the deploy and upload routes refuse with a 503. Deliberately
+  // narrow — deployments already in flight run to completion, status and logs
+  // stay readable, and tearing services down keeps working, because an operator
+  // flipping this during an incident needs those more than ever.
+  deploymentsEnabled Boolean @default(true)
+
+  // Whether the Free plan's time limit is enforced at all. Default TRUE: the limit
+  // is part of what the Free plan IS, so an instance that has never been
+  // configured enforces it. An operator can still pause it from the Deploy Admin
+  // page — which is the switch to reach for if parking ever misbehaves, because
+  // turning it off stops new parks immediately (already-parked services stay
+  // parked until their projects redeploy or upgrade).
+  //
+  // Note what this default means on the deploy that ships it: every Free-plan
+  // project whose services last deployed more than the window ago is parked by
+  // the first sweep, within ten minutes. That is the intended behaviour, but it
+  // is not a quiet rollout.
+  freePlanParkingEnabled Boolean @default(true)
+
+  // How long a Free-plan project's services run after each deploy before they are
+  // parked. Configurable because the right number is a pricing decision that will
+  // move, and because an operator handling an incident needs to be able to widen
+  // it without a deploy.
+  freePlanParkAfterHours Int @default(24)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 
 // ─── Workflows ──────────────────────────────────────────────────────────────
 //

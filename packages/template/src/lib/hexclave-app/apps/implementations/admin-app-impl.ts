@@ -670,6 +670,10 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
 
   async sendWorkflowEvent(name: string, data?: unknown): Promise<{ eventId: string }> {
     const result = await this._interface.sendWorkflowEvent(name, data ?? null);
+    // Sending an event can create a run asynchronously. Refresh the summary
+    // cache so the workflow page does not keep showing the pre-event counts
+    // after the runs grid has been explicitly reloaded.
+    await this._adminWorkflowsCache.refresh([]);
     return { eventId: result.event_id };
   }
 

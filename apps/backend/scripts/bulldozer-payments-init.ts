@@ -85,6 +85,17 @@ export type TenancyIdFilter =
   | { mode: "exclude", tenancyIds: string[] }
   | { mode: "only", tenancyIds: string[] };
 
+type PaymentOutcomeColumnPresence = {
+  subscriptionInvoicePaidAt: boolean,
+  subscriptionInvoiceMarkedUncollectibleAt: boolean,
+  subscriptionInvoiceVoidedAt: boolean,
+  subscriptionInvoiceCurrency: boolean,
+  subscriptionInvoiceAmountPaid: boolean,
+  oneTimePurchaseAmountReceived: boolean,
+  oneTimePurchaseCurrency: boolean,
+  oneTimePurchasePaidAt: boolean,
+};
+
 export type BackfillResumeOptions = {
   resumeTable?: BackfillTableName,
   resumeCursor?: Cursor,
@@ -336,6 +347,118 @@ function txnIdCursorSql(cursor: Cursor | null): Prisma.Sql {
   return Prisma.sql`AND ("tenancyId", "txnId") > (${cursor.tenancyId}::uuid, ${cursor.id})`;
 }
 
+async function getPaymentOutcomeColumnPresence(replica: PrismaReplica): Promise<PaymentOutcomeColumnPresence> {
+  const rows = await replica.$queryRaw<PaymentOutcomeColumnPresence[]>`
+    -- Code can run during the deploy window before payment-outcome migrations are applied.
+    SELECT
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'paidAt'
+      ) AS "subscriptionInvoicePaidAt",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'markedUncollectibleAt'
+      ) AS "subscriptionInvoiceMarkedUncollectibleAt",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'voidedAt'
+      ) AS "subscriptionInvoiceVoidedAt",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'currency'
+      ) AS "subscriptionInvoiceCurrency",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'SubscriptionInvoice'
+          AND column_name = 'amountPaid'
+      ) AS "subscriptionInvoiceAmountPaid",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'OneTimePurchase'
+          AND column_name = 'amountReceived'
+      ) AS "oneTimePurchaseAmountReceived",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'OneTimePurchase'
+          AND column_name = 'currency'
+      ) AS "oneTimePurchaseCurrency",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'OneTimePurchase'
+          AND column_name = 'paidAt'
+      ) AS "oneTimePurchasePaidAt"
+  `;
+  if (rows.length !== 1) {
+    throw new Error(`Expected payment outcome column presence query to return one row, got ${rows.length}`);
+  }
+  return rows[0];
+}
+
+function subscriptionInvoicePaymentColumnsSql(presence: PaymentOutcomeColumnPresence): Prisma.Sql {
+  return Prisma.sql`
+    ${presence.subscriptionInvoicePaidAt ? Prisma.sql`"paidAt"` : Prisma.sql`NULL::timestamp AS "paidAt"`},
+    ${presence.subscriptionInvoiceMarkedUncollectibleAt ? Prisma.sql`"markedUncollectibleAt"` : Prisma.sql`NULL::timestamp AS "markedUncollectibleAt"`},
+    ${presence.subscriptionInvoiceVoidedAt ? Prisma.sql`"voidedAt"` : Prisma.sql`NULL::timestamp AS "voidedAt"`},
+    ${presence.subscriptionInvoiceCurrency ? Prisma.sql`"currency"` : Prisma.sql`NULL::text AS "currency"`},
+    ${presence.subscriptionInvoiceAmountPaid ? Prisma.sql`"amountPaid"` : Prisma.sql`NULL::integer AS "amountPaid"`}
+  `;
+}
+
+function oneTimePurchasePaymentColumnsSql(presence: PaymentOutcomeColumnPresence): Prisma.Sql {
+  return Prisma.sql`
+    ${presence.oneTimePurchaseAmountReceived ? Prisma.sql`"amountReceived"` : Prisma.sql`NULL::integer AS "amountReceived"`},
+    ${presence.oneTimePurchaseCurrency ? Prisma.sql`"currency"` : Prisma.sql`NULL::text AS "currency"`},
+    ${presence.oneTimePurchasePaidAt ? Prisma.sql`"paidAt"` : Prisma.sql`NULL::timestamp AS "paidAt"`}
+  `;
+}
+
+function missingPaymentOutcomeColumns(presence: PaymentOutcomeColumnPresence): string[] {
+  const missing: string[] = [];
+  if (!presence.subscriptionInvoicePaidAt) missing.push("SubscriptionInvoice.paidAt");
+  if (!presence.subscriptionInvoiceMarkedUncollectibleAt) missing.push("SubscriptionInvoice.markedUncollectibleAt");
+  if (!presence.subscriptionInvoiceVoidedAt) missing.push("SubscriptionInvoice.voidedAt");
+  if (!presence.subscriptionInvoiceCurrency) missing.push("SubscriptionInvoice.currency");
+  if (!presence.subscriptionInvoiceAmountPaid) missing.push("SubscriptionInvoice.amountPaid");
+  if (!presence.oneTimePurchaseAmountReceived) missing.push("OneTimePurchase.amountReceived");
+  if (!presence.oneTimePurchaseCurrency) missing.push("OneTimePurchase.currency");
+  if (!presence.oneTimePurchasePaidAt) missing.push("OneTimePurchase.paidAt");
+  return missing;
+}
+
+function paymentOutcomeColumnPresenceChanged(
+  previous: PaymentOutcomeColumnPresence,
+  next: PaymentOutcomeColumnPresence,
+): boolean {
+  return previous.subscriptionInvoicePaidAt !== next.subscriptionInvoicePaidAt
+    || previous.subscriptionInvoiceMarkedUncollectibleAt !== next.subscriptionInvoiceMarkedUncollectibleAt
+    || previous.subscriptionInvoiceVoidedAt !== next.subscriptionInvoiceVoidedAt
+    || previous.subscriptionInvoiceCurrency !== next.subscriptionInvoiceCurrency
+    || previous.subscriptionInvoiceAmountPaid !== next.subscriptionInvoiceAmountPaid
+    || previous.oneTimePurchaseAmountReceived !== next.oneTimePurchaseAmountReceived
+    || previous.oneTimePurchaseCurrency !== next.oneTimePurchaseCurrency
+    || previous.oneTimePurchasePaidAt !== next.oneTimePurchasePaidAt;
+}
+
 async function fetchSubscriptionBatch(
   replica: PrismaReplica,
   cursor: Cursor | null,
@@ -377,6 +500,7 @@ async function fetchSubscriptionInvoiceBatch(
   cursor: Cursor | null,
   batchSize: number,
   tenancyFilter: TenancyIdFilter | undefined,
+  paymentColumns: Prisma.Sql,
 ): Promise<SubscriptionInvoiceBackfillRow[]> {
   return await replica.$queryRaw<SubscriptionInvoiceBackfillRow[]>`
     SELECT
@@ -387,6 +511,7 @@ async function fetchSubscriptionInvoiceBatch(
       "isSubscriptionCreationInvoice",
       "status",
       "amountTotal",
+      ${paymentColumns},
       "hostedInvoiceUrl",
       "createdAt"
     FROM "SubscriptionInvoice"
@@ -403,6 +528,7 @@ async function fetchOneTimePurchaseBatch(
   cursor: Cursor | null,
   batchSize: number,
   tenancyFilter: TenancyIdFilter | undefined,
+  paymentColumns: Prisma.Sql,
 ): Promise<OneTimePurchaseBackfillRow[]> {
   return await replica.$queryRaw<OneTimePurchaseBackfillRow[]>`
     SELECT
@@ -418,6 +544,7 @@ async function fetchOneTimePurchaseBatch(
       "revokedAt",
       "refundedAt",
       "creationSource",
+      ${paymentColumns},
       "createdAt"
     FROM "OneTimePurchase"
     WHERE TRUE
@@ -645,6 +772,29 @@ function formatBackfillFailures(failures: BackfillFailure[]): string {
 
 export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = {}) {
   const replica = globalPrismaClient.$replica();
+  let paymentOutcomeColumnPresence = await getPaymentOutcomeColumnPresence(replica);
+  let subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(paymentOutcomeColumnPresence);
+  let oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(paymentOutcomeColumnPresence);
+  const allPaymentOutcomeColumnsPresent = (presence: PaymentOutcomeColumnPresence) => Object.values(presence).every(Boolean);
+  const missingColumns = missingPaymentOutcomeColumns(paymentOutcomeColumnPresence);
+  if (missingColumns.length > 0) {
+    log(`WARNING: Payment outcome columns are missing: ${missingColumns.join(", ")}. This run mirrors NULL outcome values for those columns. Repeat this run after the payment outcome migrations are applied. Writes are idempotent.`);
+  }
+  let paymentOutcomeColumnPresenceChangedLogged = false;
+  const refreshPaymentOutcomeColumns = async () => {
+    if (allPaymentOutcomeColumnsPresent(paymentOutcomeColumnPresence)) return;
+    const nextPresence = await getPaymentOutcomeColumnPresence(replica);
+    const changed = paymentOutcomeColumnPresenceChanged(paymentOutcomeColumnPresence, nextPresence);
+    if (changed) {
+      paymentOutcomeColumnPresence = nextPresence;
+      subscriptionInvoicePaymentColumns = subscriptionInvoicePaymentColumnsSql(nextPresence);
+      oneTimePurchasePaymentColumns = oneTimePurchasePaymentColumnsSql(nextPresence);
+      if (!paymentOutcomeColumnPresenceChangedLogged) {
+        log("Payment outcome columns changed during the run; subsequent pages will include the newly available columns.");
+        paymentOutcomeColumnPresenceChangedLogged = true;
+      }
+    }
+  };
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const tenancyFilter = options.tenancyFilter;
   assertResumeCursorMatchesTenancyFilter(options.resumeCursor, tenancyFilter);
@@ -667,12 +817,18 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
     ),
     makeTable(
       "SubscriptionInvoice",
-      (cursor) => fetchSubscriptionInvoiceBatch(replica, cursor, batchSize, tenancyFilter),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchSubscriptionInvoiceBatch(replica, cursor, batchSize, tenancyFilter, subscriptionInvoicePaymentColumns);
+      },
       (invoices) => bulldozerWriteSubscriptionInvoices(invoices),
     ),
     makeTable(
       "OneTimePurchase",
-      (cursor) => fetchOneTimePurchaseBatch(replica, cursor, batchSize, tenancyFilter),
+      async (cursor) => {
+        await refreshPaymentOutcomeColumns();
+        return await fetchOneTimePurchaseBatch(replica, cursor, batchSize, tenancyFilter, oneTimePurchasePaymentColumns);
+      },
       async (purchases) => {
         await bulldozerWriteOneTimePurchases(purchases);
         const refunds = purchases

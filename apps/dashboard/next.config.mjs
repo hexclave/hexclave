@@ -1,9 +1,17 @@
 import { withSentryConfig } from "@sentry/nextjs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { resolveTvQuickTunnelDevelopmentConfig } from "./tv-quick-tunnel-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isRdeBuild = process.env.HEXCLAVE_DASHBOARD_BUILD_FOR_RDE === "true";
+const useFallbackBackend = (process.env.STACK_DEV_FALLBACK_BACKEND ?? "").trim() !== "";
+const tvQuickTunnelConfig = resolveTvQuickTunnelDevelopmentConfig({
+  configuredOrigin: process.env.HEXCLAVE_TV_QUICK_TUNNEL_ORIGIN,
+  nodeEnvironment: process.env.NODE_ENV,
+  portPrefix: process.env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX ?? "81",
+  useFallbackBackend,
+});
 
 const withConfiguredSentryConfig = (nextConfig) =>
   withSentryConfig(
@@ -110,6 +118,17 @@ const nextConfig = {
 
   poweredByHeader: false,
 
+  ...(tvQuickTunnelConfig == null ? {} : {
+    allowedDevOrigins: tvQuickTunnelConfig.allowedDevOrigins,
+    env: {
+      NEXT_PUBLIC_HEXCLAVE_TV_QUICK_TUNNEL_ENABLED: "true",
+    },
+  }),
+
+  experimental: {
+    turbopackFileSystemCacheForDev: true,
+  },
+
   typescript: {
     ignoreBuildErrors: process.env.STACK_NEXT_CONFIG_DISABLE_TYPESCRIPT === "true",
   },
@@ -137,6 +156,7 @@ const nextConfig = {
 
   async rewrites() {
     return [
+      ...(tvQuickTunnelConfig?.rewrites ?? []),
       {
         source: "/consume/static/:path*",
         destination: "https://eu-assets.i.posthog.com/static/:path*",

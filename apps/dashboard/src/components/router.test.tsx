@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import React, { useRef, useState } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { RouterProvider, useRouter } from "./router";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { RouterProvider, useRouter, useRouterConfirm } from "./router";
 
 const nextRouter = vi.hoisted(() => ({
   push: vi.fn(),
@@ -39,5 +39,56 @@ describe("useRouter", () => {
     expect(button.textContent).toBe("stable");
     fireEvent.click(button);
     expect(button.textContent).toBe("stable");
+  });
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+function Probe(props: { onSameTickUnload: (prevented: boolean) => void }) {
+  const { setNeedConfirm } = useRouterConfirm();
+  return (
+    <>
+      <button type="button" onClick={() => setNeedConfirm(true)}>
+        Require confirmation
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setNeedConfirm(false);
+          const event = new Event("beforeunload", { cancelable: true });
+          window.dispatchEvent(event);
+          props.onSameTickUnload(event.defaultPrevented);
+        }}
+      >
+        Reset and unload
+      </button>
+    </>
+  );
+}
+
+describe("RouterProvider beforeunload confirmation", () => {
+  it("cancels beforeunload while navigation confirmation is required", () => {
+    const { getByRole } = render(
+      <RouterProvider><Probe onSameTickUnload={() => undefined} /></RouterProvider>,
+    );
+    fireEvent.click(getByRole("button", { name: "Require confirmation" }));
+
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("does not cancel beforeunload after same-tick confirmation reset", () => {
+    let prevented = true;
+    const { getByRole } = render(
+      <RouterProvider><Probe onSameTickUnload={(value) => { prevented = value; }} /></RouterProvider>,
+    );
+    fireEvent.click(getByRole("button", { name: "Require confirmation" }));
+    fireEvent.click(getByRole("button", { name: "Reset and unload" }));
+
+    expect(prevented).toBe(false);
   });
 });

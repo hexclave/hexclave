@@ -19,7 +19,7 @@ export {
 // (per-specifier JSDoc on re-exports does not).
 export type { HexclaveConfig, StackConfig } from "@hexclave/shared/config";
 export { defineHexclaveConfig, defineStackConfig } from "@hexclave/shared/config";
-// The author-facing types for the config file's `deploy` export.
+// The author-facing types for the deploy file's `deploy` export.
 export type {
   HexclaveDeploymentConfig,
   HexclaveDeploymentContext,

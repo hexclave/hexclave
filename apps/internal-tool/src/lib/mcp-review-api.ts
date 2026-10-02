@@ -1,34 +1,19 @@
-const IS_DEV = process.env.NODE_ENV === "development";
-const PLACEHOLDER = "REPLACE_ME";
-
-function envOrDevDefault(value: string | undefined, devDefault: string): string {
-  if (!value || value === PLACEHOLDER) {
-    return IS_DEV ? devDefault : "";
-  }
-  return value;
-}
-
-function publicEnv(hexclaveName: string, legacyStackName: string): string | undefined {
-  return process.env[hexclaveName] ?? process.env[legacyStackName];
-}
-
-const PORT_PREFIX = process.env.NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX ?? "81";
-const API_URL = envOrDevDefault(publicEnv("NEXT_PUBLIC_HEXCLAVE_API_URL", "NEXT_PUBLIC_STACK_API_URL"), `http://localhost:${PORT_PREFIX}02`);
-const PROJECT_ID = envOrDevDefault(publicEnv("NEXT_PUBLIC_HEXCLAVE_PROJECT_ID", "NEXT_PUBLIC_STACK_PROJECT_ID"), "internal");
-const PUBLISHABLE_CLIENT_KEY = envOrDevDefault(
-  publicEnv("NEXT_PUBLIC_HEXCLAVE_PUBLISHABLE_CLIENT_KEY", "NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY"),
-  "this-publishable-client-key-is-for-local-development-only",
-);
-
-async function post(path: string, body: unknown, authHeaders: Record<string, string>): Promise<void> {
-  const res = await fetch(`${API_URL}/api/latest/internal/mcp-review/${path}`, {
+/**
+ * The only server-brokered review operation left: retrying an AI QA review
+ * runs an LLM server-side (needs the OpenRouter key), so it can't be a direct
+ * reducer call from the browser like the other mutations.
+ */
+export async function retryReview(body: {
+  correlationId: string,
+  question: string,
+  reason: string,
+  response: string,
+}): Promise<void> {
+  const res = await fetch("/api/mcp-review/retry-review", {
     method: "POST",
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
-      "x-stack-access-type": "client",
-      "x-stack-project-id": PROJECT_ID,
-      "x-stack-publishable-client-key": PUBLISHABLE_CLIENT_KEY,
-      ...authHeaders,
     },
     body: JSON.stringify(body),
   });
@@ -38,25 +23,29 @@ async function post(path: string, body: unknown, authHeaders: Record<string, str
   }
 }
 
-export function makeMcpReviewApi(authHeaders: Record<string, string>) {
-  return {
-    markReviewed: (body: { correlationId: string }) =>
-      post("mark-reviewed", body, authHeaders),
-
-    updateCorrection: (body: {
-      correlationId: string;
-      correctedQuestion: string;
-      correctedAnswer: string;
-      publish: boolean;
-    }) => post("update-correction", body, authHeaders),
-
-    addManual: (body: {
-      question: string;
-      answer: string;
-      publish: boolean;
-    }) => post("add-manual", body, authHeaders),
-
-    delete: (body: { correlationId: string }) =>
-      post("delete", body, authHeaders),
-  };
+/**
+ * Backfills the automated QA review for a batch of currently-unreviewed rows
+ * (the ones the reviewer is looking at). Same server-side-LLM reason as
+ * retryReview. Fire-and-forget: the endpoint schedules the reviews in the
+ * background with bounded concurrency and returns immediately, so the UI never
+ * blocks; verdicts arrive over the live WS subscription.
+ */
+export async function reviewVisible(items: Array<{
+  correlationId: string,
+  question: string,
+  reason: string,
+  response: string,
+}>): Promise<void> {
+  const res = await fetch("/api/mcp-review/backfill-visible", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`MCP review API error (${res.status}): ${text}`);
+  }
 }

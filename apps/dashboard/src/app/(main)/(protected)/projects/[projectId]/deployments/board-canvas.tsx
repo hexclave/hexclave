@@ -407,7 +407,7 @@ export function BoardCanvas({ deployment, deployments, linkedServiceId, linkedPa
         <div className="flex items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-xs text-muted-foreground ring-1 ring-black/[0.08] backdrop-blur-md dark:bg-background/70 dark:ring-white/[0.08]">
           <FileTsIcon className="h-4 w-4 shrink-0" />
           <span>
-            Everything running when deployment #{deployment.number} finished. Services are defined by the <span className="font-mono">services</span> member of the <span className="font-mono">deployment</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced by <span className="font-mono">hexclave deploy</span>.
+            Everything running when deployment #{deployment.number} finished. Services are defined by the <span className="font-mono">services</span> member of the <span className="font-mono">deploy</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced by <span className="font-mono">hexclave deploy</span>.
           </span>
         </div>
         {/* Legend. Only earns its space once a second source is on the map —

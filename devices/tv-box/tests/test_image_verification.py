@@ -1,0 +1,516 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import image_verification
+
+
+def fixture_public_key() -> str:
+    key_type = b"ssh-ed25519"
+    payload = struct.pack(">I", len(key_type)) + key_type + struct.pack(">I", 32) + bytes(range(32))
+    return f"ssh-ed25519 {base64.b64encode(payload).decode('ascii')} qualification-fixture\n"
+
+
+def make_verification_fixture(rootfs: Path, manifest: Path, channel: str = "production") -> None:
+    policy = json.loads(image_verification.POLICY.read_text(encoding="utf-8"))
+    files = {
+        "etc/os-release": "".join(f'{key}="{value}"\n' for key, value in policy["os"].items()),
+        "etc/hexclave-tv-box-release": f"image-channel={channel}\nsource-commit={'a' * 40}\n",
+        "var/lib/dpkg/arch": "armhf\n",
+        "var/lib/dpkg/status": "\n\n".join(f"Package: {name}\nStatus: install ok installed\nArchitecture: armhf\nVersion: {version}" for name, version in policy["packages"].items()) + "\n",
+        "etc/ssh/hexclave-support-ca.pub": fixture_public_key(),
+    }
+    for relative, content in files.items():
+        path = rootfs / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    manifest.write_text("".join(f"{name}\t{version}\n" for name, version in policy["packages"].items()), encoding="utf-8")
+
+
+class ImageVerificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory(suffix=".untracked")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.rootfs, self.state, self.boot = (self.root / name for name in ("rootfs", "state", "boot"))
+        for path in (self.rootfs, self.state, self.boot):
+            path.mkdir()
+        self.manifest = self.root / "manifest"
+        make_verification_fixture(self.rootfs, self.manifest)
+
+    def test_qualified_inventory_is_exact_and_rejects_wrong_os_arch_or_package_version(self) -> None:
+        actual = image_verification.verify_runtime(self.rootfs)
+        self.assertEqual(actual["cog"], ("0.18.4-1", "armhf"))
+        for relative, before, after in (
+            ("etc/os-release", "raspbian", "debian"),
+            ("var/lib/dpkg/arch", "armhf", "arm64"),
+            ("var/lib/dpkg/status", "0.18.4-1", "0.18.5-1"),
+            ("var/lib/dpkg/status", "Architecture: armhf", "Architecture: arm64"),
+        ):
+            with self.subTest(relative=relative):
+                path = self.rootfs / relative
+                original = path.read_text(encoding="utf-8")
+                path.write_text(original.replace(before, after), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    image_verification.verify_runtime(self.rootfs)
+                path.write_text(original, encoding="utf-8")
+
+    def test_dpkg_rejects_ambiguous_duplicate_and_not_installed_packages(self) -> None:
+        path = self.rootfs / "var/lib/dpkg/status"
+        original = path.read_text(encoding="utf-8")
+        path.write_text(original + "\nPackage: cog\nStatus: install ok installed\nArchitecture: arm64\nVersion: 1\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            image_verification.installed_packages(self.rootfs)
+        path.write_text(original.replace("Status: install ok installed", "Status: deinstall ok config-files"), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "empty"):
+            image_verification.installed_packages(self.rootfs)
+
+    def test_dpkg_rejects_duplicate_fields(self) -> None:
+        path = self.rootfs / "var/lib/dpkg/status"
+        path.write_text(
+            "Package: cog\nStatus: install ok installed\nArchitecture: armhf\n"
+            "Version: 1\nVersion: 2\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "Duplicate dpkg field Version"):
+            image_verification.installed_packages(self.rootfs)
+
+    def test_image_absolute_symlinks_resolve_inside_image_and_cycles_fail(self) -> None:
+        release = self.rootfs / "etc/os-release"
+        target = self.rootfs / "usr/lib/os-release"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(release.read_bytes())
+        release.unlink()
+        release.symlink_to("/usr/lib/os-release")
+        self.assertEqual(image_verification.image_path(self.rootfs, "etc/os-release"), target)
+        image_verification.verify_runtime(self.rootfs)
+        target.unlink()
+        target.symlink_to("/etc/os-release")
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            image_verification.image_path(self.rootfs, "etc/os-release")
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            image_verification.image_path(self.rootfs, "../../etc/shadow")
+
+    def test_legacy_paths_reject_host_symlink_before_shell_inspection(self) -> None:
+        inspected = Path("etc/ssh/hexclave-support-ca.pub")
+        image_verification.verify_legacy_paths(self.rootfs, inspected)
+        key = self.rootfs / inspected
+        key.unlink()
+        key.symlink_to("/etc/shadow")
+        with self.assertRaisesRegex(ValueError, "forbidden symlink"):
+            image_verification.verify_legacy_paths(self.rootfs, inspected)
+        key.unlink()
+        (self.rootfs / "etc/ssh").rmdir()
+        (self.rootfs / "etc/ssh").symlink_to("/etc/ssh", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "forbidden symlink"):
+            image_verification.verify_legacy_paths(self.rootfs, inspected)
+
+    def test_strict_single_public_key_rejects_extra_material_and_bad_encoding(self) -> None:
+        path = self.root / "ca.pub"
+        path.write_text(fixture_public_key(), encoding="ascii")
+        image_verification.validate_public_key(path)
+        for content in (
+            fixture_public_key() + fixture_public_key(), fixture_public_key() + "\n",
+            fixture_public_key() + "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
+            "ssh-ed25519 AAAA invalid\n", "ssh-rsa " + fixture_public_key().split()[1] + "\n",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPilotPublicKeyMaterial fixture\n",
+        ):
+            path.write_text(content, encoding="ascii")
+            with self.subTest(content_length=len(content)), self.assertRaises(ValueError):
+                image_verification.validate_public_key(path)
+
+    def test_builder_inventory_rejects_duplicates_and_drift(self) -> None:
+        packages = image_verification.builder_packages(self.manifest)
+        self.assertEqual(packages["cog"], "0.18.4-1")
+        self.manifest.write_text("cog\t1\ncog\t2\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            image_verification.builder_packages(self.manifest)
+
+    def test_secret_scan_detects_private_keys_credentials_and_boot_test_origin_without_values(self) -> None:
+        for name, content in (
+            ("arbitrary.txt", b"-----BEGIN OPENSSH PRIVATE KEY-----\nDO-NOT-PRINT-SECRET\n"),
+            ("saved.nmconnection", b"DO-NOT-PRINT-SECRET"),
+            ("operator-cert.pub", b"DO-NOT-PRINT-SECRET"),
+            ("cookies.sqlite", b"DO-NOT-PRINT-SECRET"),
+            (".env.local", b"DO-NOT-PRINT-SECRET"),
+            ("hexclave-tv-box-test-origin.txt", b"DO-NOT-PRINT-SECRET"),
+        ):
+            path = self.boot / name
+            path.write_bytes(content)
+            with self.subTest(name=name), self.assertRaises(ValueError) as rejected:
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+            self.assertNotIn("DO-NOT-PRINT-SECRET", str(rejected.exception))
+            path.unlink()
+
+    def test_secret_scan_checks_chunk_boundaries_prunes_symlinks_and_allows_public_trust(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "key").write_bytes(b"-----BEGIN PRIVATE KEY-----\nSECRET\n")
+        (self.boot / "external").symlink_to(outside, target_is_directory=True)
+        (self.boot / "public-ca.pub").write_text(fixture_public_key(), encoding="ascii")
+        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        (self.boot / "external").unlink()
+        (self.boot / "usr/bin").mkdir(parents=True)
+        (self.boot / "usr/bin/hidden").write_bytes(b"-----BEGIN PRIVATE KEY-----\nSECRET\n")
+        (self.boot / "bin").symlink_to(self.boot / "usr/bin", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "Private-key"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        (self.boot / "bin").unlink()
+        (self.boot / "usr/bin/hidden").unlink()
+        (self.boot / "usr/bin").rmdir()
+        path = self.boot / "hidden"
+        path.write_bytes(b"x" * (1024 * 1024 - 8) + b"\n-----BEGIN PRIVATE KEY-----\nSECRET\n")
+        with self.assertRaisesRegex(ValueError, "Private-key"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_secret_scan_rejects_nested_mounts(self) -> None:
+        nested = self.boot / "nested"
+        nested.mkdir()
+        original_lstat = Path.lstat
+
+        def fake_lstat(path: Path) -> object:
+            metadata = original_lstat(path)
+            if path == nested:
+                values = list(metadata)
+                values[2] += 1
+                return type(metadata)(values)
+            return metadata
+
+        with patch.object(Path, "lstat", autospec=True, side_effect=fake_lstat):
+            with self.assertRaisesRegex(ValueError, "Nested mount or symlinked directory"):
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_authorized_keys_options_do_not_hide_certificates(self) -> None:
+        key_type = b"ssh-ed25519-cert-v01@openssh.com"
+        payload = struct.pack(">I", len(key_type)) + key_type + b"\x00" * 32
+        certificate = (
+            b'restrict,command="echo hi",from="10.0.0.0/8" '
+            b"ssh-ed25519-cert-v01@openssh.com "
+            + base64.b64encode(payload)
+        )
+        self.assertTrue(image_verification.contains_certificate_record(certificate))
+        self.assertFalse(image_verification.contains_certificate_record(b"ssh-ed25519 AAAA\n"))
+        malformed_options = (
+            b'command="echo \'x ssh-ed25519-cert-v01@openssh.com '
+            + base64.b64encode(payload)
+        )
+        self.assertTrue(image_verification.contains_certificate_record(malformed_options))
+        malformed_comment = (
+            b"ssh-ed25519-cert-v01@openssh.com "
+            + base64.b64encode(payload)
+            + b' comment="unterminated'
+        )
+        self.assertTrue(image_verification.contains_certificate_record(malformed_comment))
+
+    def certificate_record(self) -> bytes:
+        ca, operator = self.root / "ca.untracked", self.root / "operator.untracked"
+        for key in (ca, operator):
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(key)],
+                check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
+            )
+        subprocess.run(
+            ["ssh-keygen", "-q", "-s", str(ca), "-I", "do-not-export-fixture-identity",
+             "-n", "hexclave-tv-support", "-V", "-1m:+5m", str(operator) + ".pub"],
+            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
+        )
+        return (self.root / "operator.untracked-cert.pub").read_bytes()
+
+    def test_renamed_certificate_records_are_rejected_on_every_image_filesystem_without_values(self) -> None:
+        certificate = self.certificate_record()
+        for filesystem, label in ((self.rootfs, "root"), (self.state, "state"), (self.boot, "boot")):
+            path = filesystem / "support-material.untracked.txt"
+            path.write_bytes(certificate)
+            with self.subTest(filesystem=label), self.assertRaisesRegex(ValueError, "OpenSSH certificate") as rejected:
+                image_verification.scan_clean_filesystem(filesystem, label, production=True)
+            self.assertNotIn(certificate.split()[1].decode("ascii"), str(rejected.exception))
+            self.assertNotIn("do-not-export-fixture-identity", str(rejected.exception))
+            path.unlink()
+
+    def test_certificate_records_are_detected_across_chunk_boundaries(self) -> None:
+        certificate = self.certificate_record()
+        path = self.boot / "support-material.untracked.txt"
+        self.assertGreater(len(certificate), 600)
+        for split in (1, 24, 48, 80, 127, 514, 550, 600, len(certificate) - 2):
+            path.write_bytes(b"\n" * (1024 * 1024 - split) + certificate)
+            with self.subTest(split=split), self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_scan_validates_the_entire_base64_token_across_chunks(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        path = self.boot / "support-material.untracked.txt"
+        for invalid in (encoded + b"!", encoded + b"=", encoded[:-3] + b"===", encoded[:512] + b"=A" + encoded[512:]):
+            for split in (127, 514, 550, len(algorithm) + 1 + len(encoded)):
+                with self.subTest(length=len(invalid), split=split):
+                    record = algorithm + b" " + invalid + b"\n"
+                    self.assertFalse(image_verification.contains_certificate_record(record))
+                    path.write_bytes(b"x" * (1024 * 1024 - split - 1) + b"\n" + record)
+                    image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_scan_accepts_noncanonical_base64_padding_bits(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        padding = len(encoded) - len(encoded.rstrip(b"="))
+        unused_bits = {1: 2, 2: 4}.get(padding, 0)
+        self.assertIn(unused_bits, (2, 4))
+        last = alphabet.index(encoded.rstrip(b"=")[-1:])
+        variant_last = (last & ~((1 << unused_bits) - 1)) | 1
+        variant_encoded = encoded.rstrip(b"=")[:-1] + bytes((alphabet[variant_last],)) + b"=" * padding
+        self.assertEqual(
+            base64.b64decode(variant_encoded, validate=True),
+            base64.b64decode(encoded, validate=True),
+        )
+        self.assertNotEqual(variant_encoded, encoded)
+        path = self.boot / "noncanonical-certificate.untracked.txt"
+        path.write_bytes(certificate)
+        with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        path.write_bytes(algorithm + b" " + variant_encoded + b"\n")
+        with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_scan_keeps_comment_and_token_boundaries_across_chunks(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        path = self.boot / "algorithm-source.untracked.py"
+        for prefix, record in (
+            (b"# " + b"x" * (1024 * 1024 - 516), certificate),
+            (b"x" * (1024 * 1024 - 514), certificate),
+            (b"x" * (1024 * 1024 - 514) + b"\n", algorithm + b"\n" + encoded),
+            (b"x" * (1024 * 1024 - 514) + b"\n", b"ssh-rsa-cert-v01@openssh.com " + encoded),
+        ):
+            with self.subTest(prefix_length=len(prefix), record_length=len(record)):
+                path.write_bytes(prefix + record)
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        path.write_bytes(b"x" * (1024 * 1024 - 514 - 1) + b"\n" + algorithm + b" " + encoded + b"\n")
+        with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+            image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_scanner_is_independent_of_read_size(self) -> None:
+        certificate = self.certificate_record()
+        for content, expected in (
+            (certificate.rstrip(), True),
+            (b'restrict,command="echo hi" ' + certificate, True),
+            (b"# " + certificate, False),
+            (b"\x00" + certificate, False),
+            (certificate.split()[0] + b" " + certificate.split()[1] + b"!", False),
+        ):
+            for read_size in (1, 3, 4, 31, 514):
+                with self.subTest(expected=expected, read_size=read_size):
+                    scanner = image_verification.CertificateRecordScanner()
+                    detected = False
+                    for offset in range(0, len(content), read_size):
+                        if scanner.feed(content[offset:offset + read_size]):
+                            detected = True
+                            break
+                    self.assertEqual(detected or scanner.finish(), expected)
+
+    def test_certificate_scan_bounds_reads_for_long_lines_and_records(self) -> None:
+        certificate = self.certificate_record()
+        algorithm, encoded = certificate.split()[:2]
+        # A large but valid wire prefix exercises streaming independently of
+        # OpenSSH's configurable principal/extension sizes and signing limits.
+        large_record = algorithm + b" " + base64.b64encode(base64.b64decode(encoded) + bytes(2 * 1024 * 1024))
+        path = self.boot / "long-record.untracked.txt"
+        path.write_bytes(b"x" * (2 * 1024 * 1024) + b"\n" + large_record)
+        original_open = Path.open
+
+        class BoundedReader:
+            def __enter__(reader):
+                reader.source = original_open(path, "rb")
+                return reader
+
+            def __exit__(reader, *arguments):
+                reader.source.close()
+
+            def read(reader, size):
+                self.assertGreater(size, 0)
+                self.assertLessEqual(size, 1024 * 1024)
+                return reader.source.read(size)
+
+        def bounded_open(candidate: Path, *arguments, **keywords):
+            return BoundedReader() if candidate == path else original_open(candidate, *arguments, **keywords)
+
+        with patch.object(Path, "open", autospec=True, side_effect=bounded_open):
+            with self.assertRaisesRegex(ValueError, "OpenSSH certificate"):
+                image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_certificate_algorithm_mentions_and_regular_public_ca_keys_remain_allowed(self) -> None:
+        certificate = self.certificate_record()
+        algorithm = certificate.split()[0]
+        path = self.boot / "algorithm-documentation.untracked.txt"
+        path.write_bytes(
+            b"Supported algorithm: " + algorithm + b"\n"
+            + algorithm + b"\n" + algorithm + b" AAAA example\n"
+            + b"\x00" + algorithm + b"\x00" + certificate.split()[1] + b"\x00"
+        )
+        (self.boot / "support-ca.untracked.pub").write_bytes((self.root / "ca.untracked.pub").read_bytes())
+        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+        # A retained chunk tail must not reinterpret inline documentation as
+        # a line-start record just because it begins at the overlap boundary.
+        path.write_bytes(b"x" * (1024 * 1024 - 512) + certificate)
+        image_verification.scan_clean_filesystem(self.boot, "boot", production=True)
+
+    def test_public_test_vector_exception_requires_exact_path_bytes_and_root_filesystem(self) -> None:
+        path = self.rootfs / "public-fixture.py"
+        path.write_bytes(b"-----BEGIN PRIVATE KEY-----\npublic-test-vector\n")
+        with patch.object(image_verification.json, "loads", return_value={"public_test_vectors": {
+            "public-fixture.py": {"sha256": image_verification.digest(path)},
+        }}):
+            image_verification.scan_clean_filesystem(self.rootfs, "root", production=True)
+            with self.assertRaises(ValueError):
+                image_verification.scan_clean_filesystem(self.rootfs, "boot", production=True)
+            path.write_bytes(path.read_bytes() + b"unknown-extra-material")
+            with self.assertRaises(ValueError):
+                image_verification.scan_clean_filesystem(self.rootfs, "root", production=True)
+
+    def test_rerun_invalidates_only_its_generated_receipt_and_rejects_unsafe_output(self) -> None:
+        output = self.root / "verification"
+        image_verification.begin_output(output, self.rootfs, self.state, self.boot, self.manifest)
+        self.assertFalse(output.exists())
+        output.mkdir()
+        receipt = output / "verification.json"
+        receipt.write_text('{"schema_version":1,"result":"passed"}', encoding="utf-8")
+        unrelated = output / "keep-evidence.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+        image_verification.begin_output(output, self.rootfs, self.state, self.boot, self.manifest)
+        self.assertFalse(receipt.exists())
+        self.assertEqual(unrelated.read_text(), "keep")
+        with self.assertRaises(ValueError):
+            image_verification.begin_output(self.boot / "verification", self.rootfs, self.state, self.boot, self.manifest)
+        receipt.symlink_to(unrelated)
+        with self.assertRaises(ValueError):
+            image_verification.begin_output(output, self.rootfs, self.state, self.boot, self.manifest)
+        self.assertEqual(unrelated.read_text(), "keep")
+        receipt.unlink()
+        (output / "rootfs-sha256.txt").symlink_to(unrelated)
+        with self.assertRaises(ValueError):
+            image_verification.begin_output(output, self.rootfs, self.state, self.boot, self.manifest)
+        self.assertEqual(unrelated.read_text(), "keep")
+
+    def test_test_marker_allowed_only_for_test_image(self) -> None:
+        (self.rootfs / "etc/hexclave-tv-box-test-image").write_text("test\n", encoding="ascii")
+        image_verification.scan_clean_filesystem(self.rootfs, "root", production=False)
+        with self.assertRaises(ValueError):
+            image_verification.scan_clean_filesystem(self.rootfs, "root", production=True)
+
+    def test_receipt_binds_raw_image_inventory_and_policy_and_rejects_tampering(self) -> None:
+        output, image = self.root / "verification", self.root / "image.img"
+        output.mkdir()
+        image.write_bytes(b"fixture-raw-image")
+        (output / "image-manifest.txt").write_text("image-channel=production\nsource-commit=" + "a" * 40 + "\n", encoding="ascii")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+            (output / name).write_text("fixture\n", encoding="ascii")
+        image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
+        image_verification.verify_receipt(image, output)
+        receipt = json.loads((output / "verification.json").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["builder_source_sha256"], image_verification.digest(self.manifest))
+        self.assertEqual(receipt["qualified_builder_commit"], json.loads(image_verification.POLICY.read_text())["image_builder_commit"])
+        receipt_file = output / "verification.json"
+        original_receipt = receipt_file.read_bytes()
+        receipt["image_channel"] = "test"
+        receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "production-channel"):
+            image_verification.verify_receipt(image, output)
+        receipt_file.write_bytes(original_receipt)
+        package_file = output / "packages.tsv"
+        original = package_file.read_bytes()
+        package_file.write_bytes(original + b"extra\t1\tarmhf\n")
+        with self.assertRaisesRegex(ValueError, "artifact checksum"):
+            image_verification.verify_receipt(image, output)
+        package_file.write_bytes(original)
+        image.write_bytes(b"changed-raw-image")
+        with self.assertRaisesRegex(ValueError, "receipt"):
+            image_verification.verify_receipt(image, output)
+
+    def test_receipt_rejects_channel_mismatch_with_archived_manifest(self) -> None:
+        output, image = self.root / "verification", self.root / "image.img"
+        output.mkdir()
+        image.write_bytes(b"fixture-raw-image")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+            (output / name).write_text("fixture\n", encoding="ascii")
+        (output / "image-manifest.txt").write_text(
+            "image-channel=test\nsource-commit=" + "a" * 40 + "\n",
+            encoding="ascii",
+        )
+        image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
+        (output / "image-manifest.txt").write_text(
+            "image-channel=test\nsource-commit=" + "a" * 40 + "\n",
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(ValueError, "production"):
+            image_verification.verify_receipt(image, output)
+
+    def test_inventory_mismatch_prevents_receipt_creation(self) -> None:
+        output, image = self.root / "verification", self.root / "image.img"
+        image.write_bytes(b"fixture")
+        self.manifest.write_text("cog\tincorrect\n", encoding="ascii")
+        with self.assertRaisesRegex(ValueError, "inventory differs"):
+            image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
+        self.assertFalse((output / "verification.json").exists())
+
+    def test_readback_requires_every_image_byte_and_ignores_unused_card_tail(self) -> None:
+        image, target = self.root / "image.img", self.root / "card"
+        image.write_bytes(b"qualified-image")
+        output = self.root / "verification"
+        output.mkdir()
+        (output / "image-manifest.txt").write_text("image-channel=production\nsource-commit=" + "a" * 40 + "\n", encoding="ascii")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+            (output / name).write_text("fixture\n", encoding="ascii")
+        image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
+        target.write_bytes(image.read_bytes() + b"unused-card-space")
+        command = [sys.executable, "-B", str(ROOT / "scripts/image_verification.py"), "readback", str(output), str(target)]
+        self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        descriptor = os.open(target, os.O_RDONLY)
+        try:
+            image_verification.verify_readback(output, Path(f"/dev/fd/{descriptor}"))
+        finally:
+            os.close(descriptor)
+        target.write_bytes(b"wrong-image" + b"unused-card-space")
+        rejected = subprocess.run(command, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("read-back checksum mismatch", rejected.stderr)
+        target.write_bytes(b"short")
+        with self.assertRaisesRegex(ValueError, "ended before"):
+            image_verification.digest(target, image.stat().st_size)
+
+    def test_readback_verifies_against_receipt_not_current_image_file(self) -> None:
+        output, image, target = (self.root / name for name in ("verification", "image.img", "card"))
+        original = b"qualified-image"
+        swapped = b"swapped-image!"
+        image.write_bytes(original)
+        output.mkdir()
+        (output / "image-manifest.txt").write_text("image-channel=production\nsource-commit=" + "a" * 40 + "\n", encoding="ascii")
+        for name in ("rootfs-sha256.txt", "state-sha256.txt", "boot-sha256.txt", "disk-image-sha256.txt"):
+            (output / name).write_text("fixture\n", encoding="ascii")
+        image_verification.verify_final(self.rootfs, self.state, self.boot, self.manifest, output, image)
+        target.write_bytes(original + b"unused-card-space")
+        image.write_bytes(swapped)
+        image_verification.verify_readback(output, target)
+
+        target.write_bytes(swapped + b"unused-card-space")
+        with self.assertRaisesRegex(ValueError, "read-back checksum mismatch"):
+            image_verification.verify_readback(output, target)
+
+        receipt_file = output / "verification.json"
+        receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+        del receipt["image_bytes"]
+        receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "missing the image extent"):
+            image_verification.verify_readback(output, target)
+
+if __name__ == "__main__":
+    unittest.main()
