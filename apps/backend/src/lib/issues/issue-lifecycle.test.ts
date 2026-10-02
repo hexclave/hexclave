@@ -138,6 +138,7 @@ beforeAll(async () => {
     FROM "Tenancy" t
     LEFT JOIN "ProjectUser" u ON u."tenancyId" = t."id"
     GROUP BY t."id"
+    HAVING count(u."projectUserId") >= 2
     ORDER BY count(u."projectUserId") DESC, t."id" ASC
     LIMIT 2
   `;

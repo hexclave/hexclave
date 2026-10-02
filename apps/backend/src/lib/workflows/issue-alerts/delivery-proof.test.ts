@@ -1,4 +1,3 @@
-import { getBillingTeamId } from "@/lib/plan-entitlements";
 import { getSoleTenancyFromProjectBranch, DEFAULT_BRANCH_ID, type Tenancy } from "@/lib/tenancies";
 import { IssueAlertDeliveryOutcome, IssueAlertDeliveryState, WorkflowRunState } from "@/generated/prisma/enums";
 import { globalPrismaClient, retryTransaction } from "@/prisma-client";
@@ -241,14 +240,23 @@ async function outboxRows(subject: string) {
 describe.sequential("issue alert workflow delivery proof", () => {
   beforeAll(async () => {
     vi.stubEnv("STACK_EMAIL_BRANCHING_DISABLE_QUEUE_AUTO_TRIGGER", "true");
-    tenancy = await getSoleTenancyFromProjectBranch("internal", DEFAULT_BRANCH_ID);
+    const internalTenancy = await getSoleTenancyFromProjectBranch("internal", DEFAULT_BRANCH_ID);
+    // Explicit alert recipients must be owner-team members with a primary email.
+    // A run-scoped owner team keeps the fixture out of the real owner team.
+    const ownerTeamId = randomUUID();
+    await globalPrismaClient.team.create({
+      data: {
+        tenancyId: internalTenancy.id,
+        teamId: ownerTeamId,
+        mirroredProjectId: internalTenancy.project.id,
+        mirroredBranchId: internalTenancy.branchId,
+        displayName: `${RUN_PREFIX}-owner-team`,
+      },
+    });
+    recipientOwnerTeamId = ownerTeamId;
+    tenancy = { ...internalTenancy, project: { ...internalTenancy.project, owner_team_id: ownerTeamId } };
     scope = { tenancyId: tenancy.id, projectId: tenancy.project.id, branchId: tenancy.branchId };
     service = new IssueAlertPersistenceService();
-
-    // Explicit alert recipients must be owner-team members with a primary email.
-    const ownerTeamId = getBillingTeamId(tenancy.project);
-    if (ownerTeamId === null) throw new Error("Issue alert delivery proof needs an internal project owner team");
-    recipientOwnerTeamId = ownerTeamId;
     recipientIds = [randomUUID(), randomUUID()];
     for (const [index, projectUserId] of recipientIds.entries()) {
       await globalPrismaClient.projectUser.create({
@@ -329,10 +337,11 @@ describe.sequential("issue alert workflow delivery proof", () => {
       if (workflowWasCreated) {
         await deleteWorkflow(tenancy, ISSUE_ALERT_EMAIL_WORKFLOW_ID);
       }
-      if (recipientOwnerTeamId !== undefined && recipientIds.length > 0) {
-        await globalPrismaClient.teamMember.deleteMany({
-          where: { tenancyId: tenancy.id, teamId: recipientOwnerTeamId, projectUserId: { in: recipientIds } },
-        });
+      if (recipientOwnerTeamId !== undefined) {
+        await globalPrismaClient.teamMember.deleteMany({ where: { tenancyId: tenancy.id, teamId: recipientOwnerTeamId } });
+        await globalPrismaClient.team.deleteMany({ where: { tenancyId: tenancy.id, teamId: recipientOwnerTeamId } });
+      }
+      if (recipientIds.length > 0) {
         await globalPrismaClient.projectUser.deleteMany({
           where: { tenancyId: tenancy.id, projectUserId: { in: recipientIds } },
         });

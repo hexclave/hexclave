@@ -235,6 +235,7 @@ type PendingPlanDebit = {
 };
 
 const pendingPlanDebitBatches = new Map<string, PendingPlanDebit[]>();
+const MAX_PLAN_DEBIT_BATCH_SIZE = 256;
 
 // Debits for one customer that arrive while an earlier transaction holds the
 // per-process queue are coalesced into a single advisory-locked transaction, so
@@ -249,7 +250,7 @@ function enqueuePlanDebit(
   return new Promise<PlanDebitResult>((resolve, reject) => {
     const key = `${tenancy.id}\0${billingTeamId}`;
     const existingBatch = pendingPlanDebitBatches.get(key);
-    if (existingBatch != null) {
+    if (existingBatch != null && existingBatch.length < MAX_PLAN_DEBIT_BATCH_SIZE) {
       existingBatch.push({ changes, resolve, reject });
       return;
     }
