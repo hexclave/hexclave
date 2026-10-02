@@ -28,7 +28,7 @@ function assignableUserId(index = 0): string {
   return userId;
 }
 
-async function findObservabilityTenancies(): Promise<Tenancy[]> {
+async function findPopulatedTenanciesWithObservabilityEnabled(): Promise<Tenancy[]> {
   const rows = await globalPrismaClient.$queryRaw<Array<{ id: string }>>`
     SELECT t."id"::text AS "id"
     FROM "Tenancy" t
@@ -120,7 +120,7 @@ function request(target: Tenancy, issueId: string, body: unknown, type: "client"
 }
 
 beforeAll(async () => {
-  const candidates = await findObservabilityTenancies();
+  const candidates = await findPopulatedTenanciesWithObservabilityEnabled();
   const first = candidates.at(0);
   if (first === undefined) throw new Error("Issue action route tests need a tenancy in the development database.");
   tenancy = first;

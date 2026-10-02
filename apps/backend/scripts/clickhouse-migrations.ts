@@ -2278,6 +2278,7 @@ WHERE sync_is_deleted = 0;
 `;
 
 const OTEL_VIEW_COLUMN_DESCRIPTIONS = new Map<string, string>([
+  ["billing_item", "Platform metering category the span is billed under (for example analytics_spans); null when the span is not metered"],
   ["event_type", "Event or log classification emitted by the OpenTelemetry producer"],
   ["event_at", "Time at which the OpenTelemetry record occurred (UTC)"],
   ["message", "Human-readable message associated with the record, when present"],

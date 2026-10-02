@@ -190,59 +190,50 @@ export async function tryDecreasePlanItemQuantities(
     createdAt: debit.idempotency?.createdAt ?? new Date(),
   }));
 
-  return await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => {
-    // Bulldozer reads and writes are HTTP round-trips; keep them outside the
-    // Postgres transaction so a slow Bulldozer cannot pin pool connections.
+  // The in-process queue keeps same-instance callers from each holding a pool
+  // connection while blocked on the advisory lock; the lock itself provides
+  // cross-instance serialization of the read-check-write sequence.
+  return await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => await retryTransaction(prisma, async (tx) => {
+    await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
+
+    const existingChanges = await tx.itemQuantityChange.findMany({
+      where: { tenancyId: tenancy.id, id: { in: changes.map(({ id }) => id) } },
+    });
+    const existingIds = new Set(existingChanges.map(({ id }) => id));
+    const ownedChanges = changes.filter(({ id }) => !existingIds.has(id));
+    if (ownedChanges.length === 0) {
+      // Prisma-first dual-write can leave a committed row whose Bulldozer set
+      // never landed. Re-POST the same row id through the existing set API.
+      await bulldozerWriteItemQuantityChanges(existingChanges);
+      return { insufficientItemId: null, createdChangeIds: [] };
+    }
+
     const quantities = await getItemQuantitiesForCustomer({
-      prisma,
+      prisma: tx,
       tenancyId: tenancy.id,
       customerType: "team",
       customerId: billingTeamId,
     });
-
-    const persisted = await retryTransaction(prisma, async (tx) => {
-      await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
-
-      const existingChanges = await tx.itemQuantityChange.findMany({
-        where: { tenancyId: tenancy.id, id: { in: changes.map(({ id }) => id) } },
-      });
-      const existingIds = new Set(existingChanges.map(({ id }) => id));
-      const ownedChanges = changes.filter(({ id }) => !existingIds.has(id));
-      if (ownedChanges.length === 0) {
-        return { status: "replay" as const, existingChanges };
+    const remainingQuantities = new Map(Object.entries(quantities));
+    for (const change of ownedChanges) {
+      const remaining = (remainingQuantities.get(change.itemId) ?? 0) + change.quantity;
+      if (remaining < 0) {
+        return { insufficientItemId: change.itemId, createdChangeIds: [] };
       }
-
-      const remainingQuantities = new Map(Object.entries(quantities));
-      for (const change of ownedChanges) {
-        const remaining = (remainingQuantities.get(change.itemId) ?? 0) + change.quantity;
-        if (remaining < 0) {
-          return { status: "insufficient" as const, itemId: change.itemId };
-        }
-        remainingQuantities.set(change.itemId, remaining);
-      }
-
-      const persistResult = await Result.fromPromise(tx.itemQuantityChange.createMany({
-        data: ownedChanges,
-        skipDuplicates: true,
-      }));
-      if (persistResult.status === "error") {
-        throw persistResult.error;
-      }
-      return { status: "created" as const, ownedChanges };
-    });
-
-    if (persisted.status === "insufficient") {
-      return { insufficientItemId: persisted.itemId, createdChangeIds: [] };
+      remainingQuantities.set(change.itemId, remaining);
     }
-    if (persisted.status === "replay") {
-      // Prisma-first dual-write can leave a committed row whose Bulldozer set
-      // never landed. Re-POST the same row id through the existing set API.
-      await bulldozerWriteItemQuantityChanges(persisted.existingChanges);
-      return { insufficientItemId: null, createdChangeIds: [] };
+
+    const persistResult = await Result.fromPromise(tx.itemQuantityChange.createMany({
+      data: ownedChanges,
+      skipDuplicates: true,
+    }));
+    if (persistResult.status === "error") {
+      throw persistResult.error;
     }
-    await bulldozerWriteItemQuantityChanges(persisted.ownedChanges);
-    return { insufficientItemId: null, createdChangeIds: persisted.ownedChanges.map(({ id }) => id) };
-  });
+
+    await bulldozerWriteItemQuantityChanges(ownedChanges);
+    return { insufficientItemId: null, createdChangeIds: ownedChanges.map(({ id }) => id) };
+  }));
 }
 
 export async function rollbackPlanItemDebits(
@@ -284,7 +275,8 @@ export async function rollbackPlanItemDebits(
   const ownedChanges = changes.filter(({ id }) => ownedChangeIds.has(id));
   if (ownedChanges.length === 0) return;
 
-  await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => {
+  await withPlanMeteringCustomerQueue(tenancy.id, billingTeamId, async () => await retryTransaction(prisma, async (tx) => {
+    await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
     // The public item-quantity set API replaces a row. Writing quantity 0
     // undoes the debit without a delete route, and keeps the same id so a
     // later retry can set the debit again.
@@ -292,14 +284,11 @@ export async function rollbackPlanItemDebits(
       ...change,
       quantity: 0,
     })));
-    await retryTransaction(prisma, async (tx) => {
-      await lockPlanMeteringCustomer(tx, tenancy.id, billingTeamId);
-      await tx.itemQuantityChange.deleteMany({
-        where: {
-          tenancyId: tenancy.id,
-          id: { in: ownedChanges.map(({ id }) => id) },
-        },
-      });
+    await tx.itemQuantityChange.deleteMany({
+      where: {
+        tenancyId: tenancy.id,
+        id: { in: ownedChanges.map(({ id }) => id) },
+      },
     });
-  });
+  }));
 }

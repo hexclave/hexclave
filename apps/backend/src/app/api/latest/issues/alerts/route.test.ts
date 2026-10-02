@@ -156,7 +156,7 @@ function request(target: Tenancy, options: {
   };
 }
 
-async function findObservabilityTenancies(): Promise<Tenancy[]> {
+async function findPopulatedTenanciesWithObservabilityEnabled(): Promise<Tenancy[]> {
   const rows = await globalPrismaClient.$queryRaw<Array<{ id: string }>>`
     SELECT t."id"::text AS "id"
     FROM "Tenancy" t
@@ -190,7 +190,7 @@ function withObservabilityEnabled(target: Tenancy): Tenancy {
 }
 
 beforeAll(async () => {
-  const candidates = await findObservabilityTenancies();
+  const candidates = await findPopulatedTenanciesWithObservabilityEnabled();
   const first = candidates.at(0);
   if (first === undefined) throw new Error("Issue alert API route tests need a tenancy in the development database.");
   tenancy = first;
