@@ -157,23 +157,42 @@ function request(target: Tenancy, options: {
 }
 
 async function findObservabilityTenancies(): Promise<Tenancy[]> {
-  const rows = await globalPrismaClient.tenancy.findMany({
-    orderBy: { id: "asc" },
-    select: { id: true },
-    take: 20,
-  });
+  const rows = await globalPrismaClient.$queryRaw<Array<{ id: string }>>`
+    SELECT t."id"::text AS "id"
+    FROM "Tenancy" t
+    LEFT JOIN "ProjectUser" u ON u."tenancyId" = t."id"
+    GROUP BY t."id"
+    ORDER BY count(u."projectUserId") DESC, t."id" ASC
+    LIMIT 2
+  `;
   const result: Tenancy[] = [];
   for (const row of rows) {
     const candidate = await getTenancy(row.id);
-    if (candidate?.config.apps.installed["observability"]?.enabled === true) result.push(candidate);
+    if (candidate !== null) result.push(withObservabilityEnabled(candidate));
   }
   return result;
+}
+
+function withObservabilityEnabled(target: Tenancy): Tenancy {
+  return {
+    ...target,
+    config: {
+      ...target.config,
+      apps: {
+        ...target.config.apps,
+        installed: {
+          ...target.config.apps.installed,
+          observability: { ...target.config.apps.installed["observability"], enabled: true },
+        },
+      },
+    },
+  };
 }
 
 beforeAll(async () => {
   const candidates = await findObservabilityTenancies();
   const first = candidates.at(0);
-  if (first === undefined) throw new Error("Issue alert API route tests need a seeded observability tenancy.");
+  if (first === undefined) throw new Error("Issue alert API route tests need a tenancy in the development database.");
   tenancy = first;
   otherTenancy = candidates.find((candidate) => candidate.id !== tenancy.id) ?? null;
 });

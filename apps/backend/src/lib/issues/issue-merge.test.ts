@@ -251,7 +251,14 @@ async function readHashState(hash: string): Promise<{ state: string | null, lock
 }
 
 beforeAll(async () => {
-  const rows = await globalPrismaClient.tenancy.findMany({ take: 2, orderBy: { id: "asc" }, select: { id: true } });
+  const rows = await globalPrismaClient.$queryRaw<Array<{ id: string }>>`
+    SELECT t."id"::text AS "id"
+    FROM "Tenancy" t
+    LEFT JOIN "ProjectUser" u ON u."tenancyId" = t."id"
+    GROUP BY t."id"
+    ORDER BY count(u."projectUserId") DESC, t."id" ASC
+    LIMIT 2
+  `;
   const first = rows.at(0);
   const second = rows.at(1);
   if (first === undefined || second === undefined) {
