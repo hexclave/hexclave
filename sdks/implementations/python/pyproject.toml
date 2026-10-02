@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stack-auth"
+version = "0.1.0"
+description = "Python SDK for Stack Auth"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+    "Framework :: Pydantic :: 2",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Security",
+]
+keywords = ["stack-auth", "authentication", "sdk", "users", "teams", "python"]
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "pyjwt[crypto]>=2.9,<3.0",
+    "pydantic>=2.7,<3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+    "respx>=0.22",
+    "ruff>=0.11",
+    "mypy>=1.10",
+    "pytest-cov>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/stack-auth/stack"
+Repository = "https://github.com/stack-auth/stack"
+Documentation = "https://docs.stack-auth.com"
+"Bug Tracker" = "https://github.com/stack-auth/stack/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stack_auth"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "TCH"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
