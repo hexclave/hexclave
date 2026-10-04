@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getOAuthAccessTokenRefreshError, getOAuthAccessTokenRefreshErrorDisposition, getOAuthCallbackExtraParams, isRetryableOAuthUserInfoError, resolveOAuthAccessTokenExpiredAt } from "./base";
+import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { parseOAuthProviderResponse, getOAuthAccessTokenRefreshError, getOAuthAccessTokenRefreshErrorDisposition, getOAuthCallbackExtraParams, isRetryableOAuthUserInfoError, resolveOAuthAccessTokenExpiredAt } from "./base";
 
 describe("isRetryableOAuthUserInfoError", () => {
   it("returns true for openid-client timeout errors", () => {
@@ -150,5 +151,24 @@ describe("resolveOAuthAccessTokenExpiredAt", () => {
       defaultExpiresInMillis: undefined,
       nowMillis: 1000,
     })?.toISOString()).toBe("1970-01-01T01:00:01.000Z");
+  });
+});
+
+describe("parseOAuthProviderResponse", () => {
+  it("parses valid provider JSON", () => {
+    expect(parseOAuthProviderResponse('{"error":"invalid_grant"}')).toEqual({ error: "invalid_grant" });
+  });
+
+  it("returns a bounded StatusError containing a non-JSON provider response", () => {
+    const responseText = `The user is not authorized. ${"x".repeat(600)}`;
+    let thrown: unknown;
+    try {
+      parseOAuthProviderResponse(responseText);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(StatusError);
+    expect((thrown as Error).message).toContain("The user is not authorized.");
+    expect((thrown as Error).message.length).toBeLessThan(600);
   });
 });

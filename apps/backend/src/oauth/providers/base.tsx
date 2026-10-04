@@ -31,9 +31,20 @@ const RETRYABLE_OAUTH_PROVIDER_ERROR_CODES = new Set([
 // openid-client defaults to a 3.5s HTTP timeout. OAuth providers can be slow
 // enough that this causes avoidable refresh failures, so give token/userinfo
 // requests a little more room while still bounding backend request latency.
+export function parseOAuthProviderResponse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new StatusError(502, `OAuth provider returned a non-JSON response: ${text.slice(0, 500)}`);
+  }
+}
+
 custom.setHttpOptionsDefaults({
   timeout: OAUTH_HTTP_TIMEOUT_MS,
   lookup: safeOAuthDnsLookup,
+  // openid-client's JSON response parser receives the raw response text here. Preserve
+  // provider error bodies in a bounded, client-safe error instead of leaking SyntaxError.
+  parseJson: parseOAuthProviderResponse,
 });
 
 export type TokenSet = {
@@ -56,6 +67,14 @@ function getUnknownProperty(obj: unknown, key: string): unknown {
     return undefined;
   }
   return Reflect.get(obj, key);
+}
+
+function getNestedStatusError(error: unknown): StatusError | undefined {
+  if (error instanceof StatusError) {
+    return error;
+  }
+  const cause = getUnknownProperty(error, "cause");
+  return cause === undefined || cause === error ? undefined : getNestedStatusError(cause);
 }
 
 function getNumberProperty(obj: unknown, key: string): number | undefined {
@@ -481,6 +500,10 @@ export abstract class OAuthBaseProvider {
         // Though a reasonable scenario where this might happen is eg. if the authorization code expires before we can exchange it, or the page is reloaded so we try to reuse a code that was already used
         captureError("inner-oauth-callback", { error, params });
         throw new StatusError(400, "Inner OAuth callback failed due to invalid grant. Please try again.");
+      }
+      const statusError = getNestedStatusError(error);
+      if (statusError) {
+        throw statusError;
       }
       if (error?.error === 'access_denied' || error?.error === 'consent_required') {
         throw new KnownErrors.OAuthProviderAccessDenied();
