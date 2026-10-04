@@ -170,6 +170,24 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
         contactChannelId: params.contact_channel_id || throwErr("Missing contact channel id"),
       });
 
+      // Avoid surfacing the database unique constraint as an internal error when a
+      // channel is changed to a value already present on this user.
+      if (value !== undefined || data.type !== undefined) {
+        const existingWithSameValue = await tx.contactChannel.findUnique({
+          where: {
+            tenancyId_projectUserId_type_value: {
+              tenancyId: auth.tenancy.id,
+              projectUserId: params.user_id,
+              type: data.type !== undefined ? crudContactChannelTypeToPrisma(data.type) : existingContactChannel.type,
+              value: value !== undefined ? value : existingContactChannel.value,
+            },
+          },
+        });
+        if (existingWithSameValue && existingWithSameValue.id !== existingContactChannel.id) {
+          throw new StatusError(StatusError.BadRequest, 'Contact channel already exists');
+        }
+      }
+
       // if usedForAuth is set to true, make sure no other account uses this channel for auth
       if (data.used_for_auth) {
         const existingWithSameChannel = await tx.contactChannel.findUnique({
