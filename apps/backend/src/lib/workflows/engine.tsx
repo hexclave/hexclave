@@ -11,10 +11,11 @@ import {
 } from "@hexclave/shared/dist/interface/workflows";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError, StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { wait } from "@hexclave/shared/dist/utils/promises";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import { deterministicWorkflowUuid, enqueueWorkflowEvent } from "./events";
 import { partitionClaimedWorkflowEvents, workflowEventRetryDelayMs } from "./event-processing";
-import { invokeWorkflowSandbox } from "./invoke";
+import { invokeWorkflowRunKeyBatch, invokeWorkflowSandbox } from "./invoke";
 import { listCronOccurrences, MAX_CATCHUP_WINDOW_MS, parseCronExpression } from "./cron";
 import {
   WORKFLOWS_DEFAULT_LIMITS,
@@ -30,16 +31,18 @@ import { createWorkflowRunToken } from "./run-token";
 
 // The workflow engine: tick-driven like the email queue. A cron route calls
 // runWorkflowEngineStep() in a loop; each step (1) materializes due schedule
-// occurrences into the event outbox, (2) processes unprocessed events into
-// runs, (3) claims due runs with FOR UPDATE SKIP LOCKED and executes them in
-// sandbox invocations, and (4) occasionally prunes retention. There is no
-// locking around the tick itself — overlapping ticks are safe by
-// construction: event and run claims use SKIP LOCKED + leases, and everything
-// in event processing is idempotent via deterministic ids (an event is only
-// marked processed AFTER its runs exist, so a crash replays it and every
-// insert no-ops).
+// occurrences into the event outbox, then concurrently (2) processes
+// unprocessed events into runs and (3) claims due runs with FOR UPDATE SKIP
+// LOCKED and executes them in sandbox invocations, and (4) occasionally
+// prunes retention. There is no locking around the tick itself — overlapping
+// ticks are safe by construction: event and run claims use SKIP LOCKED +
+// leases, and everything in event processing is idempotent via deterministic
+// ids (an event is only marked processed AFTER its runs exist, so a crash
+// replays it and every insert no-ops).
 
-const EVENT_BATCH_SIZE = 50;
+// Enough for every dispatch slot to take a full tenancy batch
+// (EVENT_TENANCY_CONCURRENCY × EVENT_TENANCY_BATCH_SIZE).
+const EVENT_BATCH_SIZE = 1000;
 // How long a claimed event stays invisible to other ticks. An expired lease
 // only costs duplicate work (run creation is idempotent), never correctness,
 // but it does let a second tick dispatch the same tenancy concurrently — so
@@ -50,11 +53,19 @@ const RUN_KEY_INVOCATION_TIMEOUT_MS = 60 * 1000;
 const EVENT_CLAIM_WORK_BUDGET_MS = EVENT_CLAIM_LEASE_MS - RUN_KEY_INVOCATION_TIMEOUT_MS - 30 * 1000;
 // At most this many of one tenancy's events per claim, so a batch spans
 // several tenancies (and uses several dispatch slots) even when one tenancy
-// holds all of the oldest events.
-const EVENT_TENANCY_BATCH_SIZE = 25;
-// Tenancies of one claimed batch dispatched at once. Bounds the number of
-// concurrent run-key sandbox invocations a single tick can start.
+// holds all of the oldest events. Run keys are derived with one sandbox
+// invocation per workflow version per tenancy batch (see
+// precomputeRunKeys), so a larger batch spreads that invocation's cost over
+// more events; what is left per event is a few statements, run serially.
+const EVENT_TENANCY_BATCH_SIZE = 100;
+// Tenancies of one claimed batch dispatched at once.
 const EVENT_TENANCY_CONCURRENCY = 10;
+// Batched run-key invocations a tenancy runs at once (one per workflow with a
+// runKey), so one tick starts at most EVENT_TENANCY_CONCURRENCY × this.
+const RUN_KEY_BATCH_CONCURRENCY = 3;
+// Serialized event bytes per batched run-key invocation. Event payloads may
+// be large, and the whole batch rides in the invocation's code.
+const RUN_KEY_BATCH_MAX_INPUT_BYTES = 1024 * 1024;
 // Events no workflow listens to, marked processed per tick in one statement.
 // Every project's user/team/permission writes land in the outbox and almost
 // none of them trigger a workflow, so this is where nearly all of the outbox
@@ -398,6 +409,15 @@ function eventToSandboxEvent(event: WorkflowEventRow): WorkflowSandboxEvent {
   };
 }
 
+function runKeySandboxInput(event: WorkflowEventRow): WorkflowSandboxInput {
+  return {
+    protocolVersion: WORKFLOWS_PROTOCOL_VERSION,
+    mode: "run-key",
+    limits: WORKFLOWS_DEFAULT_LIMITS,
+    event: eventToSandboxEvent(event),
+  };
+}
+
 async function createFailedRun(options: {
   tenancy: Tenancy,
   runId: string,
@@ -415,7 +435,13 @@ async function createFailedRun(options: {
   `);
 }
 
-async function createRunForEvent(tenancy: Tenancy, event: WorkflowEventRow, definition: DefinitionWithManifest): Promise<void> {
+async function createRunForEvent(
+  tenancy: Tenancy,
+  event: WorkflowEventRow,
+  definition: DefinitionWithManifest,
+  /** This event's run-key outcome from its tenancy's batched derivation, if that produced one. */
+  precomputedRunKey: WorkflowSandboxOutcome | undefined,
+): Promise<void> {
   // Deterministic per (event, workflow): reprocessing after a crash (or a
   // concurrently overlapping tick) can never create a duplicate run.
   const runId = deterministicWorkflowUuid(`run:${tenancy.id}:${event.id}:${definition.workflowId}`);
@@ -440,23 +466,24 @@ async function createRunForEvent(tenancy: Tenancy, event: WorkflowEventRow, defi
   // repeat on crash-replay.
   let runKey: string | null = null;
   if (versionRow.manifest.has_run_key) {
-    const keyResult = await invokeWorkflowSandbox({
-      compiledBundle: versionRow.compiledBundle,
-      input: {
-        protocolVersion: WORKFLOWS_PROTOCOL_VERSION,
-        mode: "run-key",
-        limits: WORKFLOWS_DEFAULT_LIMITS,
-        event: eventToSandboxEvent(event),
-      },
-      nodeModules: getStdlibNodeModules(versionRow),
-      timeoutMs: RUN_KEY_INVOCATION_TIMEOUT_MS,
-    });
-    if (keyResult.status === "error") {
-      // Platform failure: leave the event unprocessed (the throw aborts
-      // marking it processed) so a later tick retries.
-      throw new HexclaveAssertionError(`Workflow run-key invocation failed: ${keyResult.error.message}`, { tenancyId: tenancy.id, eventId: event.id, workflowId: definition.workflowId, invocationId: keyResult.error.invocationId });
+    // Normally batched per tenancy ahead of time; anything the batch did not
+    // resolve (a failed batch, a bundle that cannot be batched) falls back
+    // to its own invocation here.
+    let outcome = precomputedRunKey;
+    if (outcome == null) {
+      const keyResult = await invokeWorkflowSandbox({
+        compiledBundle: versionRow.compiledBundle,
+        input: runKeySandboxInput(event),
+        nodeModules: getStdlibNodeModules(versionRow),
+        timeoutMs: RUN_KEY_INVOCATION_TIMEOUT_MS,
+      });
+      if (keyResult.status === "error") {
+        // Platform failure: leave the event unprocessed (the throw aborts
+        // marking it processed) so a later tick retries.
+        throw new HexclaveAssertionError(`Workflow run-key invocation failed: ${keyResult.error.message}`, { tenancyId: tenancy.id, eventId: event.id, workflowId: definition.workflowId, invocationId: keyResult.error.invocationId });
+      }
+      outcome = keyResult.data;
     }
-    const outcome = keyResult.data;
     if (outcome.type === "handler-failed") {
       // The user's runKey function threw: record a FAILED run so the error
       // is visible in run history (user-error channel), and move on.
@@ -761,6 +788,7 @@ async function dispatchEvent(
   matching: DefinitionWithManifest[],
   tenancyCache: Map<string, Tenancy | null>,
   deadlineMs: number,
+  precomputedRunKeys: Map<string, WorkflowSandboxOutcome>,
 ): Promise<boolean> {
   const tenancy = await getCachedTenancy(event.tenancyId, tenancyCache);
   if (tenancy != null) {
@@ -779,11 +807,90 @@ async function dispatchEvent(
       // deterministic run ids make replay safe for definitions that
       // were already handled in this partial pass.
       if (Date.now() >= deadlineMs) return false;
-      await createRunForEvent(tenancy, event, definition);
+      await createRunForEvent(tenancy, event, definition, precomputedRunKeys.get(precomputedRunKeyId(event, definition)));
     }
   }
   await markEventsProcessed([event]);
   return true;
+}
+
+function precomputedRunKeyId(event: WorkflowEventRow, definition: DefinitionWithManifest): string {
+  return `${event.id}:${definition.workflowId}:${definition.latestVersion}`;
+}
+
+/**
+ * Derives the run keys of one tenancy's claimed events up front, with one
+ * sandbox invocation per workflow version instead of one per (event,
+ * workflow): a runKey is almost always a property lookup, and starting a VM
+ * for each one capped a tenancy's dispatch at roughly one event per VM
+ * round trip. The events themselves are still dispatched serially and in
+ * order afterward, so onConflict semantics are unchanged.
+ *
+ * Purely an optimization: it never throws, and an event it does not resolve
+ * (the batch failed, or the bundle cannot be batched) derives its key on its
+ * own in createRunForEvent, exactly as before.
+ */
+async function precomputeRunKeys(
+  tenancyId: string,
+  entries: { event: WorkflowEventRow, matching: DefinitionWithManifest[] }[],
+  deadlineMs: number,
+): Promise<Map<string, WorkflowSandboxOutcome>> {
+  const precomputed = new Map<string, WorkflowSandboxOutcome>();
+  let pausedWorkflowIds: Set<string>;
+  try {
+    pausedWorkflowIds = await listPausedWorkflowIdsForTenancy(tenancyId);
+  } catch (error) {
+    captureError("workflow-run-key-batch", error);
+    return precomputed;
+  }
+
+  // One chunk per invocation: a workflow's events, split by serialized size.
+  const chunks: { definition: DefinitionWithManifest, events: WorkflowEventRow[] }[] = [];
+  const openChunks = new Map<string, { chunk: (typeof chunks)[number], bytes: number }>();
+  for (const { event, matching } of entries) {
+    const eventBytes = Buffer.byteLength(JSON.stringify(eventToSandboxEvent(event)));
+    for (const definition of matching) {
+      if (!definition.manifest.has_run_key || pausedWorkflowIds.has(definition.workflowId)) continue;
+      let open = openChunks.get(definition.workflowId);
+      if (open == null || (open.chunk.events.length > 0 && open.bytes + eventBytes > RUN_KEY_BATCH_MAX_INPUT_BYTES)) {
+        open = { chunk: { definition, events: [] }, bytes: 0 };
+        chunks.push(open.chunk);
+        openChunks.set(definition.workflowId, open);
+      }
+      open.chunk.events.push(event);
+      open.bytes += eventBytes;
+    }
+  }
+
+  // Each chunk settles on its own (every failure is caught inside), so no
+  // invocation is ever left running once this returns.
+  await Promise.all(Array.from({ length: Math.min(RUN_KEY_BATCH_CONCURRENCY, chunks.length) }, async () => {
+    for (let chunk = chunks.shift(); chunk != null; chunk = chunks.shift()) {
+      if (Date.now() >= deadlineMs) return;
+      const { definition, events } = chunk;
+      try {
+        const versionRow = await loadWorkflowVersion(tenancyId, definition.workflowId, definition.latestVersion);
+        if (versionRow == null) continue;
+        const batch = await invokeWorkflowRunKeyBatch({
+          compiledBundle: versionRow.compiledBundle,
+          inputs: events.map(runKeySandboxInput),
+          nodeModules: getStdlibNodeModules(versionRow),
+          timeoutMs: RUN_KEY_INVOCATION_TIMEOUT_MS,
+        });
+        if (batch == null) continue;
+        if (batch.status === "error") {
+          captureError("workflow-run-key-batch", new HexclaveAssertionError(`Workflow run-key batch failed; its events fall back to one invocation each: ${batch.error.message}`, { tenancyId, workflowId: definition.workflowId, eventCount: events.length, invocationId: batch.error.invocationId }));
+          continue;
+        }
+        batch.data.forEach((item, index) => {
+          if (item.status === "ok") precomputed.set(precomputedRunKeyId(events[index], definition), item.data);
+        });
+      } catch (error) {
+        captureError("workflow-run-key-batch", error);
+      }
+    }
+  }));
+  return precomputed;
 }
 
 /**
@@ -796,12 +903,13 @@ async function dispatchTenancyEvents(
   tenancyCache: Map<string, Tenancy | null>,
   deadlineMs: number,
 ): Promise<void> {
+  const precomputedRunKeys = entries.length === 0 ? new Map<string, WorkflowSandboxOutcome>() : await precomputeRunKeys(entries[0].event.tenancyId, entries, deadlineMs);
   for (let index = 0; index < entries.length; index++) {
     const { event, matching } = entries[index];
     let finished = false;
     if (Date.now() < deadlineMs) {
       try {
-        finished = await dispatchEvent(event, matching, tenancyCache, deadlineMs);
+        finished = await dispatchEvent(event, matching, tenancyCache, deadlineMs, precomputedRunKeys);
       } catch (error) {
         captureError("workflow-event-processing", error);
         const nextAttempt = event.processingAttempts + 1;
@@ -1107,9 +1215,26 @@ async function recordCompletedSleepsAtomically(options: {
   });
 }
 
+/**
+ * Hands a claimed run back to the queue when the tick runs out of time,
+ * keeping its place: its wakeAt is restored to what it was when claimed, so
+ * a run that merely drew a late claim is not sent behind every other due run.
+ */
+async function handBackRunAtDeadline(run: ClaimedRunRow): Promise<void> {
+  await transitionRunFromRunning(run.tenancyId, run.id, run.leaseToken, Prisma.sql`"state" = 'QUEUED', "wakeAt" = ${run.preClaimWakeAt}, "leaseUntil" = NULL`);
+}
+
 async function executeClaimedRun(run: ClaimedRunRow, tenancy: Tenancy, deadlineMs: number): Promise<void> {
   if (Date.now() >= deadlineMs) {
-    await transitionRunFromRunning(run.tenancyId, run.id, run.leaseToken, Prisma.sql`"state" = 'QUEUED', "wakeAt" = NOW(), "leaseUntil" = NULL`);
+    if (run.preClaimState === "SLEEPING") {
+      // Nothing has happened yet, in particular the fired sleep has not been
+      // recorded (below). Requeueing it as QUEUED would lose that: the next
+      // claim would not know the timer fired, and a relative step.sleep
+      // would re-arm from the current clock on replay.
+      await transitionRunFromRunning(run.tenancyId, run.id, run.leaseToken, Prisma.sql`"state" = 'SLEEPING', "wakeAt" = ${run.preClaimWakeAt}, "leaseUntil" = NULL`);
+    } else {
+      await handBackRunAtDeadline(run);
+    }
     return;
   }
   const versionRowInitial = await loadWorkflowVersion(run.tenancyId, run.workflowId, run.version);
@@ -1228,7 +1353,7 @@ async function executeClaimedRun(run: ClaimedRunRow, tenancy: Tenancy, deadlineM
     // invocation still fits in the function lifetime. Check before every
     // invocation, including the first, rather than only after it returns.
     if (Date.now() >= deadlineMs) {
-      await transitionRunFromRunning(run.tenancyId, run.id, run.leaseToken, Prisma.sql`"state" = 'QUEUED', "wakeAt" = NOW(), "leaseUntil" = NULL`);
+      await handBackRunAtDeadline(run);
       return;
     }
     if (chained > 0) {
@@ -1368,7 +1493,7 @@ async function executeClaimedRun(run: ClaimedRunRow, tenancy: Tenancy, deadlineM
         currentStepAttempt = 0;
         if (Date.now() >= deadlineMs) {
           // Out of tick budget: hand the run back for the next tick.
-          await transitionRunFromRunning(run.tenancyId, run.id, run.leaseToken, Prisma.sql`"state" = 'QUEUED', "wakeAt" = NOW(), "leaseUntil" = NULL`);
+          await handBackRunAtDeadline(run);
           return;
         }
         continue;
@@ -1774,8 +1899,33 @@ export async function runWorkflowEngineStep(options: { deadlineMs: number }): Pr
   const tenancyCache = new Map<string, Tenancy | null>();
   let didWork = false;
   didWork = await materializeScheduleOccurrences(tenancyCache, options.deadlineMs) || didWork;
-  didWork = await processWorkflowEvents(tenancyCache, options.deadlineMs) || didWork;
-  didWork = await executeDueRuns(tenancyCache, options.deadlineMs) || didWork;
+  // Dispatch and execution run side by side: run execution must not wait
+  // behind a slow dispatch batch (or skip the pass entirely once dispatch has
+  // used up the deadline). While dispatch is still going, execution keeps
+  // claiming runs — including the ones dispatch is creating — rather than
+  // idling until the step ends. Both are awaited before an error propagates,
+  // so a failing phase never leaves the other running past the end of the
+  // step.
+  const dispatchState = { finished: false };
+  const [dispatchedEvents, executedRuns] = await Promise.allSettled([
+    processWorkflowEvents(tenancyCache, options.deadlineMs).finally(() => {
+      dispatchState.finished = true;
+    }),
+    (async () => {
+      let executedAny = await executeDueRuns(tenancyCache, options.deadlineMs);
+      while (!dispatchState.finished && Date.now() < options.deadlineMs) {
+        if (await executeDueRuns(tenancyCache, options.deadlineMs)) {
+          executedAny = true;
+        } else {
+          await wait(1000);
+        }
+      }
+      return executedAny;
+    })(),
+  ]);
+  if (dispatchedEvents.status === "rejected") throw dispatchedEvents.reason;
+  if (executedRuns.status === "rejected") throw executedRuns.reason;
+  didWork = dispatchedEvents.value || executedRuns.value || didWork;
   // Retention pruning is cheap but pointless to run every second.
   if (stepCounter++ % 60 === 0) {
     await pruneWorkflowRetention();
