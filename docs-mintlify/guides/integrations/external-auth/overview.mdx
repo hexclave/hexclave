@@ -39,9 +39,131 @@ The default claim sets differ by provider:
 | Better Auth | `sub`, `sid`, `exp` | `email` and `name` are included by default. |
 | Clerk | `sub`, `sid`, `exp` | `email` and `name` are not included by default in the default session token. |
 
-To map Clerk profile data, define a Clerk JWT template that adds the profile claims, for example `email`, `name`, and `email_verified`. The template must preserve the required session claims and use the issuer and signing keys configured in the dashboard.
+To map Clerk profile data, add the claims to Clerk's session token. See [Add profile claims to the Clerk session token](#add-profile-claims-to-the-clerk-session-token).
 
-Claims are mapped only when the Hexclave user is first created. Later exchanges do not overwrite the user's existing display name or email. A provider email is stored as unverified unless the provider asserts `email_verified: true`; it never enables Hexclave password or OTP authentication.
+Claims are mapped only when the Hexclave user is first created. Later exchanges do not overwrite the user's existing display name or email, so adding claims later does not update users that already exist. A provider email is stored as unverified unless the provider asserts `email_verified: true` (the boolean, not the string `"true"`); it never enables Hexclave password or OTP authentication.
+
+## Set up Clerk in a Next.js app
+
+This walkthrough assumes a Next.js app that already uses [`@clerk/nextjs`](https://clerk.com/docs/nextjs/getting-started/quickstart) for sign-in. Clerk keeps owning the session; Hexclave asks Clerk for the current session token and exchanges it for a short-lived Hexclave access token, so there is no separate Hexclave sign-in step.
+
+<Steps>
+  <Step title="Enable and configure the integration">
+    In the project dashboard, enable **Clerk Integration** and fill in the provider configuration:
+
+    - **Issuer**: your Clerk instance's Frontend API URL, for example `https://<your-instance>.clerk.accounts.dev`. It must exactly match the `iss` claim of the Clerk token.
+    - **Authorized parties** (optional): the origins your app runs on, for example `http://localhost:3000`. When set, the token's `azp` claim must match one of them.
+  </Step>
+  <Step title="Add profile claims to the Clerk session token">
+    See [the section below](#add-profile-claims-to-the-clerk-session-token). Skip this step if you do not need the user's email and name in Hexclave.
+  </Step>
+  <Step title="Connect Hexclave to the Clerk session">
+    Create a `HexclaveClientApp` whose token store reads from Clerk, and use it wherever you need the Hexclave user:
+
+    ```tsx
+    "use client";
+
+    import { useAuth, useClerk } from "@clerk/nextjs";
+    import { HexclaveClientApp, clerkTokenStore } from "@hexclave/next";
+    import { useEffect, useMemo, useState } from "react";
+
+    export function HexclaveUserCard() {
+      const clerk = useClerk();
+      // `clerk.loaded` does not trigger a re-render, so use the reactive `isLoaded`.
+      const { isLoaded } = useAuth();
+      const [userId, setUserId] = useState<string | null>(null);
+
+      const app = useMemo(() => {
+        if (!isLoaded) return null;
+        return new HexclaveClientApp({
+          baseUrl: process.env.NEXT_PUBLIC_HEXCLAVE_API_URL,
+          projectId: process.env.NEXT_PUBLIC_HEXCLAVE_PROJECT_ID,
+          // Only needed if the project enables "Require publishable client keys".
+          publishableClientKey: process.env.NEXT_PUBLIC_HEXCLAVE_PUBLISHABLE_CLIENT_KEY,
+          tokenStore: clerkTokenStore({
+            getSessionId: () => clerk.session?.id ?? null,
+            getToken: async () => await clerk.session?.getToken() ?? null,
+            subscribe: callback => clerk.addListener(callback),
+          }),
+          // Clerk drives sign-in, so Hexclave must not redirect to its own pages.
+          automaticSideEffects: false,
+        });
+      }, [clerk, isLoaded]);
+
+      useEffect(() => {
+        if (app == null) return;
+        let active = true;
+        const refresh = async () => {
+          const user = clerk.session == null ? null : await app.getUser();
+          if (active) setUserId(user?.id ?? null);
+        };
+        void refresh();
+        // Re-check whenever Clerk's session changes (sign-in, sign-out, token refresh).
+        const unsubscribe = clerk.addListener(() => void refresh());
+        return () => {
+          active = false;
+          unsubscribe();
+        };
+      }, [app, clerk]);
+
+      return <p>{userId == null ? "Signed out" : `Hexclave user ${userId}`}</p>;
+    }
+    ```
+
+    The `NEXT_PUBLIC_HEXCLAVE_*` values come from your project; the API URL is `http://localhost:8102` against a local development environment.
+  </Step>
+</Steps>
+
+<Note>
+  `@clerk/nextjs` 7 removed `<SignedIn>` and `<SignedOut>`. Use `<Show when="signed-in">` and `<Show when="signed-out">` to switch the UI by sign-in state. `ClerkProvider` also needs `clerkMiddleware`; see Clerk's quickstart for the middleware setup.
+</Note>
+
+### Add profile claims to the Clerk session token
+
+Clerk's default session token contains no profile claims, so Hexclave creates the user without an email or name. Add them in the Clerk dashboard under **Sessions → Customize session token**:
+
+```json
+{
+  "email": "{{user.primary_email_address}}",
+  "name": "{{user.full_name}}"
+}
+```
+
+The `clerkTokenStore` calls `getToken()` without a template name, so it receives the session token. A separate Clerk JWT template is not used unless you pass its name to `getToken`.
+
+<Warning>
+  Hexclave maps `email` and `name` only when it creates the user. After you change the claims:
+
+  1. Delete the existing Hexclave user for that Clerk account on the project's **Users** page.
+  2. Sign out of Clerk and sign in again, or sign up with a different email.
+
+  Clerk only adds the claims to newly issued tokens, and without step 1 the existing Hexclave user keeps its empty profile.
+</Warning>
+
+## Troubleshooting
+
+### The Hexclave user has no email or name
+
+First check which claims Clerk actually sends. This helper lists the claim names (not the values) of the current Clerk token:
+
+```tsx
+async function listClerkClaimNames(clerk: { session?: { getToken(): Promise<string | null> } | null }) {
+  const token = await clerk.session?.getToken();
+  const payload = token?.split(".")[1];
+  if (payload == null) return [];
+  const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "="));
+  return Object.keys(JSON.parse(json)).sort();
+}
+```
+
+With Clerk's defaults this returns `azp, exp, fva, iat, iss, nbf, sid, sts, sub, v`, which has no `email` or `name`. Once the session token is customized and you have signed in again, `email` and `name` appear in the list.
+
+- If `email` and `name` are missing, the Clerk session token customization was not saved or the token predates it. Sign out and sign in again.
+- If they are present but the Hexclave user is still empty, the user was created before you added the claims. Delete the Hexclave user and sign in again.
+
+### The Hexclave panel never leaves its loading state
+
+Build the `HexclaveClientApp` only after Clerk reports `isLoaded` from `useAuth()`. `clerk.loaded` is a plain property on a long-lived object, so reading it in `useMemo` does not re-run when Clerk finishes loading.
 
 ## Sessions and sign-out
 
