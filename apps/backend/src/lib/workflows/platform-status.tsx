@@ -106,6 +106,11 @@ export type WorkflowsPlatformStatus = {
 };
 
 export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformStatus> {
+  // Read from the replica on purpose: these scans are heaviest during a
+  // backlog, exactly when the primary can least afford them. Replica lag only
+  // makes ages read a few seconds older, far below the page's thresholds.
+  // (The engine itself must keep reading the primary.)
+  const replica = globalPrismaClient.$replica();
   const [
     pendingEvents,
     processedEvents,
@@ -121,7 +126,7 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
     // tick. A large "pending" made of claimed or backing-off events is not a
     // backlog. "withoutWorkflows" is what the engine's sweep clears each tick,
     // so it too should hover near zero.
-    globalPrismaClient.$queryRaw<PendingEventsRow[]>(Prisma.sql`
+    replica.$queryRaw<PendingEventsRow[]>(Prisma.sql`
       SELECT
         COUNT(*)::int AS "pending",
         (COUNT(*) FILTER (WHERE e."retryAt" <= NOW() AND (e."claimedUntil" IS NULL OR e."claimedUntil" <= NOW())))::int AS "ready",
@@ -140,7 +145,7 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
     // Dispatch delay is processedAt - scheduledAt: how late an event was by
     // the time the engine got to it. Schedule catch-up after downtime shows
     // up here by design (those events carry their nominal time).
-    globalPrismaClient.$queryRaw<ProcessedEventsRow[]>(Prisma.sql`
+    replica.$queryRaw<ProcessedEventsRow[]>(Prisma.sql`
       SELECT
         (COUNT(*) FILTER (WHERE e."processedAt" >= NOW() - INTERVAL '5 minutes'))::int AS "processedLast5Minutes",
         COUNT(*)::int AS "processedLastHour",
@@ -152,7 +157,7 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
       FROM "WorkflowEvent" e
       WHERE e."processedAt" >= NOW() - INTERVAL '1 hour'
     `),
-    globalPrismaClient.$queryRaw<{ type: string, count: number, oldestScheduledAt: Date }[]>(Prisma.sql`
+    replica.$queryRaw<{ type: string, count: number, oldestScheduledAt: Date }[]>(Prisma.sql`
       SELECT e."type", COUNT(*)::int AS "count", MIN(e."scheduledAt") AS "oldestScheduledAt"
       FROM "WorkflowEvent" e
       WHERE e."processedAt" IS NULL
@@ -160,7 +165,7 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
       ORDER BY COUNT(*) DESC, e."type" ASC
       LIMIT ${BREAKDOWN_LIMIT}
     `),
-    globalPrismaClient.$queryRaw<WorkflowsPlatformStatus["events"]["pendingByTenancy"]>(Prisma.sql`
+    replica.$queryRaw<WorkflowsPlatformStatus["events"]["pendingByTenancy"]>(Prisma.sql`
       SELECT
         pending."tenancyId",
         t."projectId",
@@ -183,8 +188,9 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
     `),
     // A RUNNING run whose lease has expired is one whose worker died; the
     // engine re-claims it, so a persistent non-zero count there means claims
-    // are not keeping up (or not happening).
-    globalPrismaClient.$queryRaw<ActiveRunsRow[]>(Prisma.sql`
+    // are not keeping up (or not happening). Such a run counts toward
+    // oldestDueAt from the moment its lease expired.
+    replica.$queryRaw<ActiveRunsRow[]>(Prisma.sql`
       SELECT
         (COUNT(*) FILTER (WHERE r."state" = 'QUEUED' AND (r."wakeAt" IS NULL OR r."wakeAt" <= NOW())))::int AS "queuedDue",
         (COUNT(*) FILTER (WHERE r."state" = 'QUEUED' AND r."wakeAt" > NOW()))::int AS "queuedBackingOff",
@@ -192,14 +198,15 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
         (COUNT(*) FILTER (WHERE r."state" = 'RUNNING' AND (r."leaseUntil" IS NULL OR r."leaseUntil" <= NOW())))::int AS "runningLeaseExpired",
         (COUNT(*) FILTER (WHERE r."state" = 'SLEEPING'))::int AS "sleeping",
         (COUNT(*) FILTER (WHERE r."state" = 'SLEEPING' AND r."wakeAt" <= NOW()))::int AS "sleepingOverdue",
-        MIN(COALESCE(r."wakeAt", r."updatedAt")) FILTER (WHERE
+        MIN(COALESCE(r."wakeAt", r."leaseUntil", r."updatedAt")) FILTER (WHERE
           (r."state" = 'QUEUED' AND (r."wakeAt" IS NULL OR r."wakeAt" <= NOW()))
           OR (r."state" = 'SLEEPING' AND r."wakeAt" <= NOW())
+          OR (r."state" = 'RUNNING' AND (r."leaseUntil" IS NULL OR r."leaseUntil" <= NOW()))
         ) AS "oldestDueAt"
       FROM "WorkflowRun" r
       WHERE r."state" IN ('QUEUED', 'RUNNING', 'SLEEPING')
     `),
-    globalPrismaClient.$queryRaw<FinishedRunsRow[]>(Prisma.sql`
+    replica.$queryRaw<FinishedRunsRow[]>(Prisma.sql`
       SELECT
         (COUNT(*) FILTER (WHERE r."state" = 'COMPLETED' AND r."completedAt" >= NOW() - INTERVAL '1 hour'))::int AS "completedLastHour",
         (COUNT(*) FILTER (WHERE r."state" = 'FAILED' AND r."completedAt" >= NOW() - INTERVAL '1 hour'))::int AS "failedLastHour",
@@ -212,7 +219,7 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
       WHERE r."state" IN ('COMPLETED', 'FAILED', 'CANCELED')
         AND r."completedAt" >= NOW() - INTERVAL '1 day'
     `),
-    globalPrismaClient.$queryRaw<WorkflowsPlatformStatus["runs"]["activeByWorkflow"]>(Prisma.sql`
+    replica.$queryRaw<WorkflowsPlatformStatus["runs"]["activeByWorkflow"]>(Prisma.sql`
       SELECT
         active."tenancyId",
         t."projectId",
@@ -234,9 +241,10 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
           ))::int AS "due",
           (COUNT(*) FILTER (WHERE r."state" = 'RUNNING' AND r."leaseUntil" > NOW()))::int AS "running",
           (COUNT(*) FILTER (WHERE r."state" IN ('QUEUED', 'SLEEPING') AND r."wakeAt" > NOW()))::int AS "waiting",
-          MIN(COALESCE(r."wakeAt", r."updatedAt")) FILTER (WHERE
+          MIN(COALESCE(r."wakeAt", r."leaseUntil", r."updatedAt")) FILTER (WHERE
             (r."state" = 'QUEUED' AND (r."wakeAt" IS NULL OR r."wakeAt" <= NOW()))
             OR (r."state" = 'SLEEPING' AND r."wakeAt" <= NOW())
+            OR (r."state" = 'RUNNING' AND (r."leaseUntil" IS NULL OR r."leaseUntil" <= NOW()))
           ) AS "oldestDueAt"
         FROM "WorkflowRun" r
         WHERE r."state" IN ('QUEUED', 'RUNNING', 'SLEEPING')
@@ -249,7 +257,7 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
       LEFT JOIN "WorkflowDefinition" d ON d."tenancyId" = active."tenancyId" AND d."workflowId" = active."workflowId"
       ORDER BY active."due" DESC, active."running" DESC, active."waiting" DESC, active."tenancyId" ASC, active."workflowId" ASC
     `),
-    globalPrismaClient.$queryRaw<DefinitionsRow[]>(Prisma.sql`
+    replica.$queryRaw<DefinitionsRow[]>(Prisma.sql`
       SELECT
         COUNT(*)::int AS "total",
         (COUNT(*) FILTER (WHERE d."pausedAt" IS NOT NULL))::int AS "paused",
@@ -259,7 +267,7 @@ export async function getWorkflowsPlatformStatus(): Promise<WorkflowsPlatformSta
     // The stalest cursor of an unpaused schedule doubles as the engine's
     // heartbeat: every tick advances every such cursor to "now", so one that
     // is minutes old means ticks are not completing their first phase.
-    globalPrismaClient.$queryRaw<SchedulesRow[]>(Prisma.sql`
+    replica.$queryRaw<SchedulesRow[]>(Prisma.sql`
       SELECT COUNT(*)::int AS "cursors", MIN(c."lastMaterializedAt") AS "stalestMaterializedAt"
       FROM "WorkflowScheduleCursor" c
       JOIN "WorkflowDefinition" d ON d."tenancyId" = c."tenancyId" AND d."workflowId" = c."workflowId"
