@@ -237,6 +237,12 @@ type PendingPlanDebit = {
 const pendingPlanDebitBatches = new Map<string, PendingPlanDebit[]>();
 const MAX_PLAN_DEBIT_BATCH_SIZE = 256;
 
+// The debit transaction holds the advisory lock across Bulldozer round-trips
+// (balance read, stale-row revert, and write), so Prisma's 5s default expires
+// it under load ("Transaction not found"). Every retry then re-runs the whole
+// batch and every queued debit for the customer waits behind it.
+const PLAN_DEBIT_TRANSACTION_TIMEOUT_MS = 30_000;
+
 // Debits for one customer that arrive while an earlier transaction holds the
 // per-process queue are coalesced into a single advisory-locked transaction, so
 // throughput does not degrade to one transaction plus Bulldozer round-trip per
@@ -381,7 +387,7 @@ async function applyPlanDebits(
     }
     finalBulldozerIds = new Set(bulldozerChanges.map(({ id }) => id));
     return results;
-  }));
+  }, { timeout: PLAN_DEBIT_TRANSACTION_TIMEOUT_MS }));
 
   // A retried transaction attempt may have posted rows that the committed
   // attempt no longer accepted (e.g. the balance changed in between).
@@ -449,5 +455,5 @@ export async function rollbackPlanItemDebits(
         id: { in: ownedChanges.map(({ id }) => id) },
       },
     });
-  }));
+  }, { timeout: PLAN_DEBIT_TRANSACTION_TIMEOUT_MS }));
 }
