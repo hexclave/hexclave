@@ -11,8 +11,9 @@ import {
 } from "@hexclave/shared/dist/interface/workflows";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError, StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import { deterministicWorkflowUuid, enqueueWorkflowEvent } from "./events";
-import { didAnySkippedWorkflowResume, workflowDefinitionMatchesEvent, workflowEventRetryDelayMs } from "./event-processing";
+import { didAnySkippedWorkflowResume, partitionClaimedWorkflowEvents, workflowEventRetryDelayMs } from "./event-processing";
 import { invokeWorkflowSandbox } from "./invoke";
 import { listCronOccurrences, MAX_CATCHUP_WINDOW_MS, parseCronExpression } from "./cron";
 import {
@@ -33,12 +34,40 @@ import { createWorkflowRunToken } from "./run-token";
 // runs, (3) claims due runs with FOR UPDATE SKIP LOCKED and executes them in
 // sandbox invocations, and (4) occasionally prunes retention. There is no
 // locking around the tick itself — overlapping ticks are safe by
-// construction: claims use SKIP LOCKED + leases, and everything in event
-// processing is idempotent via deterministic ids (an event is only marked
-// processed AFTER its runs exist, so a crash replays it and every insert
-// no-ops).
+// construction: event and run claims use SKIP LOCKED + leases, and everything
+// in event processing is idempotent via deterministic ids (an event is only
+// marked processed AFTER its runs exist, so a crash replays it and every
+// insert no-ops).
 
 const EVENT_BATCH_SIZE = 50;
+// How long a claimed event stays invisible to other ticks. An expired lease
+// only costs duplicate work (run creation is idempotent), never correctness,
+// but it does let a second tick dispatch the same tenancy concurrently — so
+// the work budget below stops starting new events early enough that one
+// in-flight run-key invocation still finishes inside the lease.
+const EVENT_CLAIM_LEASE_MS = 5 * 60 * 1000;
+const RUN_KEY_INVOCATION_TIMEOUT_MS = 60 * 1000;
+const EVENT_CLAIM_WORK_BUDGET_MS = EVENT_CLAIM_LEASE_MS - RUN_KEY_INVOCATION_TIMEOUT_MS - 30 * 1000;
+// At most this many of one tenancy's events per claim, so a batch spans
+// several tenancies (and uses several dispatch slots) even when one tenancy
+// holds all of the oldest events.
+const EVENT_TENANCY_BATCH_SIZE = 25;
+// Tenancies of one claimed batch dispatched at once. Bounds the number of
+// concurrent run-key sandbox invocations a single tick can start.
+const EVENT_TENANCY_CONCURRENCY = 10;
+// Events no workflow listens to, marked processed per tick in one statement.
+// Every project's user/team/permission writes land in the outbox and almost
+// none of them trigger a workflow, so this is where nearly all of the outbox
+// volume goes. The pair limit bounds how many (tenancy, event type) groups
+// one sweep looks at; see sweepUnlistenedEvents.
+const EVENT_SWEEP_LIMIT = 10_000;
+const EVENT_SWEEP_PAIR_LIMIT = 500;
+// The claim is a handful of index probes per tenancy with workflows; this is
+// generous headroom over Prisma's 5s default so that a slow claim degrades
+// instead of failing.
+const EVENT_CLAIM_TRANSACTION_TIMEOUT_MS = 30 * 1000;
+// pg_try_advisory_xact_lock key serializing the event claim statement.
+const WORKFLOW_EVENT_CLAIM_LOCK_ID = 74031182;
 // Kept small: the claim query's per-workflow concurrency filter only counts
 // leases that exist BEFORE the batch, so one batch can overshoot the
 // per-workflow cap by at most the batch size. The cap is flow control, not
@@ -59,6 +88,15 @@ export const WORKFLOW_INVOCATION_BACKSTOP_TIMEOUT_MS = WORKFLOWS_DEFAULT_LIMITS.
 // How many steps a single claim may chain before handing the run back to
 // the queue, so a hot run cannot starve others for a whole tick.
 const MAX_CHAINED_STEPS_PER_CLAIM = 50;
+/** The capacity knobs, for the internal status page: its numbers only mean something next to these. */
+export const WORKFLOW_ENGINE_LIMITS = {
+  eventBatchSize: EVENT_BATCH_SIZE,
+  eventTenancyConcurrency: EVENT_TENANCY_CONCURRENCY,
+  eventClaimLeaseMs: EVENT_CLAIM_LEASE_MS,
+  runClaimBatchSize: RUN_CLAIM_BATCH_SIZE,
+  perWorkflowConcurrency: PER_WORKFLOW_CONCURRENCY,
+  runLeaseMs: RUN_LEASE_MS,
+} as const;
 const GENERIC_PLATFORM_ERROR_SUMMARY = "A platform error occurred while executing this workflow. The Hexclave team has been notified.";
 // Sentinel step keys. "#" is reserved in user step ids (the runtime rejects
 // it), so these can never collide with real steps. "#handler" marks failures
@@ -306,6 +344,7 @@ type WorkflowEventRow = {
 };
 
 type DefinitionWithManifest = {
+  tenancyId: string,
   workflowId: string,
   latestVersion: number,
   manifest: WorkflowManifestJson,
@@ -328,23 +367,26 @@ async function listPausedWorkflowIdsForTenancy(tenancyId: string): Promise<Set<s
   return new Set(rows.map((row) => row.workflowId));
 }
 
-async function listDefinitionsForTenancy(tenancyId: string, cache: Map<string, DefinitionWithManifest[]>): Promise<DefinitionWithManifest[]> {
-  const cached = cache.get(tenancyId);
-  if (cached != null) return cached;
+async function listDefinitionsForTenancies(tenancyIds: string[]): Promise<Map<string, DefinitionWithManifest[]>> {
   // This read controls the irreversible processedAt decision below, so it
   // must observe the primary rather than a potentially stale replica. Raw
   // queries are not in the read-replicas extension's routing list (only the
   // model-level finders and findRaw/aggregateRaw are), so this stays on the
   // primary. Rewriting it as a findMany would silently move it to a replica.
   const rows = await globalPrismaClient.$queryRaw<DefinitionWithManifest[]>(Prisma.sql`
-    SELECT d."workflowId", d."latestVersion", v."manifest"
+    SELECT d."tenancyId", d."workflowId", d."latestVersion", v."manifest"
     FROM "WorkflowDefinition" d
     JOIN "WorkflowVersion" v
       ON v."tenancyId" = d."tenancyId" AND v."workflowId" = d."workflowId" AND v."version" = d."latestVersion"
-    WHERE d."tenancyId" = ${tenancyId}::uuid
+    WHERE d."tenancyId" = ANY(${tenancyIds}::uuid[])
   `);
-  cache.set(tenancyId, rows);
-  return rows;
+  const byTenancy = new Map<string, DefinitionWithManifest[]>();
+  for (const row of rows) {
+    const definitions = byTenancy.get(row.tenancyId) ?? [];
+    definitions.push(row);
+    byTenancy.set(row.tenancyId, definitions);
+  }
+  return byTenancy;
 }
 
 function eventToSandboxEvent(event: WorkflowEventRow): WorkflowSandboxEvent {
@@ -407,7 +449,7 @@ async function createRunForEvent(tenancy: Tenancy, event: WorkflowEventRow, defi
         event: eventToSandboxEvent(event),
       },
       nodeModules: getStdlibNodeModules(versionRow),
-      timeoutMs: 60_000,
+      timeoutMs: RUN_KEY_INVOCATION_TIMEOUT_MS,
     });
     if (keyResult.status === "error") {
       // Platform failure: leave the event unprocessed (the throw aborts
@@ -521,98 +563,357 @@ async function createRunForEvent(tenancy: Tenancy, event: WorkflowEventRow, defi
   }
 }
 
-async function processWorkflowEvents(tenancyCache: Map<string, Tenancy | null>, deadlineMs: number): Promise<boolean> {
-  // No claim marker on purpose: events are only marked processed AFTER all
-  // their runs exist, and run creation is idempotent (deterministic ids), so
-  // crash-replays and overlapping ticks are safe — at-least-once with
-  // no duplicate runs. The cost is occasional duplicate work under overlap.
-  const events: WorkflowEventRow[] = await globalPrismaClient.workflowEvent.findMany({
-    where: { processedAt: null, retryAt: { lte: new Date() } },
-    orderBy: { scheduledAt: "asc" },
-    take: EVENT_BATCH_SIZE,
-    select: {
-      tenancyId: true,
-      id: true,
-      type: true,
-      payload: true,
-      scheduledAt: true,
-      processingAttempts: true,
-    },
-  });
-  if (events.length === 0) return false;
+// Which event types each tenancy's workflows listen to, as (tenancyId, type)
+// rows read from the latest manifests. This is the SQL twin of
+// workflowDefinitionMatchesEvent for ordinary events: a pair appears here
+// exactly when some definition has an event trigger for that type. Schedule
+// occurrences are matched on their payload, which only the JS matcher does,
+// so every tenancy with a workflow is listed as listening to them and they
+// always take the claim path.
+const LISTENED_EVENT_TYPES_SQL = Prisma.sql`
+  SELECT d."tenancyId", t."trigger"->>'event_type' AS "type"
+  FROM "WorkflowDefinition" d
+  JOIN "WorkflowVersion" v
+    ON v."tenancyId" = d."tenancyId" AND v."workflowId" = d."workflowId" AND v."version" = d."latestVersion"
+  CROSS JOIN LATERAL jsonb_array_elements(
+    CASE WHEN jsonb_typeof(v."manifest"->'triggers') = 'array' THEN v."manifest"->'triggers' ELSE '[]'::jsonb END
+  ) AS t("trigger")
+  WHERE t."trigger"->>'type' = 'event' AND t."trigger"->>'event_type' IS NOT NULL
+  UNION
+  SELECT d."tenancyId", ${WORKFLOW_SCHEDULE_TRIGGER_TYPE}::text AS "type"
+  FROM "WorkflowDefinition" d
+`;
 
-  const definitionCache = new Map<string, DefinitionWithManifest[]>();
-  for (const event of events) {
-    if (Date.now() >= deadlineMs) break;
-    try {
-      const tenancy = await getCachedTenancy(event.tenancyId, tenancyCache);
-      if (tenancy != null) {
-        const definitions = await listDefinitionsForTenancy(event.tenancyId, definitionCache);
-        const matching = definitions.filter((definition) => workflowDefinitionMatchesEvent(definition.workflowId, definition.manifest, event));
-        // Only costs a query for events that actually match something.
-        const pausedWorkflowIds = matching.length === 0 ? new Set<string>() : await listPausedWorkflowIdsForTenancy(event.tenancyId);
-        const skippedPausedWorkflowIds = new Set<string>();
-        let processedEveryDefinition = true;
-        for (const definition of matching) {
-          // Paused workflows consume their matching events without dispatching
-          // them. The event is still marked processed below (it may match
-          // other, unpaused definitions), so events the engine sees during a
-          // pause are dropped rather than queued up for the resume.
-          if (pausedWorkflowIds.has(definition.workflowId)) {
-            skippedPausedWorkflowIds.add(definition.workflowId);
-            continue;
-          }
-          // runKey derivation is itself a sandbox invocation. Leave the
-          // event unprocessed once the latest-start deadline arrives;
-          // deterministic run ids make replay safe for definitions that
-          // were already handled in this partial pass.
-          if (Date.now() >= deadlineMs) {
-            processedEveryDefinition = false;
-            break;
-          }
-          await createRunForEvent(tenancy, event, definition);
-        }
-        if (processedEveryDefinition && skippedPausedWorkflowIds.size > 0) {
-          // A resume that commits after the initial pause snapshot must keep the
-          // event pending; otherwise marking it processed would permanently drop
-          // the resumed workflow's run. FOR SHARE makes a concurrent resume either
-          // visible here or wait until processedAt has committed.
-          const marked = await retryTransaction(globalPrismaClient, async (tx) => {
-            const rows = await tx.$queryRaw<{ workflowId: string }[]>(Prisma.sql`
-              SELECT "workflowId" FROM "WorkflowDefinition"
-              WHERE "tenancyId" = ${event.tenancyId}::uuid AND "pausedAt" IS NOT NULL
-              FOR SHARE
-            `);
-            const currentPausedWorkflowIds = new Set(rows.map((row) => row.workflowId));
-            if (didAnySkippedWorkflowResume(skippedPausedWorkflowIds, currentPausedWorkflowIds)) return false;
-            await tx.workflowEvent.update({
-              where: { tenancyId_id: { tenancyId: event.tenancyId, id: event.id } },
-              data: { processedAt: new Date() },
-            });
-            return true;
-          });
-          if (!marked) break;
-          continue;
-        }
-        if (!processedEveryDefinition) break;
+/**
+ * Marks pending events that no workflow listens to as processed, in one
+ * statement: events of tenancies with no workflows at all, and events of
+ * tenancies with workflows whose type none of those workflows triggers on.
+ * That is exactly what dispatching them would conclude — without loading a
+ * tenancy or spending a claim on them. Returns how many events were swept.
+ *
+ * The cost does not depend on the size of the backlog. Rather than reading
+ * pending rows and discarding the ones somebody listens to (which re-reads a
+ * busy tenancy's whole backlog every tick), it enumerates the distinct
+ * (tenancy, type) pairs that have pending events — one index probe each, a
+ * "loose index scan" — keeps the unlistened ones, and only then reads rows.
+ */
+async function sweepUnlistenedEvents(): Promise<number> {
+  // The LIMIT on `unlistened` is what stops the recursion: pairs are produced
+  // on demand, so the scan ends once enough unlistened ones were found. Pairs
+  // are drained in key order, and a drained pair disappears from the index,
+  // so successive sweeps move on. SKIP LOCKED lets overlapping ticks sweep
+  // disjoint rows instead of deadlocking on each other. Runs on the primary
+  // ($executeRaw), like every other read that decides processedAt.
+  return await globalPrismaClient.$executeRaw(Prisma.sql`
+    WITH RECURSIVE pending_pairs AS (
+      (
+        SELECT e."tenancyId", e."type"
+        FROM "WorkflowEvent" e
+        WHERE e."processedAt" IS NULL
+        ORDER BY e."tenancyId", e."type"
+        LIMIT 1
+      )
+      UNION ALL
+      SELECT next_pair."tenancyId", next_pair."type"
+      FROM pending_pairs p
+      CROSS JOIN LATERAL (
+        SELECT e."tenancyId", e."type"
+        FROM "WorkflowEvent" e
+        WHERE e."processedAt" IS NULL AND (e."tenancyId", e."type") > (p."tenancyId", p."type")
+        ORDER BY e."tenancyId", e."type"
+        LIMIT 1
+      ) next_pair
+    ),
+    listened AS (${LISTENED_EVENT_TYPES_SQL}),
+    unlistened AS (
+      SELECT p."tenancyId", p."type"
+      FROM pending_pairs p
+      WHERE NOT EXISTS (
+        SELECT 1 FROM listened l WHERE l."tenancyId" = p."tenancyId" AND l."type" = p."type"
+      )
+      LIMIT ${EVENT_SWEEP_PAIR_LIMIT}
+    ),
+    swept AS (
+      SELECT pending."tenancyId", pending."id"
+      FROM unlistened u
+      CROSS JOIN LATERAL (
+        SELECT e."tenancyId", e."id"
+        FROM "WorkflowEvent" e
+        WHERE e."processedAt" IS NULL AND e."tenancyId" = u."tenancyId" AND e."type" = u."type"
+        LIMIT ${EVENT_SWEEP_LIMIT}
+        FOR UPDATE SKIP LOCKED
+      ) pending
+      LIMIT ${EVENT_SWEEP_LIMIT}
+    )
+    UPDATE "WorkflowEvent" e
+    SET "processedAt" = NOW()
+    FROM swept
+    WHERE e."tenancyId" = swept."tenancyId" AND e."id" = swept."id" AND e."processedAt" IS NULL
+  `);
+}
+
+/**
+ * Claims the oldest due events that some workflow listens to, skipping every
+ * tenancy another tick is currently dispatching. One tenancy's events are
+ * therefore dispatched by one tick at a time, oldest first, while overlapping
+ * ticks work on different tenancies instead of repeating each other's batch.
+ * `onConflict: "cancel-existing"` leans on that order (the newest event should
+ * win). It is best-effort, not a guarantee: an event that fails and backs off
+ * is retried after the tenancy's later events, exactly as before claims.
+ *
+ * Returns nothing when another tick is claiming right now; that tick's batch
+ * is the one this claim would have had to step around anyway.
+ *
+ * Like the sweep, the cost does not depend on the size of the backlog: it
+ * starts from the tenancies that have workflows and probes each one's oldest
+ * due events per listened type, rather than walking pending events in global
+ * time order (which made every claim step over all the rows of whichever
+ * tenancy was mid-dispatch, while holding the lock).
+ */
+async function claimDueEvents(): Promise<WorkflowEventRow[]> {
+  const events = await retryTransaction(globalPrismaClient, async (tx) => {
+    // Without the lock, two ticks claiming at the same instant would each
+    // compute "busy tenancies" from a snapshot that predates the other's
+    // claim, and both would take the same tenancy. It is taken in its own
+    // statement so that the claim statement's snapshot (READ COMMITTED: one
+    // per statement) is newer than the previous holder's commit, and with
+    // try-lock so that ticks never queue up behind a slow claim.
+    const lock = await tx.$queryRaw<{ locked: boolean }[]>`SELECT pg_try_advisory_xact_lock(${WORKFLOW_EVENT_CLAIM_LOCK_ID}) AS "locked"`;
+    if (!lock[0].locked) return [];
+    return await tx.$queryRaw<WorkflowEventRow[]>(Prisma.sql`
+      WITH busy AS (
+        SELECT DISTINCT "tenancyId"
+        FROM "WorkflowEvent"
+        WHERE "processedAt" IS NULL AND "claimedUntil" > NOW()
+      ),
+      listened AS (${LISTENED_EVENT_TYPES_SQL}),
+      candidates AS (
+        SELECT l."tenancyId", due."id", due."scheduledAt"
+        FROM listened l
+        CROSS JOIN LATERAL (
+          SELECT e."id", e."scheduledAt"
+          FROM "WorkflowEvent" e
+          WHERE e."processedAt" IS NULL
+            AND e."tenancyId" = l."tenancyId"
+            AND e."type" = l."type"
+            AND e."retryAt" <= NOW()
+          ORDER BY e."scheduledAt" ASC
+          LIMIT ${EVENT_TENANCY_BATCH_SIZE}
+        ) due
+        WHERE NOT EXISTS (SELECT 1 FROM busy b WHERE b."tenancyId" = l."tenancyId")
+      ),
+      ranked AS (
+        SELECT c."tenancyId", c."id", c."scheduledAt",
+          ROW_NUMBER() OVER (PARTITION BY c."tenancyId" ORDER BY c."scheduledAt" ASC, c."id" ASC) AS "position"
+        FROM candidates c
+      ),
+      picked AS (
+        SELECT r."tenancyId", r."id"
+        FROM ranked r
+        WHERE r."position" <= ${EVENT_TENANCY_BATCH_SIZE}
+        ORDER BY r."scheduledAt" ASC, r."id" ASC
+        LIMIT ${EVENT_BATCH_SIZE}
+      ),
+      selected AS (
+        SELECT e."tenancyId", e."id"
+        FROM "WorkflowEvent" e
+        JOIN picked ON picked."tenancyId" = e."tenancyId" AND picked."id" = e."id"
+        WHERE e."processedAt" IS NULL
+        FOR UPDATE OF e SKIP LOCKED
+      )
+      UPDATE "WorkflowEvent" e
+      SET "claimedUntil" = NOW() + make_interval(secs => ${EVENT_CLAIM_LEASE_MS / 1000})
+      FROM selected
+      WHERE e."tenancyId" = selected."tenancyId" AND e."id" = selected."id"
+      RETURNING e."tenancyId", e."id", e."type", e."payload", e."scheduledAt", e."processingAttempts"
+    `);
+  }, { timeout: EVENT_CLAIM_TRANSACTION_TIMEOUT_MS });
+  // UPDATE ... RETURNING does not preserve the subquery's order.
+  return events.sort((a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime() || stringCompare(a.id, b.id));
+}
+
+async function updateClaimedEvents(events: WorkflowEventRow[], set: Prisma.Sql): Promise<void> {
+  if (events.length === 0) return;
+  await globalPrismaClient.$executeRaw(Prisma.sql`
+    UPDATE "WorkflowEvent" e
+    SET ${set}
+    FROM unnest(${events.map((event) => event.tenancyId)}::uuid[], ${events.map((event) => event.id)}::uuid[]) AS claimed("tenancyId", "id")
+    WHERE e."tenancyId" = claimed."tenancyId" AND e."id" = claimed."id" AND e."processedAt" IS NULL
+  `);
+}
+
+async function markEventsProcessed(events: WorkflowEventRow[]): Promise<void> {
+  await updateClaimedEvents(events, Prisma.sql`"processedAt" = NOW(), "claimedUntil" = NULL`);
+}
+
+/** Hands claimed events back untouched, so the next tick can take them without waiting out the lease. */
+async function releaseClaimedEvents(events: WorkflowEventRow[]): Promise<void> {
+  await updateClaimedEvents(events, Prisma.sql`"claimedUntil" = NULL`);
+}
+
+/**
+ * Creates the runs for one claimed event and marks it processed. Returns
+ * false, leaving the event untouched, when the deadline arrived before every
+ * matching definition was handled.
+ */
+async function dispatchEvent(
+  event: WorkflowEventRow,
+  matching: DefinitionWithManifest[],
+  tenancyCache: Map<string, Tenancy | null>,
+  deadlineMs: number,
+): Promise<boolean> {
+  const tenancy = await getCachedTenancy(event.tenancyId, tenancyCache);
+  const skippedPausedWorkflowIds = new Set<string>();
+  if (tenancy != null) {
+    const pausedWorkflowIds = await listPausedWorkflowIdsForTenancy(event.tenancyId);
+    for (const definition of matching) {
+      // Paused workflows consume their matching events without dispatching
+      // them. The event is still marked processed below (it may match
+      // other, unpaused definitions), so events the engine sees during a
+      // pause are dropped rather than queued up for the resume. The
+      // boundary is approximate by design: an event enqueued shortly
+      // before a resume can still dispatch if no tick reached it while the
+      // workflow was paused.
+      if (pausedWorkflowIds.has(definition.workflowId)) {
+        skippedPausedWorkflowIds.add(definition.workflowId);
+        continue;
       }
-      await globalPrismaClient.workflowEvent.update({
-        where: { tenancyId_id: { tenancyId: event.tenancyId, id: event.id } },
-        data: { processedAt: new Date() },
-      });
-    } catch (error) {
-      captureError("workflow-event-processing", error);
-      const nextAttempt = event.processingAttempts + 1;
-      const retryDelayMs = workflowEventRetryDelayMs(nextAttempt);
-      await globalPrismaClient.workflowEvent.updateMany({
-        where: { tenancyId: event.tenancyId, id: event.id, processedAt: null },
-        data: {
-          processingAttempts: { increment: 1 },
-          retryAt: new Date(Date.now() + retryDelayMs),
-        },
-      });
+      // runKey derivation is itself a sandbox invocation. Leave the
+      // event unprocessed once the latest-start deadline arrives;
+      // deterministic run ids make replay safe for definitions that
+      // were already handled in this partial pass.
+      if (Date.now() >= deadlineMs) return false;
+      await createRunForEvent(tenancy, event, definition);
     }
   }
+  if (skippedPausedWorkflowIds.size > 0) {
+    // A resume that commits after the pause snapshot above must keep the event
+    // pending; otherwise marking it processed would permanently drop the
+    // resumed workflow's run. FOR SHARE makes a concurrent resume either
+    // visible here or wait until processedAt has committed.
+    return await retryTransaction(globalPrismaClient, async (tx) => {
+      const rows = await tx.$queryRaw<{ workflowId: string }[]>(Prisma.sql`
+        SELECT "workflowId" FROM "WorkflowDefinition"
+        WHERE "tenancyId" = ${event.tenancyId}::uuid AND "pausedAt" IS NOT NULL
+        FOR SHARE
+      `);
+      if (didAnySkippedWorkflowResume(skippedPausedWorkflowIds, new Set(rows.map((row) => row.workflowId)))) return false;
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "WorkflowEvent" SET "processedAt" = NOW(), "claimedUntil" = NULL
+        WHERE "tenancyId" = ${event.tenancyId}::uuid AND "id" = ${event.id}::uuid AND "processedAt" IS NULL
+      `);
+      return true;
+    });
+  }
+  await markEventsProcessed([event]);
+  return true;
+}
+
+/**
+ * Dispatches one tenancy's claimed events, serially and in scheduledAt order.
+ * Events not started by the deadline are released rather than left to their
+ * lease.
+ */
+async function dispatchTenancyEvents(
+  entries: { event: WorkflowEventRow, matching: DefinitionWithManifest[] }[],
+  tenancyCache: Map<string, Tenancy | null>,
+  deadlineMs: number,
+): Promise<void> {
+  for (let index = 0; index < entries.length; index++) {
+    const { event, matching } = entries[index];
+    let finished = false;
+    if (Date.now() < deadlineMs) {
+      try {
+        finished = await dispatchEvent(event, matching, tenancyCache, deadlineMs);
+      } catch (error) {
+        captureError("workflow-event-processing", error);
+        const nextAttempt = event.processingAttempts + 1;
+        const retryDelayMs = workflowEventRetryDelayMs(nextAttempt);
+        // Clearing the claim lets this tenancy's later events go on dispatching
+        // while this one backs off: one poison event must not stall the rest.
+        await globalPrismaClient.workflowEvent.updateMany({
+          where: { tenancyId: event.tenancyId, id: event.id, processedAt: null },
+          data: {
+            processingAttempts: { increment: 1 },
+            retryAt: new Date(Date.now() + retryDelayMs),
+            claimedUntil: null,
+          },
+        });
+        continue;
+      }
+    }
+    if (!finished) {
+      // Out of time. Deliberately outside the try above: a release that fails
+      // is a bookkeeping problem, not a failed dispatch of this event.
+      await releaseClaimedEvents(entries.slice(index).map((entry) => entry.event));
+      return;
+    }
+  }
+}
+
+async function processWorkflowEvents(tenancyCache: Map<string, Tenancy | null>, deadlineMs: number): Promise<boolean> {
+  // Nothing in this phase may throw out of the tick: run execution comes
+  // after it in the same pass, and a transient failure here (a deadlock, a
+  // claim that timed out) must cost one pass of event dispatch, not that too.
+  let sweptCount = 0;
+  try {
+    sweptCount = await sweepUnlistenedEvents();
+  } catch (error) {
+    captureError("workflow-event-sweep", error);
+  }
+
+  // Events are claimed (lease + per-tenancy exclusivity, see claimDueEvents)
+  // and only marked processed AFTER all their runs exist. Run creation is
+  // idempotent (deterministic ids), so a crash mid-batch — or a lease that
+  // expires under a slow batch — replays safely: at-least-once dispatch with
+  // no duplicate runs.
+  const claimedAtMs = Date.now();
+  let events: WorkflowEventRow[];
+  try {
+    events = await claimDueEvents();
+  } catch (error) {
+    captureError("workflow-event-claim", error);
+    return sweptCount > 0;
+  }
+  if (events.length === 0) return sweptCount > 0;
+  const eventDeadlineMs = Math.min(deadlineMs, claimedAtMs + EVENT_CLAIM_WORK_BUDGET_MS);
+
+  let matchedByTenancy: Map<string, { event: WorkflowEventRow, matching: DefinitionWithManifest[] }[]>;
+  try {
+    // Definitions are read once for the whole batch and BEFORE any tenancy is
+    // loaded: an event that matches no trigger needs neither the (expensive)
+    // tenancy nor a statement of its own. The sweep already took the events
+    // whose type nobody listens to; what is left unmatched here is mostly
+    // schedule occurrences of a trigger that has since changed.
+    const definitionsByTenancy = await listDefinitionsForTenancies([...new Set(events.map((event) => event.tenancyId))]);
+    const partition = partitionClaimedWorkflowEvents(events, definitionsByTenancy);
+    await markEventsProcessed(partition.unmatched);
+    matchedByTenancy = partition.matchedByTenancy;
+  } catch (error) {
+    captureError("workflow-event-batch", error);
+    // Give the whole batch back; otherwise up to EVENT_BATCH_SIZE tenancies
+    // would sit claimed and undispatched for the full lease.
+    try {
+      await releaseClaimedEvents(events);
+    } catch (releaseError) {
+      captureError("workflow-event-batch-release", releaseError);
+    }
+    return true;
+  }
+
+  const tenancyQueue = [...matchedByTenancy.values()];
+  await Promise.all(Array.from({ length: Math.min(EVENT_TENANCY_CONCURRENCY, tenancyQueue.length) }, async () => {
+    for (let entries = tenancyQueue.shift(); entries != null; entries = tenancyQueue.shift()) {
+      try {
+        await dispatchTenancyEvents(entries, tenancyCache, eventDeadlineMs);
+      } catch (error) {
+        // Only bookkeeping can throw here (per-event failures are handled
+        // inside). Events left claimed become claimable again when the lease
+        // expires; the other tenancies of this batch must still be dispatched.
+        captureError("workflow-event-dispatch", error);
+      }
+    }
+  }));
   return true;
 }
 

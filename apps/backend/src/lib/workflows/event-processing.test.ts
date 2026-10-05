@@ -1,6 +1,6 @@
 import type { WorkflowManifestJson } from "@hexclave/shared/dist/interface/workflows";
 import { describe, expect, it } from "vitest";
-import { didAnySkippedWorkflowResume, workflowDefinitionMatchesEvent, workflowEventRetryDelayMs } from "./event-processing";
+import { didAnySkippedWorkflowResume, partitionClaimedWorkflowEvents, workflowDefinitionMatchesEvent, workflowEventRetryDelayMs } from "./event-processing";
 
 describe("workflowDefinitionMatchesEvent", () => {
   it("matches schedule events only to the exact workflow and trigger revision", () => {
@@ -59,5 +59,43 @@ describe("didAnySkippedWorkflowResume", () => {
   it("keeps an event pending when a skipped workflow resumed before processing commits", () => {
     expect(didAnySkippedWorkflowResume(new Set(["first", "second"]), new Set(["first"]))).toBe(true);
     expect(didAnySkippedWorkflowResume(new Set(["first", "second"]), new Set(["first", "second"]))).toBe(false);
+  });
+});
+
+describe("partitionClaimedWorkflowEvents", () => {
+  const manifestFor = (eventType: string): WorkflowManifestJson => ({
+    workflow_id: "ignored",
+    triggers: [{ type: "event", event_type: eventType }],
+    on_conflict: "skip",
+    has_run_key: false,
+    uses_stdlib: [],
+  });
+
+  it("separates events nothing listens to and keeps each tenancy's dispatch order", () => {
+    const definitionsByTenancy = new Map([
+      ["tenancy-a", [
+        { workflowId: "welcome", manifest: manifestFor("user.created") },
+        { workflowId: "audit", manifest: manifestFor("user.created") },
+      ]],
+      ["tenancy-b", [{ workflowId: "cleanup", manifest: manifestFor("user.deleted") }]],
+    ]);
+    const events = [
+      { tenancyId: "tenancy-a", id: "a1", type: "user.created", payload: {} },
+      { tenancyId: "tenancy-b", id: "b1", type: "user.created", payload: {} },
+      { tenancyId: "tenancy-c", id: "c1", type: "user.created", payload: {} },
+      { tenancyId: "tenancy-a", id: "a2", type: "user.updated", payload: {} },
+      { tenancyId: "tenancy-a", id: "a3", type: "user.created", payload: {} },
+      { tenancyId: "tenancy-b", id: "b2", type: "user.deleted", payload: {} },
+    ];
+
+    const { unmatched, matchedByTenancy } = partitionClaimedWorkflowEvents(events, definitionsByTenancy);
+
+    expect(unmatched.map((event) => event.id)).toEqual(["b1", "c1", "a2"]);
+    expect([...matchedByTenancy.keys()]).toEqual(["tenancy-a", "tenancy-b"]);
+    expect(matchedByTenancy.get("tenancy-a")?.map((entry) => [entry.event.id, entry.matching.map((definition) => definition.workflowId)])).toEqual([
+      ["a1", ["welcome", "audit"]],
+      ["a3", ["welcome", "audit"]],
+    ]);
+    expect(matchedByTenancy.get("tenancy-b")?.map((entry) => entry.event.id)).toEqual(["b2"]);
   });
 });

@@ -44,3 +44,35 @@ export function didAnySkippedWorkflowResume(
   }
   return false;
 }
+
+/**
+ * Splits a claimed batch into the events no workflow listens to (which only
+ * need marking processed) and, per tenancy, the events to dispatch together
+ * with the definitions each one matches. Input order is preserved within each
+ * tenancy: that is the order the events are dispatched in.
+ */
+export function partitionClaimedWorkflowEvents<
+  Event extends WorkflowEventForMatching & { tenancyId: string },
+  Definition extends { workflowId: string, manifest: WorkflowManifestJson },
+>(
+  events: Event[],
+  definitionsByTenancy: Map<string, Definition[]>,
+): {
+  unmatched: Event[],
+  matchedByTenancy: Map<string, { event: Event, matching: Definition[] }[]>,
+} {
+  const unmatched: Event[] = [];
+  const matchedByTenancy = new Map<string, { event: Event, matching: Definition[] }[]>();
+  for (const event of events) {
+    const definitions = definitionsByTenancy.get(event.tenancyId) ?? [];
+    const matching = definitions.filter((definition) => workflowDefinitionMatchesEvent(definition.workflowId, definition.manifest, event));
+    if (matching.length === 0) {
+      unmatched.push(event);
+      continue;
+    }
+    const entries = matchedByTenancy.get(event.tenancyId) ?? [];
+    entries.push({ event, matching });
+    matchedByTenancy.set(event.tenancyId, entries);
+  }
+  return { unmatched, matchedByTenancy };
+}

@@ -3027,14 +3027,27 @@ model WorkflowEvent {
   // oldest outbox batch and starve unrelated tenants forever.
   processingAttempts Int      @default(0)
   retryAt            DateTime @default(now())
+  // Dispatch lease. An engine tick claims a batch by setting this into the
+  // future; while any unprocessed event of a tenancy holds a live claim, no
+  // other tick claims events of that tenancy, which is what keeps one
+  // tenancy's events dispatching in scheduledAt order while different
+  // tenancies dispatch in parallel. Cleared on release and on failure; an
+  // expired claim (the worker died) makes the event claimable again.
+  claimedUntil       DateTime?
 
   createdAt DateTime @default(now())
 
   @@id([tenancyId, id])
-  // Outbox scan: unprocessed events in scheduledAt order. processedAt is the
-  // leading column so the scan stays cheap as processed events accumulate
-  // (IS NULL rows are contiguous in the index).
+  // Serves "processed in the last N minutes" reads (the internal status
+  // page). No longer the dispatch scan: a range on retryAt
+  // sits between processedAt and scheduledAt, so it could not return the
+  // oldest pending events without reading and sorting the whole backlog.
   @@index([processedAt, retryAt, scheduledAt], map: "WorkflowEvent_outbox_idx")
+  // Dispatch (the sweep, the claim, and the claim's busy-tenancy lookup) uses
+  // two partial indexes over unprocessed rows only, created in a custom
+  // migration (not expressible in Prisma schema):
+  //   "WorkflowEvent_pending_idx"       ("tenancyId", "type", "scheduledAt") WHERE "processedAt" IS NULL
+  //   "WorkflowEvent_pending_claim_idx" ("claimedUntil", "tenancyId")        WHERE "processedAt" IS NULL AND "claimedUntil" IS NOT NULL
   // Retention pruning + per-tenancy event views.
   @@index([tenancyId, createdAt], map: "WorkflowEvent_tenancy_created_idx")
 }
