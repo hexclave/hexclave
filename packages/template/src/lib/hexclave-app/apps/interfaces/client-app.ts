@@ -79,6 +79,8 @@ export type StackClientApp<HasTokenStore extends boolean = boolean, ProjectId ex
      * `redirectToSignIn()`, `redirectToSignUp()`, `redirectToSignOut()`, or `redirectToAccountSettings()`.
      */
     readonly urls: Readonly<ResolvedHandlerUrls>,
+    /** Whether this app delegates authentication to an external provider token store. */
+    isExternalAuthApp(): boolean,
 
     signInWithOAuth(provider: string, options?: { returnTo?: string }): Promise<void>,
     signInWithCredential(options: { email: string, password: string, noRedirect?: boolean }): Promise<Result<undefined, KnownErrors["EmailPasswordMismatch"] | KnownErrors["InvalidTotpCode"]>>,

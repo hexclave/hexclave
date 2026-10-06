@@ -754,11 +754,52 @@ model AuthMethod {
   passwordAuthMethod PasswordAuthMethod?
   passkeyAuthMethod  PasskeyAuthMethod?
   oauthAuthMethod    OAuthAuthMethod?
+  externalAuthMethod ExternalAuthMethod?
 
   projectUser ProjectUser @relation(fields: [tenancyId, projectUserId], references: [tenancyId, projectUserId], onDelete: Cascade)
 
   @@id([tenancyId, id])
+  @@unique([tenancyId, id, projectUserId])
   @@index([tenancyId, projectUserId])
+}
+
+model ExternalAuthMethod {
+  tenancyId     String @db.Uuid
+  authMethodId  String @db.Uuid
+  projectUserId String @db.Uuid
+
+  providerConfigId String
+  issuer           String
+  subject          String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  authMethod AuthMethod            @relation(fields: [tenancyId, authMethodId, projectUserId], references: [tenancyId, id, projectUserId], onDelete: Cascade)
+  sessions   ExternalAuthSession[]
+
+  @@id([tenancyId, authMethodId])
+  @@unique([tenancyId, authMethodId, projectUserId])
+  @@unique([tenancyId, providerConfigId, issuer, subject])
+  @@unique([tenancyId, projectUserId, providerConfigId])
+}
+
+model ExternalAuthSession {
+  tenancyId           String @db.Uuid
+  id                  String @default(uuid()) @db.Uuid
+  externalAuthMethodId String @db.Uuid
+  providerSessionId   String
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastActiveAt DateTime  @default(now())
+  revokedAt    DateTime?
+
+  externalAuthMethod ExternalAuthMethod @relation(fields: [tenancyId, externalAuthMethodId], references: [tenancyId, authMethodId], onDelete: Cascade)
+
+  @@id([tenancyId, id])
+  @@unique([tenancyId, externalAuthMethodId, providerSessionId])
+  @@index([tenancyId, externalAuthMethodId, createdAt])
 }
 
 model OtpAuthMethod {

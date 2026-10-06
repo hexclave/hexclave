@@ -420,6 +420,48 @@ export const ALL_APPS_FRONTEND = {
       </>
     ),
   },
+  "clerk-integration": {
+    icon: FingerprintSimpleIcon,
+    href: "clerk-integration",
+    navigationItems: [
+      { displayName: "Clerk Integration", href: "." },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Use Clerk as the source of user sessions while Hexclave supplies authorization, teams, and user data.</p>
+        <p>Clerk refreshes its own session tokens; Hexclave exchanges them for short-lived access tokens without storing Clerk credentials.</p>
+      </>
+    ),
+  },
+  "better-auth-integration": {
+    icon: ShieldCheckIcon,
+    href: "better-auth-integration",
+    navigationItems: [
+      { displayName: "Better Auth Integration", href: "." },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Connect a Better Auth JWT issuer to Hexclave through its JWKS endpoint.</p>
+        <p>Keep Better Auth responsible for session refresh while using Hexclave APIs with short-lived access tokens.</p>
+      </>
+    ),
+  },
+  "workos-integration": {
+    icon: UserGearIcon,
+    href: "workos-integration",
+    navigationItems: [
+      { displayName: "WorkOS Integration", href: "." },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Use WorkOS AuthKit sessions to authenticate users into Hexclave.</p>
+        <p>Configure the AuthKit client once and let WorkOS continue managing session refresh and organization selection.</p>
+      </>
+    ),
+  },
   analytics: {
     icon: ChartLineIcon,
     href: "analytics",

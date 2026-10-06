@@ -98,6 +98,9 @@ export const usersCrudServerReadSchema = fieldSchema.yupObject({
     ...oauthProviderBaseFields,
     email: fieldSchema.yupString().nullable(),
   }).defined()).defined().meta(hiddenFieldMeta),
+  external_auth_providers: fieldSchema.yupArray(fieldSchema.yupObject({
+    id: fieldSchema.yupString().defined(),
+  }).defined()).defined().meta(hiddenFieldMeta),
 
   /**
    * @deprecated

@@ -1,6 +1,7 @@
 "use client";
 
 import { TeamSearchTable } from "@/components/data-table/team-search-table";
+import { getExternalAuthProviderLabel } from "@/components/data-table/user-table";
 import { DesignCategoryTabs, DesignEditableGrid, DesignMenu, type DesignCategoryTabItem, type DesignEditableGridItem, type DesignMenuActionItem } from "@/components/design-components";
 import { EditableInput } from "@/components/editable-input";
 import { FormDialog, SmartFormDialog } from "@/components/form-dialog";
@@ -1589,6 +1590,31 @@ function OAuthProvidersSection({ user }: OAuthProvidersSectionProps) {
   );
 }
 
+function ExternalAuthProvidersSection({ user }: { user: ServerUser }) {
+  const externalAuthProviders = user.externalAuthProviders;
+  const columns: DataGridColumnDef<ServerUser["externalAuthProviders"][number]>[] = [
+    {
+      id: "provider",
+      header: "Provider",
+      width: 180,
+      flex: 1,
+      sortable: false,
+      renderCell: ({ row }) => getExternalAuthProviderLabel(row.id),
+    },
+  ];
+
+  return (
+    <UserPageTableSection
+      title="External authentication"
+      urlStateKey="userexternalauth"
+      columns={columns}
+      rows={externalAuthProviders}
+      getRowId={(provider) => provider.id}
+      emptyLabel="No external authentication providers"
+    />
+  );
+}
+
 const ACTIVITY_GRID_COLUMNS = 7;
 const ACTIVITY_GRID_ROWS = 53;
 const ACTIVITY_GRID_CELLS = ACTIVITY_GRID_COLUMNS * ACTIVITY_GRID_ROWS;
@@ -1982,6 +2008,7 @@ function UserPage({ user }: { user: ServerUser }) {
               <div className="flex flex-col gap-6">
                 <ContactChannelsSection user={user} />
                 <OAuthProvidersSection user={user} />
+                <ExternalAuthProvidersSection user={user} />
                 <FraudSection user={user} />
               </div>
             </Suspense>

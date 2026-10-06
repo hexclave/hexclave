@@ -72,7 +72,7 @@ function UserButtonInnerInner(props: UserButtonProps & { user: CurrentUser | nul
       <DropdownMenuTrigger className="outline-none stack-scope rounded-lg hover:bg-muted/50 transition-colors hover:transition-none p-1.5">
         <div className="flex gap-2 items-center">
           <UserAvatar user={user} />
-          {user && props.showUserInfo &&
+          {user != null && props.showUserInfo &&
             <div className="flex flex-col justify-center text-left min-w-0">
               <div className="max-w-40 truncate text-sm font-medium">{user.displayName}</div>
               <div className="max-w-40 truncate text-xs text-muted-foreground">{user.primaryEmail}</div>
@@ -85,14 +85,14 @@ function UserButtonInnerInner(props: UserButtonProps & { user: CurrentUser | nul
           <div className="flex gap-2 items-center">
             <UserAvatar user={user} />
             <div>
-              {user && <Typography className="max-w-40 truncate">{user.displayName}</Typography>}
-              {user && <Typography className="max-w-40 truncate" variant="secondary" type='label'>{user.primaryEmail}</Typography>}
-              {!user && <Typography>{t('Not signed in')}</Typography>}
+              {user != null && <Typography className="max-w-40 truncate">{user.displayName}</Typography>}
+              {user != null && <Typography className="max-w-40 truncate" variant="secondary" type='label'>{user.primaryEmail}</Typography>}
+              {user == null && <Typography>{t('Not signed in')}</Typography>}
             </div>
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {user && <Item
+        {user != null && <Item
           text={t('Account settings')}
           onClick={async () => {
             if (props.mockUser) {
@@ -103,7 +103,7 @@ function UserButtonInnerInner(props: UserButtonProps & { user: CurrentUser | nul
           }}
           icon={<CircleUser {...iconProps} />}
         />}
-        {!user && <Item
+        {user == null && <Item
           text={t('Sign in')}
           onClick={async () => {
             if (props.mockUser) {
@@ -114,7 +114,7 @@ function UserButtonInnerInner(props: UserButtonProps & { user: CurrentUser | nul
           }}
           icon={<LogIn {...iconProps} />}
         />}
-        {!user && <Item
+        {user == null && <Item
           text={t('Sign up')}
           onClick={async () => {
             if (props.mockUser) {
@@ -125,7 +125,7 @@ function UserButtonInnerInner(props: UserButtonProps & { user: CurrentUser | nul
           }}
           icon={<UserPlus {...iconProps}/> }
         />}
-        {user && props.extraItems && props.extraItems.map((item, index) => (
+        {user != null && props.extraItems && props.extraItems.map((item, index) => (
           <Item key={index} {...item} />
         ))}
         {props.colorModeToggle && (
@@ -135,7 +135,7 @@ function UserButtonInnerInner(props: UserButtonProps & { user: CurrentUser | nul
             icon={<SunMoon {...iconProps} />}
           />
         )}
-        {user && <Item
+        {user != null && !app.isExternalAuthApp() && <Item
           text={t('Sign out')}
           onClick={async () => {
             if (props.mockUser) {

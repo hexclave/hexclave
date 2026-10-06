@@ -77,10 +77,22 @@ const DEFAULT_FILTERS: FilterState = {
   signedUpOrder: "desc",
 };
 
+const EXTERNAL_AUTH_PROVIDER_LABELS = new Map<string, string>([
+  ["clerk-integration", "Clerk"],
+  ["workos-integration", "WorkOS"],
+  ["better-auth-integration", "Better Auth"],
+]);
+
+/** Display name of an external-auth provider ID, shared by the users table and the user detail page. */
+export function getExternalAuthProviderLabel(providerId: string): string {
+  return EXTERNAL_AUTH_PROVIDER_LABELS.get(providerId) ?? "External provider";
+}
+
 const AUTH_TYPE_LABELS = new Map<string, string>([
   ["anonymous", "Anonymous"],
   ["otp", "Authenticator"],
   ["password", "Password"],
+  ...EXTERNAL_AUTH_PROVIDER_LABELS,
 ]);
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -93,6 +105,7 @@ export function extendUsers(users: ServerUser[]): ExtendedServerUser[] {
         ...(user.otpAuthEnabled ? ["otp"] : []),
         ...(user.hasPassword ? ["password"] : []),
         ...user.oauthProviders.map((provider) => provider.id),
+        ...user.externalAuthProviders.map((provider) => getExternalAuthProviderLabel(provider.id)),
       ];
     return {
       ...user,
@@ -214,6 +227,7 @@ const USER_EXPORT_FIELDS: DataGridExportField<ExtendedServerUser>[] = [
   { key: "passkeyAuthEnabled", label: "Passkey Auth Enabled", enabled: false, getValue: (user) => user.passkeyAuthEnabled ? "Yes" : "No" },
   { key: "isMultiFactorRequired", label: "Multi-Factor Required", enabled: false, getValue: (user) => user.isMultiFactorRequired ? "Yes" : "No" },
   { key: "oauthProviders", label: "OAuth Providers", enabled: false, getValue: (user) => user.oauthProviders.map((provider) => provider.id).join(", ") },
+  { key: "externalAuthProviders", label: "External Auth Providers", enabled: false, getValue: (user) => user.externalAuthProviders.map((provider) => getExternalAuthProviderLabel(provider.id)).join(", ") },
   { key: "profileImageUrl", label: "Profile Image URL", enabled: false, getValue: (user) => user.profileImageUrl ?? "" },
   { key: "clientMetadata", label: "Client Metadata", enabled: false, getValue: (user) => JSON.stringify(user.clientMetadata ?? {}) },
   { key: "clientReadOnlyMetadata", label: "Client Read-Only Metadata", enabled: false, getValue: (user) => JSON.stringify(user.clientReadOnlyMetadata ?? {}) },

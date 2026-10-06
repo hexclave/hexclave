@@ -1,0 +1,6 @@
+.next
+node_modules
+*.db
+*.db-*
+.env.local
+*.untracked

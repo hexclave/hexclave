@@ -22,10 +22,49 @@ Optional:
     Default: "https://api.hexclave.com"
     Can specify different URLs for browser vs server environments.
     
-  tokenStore: "cookie" | "memory" | { accessToken, refreshToken } | null
+  tokenStore: "cookie" | "memory" | { accessToken, refreshToken } | ExternalTokenStore | null
     Default: "cookie" (JS) or "memory" (other SDKs)
     Where to store authentication tokens.
     "cookie" is JS-only due to complexity. See _utilities.spec.md for details.
+
+    ExternalTokenStore is JS-only and delegates the long-lived session to another
+    authentication provider:
+      type: "external"
+      providerId: "clerk-integration" | "better-auth-integration" | "workos-integration"
+      getToken(): async string | null
+      getSessionId(): string | null [optional]
+      subscribe(callback): unsubscribe function [optional]
+
+    On demand, call getToken() and exchange the provider JWT for a short-lived
+    Hexclave access token. Never persist the provider JWT or receive a Hexclave
+    refresh token. If getToken() returns null while getSessionId() is null or absent,
+    invalidate that external session; if getSessionId() is non-null, treat a null token
+    as a transient fetch failure (eg. the provider SDK is still initializing) and keep
+    the session. If the exchange is rejected with InvalidExternalAuthToken, retry once
+    with a freshly fetched provider token and then propagate the error without
+    invalidating the session: a rejected token is a configuration problem, not a
+    sign-out, because the backend re-establishes a session for any valid provider token.
+    First-party sign-in with Hexclave tokens is unsupported for an app that uses an
+    ExternalTokenStore and throws.
+    If getSessionId() is provided, use it to keep the SDK session and its caches
+    stable across provider token rotations. A null session ID represents a signed-out
+    provider. Without getSessionId(), each subscription notification starts a new
+    SDK session generation because identity continuity cannot be proven.
+
+    subscribe(callback) notifies the SDK when the provider token or session changes;
+    expire the current Hexclave access token and re-read the provider state. Hexclave
+    sign-out is unsupported for an ExternalTokenStore: it throws a developer-facing
+    assertion before revoking the correlated Hexclave session. The application must
+    sign out through the provider because the provider owns the credential.
+
+    JS SDKs expose clerkTokenStore(), betterAuthTokenStore(), and workosTokenStore()
+    helpers that construct ExternalTokenStore objects with the corresponding
+    providerId.
+
+    Prebuilt user controls must not offer a Hexclave sign-out action when the
+    app uses an ExternalTokenStore. Direct calls to signOut still throw the
+    developer-facing assertion; applications must invoke the provider's own
+    sign-out flow instead.
       
   oauthScopesOnSignIn: object
     Additional OAuth scopes to request during sign-in for each provider.
@@ -276,24 +315,35 @@ Errors:
     message: "The password does not meet the project's requirements."
 
 
+## isExternalAuthApp()
+
+Returns: bool
+
+Returns true when this app's configured token store is an
+ExternalTokenStore, meaning authentication is delegated to the configured
+provider. Prebuilt controls use this to omit Hexclave sign-out actions;
+direct signOut calls still throw and applications must sign out through the
+provider.
+
+
 ## signOut(options?)
 
 Arguments:
   options.redirectUrl: string? - where to redirect after sign out
   options.tokenStore: TokenStoreInit? - override token storage for this call
 
-Returns: void
+Returns: void, or throws for an externally authenticated session.
 
 Request:
   DELETE /api/v1/auth/sessions/current [authenticated]
   Body: {}
 
 Implementation:
-1. Send request (ignore errors - session may already be invalid)
-2. Clear stored tokens (mark session invalid)
-3. Redirect to redirectUrl or afterSignOut URL
-
-Does not error (errors are ignored).
+1. If the current session belongs to an ExternalTokenStore, throw a developer-facing
+   assertion naming the provider and do not revoke the Hexclave session.
+2. Otherwise send the request (ignore errors - session may already be invalid).
+3. Clear stored tokens (mark session invalid).
+4. Redirect to redirectUrl or afterSignOut URL.
 
 
 ## getUser(options?)

@@ -1428,6 +1428,62 @@ const InvalidAppleCredentials = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const externalAuthProviderConfigurationReasons = [
+  "provider_disabled",
+  "required_setting_missing",
+  "invalid_authorized_party",
+  "unknown",
+] as const;
+type ExternalAuthProviderConfigurationReason = typeof externalAuthProviderConfigurationReasons[number];
+const externalAuthTokenReasons = [
+  "malformed_token",
+  "signature_mismatch",
+  "expired",
+  "issuer_mismatch",
+  "audience_mismatch",
+  "authorized_party_mismatch",
+  "client_id_mismatch",
+  "missing_claim",
+  "unknown",
+] as const;
+type ExternalAuthTokenReason = typeof externalAuthTokenReasons[number];
+
+function parseExternalAuthReason<T extends readonly string[]>(
+  value: unknown,
+  reasons: T,
+  fallback: T[number],
+): T[number] {
+  return typeof value === "string"
+    ? reasons.find(reason => reason === value) ?? fallback
+    : fallback;
+}
+
+const ExternalAuthProviderNotConfigured = createKnownErrorConstructor(
+  KnownError,
+  "EXTERNAL_AUTH_PROVIDER_NOT_CONFIGURED",
+  (reason: ExternalAuthProviderConfigurationReason) => [
+    400,
+    `The external authentication provider is not configured or enabled for this project (${reason}).`,
+    { reason },
+  ] as const,
+  (json) => [
+    parseExternalAuthReason(json.reason, externalAuthProviderConfigurationReasons, "unknown"),
+  ] as const,
+);
+
+const InvalidExternalAuthToken = createKnownErrorConstructor(
+  KnownError,
+  "INVALID_EXTERNAL_AUTH_TOKEN",
+  (reason: ExternalAuthTokenReason) => [
+    401,
+    `The external authentication token could not be verified (${reason}). Please sign in again.`,
+    { reason },
+  ] as const,
+  (json) => [
+    parseExternalAuthReason(json.reason, externalAuthTokenReasons, "unknown"),
+  ] as const,
+);
+
 const OAuthProviderAccessDenied = createKnownErrorConstructor(
   KnownError,
   "OAUTH_PROVIDER_ACCESS_DENIED",
@@ -2014,6 +2070,8 @@ export const KnownErrors = {
   InvalidStandardOAuthProviderId,
   InvalidAuthorizationCode,
   InvalidAppleCredentials,
+  ExternalAuthProviderNotConfigured,
+  InvalidExternalAuthToken,
   TeamPermissionNotFound,
   OAuthProviderAccessDenied,
   OAuthProviderTemporarilyUnavailable,

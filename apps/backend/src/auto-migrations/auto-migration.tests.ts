@@ -329,6 +329,42 @@ import.meta.vitest?.test("does not record a migration when its outside-transacti
   timeout: 120_000,
 });
 
+// Regression test: the runner's wrapping transaction used to keep a snapshot pinned while dispatching
+// outside-of-transaction statements (the Prisma driver adapter keeps the last *parameterized* query's
+// snapshot registered until the next statement on that connection), so a CREATE INDEX CONCURRENTLY on
+// its separate connection waited for our own idle wrapper transaction until statement_timeout killed it.
+// Note that this file deliberately does NOT start with a lone SPLIT_STATEMENT_SENTINEL: that leading
+// sentinel (present in most older migrations) made the runner execute a no-op chunk inside the
+// transaction first, which accidentally released the pinned snapshot and masked the bug.
+import.meta.vitest?.test("applies a CREATE INDEX CONCURRENTLY migration via RUN_OUTSIDE_TRANSACTION_SENTINEL", runTest(async ({ connectionString, expect, prismaClient }) => {
+  const migrationFiles = [
+    {
+      migrationName: "001-create-table",
+      sql: "CREATE TABLE cic_test (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL);",
+    },
+    {
+      migrationName: "002-create-index-concurrently",
+      sql: [
+        "-- SINGLE_STATEMENT_SENTINEL",
+        "-- RUN_OUTSIDE_TRANSACTION_SENTINEL",
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS cic_test_name_key ON /* SCHEMA_NAME_SENTINEL */.cic_test (name);",
+      ].join("\n"),
+    },
+  ];
+
+  const result = await applyMigrations({ prismaClient, migrationFiles, outsideTransactionConnectionString: connectionString, schema: 'public' });
+  expect(result.newlyAppliedMigrationNames).toEqual(["001-create-table", "002-create-index-concurrently"]);
+
+  const indexes = await prismaClient.$queryRaw`
+    SELECT indisvalid FROM pg_index WHERE indexrelid = 'cic_test_name_key'::regclass
+  ` as { indisvalid: boolean }[];
+  expect(indexes).toEqual([{ indisvalid: true }]);
+}), {
+  // Without the fix this fails via the database's statement_timeout (30s in the dev docker container),
+  // so give it enough headroom to fail with the real error instead of a generic test timeout.
+  timeout: 120_000,
+});
+
 
 import.meta.vitest?.test("applies migration with a DB previously migrated with prisma", runTest(async ({ expect, prismaClient, dbURL }) => {
   await applySql({ sql: examplePrismaBasedInitQueries, dbUrl: dbURL.full });

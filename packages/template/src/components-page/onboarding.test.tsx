@@ -41,6 +41,7 @@ function createAppTestDouble() {
   const app = {
     redirectToSignIn: vi.fn(async () => {}),
     redirectToAfterSignIn: vi.fn(async () => {}),
+    isExternalAuthApp: vi.fn(() => false),
   };
 
   // This test double intentionally implements only the StackClientApp surface that Onboarding touches.

@@ -185,6 +185,19 @@ const branchSchemaFuzzerConfig = [{
   onboarding: [{
     requireEmailVerification: [true, false],
   }],
+  "clerk-integration": [{
+    issuer: [undefined, "https://clerk.example.com"] as (string | undefined)[],
+    authorizedParties: [undefined, "https://example.com, https://app.example.com"] as (string | undefined)[],
+  }],
+  "better-auth-integration": [{
+    issuer: [undefined, "https://auth.example.com"] as (string | undefined)[],
+    audience: [undefined, "hexclave"] as (string | undefined)[],
+    jwksUrl: [undefined, "https://auth.example.com/.well-known/jwks.json"] as (string | undefined)[],
+  }],
+  "workos-integration": [{
+    clientId: [undefined, "client_123"] as (string | undefined)[],
+    issuer: [undefined, "https://api.workos.com/user_management/client_123"] as (string | undefined)[],
+  }],
 }] satisfies FuzzerConfig<BranchConfigNormalizedOverride>;
 
 const environmentSchemaFuzzerConfig = [{

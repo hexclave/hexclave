@@ -26,9 +26,11 @@ export function PredefinedMessageCard({
     case 'signedIn': {
       title = t("You are already signed in");
       primaryAction = () => hexclaveApp.redirectToHome();
-      secondaryAction = () => hexclaveApp.redirectToSignOut();
+      if (!hexclaveApp.isExternalAuthApp()) {
+        secondaryAction = () => hexclaveApp.redirectToSignOut();
+        secondaryButton = t("Sign out");
+      }
       primaryButton = t("Go home");
-      secondaryButton = t("Sign out");
       break;
     }
     case 'signedOut': {

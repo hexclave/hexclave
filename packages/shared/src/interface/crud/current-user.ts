@@ -28,6 +28,7 @@ const clientReadSchema = usersCrudServerReadSchema.pick([
   "has_password",
   "auth_with_email",
   "oauth_providers",
+  "external_auth_providers",
   "selected_team_id",
   "requires_totp_mfa",
   "otp_auth_enabled",

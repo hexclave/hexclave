@@ -156,6 +156,7 @@ export type BaseUser = {
    * @deprecated
    */
   readonly oauthProviders: readonly { id: string }[],
+  readonly externalAuthProviders: readonly { id: string }[],
 }
 
 export type UserExtra = {
