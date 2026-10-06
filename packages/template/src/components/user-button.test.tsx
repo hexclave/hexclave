@@ -2,13 +2,15 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UserButton } from "./user-button";
 
 type MockState = {
   app: { isExternalAuthApp: () => boolean, redirectToAccountSettings: () => Promise<void> } | null,
   user: { displayName: string, primaryEmail: string, signOut: () => Promise<void> } | null,
 };
+
+const previousActEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
 
 const state = vi.hoisted<MockState>(() => ({
   app: null,
@@ -43,6 +45,10 @@ describe("UserButton", () => {
   let root: Root | null = null;
   let container: HTMLDivElement | null = null;
 
+  beforeEach(() => {
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  });
+
   afterEach(() => {
     act(() => root?.unmount());
     container?.remove();
@@ -50,6 +56,7 @@ describe("UserButton", () => {
     container = null;
     state.app = null;
     state.user = null;
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousActEnvironment);
   });
 
   it("hides external-auth sign out while keeping account settings", async () => {
