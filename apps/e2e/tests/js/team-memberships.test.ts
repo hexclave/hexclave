@@ -115,3 +115,24 @@ it("refreshes the current user after leaving a team", { timeout: 60_000 }, async
   const refreshedUser = await clientApp.getUser({ or: "throw" });
   expect(refreshedUser.selectedTeam).toBeNull();
 });
+
+it("exposes the selected team of a server user as a server team", { timeout: 60_000 }, async ({ expect }) => {
+  const { clientApp, serverApp } = await createApp({ config: { clientTeamCreationEnabled: true } });
+
+  await clientApp.signUpWithCredential({
+    email: "membership-server-selected-team@test.com",
+    password: "password",
+    noVerificationCallback: true,
+  });
+  const user = await clientApp.getUser({ or: "throw" });
+  const team = await user.createTeam({ displayName: "Server Selected Team" });
+
+  const serverUser = await serverApp.getUser(user.id);
+  if (!serverUser?.selectedTeam) throw new Error("Selected team not found on server user");
+  expect(serverUser.selectedTeam.id).toBe(team.id);
+  expect(serverUser.selectedTeam.createdAt).toBeInstanceOf(Date);
+
+  // Server-only member details are available without fetching the team again
+  const members = await serverUser.selectedTeam.listUsers();
+  expect(members.map((member) => member.primaryEmail)).toEqual(["membership-server-selected-team@test.com"]);
+});

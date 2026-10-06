@@ -414,6 +414,7 @@ TokenPartialUser:
   displayName: string | null
   primaryEmail: string | null
   primaryEmailVerified: bool
+  selectedTeamId: string | null [JS-ONLY]
   isAnonymous: bool
   isMultiFactorRequired: bool
   isRestricted: bool
@@ -423,16 +424,17 @@ Implementation for "token":
 1. Get access token from storage
 2. If no token: return null
 3. Decode JWT payload (base64url decode middle segment)
-4. Extract fields: sub (id), name, email, email_verified, is_anonymous, is_restricted, restricted_reason
+4. Extract fields: sub (id), name, email, email_verified, selected_team_id [JS-ONLY], is_anonymous, is_restricted, restricted_reason
 
 Implementation for "convex" [JS-ONLY]:
 1. Call ctx.auth.getUserIdentity()
 2. If null: return null
-3. Map: subject→id, name→displayName, email, email_verified, is_anonymous, is_restricted, restricted_reason
+3. Map: subject→id, name→displayName, email, email_verified, selected_team_id→selectedTeamId (null if the claim is absent), is_anonymous, is_restricted, restricted_reason
 
 Panics:
   If constructor tokenStore was null and no tokenStore override is provided (for "token" mode).
   This is a programmer error - the code should be fixed to provide a tokenStore.
+  For "convex", if selected_team_id is present and is neither a string nor null.
 
 
 ## cancelSubscription(options)
