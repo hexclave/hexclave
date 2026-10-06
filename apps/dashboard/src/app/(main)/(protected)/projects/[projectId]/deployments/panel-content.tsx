@@ -1,7 +1,7 @@
 "use client";
 
 import { DesignBadge, DesignButton, DesignInput } from "@/components/design-components";
-import { CopyButton, Label, Spinner, cn } from "@/components/ui";
+import { CopyButton, Label, SimpleTooltip, Spinner, cn } from "@/components/ui";
 import type { AdminDeploymentDomainJson, AdminDeploymentServiceJson, AdminDeploymentServiceLogLineJson, AdminDeploymentServiceOutcomeJson, AdminProject } from "@hexclave/next";
 import { deploymentPortOwnsStandardPorts, parseConnectionValue, sourceManifestEntriesForService, type DeploymentSourceManifest } from "@hexclave/shared/dist/deployments";
 import { runAsynchronously, runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
@@ -14,6 +14,7 @@ import {
   CheckCircleIcon,
   CircleNotchIcon,
   ClockIcon,
+  DownloadSimpleIcon,
   FileIcon,
   FolderIcon,
   InfoIcon,
@@ -994,6 +995,20 @@ function DnsRecordCell({ value }: { value: string }) {
   );
 }
 
+// Imported INSTEAD of creating the rows by hand — the file is generated server-side from the
+// same records the table shows, so the two cannot disagree.
+function downloadZoneFile(hostname: string, zoneFile: string) {
+  const blob = new Blob([zoneFile], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${hostname}.zone`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function DomainDetails({ project, serviceId, hostname, onVerifiedChange, onStatusChange }: {
   project: AdminProject,
   serviceId: string,
@@ -1057,6 +1072,7 @@ function DomainDetails({ project, serviceId, hostname, onVerifiedChange, onStatu
     );
   }
   if (details == null) return <CenteredSpinner />;
+  const zoneFile = details.bind_zone_file;
 
   return (
     <div className="space-y-2">
@@ -1111,16 +1127,32 @@ function DomainDetails({ project, serviceId, hostname, onVerifiedChange, onStatu
               : "Checking automatically — verification usually completes within a few minutes of creating the records."}
           {checkedAt != null && !details.verified && ` Last checked ${relativeCheckedAt(checkedAt)}.`}
         </p>
-        <DesignButton
-          variant="ghost"
-          size="sm"
-          className="h-6 shrink-0 px-2 text-[11px] text-muted-foreground"
-          disabled={checking}
-          onClick={() => runAsynchronously(load())}
-        >
-          <ArrowClockwiseIcon className={cn("mr-1 h-3 w-3", checking && "animate-spin")} />
-          {checking ? "Checking" : "Check now"}
-        </DesignButton>
+        <div className="flex shrink-0 items-center gap-1">
+          {zoneFile != null && (
+            <>
+              <SimpleTooltip type="info" tooltip="All of these records in one file, for your DNS provider's zone import. Importing adds records, so remove any existing ones with the same name first." />
+              <DesignButton
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px] text-muted-foreground"
+                onClick={() => downloadZoneFile(hostname, zoneFile)}
+              >
+                <DownloadSimpleIcon className="mr-1 h-3 w-3" />
+                Zone file
+              </DesignButton>
+            </>
+          )}
+          <DesignButton
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-[11px] text-muted-foreground"
+            disabled={checking}
+            onClick={() => runAsynchronously(load())}
+          >
+            <ArrowClockwiseIcon className={cn("mr-1 h-3 w-3", checking && "animate-spin")} />
+            {checking ? "Checking" : "Check now"}
+          </DesignButton>
+        </div>
       </div>
     </div>
   );

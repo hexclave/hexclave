@@ -210,6 +210,8 @@ export type AdminDeploymentDomainJson = {
   status: "awaiting_dns" | "issuing" | "verified",
   pending_first_deploy: boolean,
   dns_records: { type: string, name: string, value: string }[],
+  /** `dns_records` as a BIND zone file to import into a DNS provider; null when there are none. */
+  bind_zone_file: string | null,
 };
 
 export type AdminAuthApplicationOptions = ServerAuthApplicationOptions &(
