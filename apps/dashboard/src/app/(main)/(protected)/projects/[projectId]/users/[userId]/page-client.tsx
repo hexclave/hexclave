@@ -1,6 +1,7 @@
 "use client";
 
 import { TeamSearchTable } from "@/components/data-table/team-search-table";
+import { getExternalAuthProviderLabel } from "@/components/data-table/user-table";
 import { DesignCategoryTabs, DesignEditableGrid, DesignMenu, type DesignCategoryTabItem, type DesignEditableGridItem, type DesignMenuActionItem } from "@/components/design-components";
 import { EditableInput } from "@/components/editable-input";
 import { FormDialog, SmartFormDialog } from "@/components/form-dialog";
@@ -1589,12 +1590,6 @@ function OAuthProvidersSection({ user }: OAuthProvidersSectionProps) {
   );
 }
 
-const externalAuthProviderLabels = new Map([
-  ["clerk-integration", "Clerk"],
-  ["workos-integration", "WorkOS"],
-  ["better-auth-integration", "Better Auth"],
-]);
-
 function ExternalAuthProvidersSection({ user }: { user: ServerUser }) {
   const externalAuthProviders = user.externalAuthProviders;
   const columns: DataGridColumnDef<ServerUser["externalAuthProviders"][number]>[] = [
@@ -1604,7 +1599,7 @@ function ExternalAuthProvidersSection({ user }: { user: ServerUser }) {
       width: 180,
       flex: 1,
       sortable: false,
-      renderCell: ({ row }) => externalAuthProviderLabels.get(row.id) ?? "External provider",
+      renderCell: ({ row }) => getExternalAuthProviderLabel(row.id),
     },
   ];
 

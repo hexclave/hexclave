@@ -128,7 +128,8 @@ export function ExternalAuthIntegrationPage(props: { provider: ExternalAuthInteg
           configUpdate: {
             "better-auth-integration.issuer": issuer.length === 0 ? null : issuer,
             "better-auth-integration.audience": audience,
-            "better-auth-integration.jwksUrl": jwksUrl,
+            // The config schema validates a non-empty value as a URL, so clearing the field must send null.
+            "better-auth-integration.jwksUrl": jwksUrl.length === 0 ? null : jwksUrl,
           },
           pushable: true,
         });
