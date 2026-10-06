@@ -37,7 +37,15 @@ Optional:
 
     On demand, call getToken() and exchange the provider JWT for a short-lived
     Hexclave access token. Never persist the provider JWT or receive a Hexclave
-    refresh token. If getToken() returns null, invalidate that external session.
+    refresh token. If getToken() returns null while getSessionId() is null or absent,
+    invalidate that external session; if getSessionId() is non-null, treat a null token
+    as a transient fetch failure (eg. the provider SDK is still initializing) and keep
+    the session. If the exchange is rejected with InvalidExternalAuthToken, retry once
+    with a freshly fetched provider token and then propagate the error without
+    invalidating the session: a rejected token is a configuration problem, not a
+    sign-out, because the backend re-establishes a session for any valid provider token.
+    First-party sign-in with Hexclave tokens is unsupported for an app that uses an
+    ExternalTokenStore and throws.
     If getSessionId() is provided, use it to keep the SDK session and its caches
     stable across provider token rotations. A null session ID represents a signed-out
     provider. Without getSessionId(), each subscription notification starts a new

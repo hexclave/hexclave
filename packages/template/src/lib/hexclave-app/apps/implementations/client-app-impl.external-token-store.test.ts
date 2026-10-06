@@ -250,6 +250,8 @@ describe("StackClientApp external token stores", () => {
 
     await expect(pending).rejects.toThrow("provider session changed");
     expect(session.isKnownToBeInvalid()).toBe(false);
+    // The rejected exchange must not have left the other account's token behind on this session.
+    expect(session.getAccessTokenIfNotExpiredYet(0, null)).toBeNull();
   });
 
   it("does not install a token when the provider switches away and back during token retrieval", async () => {
@@ -299,7 +301,7 @@ describe("StackClientApp external token stores", () => {
     expect(session.isKnownToBeInvalid()).toBe(false);
   });
 
-  it("invalidates the session when the retried exchange is rejected too", async () => {
+  it("surfaces the rejection without invalidating the session when the retried exchange is rejected too", async () => {
     let exchangeCount = 0;
     const clientApp = new StackClientApp({
       automaticSideEffects: false,
@@ -320,10 +322,31 @@ describe("StackClientApp external token stores", () => {
 
     const getSession = Reflect.get(clientApp, "_getSession");
     const session = await getSession.call(clientApp);
-    const tokens = await session.getOrFetchLikelyValidTokens(20_000, null);
-    expect(tokens).toBeNull();
+    await expect(session.getOrFetchLikelyValidTokens(20_000, null)).rejects.toBeInstanceOf(KnownErrors.InvalidExternalAuthToken);
     expect(exchangeCount).toBe(2);
-    expect(session.isKnownToBeInvalid()).toBe(true);
+    // A repeated rejection is a misconfiguration signal, not a sign-out: the session must stay usable
+    // so that fixing the configuration recovers it.
+    expect(session.isKnownToBeInvalid()).toBe(false);
+  });
+
+  it("rejects first-party sign-in with Hexclave tokens for an app with an external token store", async () => {
+    const clientApp = new StackClientApp({
+      automaticSideEffects: false,
+      baseUrl: "http://localhost:12345",
+      projectId: "00000000-0000-4000-8000-000000000000",
+      publishableClientKey: "stack-pk-test",
+      tokenStore: clerkTokenStore({
+        getSessionId: () => "clerk-session",
+        getToken: async () => "clerk-token",
+      }),
+      redirectMethod: "none",
+    });
+
+    const signInToAccountWithTokens = Reflect.get(clientApp, "_signInToAccountWithTokens");
+    await expect(signInToAccountWithTokens.call(clientApp, {
+      accessToken: createAccessTokenString("unrelated-session"),
+      refreshToken: "unrelated-refresh-token",
+    })).rejects.toThrow("cannot sign in with Hexclave tokens");
   });
 
   it("treats a missing provider token as transient while the provider still reports a session", async () => {

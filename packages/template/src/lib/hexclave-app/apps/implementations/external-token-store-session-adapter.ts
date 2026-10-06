@@ -156,11 +156,18 @@ export class ExternalTokenStoreSessionAdapter {
               if (!KnownErrors.InvalidExternalAuthToken.isInstance(error)) {
                 throw error;
               }
-              // The server rejects both revoked provider sessions and provider tokens that expired
-              // in flight with the same error, and only the former should sign the user out. Retry
-              // once with a freshly fetched provider token to disambiguate: an expired token gets
-              // replaced by the provider SDK, while a revoked session fails again and invalidates.
-              return isRetry ? null : await attemptExchange(true);
+              // The server rejects provider tokens that expired in flight with the same error as
+              // genuinely bad ones, so retry once with a freshly fetched provider token: the provider
+              // SDK replaces an expired token. If the fresh token is rejected too, the cause is not
+              // transient (eg. an issuer or client-ID misconfiguration), and it does not mean the
+              // provider session ended either: the backend re-establishes a Hexclave session for any
+              // valid provider token, so a rejection never signals revocation. Propagate the error
+              // instead of returning null, which would permanently invalidate this session and make
+              // a misconfiguration look like a silent sign-out.
+              if (isRetry) {
+                throw error;
+              }
+              return await attemptExchange(true);
             }
           };
           return await attemptExchange(false);

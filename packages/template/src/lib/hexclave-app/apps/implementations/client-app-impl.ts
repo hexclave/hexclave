@@ -1952,6 +1952,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     if (!("accessToken" in tokens) || !("refreshToken" in tokens)) {
       throw new HexclaveAssertionError("Invalid tokens object; can't sign in with this", { tokens });
     }
+    // An external token store keys its session by the provider's session, so Hexclave refresh tokens from a
+    // first-party sign-in would be written into (and then silently replaced by) the provider's session.
+    if (this.isExternalAuthApp()) {
+      throw new Error("This app authenticates through an external provider and cannot sign in with Hexclave tokens. Sign in through the provider instead.");
+    }
     const attemptId = ++this._signInAttemptCounter;
     const tokenStore = this._getOrCreateTokenStore(await this._createCookieHelper());
 
