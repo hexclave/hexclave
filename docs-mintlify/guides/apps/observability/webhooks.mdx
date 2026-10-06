@@ -1,0 +1,127 @@
+---
+title: "Issue Webhooks"
+sidebarTitle: "Issue Webhooks"
+description: "Get notified when a new issue appears or a resolved one comes back — the issue.* webhook family"
+---
+
+The `issue.*` webhooks let you route error tracking into wherever your team already looks: Slack, PagerDuty, a Linear ticket, your own triage bot.
+
+They use the same delivery, signing, and verification as every other Hexclave webhook — see [Webhooks](/guides/apps/webhooks/overview) for endpoint setup and signature verification. This page covers only what is specific to issues.
+
+Issue webhooks require **both** the Observability app (for the issues themselves) and the **Webhooks** app to be enabled on the project. With Webhooks disabled, no issue event is emitted and no delivery work is done.
+
+## Event Types
+
+| Event | Fires when |
+|---|---|
+| `issue.created` | An error is grouped into a **new** issue for the first time. It does **not** fire again for later occurrences of the same issue. |
+| `issue.regressed` | An issue that had been resolved occurs again. |
+| `issue.resolved` | An issue is marked as resolved. |
+| `issue.ignored` | An issue is marked as ignored. |
+| `issue.merged` | Issues are merged. The payload describes the surviving issue; the ones merged into it no longer resolve on their own. |
+
+<Warning>
+Only `issue.created` and `issue.regressed` are emitted today. `issue.resolved`, `issue.ignored`, and `issue.merged` are declared and appear in the API reference, but nothing fires them yet — do not build an integration that depends on receiving them.
+</Warning>
+
+## Payload
+
+Every issue event uses the same envelope and the same `data` shape:
+
+```json
+{
+  "type": "issue.created",
+  "data": {
+    "id": "3241a285-8329-4d69-8f3d-316e08cf140c",
+    "short_id": "42",
+    "type": "TypeError",
+    "value": "Cannot read properties of undefined (reading 'id')",
+    "culprit": "app/dashboard/page.tsx in DashboardPage",
+    "level": "error",
+    "status": "unresolved",
+    "substatus": "new",
+    "first_seen_at_millis": 1630000000000,
+    "last_seen_at_millis": 1630000000000,
+    "times_seen": "1337",
+    "service_name": "web",
+    "environment": "production",
+    "release": "1.4.2",
+    "url": "https://app.hexclave.com/projects/<projectId>/observability/issues/<issueId>"
+  }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | The issue's UUID — the stable id to store on your side |
+| `short_id` | **string** | Decimal string. Rendered as `#42` in the dashboard |
+| `type` | string | Exception type |
+| `value` | string | Exception message |
+| `culprit` | string | Where it happened |
+| `level` | string | Always `error` |
+| `status` | string | `unresolved` \| `resolved` \| `ignored` |
+| `substatus` | string | `new` \| `ongoing` \| `regressed` |
+| `first_seen_at_millis` | number | Epoch milliseconds |
+| `last_seen_at_millis` | number | Epoch milliseconds |
+| `times_seen` | **string** | Lifetime occurrence count, as a decimal string |
+| `service_name` | string \| null | |
+| `environment` | string \| null | |
+| `release` | string \| null | Release of the most recent occurrence |
+| `url` | string | Deep link to the issue in the dashboard (empty string when no dashboard URL is configured, as in some self-hosted setups) |
+
+<Warning>
+**`short_id` and `times_seen` are decimal strings, not JSON numbers.** Both are 64-bit integers, and `times_seen` on a busy project can exceed `Number.MAX_SAFE_INTEGER` — a JSON number would silently lose precision. Parse them with `BigInt(...)`, not `Number(...)`.
+
+The `*_at_millis` fields are ordinary JSON numbers and are safe to use directly.
+</Warning>
+
+## Handling Them
+
+```tsx
+// app/api/webhooks/issues/route.ts
+import { Webhook } from "svix";
+
+export async function POST(request: Request) {
+  const payload = await request.text();
+  const headers = {
+    "svix-id": request.headers.get("svix-id") ?? "",
+    "svix-timestamp": request.headers.get("svix-timestamp") ?? "",
+    "svix-signature": request.headers.get("svix-signature") ?? "",
+  };
+
+  const wh = new Webhook(process.env.STACK_WEBHOOK_SECRET!);
+  // Throws on error, returns the verified content on success.
+  const event = wh.verify(payload, headers) as { type: string, data: Record<string, unknown> };
+
+  if (event.type === "issue.created" || event.type === "issue.regressed") {
+    await postToSlack({
+      text: `${event.type === "issue.regressed" ? "Regressed" : "New issue"}: ${event.data.type}: ${event.data.value}`,
+      // times_seen is a decimal string — BigInt, not Number
+      occurrences: BigInt(event.data.times_seen as string),
+      link: event.data.url as string,
+    });
+  }
+
+  return Response.json({ ok: true });
+}
+```
+
+## Delivery Guarantees
+
+Issue events differ from every other Hexclave webhook in one way that changes how they behave: they fire from a **telemetry firehose**, not from a human action. `user.created` fires when someone signs up; a flapping issue could otherwise fire once per ingest batch. Three consequences:
+
+**Deduplication.** Every issue event carries a deterministic delivery id, so a retry that already reached us collapses into a single delivery rather than double-firing. `issue.created` is keyed on the issue id; `issue.regressed` is keyed on the issue id plus the instant it regressed — so re-delivering the same regression dedupes, while a genuinely later regression is a distinct event.
+
+**Throttling.** An issue emits at most one state-change event per **five minutes**. A brand-new issue always emits its `issue.created` (it has no prior event to throttle against), but a noisy issue that regresses repeatedly will not spam your endpoint. The throttle is enforced at the database write, so two concurrent ingest batches cannot both fire.
+
+**Idempotency on your side is still worth it.** Store the issue `id` and treat repeats as updates. `issue.created` fires once per issue, but your endpoint may see a delivery retry.
+
+<Warning>
+Delivery is **best-effort**. Failures are retried, but a hard delivery failure loses the notification — there is no dead-letter queue or replay. The Issue record itself is always correct, so this is a notification gap and never data loss. If you are driving on-call paging from these events, treat the dashboard as the source of truth and reconcile periodically.
+</Warning>
+
+## Next Steps
+
+- [Webhooks](/guides/apps/webhooks/overview) — endpoint setup, secrets, signature verification, local testing
+- [Triaging Issues](/guides/apps/observability/issues) — what `status` and `substatus` mean
+- [Error Tracking](/guides/apps/observability/error-tracking) — the pipeline that produces these events

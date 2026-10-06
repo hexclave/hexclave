@@ -1,3 +1,4 @@
+import { generateW3cSpanId, generateW3cTraceId } from "@hexclave/shared/dist/utils/analytics-wire";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { it } from "../../../../helpers";
@@ -9,6 +10,7 @@ type AnalyticsEvent = {
   branch_id: string,
   user_id: string,
   team_id: string,
+  refresh_token_id: string,
   event_at: string,
 };
 
@@ -23,7 +25,7 @@ const queryEvents = async (params: {
   accessType: "server",
   body: {
     query: `
-      SELECT event_type, project_id, branch_id, user_id, team_id, event_at
+      SELECT event_type, project_id, branch_id, user_id, team_id, refresh_token_id, event_at
       FROM events
       WHERE 1
         ${params.userId ? "AND user_id = {user_id:Nullable(String)}" : ""}
@@ -63,6 +65,34 @@ const fetchEventsWithRetry = async (
     response = await queryEvents(params);
   }
 
+  return response;
+};
+
+const queryTraceSpans = async (traceId: string) => await niceBackendFetch("/api/v1/analytics/query", {
+  method: "POST",
+  accessType: "server",
+  body: {
+    query: `
+      SELECT trace_id, span_id, parent_span_id, span_type, refresh_token_id, user_id
+      FROM spans
+      WHERE trace_id = {trace_id:String}
+      ORDER BY started_at ASC
+    `,
+    params: { trace_id: traceId },
+  },
+});
+
+const fetchTraceSpansWithRetry = async (traceId: string) => {
+  const startedAt = performance.now();
+  let response = await queryTraceSpans(traceId);
+  while (
+    performance.now() - startedAt < 30_000
+    && response.status === 200
+    && (!Array.isArray(response.body?.result) || response.body.result.length === 0)
+  ) {
+    await wait(500);
+    response = await queryTraceSpans(traceId);
+  }
   return response;
 };
 
@@ -353,6 +383,7 @@ it("OAuth refresh token grant creates exactly one additional $token-refresh even
       }],
     },
   });
+  await Project.updateConfig({ apps: { installed: { observability: { enabled: true } } } });
   await InternalApiKey.createAndSetProjectKeys();
 
   // Sign in via OAuth to get initial tokens
@@ -367,10 +398,15 @@ it("OAuth refresh token grant creates exactly one additional $token-refresh even
   // Use the refresh token grant to get a new access token
   const projectKeys = backendContext.value.projectKeys;
   if (projectKeys === "no-project") throw new Error("No project keys");
+  const traceId = generateW3cTraceId();
+  const clientSpanId = generateW3cSpanId();
 
   const refreshResponse = await niceBackendFetch("/api/v1/auth/oauth/token", {
     method: "POST",
     accessType: "client",
+    headers: {
+      traceparent: `00-${traceId}-${clientSpanId}-01`,
+    },
     body: {
       grant_type: "refresh_token",
       refresh_token: refreshToken,
@@ -389,6 +425,19 @@ it("OAuth refresh token grant creates exactly one additional $token-refresh even
   const events = await expectExactlyNTokenRefreshEvents(userId, 2, { projectId });
   expect(events.every((e: AnalyticsEvent) => e.event_type === "$token-refresh")).toBe(true);
   expect(events.every((e: AnalyticsEvent) => e.user_id === userId)).toBe(true);
+
+  const refreshTokenId = events.at(0)?.refresh_token_id ?? throwErr("Token refresh event did not expose its refresh_token_id");
+  const traceResponse = await fetchTraceSpansWithRetry(traceId);
+  expect(traceResponse.status).toBe(200);
+  expect(traceResponse.body?.result).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      trace_id: traceId,
+      parent_span_id: clientSpanId,
+      refresh_token_id: refreshTokenId,
+      user_id: userId,
+    }),
+  ]));
+  expect(traceResponse.body.result.every((span: { refresh_token_id?: unknown }) => span.refresh_token_id === refreshTokenId)).toBe(true);
 });
 
 it("multiple OAuth refresh token grants create one event each", { timeout: 180_000 }, async ({ expect }) => {

@@ -277,7 +277,6 @@ async function loadLiveUsersCount(
   includeAnonymous: boolean = false,
 ): Promise<number> {
   const since = new Date(now.getTime() - ACTIVE_USERS_BY_COUNTRY_WINDOW_MS);
-
   try {
     const clickhouseClient = getClickhouseAdminClientForMetrics();
     const res = await clickhouseClient.query({
@@ -300,7 +299,11 @@ async function loadLiveUsersCount(
       format: "JSONEachRow",
     });
     const rows: { live_users: number | string }[] = await res.json();
-    return Number(rows[0]?.live_users ?? 0);
+    const liveUsers = Number(rows[0]?.live_users ?? 0);
+    if (!Number.isSafeInteger(liveUsers) || liveUsers < 0) {
+      throw new HexclaveAssertionError("ClickHouse returned an invalid live-user count.", { rows });
+    }
+    return liveUsers;
   } catch (error) {
     // Best-effort: a missing ClickHouse table or CH outage must not break the
     // main metrics call. Sentry-log ClickHouseError vs. everything else so a
@@ -729,7 +732,6 @@ async function loadAnonymousVisitorsFromTokenRefresh(
     GROUP BY GROUPING SETS ((event_day), ())
     ORDER BY GROUPING(event_day) ASC, day ASC
   `;
-
   try {
     const result = await clickhouseClient.query({
       query,
@@ -819,7 +821,11 @@ async function loadMonthlyActiveUsers(tenancy: Tenancy, now: Date, includeAnonym
       format: "JSONEachRow",
     });
     const rows: { mau: string | number }[] = await result.json();
-    return Number(rows[0]?.mau ?? 0);
+    const mau = Number(rows[0]?.mau ?? 0);
+    if (!Number.isSafeInteger(mau) || mau < 0) {
+      throw new HexclaveAssertionError("ClickHouse returned an invalid monthly-active-user count.", { rows });
+    }
+    return mau;
   } catch (error) {
     // Only swallow real ClickHouse errors (e.g. project hasn't enabled
     // analytics yet, transient query failure). Anything else is a programming
@@ -1307,6 +1313,58 @@ export function buildAnalyticsOverviewUserAgentFilterFragmentsForTest(filters: A
   };
 }
 
+const PAGE_VIEWS_SQL = `
+  SELECT
+    CAST('$page-view', 'LowCardinality(String)') AS event_type,
+    started_at AS event_at,
+    CAST(data, 'JSON') AS data,
+    project_id,
+    branch_id,
+    user_id,
+    team_id,
+    refresh_token_id,
+    session_replay_id,
+    session_replay_segment_id
+  FROM default.page_views
+  WHERE project_id = {projectId:String}
+    AND branch_id = {branchId:String}
+    AND started_at >= {since:DateTime}
+    AND started_at < {untilExclusive:DateTime}
+`;
+
+const PAGE_VIEWS_AND_CLICKS_SQL = `
+  SELECT
+    event_type,
+    event_at,
+    data,
+    project_id,
+    branch_id,
+    user_id,
+    team_id,
+    refresh_token_id,
+    session_replay_id,
+    session_replay_segment_id
+  FROM analytics_internal.events
+  PREWHERE project_id = {projectId:String}
+    AND branch_id = {branchId:String}
+    AND event_type = '$click'
+    AND event_at >= {since:DateTime}
+    AND event_at < {untilExclusive:DateTime}
+  UNION ALL
+  ${PAGE_VIEWS_SQL}
+`;
+
+export function getAnalyticsOverviewTelemetrySqlForTest(): string {
+  return [PAGE_VIEWS_SQL, PAGE_VIEWS_AND_CLICKS_SQL].join("\n");
+}
+
+export function reconcileAnalyticsVisitorCount(
+  analyticsVisitors: number,
+  anonymousVisitorsFallback: number,
+): number {
+  return Math.max(analyticsVisitors, anonymousVisitorsFallback);
+}
+
 export async function loadAnalyticsOverview(
   tenancy: Tenancy,
   now: Date,
@@ -1330,18 +1388,7 @@ export async function loadAnalyticsOverview(
   }
 
   const clickhouseClient = getClickhouseAdminClientForMetrics();
-
-  // Session replay aggregates come from Postgres and have nothing to do with
-  // ClickHouse availability. Run them in parallel with the ClickHouse queries
-  // but keep them outside the ClickHouse-only try/catch so a postgres failure
-  // never gets misattributed to "analytics not enabled".
   const replayPromise = loadSessionReplayAggregates(tenancy, since);
-
-  // Token-refresh-based anon visitor fallback. Always computed so the frontend
-  // can swap it in when the analytics app isn't installed (no `$page-view`
-  // events). The helper swallows all failures and Sentry-logs them, so this
-  // promise is guaranteed to resolve — no unhandled rejection if the main
-  // analytics query fails before we get to the await below.
   const anonymousVisitorsPromise = loadAnonymousVisitorsFromTokenRefresh(tenancy, now);
 
   let clickhouseAggregates: {
@@ -1366,10 +1413,6 @@ export async function loadAnalyticsOverview(
   } | null = null;
 
   // Explicit installed-check instead of inferring "analytics not enabled" from
-  // a failed ClickHouse query: when the app isn't installed we skip ClickHouse
-  // entirely and return the token-refresh fallback payload; when it IS
-  // installed, every ClickHouse error propagates to the caller so the
-  // dashboard renders its error state instead of plausible-looking zeros.
   const analyticsInstalled = tenancy.config.apps.installed["analytics"]?.enabled ?? false;
 
   if (analyticsInstalled) try {
@@ -1448,10 +1491,9 @@ export async function loadAnalyticsOverview(
       ? `
             AND user_id IN (
               SELECT assumeNotNull(e.user_id)
-              FROM analytics_internal.events AS e
+              FROM (${PAGE_VIEWS_SQL}) AS e
               ${filters.country_code != null ? analyticsUserJoinWithCountry : ""}
-              WHERE e.event_type = '$page-view'
-                AND e.project_id = {projectId:String}
+              WHERE e.project_id = {projectId:String}
                 AND e.branch_id = {branchId:String}
                 AND e.user_id IS NOT NULL
                 AND e.event_at >= {since:DateTime}
@@ -1462,8 +1504,6 @@ export async function loadAnalyticsOverview(
         `
       : '';
     const [dailyEventResult, hourlyEventResult, totalVisitorResult, referrerResult, topRegionResult, onlineResult, sessionResult, userAgentResult] = await Promise.all([
-      // Combined daily aggregates: page-view count, click count, and unique
-      // visitors per day — one scan over the page-view/click event types.
       clickhouseClient.query({
         query: `
           SELECT
@@ -1474,10 +1514,9 @@ export async function loadAnalyticsOverview(
               ${analyticsVisitorKey},
               e.event_type = '$page-view'
             ) AS visitors
-          FROM analytics_internal.events AS e
+          FROM (${PAGE_VIEWS_AND_CLICKS_SQL}) AS e
           ${analyticsUserJoinForFilteredEvents}
-          WHERE e.event_type IN ('$page-view', '$click')
-            AND e.project_id = {projectId:String}
+          WHERE e.project_id = {projectId:String}
             AND e.branch_id = {branchId:String}
             AND e.event_at >= {since:DateTime}
             AND e.event_at < {untilExclusive:DateTime}
@@ -1509,10 +1548,9 @@ export async function loadAnalyticsOverview(
               ${analyticsVisitorKey},
               e.event_type = '$page-view'
             ) AS visitors
-          FROM analytics_internal.events AS e
+          FROM (${PAGE_VIEWS_AND_CLICKS_SQL}) AS e
           ${analyticsUserJoinForFilteredEvents}
-          WHERE e.event_type IN ('$page-view', '$click')
-            AND e.project_id = {projectId:String}
+          WHERE e.project_id = {projectId:String}
             AND e.branch_id = {branchId:String}
             AND e.event_at >= {hourlySince:DateTime}
             AND e.event_at < {untilExclusive:DateTime}
@@ -1540,10 +1578,9 @@ export async function loadAnalyticsOverview(
         query: `
           SELECT
             uniqExact(${analyticsVisitorKey}) AS visitors
-          FROM analytics_internal.events AS e
+          FROM (${PAGE_VIEWS_SQL}) AS e
           ${analyticsUserJoinForFilteredEvents}
-          WHERE e.event_type = '$page-view'
-            AND e.project_id = {projectId:String}
+          WHERE e.project_id = {projectId:String}
             AND e.branch_id = {branchId:String}
             AND e.event_at >= {since:DateTime}
             AND e.event_at < {untilExclusive:DateTime}
@@ -1565,10 +1602,9 @@ export async function loadAnalyticsOverview(
           SELECT
             nullIf(CAST(e.data.referrer, 'String'), '') AS referrer,
             uniqExact(${analyticsVisitorKey}) AS visitors
-          FROM analytics_internal.events AS e
+          FROM (${PAGE_VIEWS_SQL}) AS e
           ${analyticsUserJoinForFilteredEvents}
-          WHERE e.event_type = '$page-view'
-            AND e.project_id = {projectId:String}
+          WHERE e.project_id = {projectId:String}
             AND e.branch_id = {branchId:String}
             AND e.event_at >= {rangeSince:DateTime}
             AND e.event_at < {rangeUntilExclusive:DateTime}
@@ -1600,10 +1636,9 @@ export async function loadAnalyticsOverview(
           SELECT
             upper(coalesce(token_refresh_users.latest_country, '')) AS country_code,
             uniqExact(${analyticsVisitorKey}) AS visitors
-          FROM analytics_internal.events AS e
+          FROM (${PAGE_VIEWS_SQL}) AS e
           ${analyticsUserJoinWithCountry}
-          WHERE e.event_type = '$page-view'
-            AND e.project_id = {projectId:String}
+          WHERE e.project_id = {projectId:String}
             AND e.branch_id = {branchId:String}
             AND e.event_at >= {rangeSince:DateTime}
             AND e.event_at < {rangeUntilExclusive:DateTime}
@@ -1680,7 +1715,7 @@ export async function loadAnalyticsOverview(
               countIf(e.event_type = '$page-view') AS pv,
               dateDiff('second', min(e.event_at), max(e.event_at)) AS duration_s,
               countIf(e.event_type = '$page-view' AND (${analyticsContributingUserFilter} ${sharedExtraFilters})) AS matching_pv
-            FROM analytics_internal.events AS e
+            FROM (${PAGE_VIEWS_AND_CLICKS_SQL}) AS e
             ${analyticsUserJoinForFilteredEvents}
             WHERE e.session_replay_segment_id IS NOT NULL
               AND e.project_id = {projectId:String}
@@ -1704,8 +1739,6 @@ export async function loadAnalyticsOverview(
         },
         format: "JSONEachRow",
       }),
-      // User-Agent buckets pulled from the same `$page-view` event stream so
-      // visitor counts line up with the referrer / region cards on the overview.
       // `data.user_agent` is captured client-side (navigator.userAgent), so
       // older rows that pre-date capture simply return empty here.
       clickhouseClient.query({
@@ -1720,10 +1753,9 @@ export async function loadAnalyticsOverview(
               ${analyticsOverviewBrowserSql} AS browser,
               ${analyticsOverviewOsSql} AS os,
               ${analyticsOverviewDeviceSql} AS device
-            FROM analytics_internal.events AS e
+            FROM (${PAGE_VIEWS_SQL}) AS e
             ${analyticsUserJoinForFilteredEvents}
-            WHERE e.event_type = '$page-view'
-              AND e.project_id = {projectId:String}
+            WHERE e.project_id = {projectId:String}
               AND e.branch_id = {branchId:String}
               AND e.event_at >= {rangeSince:DateTime}
               AND e.event_at < {rangeUntilExclusive:DateTime}
@@ -1915,15 +1947,10 @@ export async function loadAnalyticsOverview(
         branchId: tenancy.branchId,
       },
     ));
-    // Rethrowing skips the `await replayPromise` below, so observe it here to
-    // keep a concurrent Postgres failure from becoming an unhandled rejection.
-    // (anonymousVisitorsPromise swallows its own failures and never rejects.)
     replayPromise.catch(() => {});
     throw error;
   }
 
-  // Postgres-backed session replay query has its own error surface — let it
-  // propagate naturally so we don't conflate it with "clickhouse missing".
   const replayResult = await replayPromise;
   const anonymousVisitorsResult = await anonymousVisitorsPromise;
 
@@ -1961,12 +1988,10 @@ export async function loadAnalyticsOverview(
     };
   }
 
-  // When the analytics app isn't installed, `clickhouseAggregates.visitors` is
-  // 0 even though the fallback can surface a number. Prefer the larger of the
-  // two so `revenue_per_visitor` divides by something meaningful in both
-  // cases — page-view visitors when the app is wired up, anon token-refresh
-  // visitors otherwise.
-  const effectiveVisitors = Math.max(clickhouseAggregates.visitors, anonymousVisitorsResult.visitors);
+  const effectiveVisitors = reconcileAnalyticsVisitorCount(
+    clickhouseAggregates.visitors,
+    anonymousVisitorsResult.visitors,
+  );
 
   return {
     daily_page_views: clickhouseAggregates.dailyPageViews,
@@ -1980,7 +2005,7 @@ export async function loadAnalyticsOverview(
     total_revenue_cents: replayResult.totalRevenueCents,
     total_replays: replayResult.total,
     recent_replays: replayResult.recent,
-    visitors: clickhouseAggregates.visitors,
+    visitors: effectiveVisitors,
     anonymous_visitors_fallback: anonymousVisitorsResult.visitors,
     avg_session_seconds: clickhouseAggregates.avgSessionSeconds,
     bounce_rate: clickhouseAggregates.bounceRate,

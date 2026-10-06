@@ -1,4 +1,5 @@
 import { HexclaveClientInterface, KnownError, KnownErrors } from "@hexclave/shared";
+import { TraceFlags } from "@opentelemetry/api";
 import type { RequestListener } from "@hexclave/shared/dist/interface/client-interface";
 import { ContactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
 import { CurrentUserCrud } from "@hexclave/shared/dist/interface/crud/current-user";
@@ -26,7 +27,7 @@ import { HexclaveAssertionError, HexclaveSetupError, captureError, throwErr } fr
 import { parseJson } from "@hexclave/shared/dist/utils/json";
 import { DependenciesMap } from "@hexclave/shared/dist/utils/maps";
 import { ProviderType } from "@hexclave/shared/dist/utils/oauth";
-import { deepPlainEquals, omit } from "@hexclave/shared/dist/utils/objects";
+import { deepPlainEquals, isRecord, omit } from "@hexclave/shared/dist/utils/objects";
 import { neverResolve, runAsynchronously, wait } from "@hexclave/shared/dist/utils/promises";
 import { suspend, use } from "@hexclave/shared/dist/utils/react";
 import { getTrustedParentDomain, validateRedirectUrl } from "@hexclave/shared/dist/utils/redirect-urls";
@@ -37,6 +38,7 @@ import type { TurnstileAction } from "@hexclave/shared/dist/utils/turnstile";
 import { BotChallengeExecutionFailedError, BotChallengeUserCancelledError, withBotChallengeFlow } from "@hexclave/shared/dist/utils/turnstile-flow";
 import { createUrlIfValid, getRelativePart, isRelative } from "@hexclave/shared/dist/utils/urls";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
+import { uuidToW3cSpanId, uuidToW3cTraceId } from "@hexclave/shared/dist/utils/analytics-wire";
 import * as tanstackStartServerContext from "@hexclave/tanstack-start/tanstack-start-server-context"; // THIS_LINE_PLATFORM tanstack-start
 import { WebAuthnError, startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import * as TanStackRouter from "@tanstack/react-router"; // THIS_LINE_PLATFORM tanstack-start
@@ -62,15 +64,29 @@ import { EditableTeamMemberProfile, ReceivedTeamInvitation, SentTeamInvitation, 
 import { buildCliAuthConfirmUrl, getHostedHandlerUrl, isHostedHandlerUrlForProject, resolveHandlerUrls } from "../../url-targets";
 import { ActiveSession, Auth, BaseUser, CurrentUser, InternalUserExtra, OAuthProvider, ProjectCurrentUser, SyncedPartialUser, TokenPartialUser, UserExtra, UserUpdateOptions, userUpdateOptionsToCrud, withUserDestructureGuard } from "../../users";
 import { StackClientApp, StackClientAppConstructorOptions, StackClientAppJson } from "../interfaces/client-app";
+import type { CaptureEvent, CaptureExceptionOptions, CaptureMessageOptions, ErrorEventId, ErrorScopeData, ErrorScope } from "../interfaces/error-capture";
 import { _HexclaveAdminAppImplIncomplete } from "./admin-app-impl";
 import { TokenObject, clientVersion, createCache, createCacheBySession, createEmptyTokenStore, getAnalyticsBaseUrl, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getUrls, resolveApiUrls, resolveConstructorOptions } from "./common";
-import { EventTracker } from "./event-tracker";
+import { assertValidSpanStartInput, getCustomTelemetryDataError, getCustomTelemetryNameError, rejectedPreCaught, resolveSpanParent, withSpanImpl, type ParentRef, type Span, type StartSpanOptions, type TrackOptions } from "./telemetry-core";
+import { ClientAnalytics } from "./client-analytics";
+import { normalizeErrorCaptureOptions } from "./error-capture";
+import { createErrorAttachmentTransport } from "./error-attachments";
+import { createLogger, type LogEmitItem, type Logger } from "./logs";
+import { emitHexclaveOtelLog } from "./otel-log-facade";
+import { generateOtelSpanId, traceFlagsForSampleRate } from "./otel-context";
+import { normalizeNetworkCaptureOptions, type NetworkCaptureConfig } from "./network-capture";
+import { createInertSpanHandle } from "./span-handle";
+import { buildPropagationHeaderValues, trustedDomainsToPropagationOrigins, type SpanPropagationContext } from "./span-propagation";
 import { augmentUrlWithPersistedRedirectBackState, getRawAfterAuthReturnTo, saveRedirectBackStateFromUrl } from "./redirect-back-state";
 import { recordRedirectAndThrowIfLoopDetected } from "./redirect-loop-breaker";
 import type { CrossDomainHandoffParams } from "./redirect-page-urls";
 import { crossDomainAuthQueryParams, getCrossDomainHandoffParamsFromCurrentUrl, planRedirectToHandler } from "./redirect-page-urls";
 import { subscribeSessionRefresh } from "./session-refresh-subscription";
-import { AnalyticsOptions, SessionRecorder, analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions } from "./session-replay";
+import { AnalyticsOptions, analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions } from "./analytics-config";
+import { createAnonymousAnalyticsTokenStore } from "./analytics-session";
+import { createErrorScope, getActiveErrorScope, runWithErrorScope, runWithErrorScopeAsync } from "./error-scope";
+import { DEFAULT_CONSOLE_CAPTURE_LEVELS, isObservabilityEnabled, normalizeTraceSampleRate, observabilityOptionsToJson, ObservabilityOptions, resolveClientOpenTelemetryProvider } from "./observability-config";
+import { resolveTelemetryResource, snapshotTelemetryOptions, TelemetryOptions, TelemetryResource, telemetryOptionsToJson } from "./telemetry-config";
 
 export function stripBrowserActionQueryParam() {
   let stripAttemptsRemaining = 20;
@@ -97,6 +113,29 @@ import { mountDevTool } from "../../../../dev-tool";
 import { mountPushedConfigErrorOverlay } from "../../../../pushed-config-error-overlay";
 import { showSetupErrorOverlay } from "../../../../setup-error-overlay";
 // END_PLATFORM
+
+export function shouldIgnoreTelemetryDeliveryUrl(url: string, analyticsBaseUrl: string, currentOrigin?: string): boolean {
+  let target: URL;
+  let analyticsBase: URL;
+  try {
+    target = new URL(url, currentOrigin);
+    analyticsBase = new URL(analyticsBaseUrl, currentOrigin);
+  } catch {
+    return false;
+  }
+  if (target.origin !== analyticsBase.origin) return false;
+
+  const basePath = analyticsBase.pathname.replace(/\/+$/, "");
+  return [
+    `${basePath}/api/v1/analytics/events/batch`,
+    `${basePath}/api/v1/analytics/otlp/v1/traces`,
+    `${basePath}/api/v1/analytics/otlp/v1/logs`,
+    `${basePath}/api/v1/analytics/otlp/v1/metrics`,
+    `${basePath}/api/v1/analytics/client-reports`,
+    `${basePath}/api/v1/analytics/attachments`,
+    `${basePath}/api/v1/session-replays/batch`,
+  ].includes(target.pathname);
+}
 
 let isReactServer = false;
 // IF_PLATFORM next
@@ -300,12 +339,12 @@ function getAuthJsonFromAuthorizationHeaderValue(authorizationHeaderValue: strin
     throw new Error("Invalid stackauth authorization header.", { cause: e });
   }
 
-  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) {
     throw new Error("Invalid stackauth authorization payload. Expected an object.");
   }
 
-  const accessToken = Reflect.get(parsed, "accessToken");
-  const refreshToken = Reflect.get(parsed, "refreshToken");
+  const accessToken = parsed["accessToken"];
+  const refreshToken = parsed["refreshToken"];
   if (accessToken != null && typeof accessToken !== "string") {
     throw new Error("Invalid stackauth authorization payload. `accessToken` must be a string or null.");
   }
@@ -409,9 +448,16 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   protected readonly _urlOptions: HandlerUrlOptions;
   protected readonly _oauthScopesOnSignIn: Partial<OAuthScopesOnSignIn>;
 
-  private readonly _analyticsOptions: AnalyticsOptions | undefined;
-  private _sessionRecorder: SessionRecorder | null = null;
-  private _eventTracker: EventTracker | null = null;
+  protected readonly _analyticsOptions: AnalyticsOptions | undefined;
+  protected readonly _observabilityOptions: ObservabilityOptions | undefined;
+  protected readonly _telemetryOptions: TelemetryOptions | undefined;
+  protected readonly _telemetryResource: TelemetryResource;
+  protected readonly _networkCaptureConfig: NetworkCaptureConfig;
+  protected readonly _traceSampleRate: number;
+  protected _clientAnalytics: ClientAnalytics | null = null;
+  private _lastErrorEventId: ErrorEventId | undefined;
+  private _anonymousAnalyticsTokenStore: Store<TokenObject> | null = null;
+  private _anonymousAnalyticsSignUpInProgress: Promise<InternalSession> | null = null;
   private _pendingSignOut: Promise<void> | null = null;
 
   private __DEMO_ENABLE_SLIGHT_FETCH_DELAY = false;
@@ -688,7 +734,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   // Retain domains across token-store snapshots because a later update can see cookies already deleted by an earlier update.
   private readonly _knownCustomRefreshCookieDomains = new Set<string>();
 
-  private _anonymousSignUpInProgress: Promise<{ accessToken: string, refreshToken: string }> | null = null;
+  private _anonymousSignUpInProgress: Promise<{ accessToken: string, refreshToken: string } | null> | null = null;
   private _prefetchedCrossDomainHandoffParams: CrossDomainHandoffParams | null = null;
   private _prefetchedCrossDomainHandoffParamsFetchedAt = 0;
   private _isPrefetchingCrossDomainHandoffParams = false;
@@ -852,63 +898,139 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     this._urlOptions = resolvedOptions.urls ?? {};
     this._oauthScopesOnSignIn = resolvedOptions.oauthScopesOnSignIn ?? {};
     this._analyticsOptions = resolvedOptions.analytics;
+    this._observabilityOptions = resolvedOptions.observability;
+    this._telemetryOptions = snapshotTelemetryOptions(resolvedOptions.telemetry);
+    this._telemetryResource = resolveTelemetryResource(this._telemetryOptions, this._telemetryTier());
+    this._networkCaptureConfig = normalizeNetworkCaptureOptions(this._observabilityOptions?.network);
+    this._traceSampleRate = normalizeTraceSampleRate(this._observabilityOptions);
 
     if (extraOptions?.uniqueIdentifier !== undefined) {
       this._uniqueIdentifier = extraOptions.uniqueIdentifier;
-    }
-
-    // Custom dashboards can disable automatic initialization so URL parameters, browser storage, analytics, and
-    // development overlays cannot affect the containing page. Explicit SDK calls remain functional and retain their
-    // documented side effects.
-    if (resolvedOptions.automaticSideEffects === false) {
-      return;
     }
 
     this._initializeAutomaticSideEffects(resolvedOptions);
   }
 
   private _initializeAutomaticSideEffects(resolvedOptions: HexclaveClientAppImplConstructorOptionsResolved<HasTokenStore, ProjectId>) {
-    if (isBrowserLike() && (resolvedOptions.tokenStore === "cookie" || resolvedOptions.tokenStore === "nextjs-cookie")) {
+    const automaticSideEffects = resolvedOptions.automaticSideEffects !== false;
+    if (automaticSideEffects && isBrowserLike() && (resolvedOptions.tokenStore === "cookie" || resolvedOptions.tokenStore === "nextjs-cookie")) {
       runAsynchronously(this._trustedParentDomainCache.getOrWait([window.location.hostname], "write-only"));
       this._ensureCrossSubdomainCookieExists();
     }
 
-    if (this._uniqueIdentifier !== undefined) {
+    if (automaticSideEffects && this._uniqueIdentifier !== undefined) {
       this._initUniqueIdentifier();
     }
 
-    const getAnalyticsSession = async (): Promise<InternalSession> => {
-      this._ensurePersistentTokenStore();
-      const partialUser = await this.getPartialUser({ from: 'token', or: 'anonymous-if-exists' });
-      if (partialUser) {
-        return await this._getSession();
-      }
-      const anonUser = await this.getUser({ or: "anonymous" });
-      return anonUser._internalSession;
+    const canRefreshClientAccessTokens = !("projectOwnerSession" in this._interface.options);
+    const analyticsEnabled = canRefreshClientAccessTokens && this._analyticsOptions?.enabled !== false;
+    const observabilityEnabled = canRefreshClientAccessTokens && isObservabilityEnabled(this._observabilityOptions);
+    const telemetryResource = analyticsEnabled || observabilityEnabled ? this._telemetryResource : null;
+
+    const sessionReplayOptions = {
+      ...getSessionReplayOptions(this._analyticsOptions),
+      enabled: analyticsEnabled && getSessionReplayOptions(this._analyticsOptions).enabled,
     };
-
-    const analyticsEnabled = this._analyticsOptions?.enabled !== false;
-
-    const sessionReplayOptions = getSessionReplayOptions(this._analyticsOptions);
-    if (analyticsEnabled && isBrowserLike() && this._hasPersistentTokenStore() && sessionReplayOptions.enabled) {
-      this._sessionRecorder = new SessionRecorder({
+    const browserTelemetryEnvironment = automaticSideEffects ? isBrowserLike() : typeof window !== "undefined";
+    if ((analyticsEnabled || observabilityEnabled) && browserTelemetryEnvironment) {
+      this._clientAnalytics = new ClientAnalytics({
         projectId: this.projectId,
-        sendBatch: async (body, opts) => {
-          return await this._interface.sendSessionReplayBatch(body, await getAnalyticsSession(), opts);
+        resource: telemetryResource ?? throwErr("Telemetry resource was validated above"),
+        sendReplayBatch: async (body, opts) => {
+          return await this._interface.sendSessionReplayBatch(body, await this._getAnalyticsSession(), opts);
         },
-      }, sessionReplayOptions);
-      this._sessionRecorder.start();
-    }
-
-    if (analyticsEnabled && isBrowserLike() && this._hasPersistentTokenStore()) {
-      this._eventTracker = new EventTracker({
-        projectId: this.projectId,
-        sendBatch: async (body, opts) => {
-          return await this._interface.sendAnalyticsEventBatch(body, await getAnalyticsSession(), opts);
+        getSessionRootContext: async () => {
+          const session = await this._getAnalyticsSession();
+          const tokens = await session.getOrFetchLikelyValidTokens(20_000, 75_000);
+          const refreshTokenId = tokens?.accessToken.payload.refresh_token_id
+            ?? throwErr("Analytics session did not provide the refresh-token id required for trace parenting");
+          const traceId = uuidToW3cTraceId(refreshTokenId);
+          return {
+            traceId,
+            spanId: uuidToW3cSpanId(refreshTokenId),
+            traceFlags: traceFlagsForSampleRate(traceId, this._traceSampleRate),
+          };
+        },
+        getCachedSessionRootContext: () => {
+          if (!isBrowserLike()) return null;
+          const currentUrl = new URL(window.location.href);
+          const authTransitionInFlight = currentUrl.searchParams.has(nestedCrossDomainAuthQueryParams.refreshTokenId)
+            || (
+              (this._isOAuthCallbackUrlHosted() || this._currentUrlLooksLikeNestedCrossDomainOAuthCallback())
+              && (this._currentUrlLooksLikeHexclaveOAuthCallback() || this._currentUrlLooksLikeOAuthCallbackError())
+            );
+          if (authTransitionInFlight) return null;
+          const tokenStore = this._getOrCreateTokenStore(createBrowserCookieHelper());
+          const session = this._getSessionFromTokenStore(tokenStore);
+          if (session.isKnownToBeInvalid()) return null;
+          const accessToken = session.getAccessTokenIfNotExpiredYet(0, null);
+          if (accessToken === null) return null;
+          const refreshTokenId = accessToken.payload.refresh_token_id;
+          const traceId = uuidToW3cTraceId(refreshTokenId);
+          return {
+            traceId,
+            spanId: uuidToW3cSpanId(refreshTokenId),
+            traceFlags: traceFlagsForSampleRate(traceId, this._traceSampleRate),
+          };
+        },
+        replayOptions: sessionReplayOptions,
+        productAnalyticsEnabled: analyticsEnabled,
+        registerBackgroundTask: this._telemetryOptions?.waitUntil,
+        getPropagationPolicy: () => ({
+          selfOrigin: typeof window !== "undefined" ? window.location.origin : null,
+          ...this._getPropagationOriginPolicy(),
+        }),
+        integritySignals: this._analyticsOptions?.integritySignals === true,
+        networkCapture: this._networkCaptureConfig,
+        traceSampleRate: this._traceSampleRate,
+        errorCapture: normalizeErrorCaptureOptions(this._observabilityOptions?.errorCapture),
+        release: telemetryResource?.service.version ?? null,
+        environment: telemetryResource?.deploymentEnvironmentName ?? null,
+        sdkVersion: clientVersion,
+        analyticsBaseUrl: (this._interface.options.getAnalyticsBaseUrl ?? this._interface.options.getBaseUrl)(),
+        openTelemetryProvider: resolveClientOpenTelemetryProvider(
+          this._observabilityOptions?.openTelemetry?.provider,
+          observabilityEnabled,
+          analyticsEnabled,
+        ),
+        instrumentationEnabled: observabilityEnabled,
+        automaticSideEffects,
+        consoleCaptureLevels: this._observabilityOptions?.logs?.captureConsole ?? DEFAULT_CONSOLE_CAPTURE_LEVELS,
+        emitLog: (item) => this._emitLog(item),
+        onErrorEventId: (eventId) => this._recordErrorEventId(eventId),
+        errorAttachmentTransport: this._observabilityOptions?.errorCapture?.attachmentTransport ?? createErrorAttachmentTransport({
+          sendRequest: async (path, request) => await this._interface.sendClientRequest(
+            path,
+            request,
+            await this._getAnalyticsSession(),
+            "client",
+            this._interface.getAnalyticsApiUrl(),
+            { maxAttempts: 1, skipDiagnostics: true },
+          ),
+        }),
+        onAttachmentPending: this._observabilityOptions?.errorCapture?.onAttachmentPending,
+        getOtlpRequestHeaders: async () => {
+          const session = await this._getAnalyticsSession();
+          const tokens = await session.getOrFetchLikelyValidTokens(20_000, null)
+            ?? throwErr("Analytics session did not provide credentials required for browser OTLP export");
+          const interfaceOptions = this._interface.options;
+          return {
+            "x-hexclave-project-id": this.projectId,
+            "x-hexclave-access-type": "client",
+            "x-hexclave-client-version": clientVersion,
+            "x-hexclave-access-token": tokens.accessToken.token,
+            ...tokens.refreshToken === null ? {} : { "x-hexclave-refresh-token": tokens.refreshToken.token },
+            "x-hexclave-allow-anonymous-user": "true",
+            ..."publishableClientKey" in interfaceOptions && interfaceOptions.publishableClientKey
+              ? { "x-hexclave-publishable-client-key": interfaceOptions.publishableClientKey }
+              : {},
+            ...interfaceOptions.extraRequestHeaders,
+          };
         },
       });
-      this._eventTracker.start();
     }
+
+    if (!automaticSideEffects) return;
 
     if (
       isBrowserLike()
@@ -1649,7 +1771,55 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     return getTrustedParentDomain(currentDomain, (await this._getTrustedRedirectConfig()).trustedDomains);
   }
 
-  protected _getBrowserCookieTokenStore(): Store<TokenObject> {
+  private _trustedPropagationOrigins: readonly string[] = [];
+  private _trustedPropagationAllowLocalhost = false;
+  private _trustedPropagationOriginsPromise: Promise<void> | null = null;
+
+  /**
+   * The full origin policy for cross-tier span propagation: the explicit
+   * `spanPropagation.allowedOrigins` plus (unless `useTrustedDomains: false`)
+   * the exact origins derived from the project's trusted domains and the
+   * project's `allow_localhost` dev flag. The trusted-domain half loads
+   * asynchronously on the FIRST policy read (not at construction — apps that
+   * never propagate cross-origin shouldn't fetch the project config for
+   * this); until it resolves the policy is fail-closed to same-origin +
+   * explicit origins, so at worst the first few cross-origin requests skip
+   * the header — acceptable for best-effort telemetry, and the alternative
+   * (blocking a sync decision on a network fetch) is impossible anyway.
+   */
+  /**
+   * Which half of an isomorphic app this instance is, used only to disambiguate
+   * an INFERRED service name (see inferTelemetryResource). Overridden by the
+   * server subclass. Must stay a prototype method: the base constructor calls it.
+   */
+  protected _telemetryTier(): "browser" | "server" {
+    return "browser";
+  }
+
+  protected _getPropagationOriginPolicy(): { allowedOrigins: readonly string[], allowLocalhost: boolean, correlationBaggage: boolean } {
+    const correlationBaggage = this._observabilityOptions?.spanPropagation?.enabled !== false;
+    const explicit = this._observabilityOptions?.spanPropagation?.allowedOrigins ?? [];
+    if (this._observabilityOptions?.spanPropagation?.useTrustedDomains === false) {
+      return { allowedOrigins: explicit, allowLocalhost: false, correlationBaggage };
+    }
+    this._trustedPropagationOriginsPromise ??= (async () => {
+      try {
+        const config = await this._getTrustedRedirectConfig();
+        this._trustedPropagationOrigins = trustedDomainsToPropagationOrigins(config.trustedDomains);
+        this._trustedPropagationAllowLocalhost = config.allowLocalhost;
+        this._clientAnalytics?.updateOtelPropagationPolicy();
+      } catch (error) {
+        console.warn("Hexclave analytics: could not load the project's trusted domains for span propagation; cross-origin propagation stays limited to spanPropagation.allowedOrigins:", error);
+      }
+    })();
+    return {
+      allowedOrigins: this._trustedPropagationOrigins.length === 0 ? explicit : [...explicit, ...this._trustedPropagationOrigins],
+      allowLocalhost: this._trustedPropagationAllowLocalhost,
+      correlationBaggage,
+    };
+  }
+
+  protected _getBrowserCookieTokenStore(options?: { duringRender?: boolean }): Store<TokenObject> {
     if (!isBrowserLike()) {
       throw new Error("Cannot use cookie token store on the server!");
     }
@@ -1705,6 +1875,15 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
           }
         }
       });
+    } else if (options?.duringRender) {
+      const store = this._storedBrowserCookieTokenStore;
+      queueMicrotask(() => {
+        const oldValue = store.get();
+        const currentValue = this._getCurrentBrowserCookieTokenStoreValue(oldValue);
+        if (!deepPlainEquals(currentValue, oldValue)) {
+          store.set(currentValue);
+        }
+      });
     } else {
       const oldValue = this._storedBrowserCookieTokenStore.get();
       const currentValue = this._getCurrentBrowserCookieTokenStoreValue(oldValue);
@@ -1715,21 +1894,21 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
 
     return this._storedBrowserCookieTokenStore;
   };
-  protected _getOrCreateTokenStore(cookieHelper: CookieHelper, overrideTokenStoreInit?: TokenStoreInit): Store<TokenObject> {
+  protected _getOrCreateTokenStore(cookieHelper: CookieHelper, overrideTokenStoreInit?: TokenStoreInit, options?: { duringRender?: boolean }): Store<TokenObject> {
     const tokenStoreInit = overrideTokenStoreInit === undefined ? this._tokenStoreInit : overrideTokenStoreInit;
 
     switch (tokenStoreInit) {
       case "cookie": {
         // IF_PLATFORM tanstack-start
         if (!isBrowserLike()) {
-          return this._getOrCreateTokenStore(cookieHelper, "nextjs-cookie");
+          return this._getOrCreateTokenStore(cookieHelper, "nextjs-cookie", options);
         }
         // END_PLATFORM
-        return this._getBrowserCookieTokenStore();
+        return this._getBrowserCookieTokenStore(options);
       }
       case "nextjs-cookie": {
         if (isBrowserLike()) {
-          return this._getBrowserCookieTokenStore();
+          return this._getBrowserCookieTokenStore(options);
         } else {
           // IF_PLATFORM next
           const existingStore = this._nextServerCookiesTokenStores.get(cookieHelper.identity);
@@ -1851,12 +2030,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   protected _useTokenStore(overrideTokenStoreInit?: TokenStoreInit): Store<TokenObject> {
     // IF_PLATFORM tanstack-start
     if (!isBrowserLike()) {
-      return this._getOrCreateTokenStore(use(createCookieHelper()), overrideTokenStoreInit);
+      return this._getOrCreateTokenStore(use(createCookieHelper()), overrideTokenStoreInit, { duringRender: true });
     }
     // END_PLATFORM
     suspendIfSsr();
     const cookieHelper = createBrowserCookieHelper();
-    const tokenStore = this._getOrCreateTokenStore(cookieHelper, overrideTokenStoreInit);
+    const tokenStore = this._getOrCreateTokenStore(cookieHelper, overrideTokenStoreInit, { duringRender: true });
     return tokenStore;
   }
   // END_PLATFORM
@@ -1931,12 +2110,31 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   // END_PLATFORM
 
   private _signInAttemptCounter = 0;
+  private _latestSignIn: Promise<void> = Promise.resolve();
   protected async _signInToAccountWithTokens(tokens: { accessToken: string | null, refreshToken: string }) {
+    const signIn = this._doSignInToAccountWithTokens(tokens);
+    this._latestSignIn = signIn.catch(() => {});
+    return await signIn;
+  }
+
+  private async _doSignInToAccountWithTokens(tokens: { accessToken: string | null, refreshToken: string }) {
     if (!("accessToken" in tokens) || !("refreshToken" in tokens)) {
       throw new HexclaveAssertionError("Invalid tokens object; can't sign in with this", { tokens });
     }
     const attemptId = ++this._signInAttemptCounter;
     const tokenStore = this._getOrCreateTokenStore(await this._createCookieHelper());
+
+    // A direct signed-out/anonymous -> authenticated transition does not pass
+    // through _signOut(), but it changes which project user owns replay
+    // uploads just as decisively. Rotate before the user lookup can await:
+    // otherwise a large initial FullSnapshot can flush under the old identity
+    // while later mutations flush under the new one, leaving the new user's
+    // replay impossible to reconstruct. Re-installing an access token for the
+    // same refresh token is not an identity boundary and must not fragment the
+    // current replay.
+    if (tokenStore.get().refreshToken !== tokens.refreshToken) {
+      await this._clientAnalytics?.clearBuffer();
+    }
 
     // If these tokens resolve to a session we already have (eg. the RDE dashboard re-installing a freshly minted
     // access token for the same access-only session), push the new token into it in place; constructing a new
@@ -1957,6 +2155,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     // (by now outdated) tokens would roll the app back to the session it just left.
     if (attemptId !== this._signInAttemptCounter) return;
     tokenStore.set(tokens);
+    this._clientAnalytics?.resumeSessionReplayAfterAuthentication();
   }
 
   protected _getTokenStoreInitForFreshTokens(tokens: { accessToken: string | null, refreshToken: string }): TokenStoreInit | undefined {
@@ -1971,6 +2170,39 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
 
   protected _hasPersistentTokenStore(overrideTokenStoreInit?: TokenStoreInit): this is StackClientApp<true, ProjectId> {
     return (overrideTokenStoreInit !== undefined ? overrideTokenStoreInit : this._tokenStoreInit) !== null;
+  }
+
+  private async _getAnalyticsSession(): Promise<InternalSession> {
+    if (this._hasPersistentTokenStore()) {
+      const partialUser = await this.getPartialUser({ from: "token", or: "anonymous-if-exists" });
+      if (partialUser !== null) return await this._getSession();
+      return (await this.getUser({ or: "anonymous" }))._internalSession;
+    }
+
+    this._anonymousAnalyticsTokenStore ??= createAnonymousAnalyticsTokenStore(this.projectId);
+    const analyticsTokenStore = this._anonymousAnalyticsTokenStore;
+    const existingTokens = analyticsTokenStore.get();
+    if (existingTokens.refreshToken !== null) {
+      return this._getSessionFromTokenStore(analyticsTokenStore);
+    }
+
+    if (this._anonymousAnalyticsSignUpInProgress === null) {
+      this._anonymousAnalyticsSignUpInProgress = (async () => {
+        const unsignedSession = this._getSessionFromTokenStore(analyticsTokenStore);
+        const result = await this._interface.signUpAnonymously(unsignedSession);
+        if (result.status === "error") {
+          throw new HexclaveAssertionError("Anonymous analytics sign-up should never return an error");
+        }
+        analyticsTokenStore.set(result.data);
+        return this._getSessionFromTokenStore(analyticsTokenStore);
+      })();
+    }
+
+    try {
+      return await this._anonymousAnalyticsSignUpInProgress;
+    } finally {
+      this._anonymousAnalyticsSignUpInProgress = null;
+    }
   }
 
   protected _ensurePersistentTokenStore(overrideTokenStoreInit?: TokenStoreInit): asserts this is StackClientApp<true, ProjectId> {
@@ -3073,6 +3305,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         tokenStore: null,
         projectOwnerSession: session,
         noAutomaticPrefetch: true,
+        analytics: { enabled: false },
         automaticSideEffects: false,
       }));
     }
@@ -3678,7 +3911,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
         case 'anonymous': {
           const tokens = await this._signUpAnonymously();
-          return await this.getUser({ tokenStore: tokens, or: "anonymous-if-exists[deprecated]", includeRestricted: true }) ?? throwErr("Something went wrong while signing up anonymously");
+          return await this.getUser({ ...tokens === null ? {} : { tokenStore: tokens }, or: "anonymous-if-exists[deprecated]", includeRestricted: true }) ?? throwErr("Something went wrong while signing up anonymously");
         }
         case undefined:
         case "anonymous-if-exists[deprecated]":
@@ -4070,16 +4303,25 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
 
     if (!this._anonymousSignUpInProgress) {
       this._anonymousSignUpInProgress = (async () => {
-        this._ensurePersistentTokenStore();
-        const session = await this._getSession();
-        const result = await this._interface.signUpAnonymously(session);
-        if (result.status === "ok") {
+        try {
+          this._ensurePersistentTokenStore();
+          const signInAttemptAtStart = this._signInAttemptCounter;
+          const session = await this._getSession();
+          const result = await this._interface.signUpAnonymously(session);
+          if (result.status !== "ok") {
+            throw new HexclaveAssertionError("signUpAnonymously() should never return an error");
+          }
+          if (signInAttemptAtStart !== this._signInAttemptCounter) {
+            // A sign-in that started while this request was in flight owns the token store; don't replace it.
+            await this._latestSignIn;
+            const tokenStore = this._getOrCreateTokenStore(await this._createCookieHelper());
+            if (tokenStore.get().refreshToken !== null) return null;
+          }
           await this._signInToAccountWithTokens(result.data);
-        } else {
-          throw new HexclaveAssertionError("signUpAnonymously() should never return an error");
+          return result.data;
+        } finally {
+          this._anonymousSignUpInProgress = null;
         }
-        this._anonymousSignUpInProgress = null;
-        return result.data;
       })();
     }
 
@@ -4367,9 +4609,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   }
 
   protected async _signOut(session: InternalSession, options?: { redirectUrl?: URL | string }): Promise<void> {
-    // Clear analytics buffers before sign-out to prevent cross-user event leakage
-    this._eventTracker?.clearBuffer();
-    this._sessionRecorder?.clearBuffer();
+    await this._clientAnalytics?.clearBuffer();
 
     const previousSignOut = this._pendingSignOut;
     const signOutOperation = (async () => {
@@ -4416,14 +4656,224 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   }
 
   async signOut(options?: { redirectUrl?: URL | string, tokenStore?: TokenStoreInit }): Promise<void> {
-    const user = await this.getUser({ tokenStore: options?.tokenStore ?? undefined as any });
+    const tokenStore = options?.tokenStore;
+    const user = tokenStore === undefined
+      ? await this.getUser()
+      : await this.getUser({ tokenStore });
     if (user) {
       await user.signOut({ redirectUrl: options?.redirectUrl });
     }
   }
 
+
+  private _logger: Logger | null = null;
+
+  get logger(): Logger {
+    this._logger ??= createLogger({ emit: (item) => this._emitLog(item) });
+    return this._logger;
+  }
+
+  /**
+   * The browser OTel LogRecord sink behind `app.logger`. Non-browser client
+   * apps have no provider/export path, so "unavailable" warns once. The server
+   * subclass installs or uses the Node provider instead.
+   */
+  protected _emitLog(item: LogEmitItem): "ok" | "unavailable" {
+    if (!isObservabilityEnabled(this._observabilityOptions) || this._clientAnalytics === null) return "unavailable";
+    this._clientAnalytics.ensureProviderForExplicitSignal();
+    emitHexclaveOtelLog(item, clientVersion);
+    return "ok";
+  }
+
+  trackEvent(eventType: string, data?: Record<string, unknown>, options?: TrackOptions): Promise<void> {
+    if (this._analyticsOptions?.enabled !== false && this._clientAnalytics) {
+      return this._clientAnalytics.trackCustomEvent(eventType, data, options);
+    }
+    const nameError = getCustomTelemetryNameError("event", eventType);
+    if (nameError) return rejectedPreCaught(nameError);
+    const dataError = getCustomTelemetryDataError(data);
+    if (dataError) return rejectedPreCaught(dataError);
+    const resolved = resolveSpanParent({ explicit: options?.parent, ambient: [] });
+    if ("error" in resolved) return rejectedPreCaught(resolved.error);
+    return rejectedPreCaught("telemetry is unavailable in this environment");
+  }
+
+  captureException(error: unknown, options?: CaptureExceptionOptions): ErrorEventId {
+    const eventId = this._captureManualException(error, options, getActiveErrorScope()?.snapshot());
+    this._recordErrorEventId(eventId);
+    return eventId;
+  }
+
+  captureMessage(message: string, options?: CaptureMessageOptions): ErrorEventId {
+    const eventId = this._captureManualMessage(message, options, getActiveErrorScope()?.snapshot());
+    this._recordErrorEventId(eventId);
+    return eventId;
+  }
+
+  captureEvent(event: CaptureEvent): ErrorEventId {
+    const eventId = this._captureManualEvent(event, getActiveErrorScope()?.snapshot());
+    this._recordErrorEventId(eventId);
+    return eventId;
+  }
+
+  lastEventId(): ErrorEventId | undefined {
+    return this._lastErrorEventId;
+  }
+
+  protected _recordErrorEventId(eventId: ErrorEventId): void {
+    this._lastErrorEventId = eventId;
+  }
+
+  withErrorScope<T>(fn: (scope: ErrorScope) => T): T {
+    const scope = createErrorScope(getActiveErrorScope()?.snapshot());
+    return runWithErrorScope(scope, () => fn(scope));
+  }
+
+  withErrorScopeAsync<T>(fn: (scope: ErrorScope) => Promise<T>): Promise<T> {
+    const scope = createErrorScope(getActiveErrorScope()?.snapshot());
+    return runWithErrorScopeAsync(scope, async () => await fn(scope));
+  }
+
+  protected _captureManualException(error: unknown, options: CaptureExceptionOptions | undefined, scope: ErrorScopeData | undefined): ErrorEventId {
+    if (this._clientAnalytics === null) throw new Error("Hexclave error capture is unavailable before client observability starts");
+    return this._clientAnalytics.captureException(error, options, scope);
+  }
+
+  protected _captureManualMessage(message: string, options: CaptureMessageOptions | undefined, scope: ErrorScopeData | undefined): ErrorEventId {
+    if (this._clientAnalytics === null) throw new Error("Hexclave error capture is unavailable before client observability starts");
+    return this._clientAnalytics.captureMessage(message, options, scope);
+  }
+
+  protected _captureManualEvent(event: CaptureEvent, scope: ErrorScopeData | undefined): ErrorEventId {
+    if (this._clientAnalytics === null) throw new Error("Hexclave error capture is unavailable before client observability starts");
+    return this._clientAnalytics.captureEvent(event, scope);
+  }
+
+  startSpan(spanType: string, options?: StartSpanOptions): Span {
+    if (isObservabilityEnabled(this._observabilityOptions) && this._clientAnalytics) {
+      return this._clientAnalytics.startSpan(spanType, options);
+    }
+    assertValidSpanStartInput(spanType, options);
+    const resolved = resolveSpanParent({ explicit: options?.parent, links: options?.links, ambient: [] });
+    if ("error" in resolved) {
+      throw new Error(`Hexclave analytics: ${resolved.error}`);
+    }
+    return createInertSpanHandle({
+      traceId: resolved.traceId,
+      spanId: generateOtelSpanId(),
+      spanType,
+      startedAtMs: options?.startedAtMs ?? Date.now(),
+      parentSpanId: resolved.parentSpanId,
+      initialData: { ...options?.data ?? {} },
+      ...resolved.traceFlags === undefined ? {} : { traceFlags: resolved.traceFlags },
+      ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
+    });
+  }
+
+  setGlobalSpan(span: Span): void {
+    this._clientAnalytics?.setGlobalSpan(span);
+  }
+
+  clearGlobalSpan(span: Span): void {
+    this._clientAnalytics?.clearGlobalSpan(span);
+  }
+
+  async flush(): Promise<void> {
+    await this._clientAnalytics?.flush();
+  }
+
+  withSpan<T>(spanType: string, fn: (span: Span) => Promise<T> | T): Promise<T>;
+  withSpan<T>(spanType: string, options: StartSpanOptions, fn: (span: Span) => Promise<T> | T): Promise<T>;
+  withSpan<T>(spanType: string, optionsOrFn: StartSpanOptions | ((span: Span) => Promise<T> | T), maybeFn?: (span: Span) => Promise<T> | T): Promise<T> {
+    return withSpanImpl((type, options) => this.startSpan(type, options), spanType, optionsOrFn, maybeFn);
+  }
+
+  /**
+   * Analytics and replay uploads must not produce HTTP client spans: each
+   * such span would need another analytics upload, creating a self-sustaining
+   * flush loop. Other SDK calls propagate the active browser operation to
+   * backend instrumentation.
+   *
+   * URL-based (not a re-entrancy flag) keeps timer and keepalive uploads
+   * covered. Exact path matching avoids suppressing customer traffic on
+   * same-origin proxy setups such as `baseUrl: "/hexclave-api"`.
+   */
+  protected _shouldIgnoreOwnApiFetchUrl(url: string): boolean {
+    const interfaceOptions = this._interface.options;
+    return shouldIgnoreTelemetryDeliveryUrl(
+      url,
+      (interfaceOptions.getAnalyticsBaseUrl ?? interfaceOptions.getBaseUrl)(),
+      typeof window !== "undefined" ? window.location.origin : undefined,
+    );
+  }
+
+  /**
+   * The CORRELATION context an outgoing request should carry so backend telemetry
+   * lands on the right session and page: the per-tab replay segment plus the
+   * current page view. Deliberately free of hierarchy — that rides `traceparent`,
+   * built separately in getSpanPropagationHeaders.
+   *
+   * Tenancy is deliberately absent: the receiver derives it from authenticated
+   * request state, while an external W3C parent is valid even when its row lives
+   * in another OTel backend.
+   */
+  protected _getSpanPropagationContext(): SpanPropagationContext | null {
+    const tracker = this._clientAnalytics;
+    if (!tracker) return null;
+    if (this._observabilityOptions?.spanPropagation?.enabled === false) return null;
+    const segmentId = tracker.getSessionReplaySegmentId();
+    const pageViewSpanId = tracker.getCurrentPageViewSpanId();
+    return {
+      ...segmentId ? { sessionReplaySegmentId: segmentId } : {},
+      ...pageViewSpanId != null ? { pageViewSpanId } : {},
+    };
+  }
+
+  /**
+   * Both propagation headers for a manually-instrumented transport. `parent` pins
+   * the trace explicitly; otherwise the nearest ambient span supplies it, falling
+   * back to the current `$page-view` so a manually instrumented transport lands in the same
+   * trace the auto-instrumented one would. `root: true` suppresses `traceparent`
+   * entirely — with no span to name, there is no hierarchy to state, and inventing
+   * a trace id here would fabricate a parent span that never exists.
+   */
+  getSpanPropagationHeaders(options?: { parent?: ParentRef, root?: boolean }): Record<string, string> {
+    if (!isObservabilityEnabled(this._observabilityOptions)) return {};
+    const tracker = this._clientAnalytics;
+    const context = this._getSpanPropagationContext();
+    const resolved = tracker === null ? null : resolveSpanParent({
+      explicit: options?.parent,
+      ambient: tracker.getAmbientSpanContexts(),
+      fallbackParent: tracker.getPageViewSpanContext(),
+      root: options?.root,
+    });
+    const parent = resolved !== null && !("error" in resolved) && resolved.parentSpanId !== null
+      ? {
+        traceId: resolved.traceId,
+        spanId: resolved.parentSpanId,
+        traceFlags: resolved.traceFlags ?? TraceFlags.SAMPLED,
+        ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
+      }
+      : null;
+    const propagatableParent = parent !== null && (parent.traceFlags & TraceFlags.SAMPLED) !== 0
+      ? parent
+      : null;
+    return buildPropagationHeaderValues({
+      traceparent: propagatableParent === null ? null : {
+        traceId: propagatableParent.traceId,
+        spanId: propagatableParent.spanId,
+        sampled: true,
+        ...propagatableParent.traceState === undefined ? {} : { traceState: propagatableParent.traceState },
+      },
+      context,
+    });
+  }
+
   async getAccessToken(options?: { tokenStore?: TokenStoreInit }): Promise<string | null> {
-    const user = await this.getUser({ tokenStore: options?.tokenStore ?? undefined as any });
+    const tokenStore = options?.tokenStore;
+    const user = tokenStore === undefined
+      ? await this.getUser()
+      : await this.getUser({ tokenStore });
     if (user) {
       return await user.getAccessToken();
     }
@@ -4432,7 +4882,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
 
   // IF_PLATFORM react-like
   useAccessToken(options?: { tokenStore?: TokenStoreInit }): string | null {
-    const user = this.useUser({ tokenStore: options?.tokenStore ?? undefined as any });
+    const tokenStore = options?.tokenStore;
+    const user = tokenStore === undefined
+      ? this.useUser()
+      : this.useUser({ tokenStore });
     if (user) {
       return user.useAccessToken();
     }
@@ -4441,7 +4894,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   // END_PLATFORM
 
   async getRefreshToken(options?: { tokenStore?: TokenStoreInit }): Promise<string | null> {
-    const user = await this.getUser({ tokenStore: options?.tokenStore ?? undefined as any });
+    const tokenStore = options?.tokenStore;
+    const user = tokenStore === undefined
+      ? await this.getUser()
+      : await this.getUser({ tokenStore });
     if (user) {
       return await user.getRefreshToken();
     }
@@ -4450,7 +4906,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
 
   // IF_PLATFORM react-like
   useRefreshToken(options?: { tokenStore?: TokenStoreInit }): string | null {
-    const user = this.useUser({ tokenStore: options?.tokenStore ?? undefined as any });
+    const tokenStore = options?.tokenStore;
+    const user = tokenStore === undefined
+      ? this.useUser()
+      : this.useUser({ tokenStore });
     if (user) {
       return user.useRefreshToken();
     }
@@ -4483,7 +4942,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   // END_PLATFORM
 
   async getAuthJson(options?: { tokenStore?: TokenStoreInit }): Promise<{ accessToken: string | null, refreshToken: string | null }> {
-    const user = await this.getUser({ tokenStore: options?.tokenStore ?? undefined as any });
+    const tokenStore = options?.tokenStore;
+    const user = tokenStore === undefined
+      ? await this.getUser()
+      : await this.getUser({ tokenStore });
     if (user) {
       return await user.getAuthJson();
     }
@@ -4492,7 +4954,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
 
   // IF_PLATFORM react-like
   useAuthJson(options?: { tokenStore?: TokenStoreInit }): { accessToken: string | null, refreshToken: string | null } {
-    const user = this.useUser({ tokenStore: options?.tokenStore ?? undefined as any });
+    const tokenStore = options?.tokenStore;
+    const user = tokenStore === undefined
+      ? this.useUser()
+      : this.useUser({ tokenStore });
     if (user) {
       return user.useAuthJson();
     }
@@ -4583,10 +5048,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
           return clientApp as any;
         }
 
-        const { analytics, ...restJson } = omit(json, ["uniqueIdentifier"]);
+        const { analytics, observability, telemetry, ...restJson } = omit(json, ["uniqueIdentifier"]);
         const app = new _HexclaveClientAppImplIncomplete<HasTokenStore, ProjectId>({
           ...restJson as any,
           analytics: analyticsOptionsFromJson(analytics),
+          observability,
+          telemetry,
         }, {
           uniqueIdentifier: json.uniqueIdentifier,
           checkString: providedCheckString,
@@ -4625,6 +5092,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
           devTool: this._options.devTool,
           automaticSideEffects: this._options.automaticSideEffects,
           analytics: analyticsOptionsToJson(this._analyticsOptions),
+          observability: observabilityOptionsToJson(this._observabilityOptions),
+          telemetry: telemetryOptionsToJson(this._telemetryOptions),
         };
       },
       setCurrentUser: (userJsonPromise: Promise<CurrentUserCrud['Client']['Read'] | null>) => {

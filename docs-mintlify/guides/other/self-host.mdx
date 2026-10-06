@@ -169,6 +169,8 @@ The Docker image does not start cron jobs for you. In production, configure exac
 | `/api/latest/internal/email-queue-step` | Processes queued emails. |
 | `/api/latest/internal/external-db-sync/sequencer` | Schedules external database sync work. |
 | `/api/latest/internal/external-db-sync/poller` | Polls and advances external database sync work. |
+| `/api/latest/internal/workflow-engine-step` | Dispatches workflow events and advances workflow runs. |
+| `/api/latest/internal/issues/reconciler` | Repairs telemetry batches whose issue updates were interrupted. |
 
 For example, a scheduler can run these requests every minute:
 
@@ -176,9 +178,11 @@ For example, a scheduler can run these requests every minute:
 curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://auth-api.example.com/api/latest/internal/email-queue-step
 curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://auth-api.example.com/api/latest/internal/external-db-sync/sequencer
 curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://auth-api.example.com/api/latest/internal/external-db-sync/poller
+curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://auth-api.example.com/api/latest/internal/workflow-engine-step
+curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://auth-api.example.com/api/latest/internal/issues/reconciler
 ```
 
-Use your deployment platform's scheduler, Kubernetes `CronJob`, systemd timer, or another reliable cron service. Configure it to treat every non-2xx response as a failed run—the `-f` option in the example does this. A request that reached the server is not necessarily a successful tick. If you run multiple application replicas, do not let every replica run its own scheduler against the same database.
+Use your deployment platform's scheduler, Kubernetes `CronJob`, systemd timer, or another reliable cron service. Run the reconciler every five minutes; the other endpoints can run every minute. QStash-delivered workers, including telemetry materialization, are not cron jobs and should not be added to this list. Configure the scheduler to treat every non-2xx response as a failed run—the `-f` option in the example does this. A request that reached the server is not necessarily a successful tick. If you run multiple application replicas, do not let every replica run its own scheduler against the same database.
 
 ### 5. Put It Behind HTTPS
 

@@ -1,454 +1,357 @@
 // @vitest-environment jsdom
 
-import { KnownErrors } from "@hexclave/shared/dist/known-errors";
-import { Result } from "@hexclave/shared/dist/utils/results";
+import { propagation, trace } from "@opentelemetry/api";
+import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator } from "@opentelemetry/core";
+import { logs } from "@opentelemetry/api-logs";
+import { InMemoryLogRecordExporter, LoggerProvider, SimpleLogRecordProcessor } from "@opentelemetry/sdk-logs";
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EventTracker } from "./event-tracker";
+import { EventTracker, type EventTrackerDeps } from "./event-tracker";
 
-async function advancePastFlush() {
-  await vi.advanceTimersByTimeAsync(10_000);
-  await Promise.resolve();
+const PROJECT_ID = "00000000-0000-4000-8000-000000000001";
+const SEGMENT_ID = "11111111-1111-4111-8111-111111111111";
+const SESSION_ROOT = {
+  traceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  spanId: "bbbbbbbbbbbbbbbb",
+  traceState: "vendor=value",
+};
+
+const loggerProviders: LoggerProvider[] = [];
+const tracerProviders: BasicTracerProvider[] = [];
+
+function installOtel(): {
+  logsExporter: InMemoryLogRecordExporter,
+  spansExporter: InMemorySpanExporter,
+  loggerProvider: LoggerProvider,
+} {
+  const logsExporter = new InMemoryLogRecordExporter();
+  const loggerProvider = new LoggerProvider({
+    processors: [new SimpleLogRecordProcessor({ exporter: logsExporter })],
+  });
+  loggerProviders.push(loggerProvider);
+  logs.setGlobalLoggerProvider(loggerProvider);
+
+  const spansExporter = new InMemorySpanExporter();
+  const tracerProvider = new BasicTracerProvider({
+    spanProcessors: [new SimpleSpanProcessor(spansExporter)],
+  });
+  tracerProviders.push(tracerProvider);
+  if (!trace.setGlobalTracerProvider(tracerProvider)) throw new Error("Could not install test TracerProvider");
+  return { logsExporter, spansExporter, loggerProvider };
 }
 
-function getSentEventTypes(sentBodies: string[]) {
-  const [body] = sentBodies;
+function makeTracker(overrides?: Partial<EventTrackerDeps>): EventTracker {
+  return new EventTracker({
+    projectId: PROJECT_ID,
+    resource: { service: { name: "browser-test" } },
+    clientVersion: "test-version",
+    sessionReplaySegmentId: SEGMENT_ID,
+    sessionRootContext: SESSION_ROOT,
+    productAnalyticsEnabled: true,
+    ...overrides,
+  });
+}
 
-  const payload = JSON.parse(body);
-  if (typeof payload !== "object" || payload === null || !("events" in payload) || !Array.isArray(payload.events)) {
-    throw new Error("Expected analytics batch payload to include an events array.");
+class MockPerformanceObserver {
+  static supportedEntryTypes = ["navigation", "paint", "largest-contentful-paint", "layout-shift", "event", "first-input"];
+  static instances: MockPerformanceObserver[] = [];
+
+  observedType: string | null = null;
+
+  constructor(private readonly callback: (list: { getEntries: () => unknown[] }) => void) {
+    MockPerformanceObserver.instances.push(this);
   }
 
-  return (payload.events as { event_type: string }[]).map((event) => event.event_type);
+  observe(options: { type: string }) {
+    this.observedType = options.type;
+  }
+
+  disconnect() {}
+
+  emit(entries: unknown[]) {
+    this.callback({ getEntries: () => entries });
+  }
+
+  static byType(type: string): MockPerformanceObserver {
+    const instance = MockPerformanceObserver.instances.find((candidate) => candidate.observedType === type);
+    if (!instance) throw new Error(`No observer registered for ${type}`);
+    return instance;
+  }
 }
 
-describe("EventTracker", () => {
-  afterEach(() => {
-    vi.useRealTimers();
+afterEach(async () => {
+  vi.useRealTimers();
+  document.body.replaceChildren();
+  Reflect.set(globalThis, "hexclaveCapturedErrors", []);
+  MockPerformanceObserver.instances = [];
+  trace.disable();
+  logs.disable();
+  propagation.disable();
+  await Promise.all(loggerProviders.splice(0).map(async (provider) => await provider.shutdown()));
+  await Promise.all(tracerProviders.splice(0).map(async (provider) => await provider.shutdown()));
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("EventTracker OTel autocapture", () => {
+  it("does not re-report a failed background OTLP flush as an application error", async () => {
+    vi.useFakeTimers();
+    const forceFlushOtel = vi.fn(async () => {
+      throw new Error("OTLP endpoint unavailable");
+    });
+    const tracker = makeTracker({ forceFlushOtel });
+    document.body.innerHTML = "<button id=checkout>Checkout</button>";
+    tracker.start();
+    document.querySelector("#checkout")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    Reflect.set(globalThis, "hexclaveCapturedErrors", []);
+
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(forceFlushOtel).toHaveBeenCalledOnce();
+    expect(Reflect.get(globalThis, "hexclaveCapturedErrors")).toEqual([]);
+    tracker.stop();
   });
 
-  it("captures events when browser globals are exposed as accessor descriptors", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = "<button>Open project</button>";
+  it("emits explicit product events as named LogRecords, never a legacy batch", async () => {
+    const otel = installOtel();
+    const forceFlush = vi.fn(async () => await otel.loggerProvider.forceFlush());
+    const tracker = makeTracker({ forceFlushOtel: forceFlush });
 
-    const screenDescriptor = Object.getOwnPropertyDescriptor(window, "screen");
-    const historyDescriptor = Object.getOwnPropertyDescriptor(window, "history");
-    expect(screenDescriptor?.value).toBeUndefined();
-    expect(historyDescriptor?.value).toBeUndefined();
-    expect(screenDescriptor?.get).toBeTypeOf("function");
-    expect(historyDescriptor?.get).toBeTypeOf("function");
+    await tracker.trackCustomEvent("checkout_completed", { amount: 42 }, { parent: SESSION_ROOT });
 
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
+    expect(forceFlush).toHaveBeenCalledOnce();
+    expect(otel.logsExporter.getFinishedLogRecords()).toMatchObject([{
+      eventName: "checkout_completed",
+      spanContext: { traceId: SESSION_ROOT.traceId, spanId: SESSION_ROOT.spanId },
+      attributes: {
+        "hexclave.signal.type": "event",
+        "hexclave.session_replay.segment.id": SEGMENT_ID,
+        "hexclave.data": { amount: 42 },
       },
-    });
-
-    try {
-      tracker.start();
-      document.querySelector("button")?.dispatchEvent(new MouseEvent("click", {
-        bubbles: true,
-        clientX: 12,
-        clientY: 34,
-      }));
-
-      await advancePastFlush();
-
-      // Dead-click classification marks the buffered $click in place —
-      // exactly one click event either way.
-      expect(getSentEventTypes(sentBodies)).toMatchInlineSnapshot(`
-        [
-          "$page-view",
-          "$click",
-        ]
-      `);
-    } finally {
-      tracker.stop();
-    }
+    }]);
   });
 
-  it("emits a PostHog-style elements_chain plus scaled pointer coords for $click", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = `
-      <main>
-        <section class="card panel">
-          <button id="save-btn" data-testid="save" aria-label="Save project">Save changes</button>
-        </section>
-      </main>
-    `;
+  it("inert-ifies never-ended CHILD facades on the sign-out sweep", async () => {
+    installOtel();
+    const tracker = makeTracker();
+    const parent = tracker.startSpan("parent-op");
+    const child = parent.startSpan("child-op");
+    const grandchild = child.startSpan("grandchild-op");
+    expect(grandchild.isEnded).toBe(false);
 
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
-    });
+    tracker.clearBuffer();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    try {
-      tracker.start();
-      const button = document.querySelector("#save-btn");
-      if (button == null) throw new Error("button missing");
-      button.dispatchEvent(new MouseEvent("click", {
-        bubbles: true,
-        clientX: 100,
-        clientY: 200,
-      }));
-
-      await advancePastFlush();
-
-      const payload = JSON.parse(sentBodies[0] ?? "{}") as { events: { event_type: string, data: Record<string, unknown> }[] };
-      const click = payload.events.find((event) => event.event_type === "$click");
-      if (click == null) throw new Error("no $click event captured");
-
-      // elements_chain encodes the target leaf plus a few ancestors. Leaf is
-      // first; segments are `;`-delimited. Assert against substrings rather
-      // than the full string so jsdom layout quirks don't make this flaky.
-      const chain = click.data.elements_chain;
-      expect(typeof chain).toBe("string");
-      expect(chain).toContain('button');
-      expect(chain).toContain('attr__id="save-btn"');
-      expect(chain).toContain('attr__data-testid="save"');
-      expect(chain).toContain('attr__aria-label="Save project"');
-      expect(chain).toContain('text="Save changes"');
-      // Ancestor section is in the chain too.
-      expect(chain).toContain("section");
-
-      // Pre-scaled coords land in clickmap_events.pointer_*. SCALE_FACTOR=16.
-      expect(click.data.x_scaled).toBe(Math.round(100 / 16));
-      expect(click.data.y_scaled).toBe(Math.round(200 / 16));
-      expect(click.data.client_y_scaled).toBe(Math.round(200 / 16));
-      expect(click.data.scale_factor).toBe(16);
-      expect(click.data.pointer_relative_x).toBeCloseTo(100 / window.innerWidth, 4);
-      expect(click.data.pointer_target_fixed).toBe(0);
-
-      // Legacy CSS selector still emitted for back-compat. The builder prefers
-      // data-testid over id, so we assert against that anchor rather than #id.
-      expect(click.data.selector).toContain('data-testid="save"');
-      expect(click.data.tag_name).toBe("button");
-    } finally {
-      tracker.stop();
-    }
+    expect(parent.isEnded).toBe(true);
+    expect(child.isEnded).toBe(true);
+    expect(grandchild.isEnded).toBe(true);
   });
 
-  it("ignores clicks inside the Hexclave dev tool", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = `
-      <div id="__hexclave-dev-tool-root">
-        <button>Clickmap toolbar control</button>
-      </div>
-    `;
+  it("keeps the parent registered for the sign-out sweep after a child ends", async () => {
+    installOtel();
+    const tracker = makeTracker();
+    const parent = tracker.startSpan("parent-op");
+    const child = parent.startSpan("child-op");
+    await child.end();
+    expect(parent.isEnded).toBe(false);
 
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
-    });
-
-    try {
-      tracker.start();
-      document.querySelector("button")?.dispatchEvent(new MouseEvent("click", {
-        bubbles: true,
-        clientX: 100,
-        clientY: 200,
-      }));
-
-      await advancePastFlush();
-
-      expect(getSentEventTypes(sentBodies)).toMatchInlineSnapshot(`
-        [
-          "$page-view",
-        ]
-      `);
-    } finally {
-      tracker.stop();
-    }
+    tracker.clearBuffer();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(parent.isEnded).toBe(true);
   });
 
-  it("flags pointer_target_fixed when the target sits under a fixed-position ancestor", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = `
-      <header style="position: fixed; top: 0">
-        <button id="cta">Sign up</button>
-      </header>
-    `;
-
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
+  it("sends the real W3C traceparent (not correlation-only baggage) on span.fetch", async () => {
+    installOtel();
+    propagation.setGlobalPropagator(new W3CTraceContextPropagator());
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}"));
+    const tracker = makeTracker({
+      getPropagationPolicy: () => ({ selfOrigin: "https://app.example.com", allowedOrigins: ["https://api.example.com"], allowLocalhost: false, correlationBaggage: true }),
     });
 
-    try {
-      tracker.start();
-      document.querySelector("#cta")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await advancePastFlush();
+    const span = tracker.startSpan("db.query");
+    await span.fetch("https://api.example.com/data");
 
-      const payload = JSON.parse(sentBodies[0] ?? "{}") as { events: { event_type: string, data: Record<string, unknown> }[] };
-      const click = payload.events.find((event) => event.event_type === "$click");
-      expect(click?.data.pointer_target_fixed).toBe(1);
-    } finally {
-      tracker.stop();
-    }
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const headers = new Headers(fetchSpy.mock.calls[0]?.[1]?.headers);
+    const traceparent = headers.get("traceparent");
+    expect(traceparent).toBe(`00-${span.traceId}-${span.spanId}-01`);
+    expect(headers.get("baggage")).toContain(SEGMENT_ID);
+    await span.end();
   });
 
-  it("flags a click with no observable effect as dead on its single $click event", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = "<button id=\"dead\">Does nothing</button>";
-
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
+  it("spanPropagation.enabled=false strips correlation baggage from span.fetch but keeps traceparent", async () => {
+    installOtel();
+    propagation.setGlobalPropagator(new CompositePropagator({
+      propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
+    }));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}"));
+    const tracker = makeTracker({
+      getPropagationPolicy: () => ({ selfOrigin: "https://app.example.com", allowedOrigins: ["https://api.example.com"], allowLocalhost: false, correlationBaggage: false }),
     });
 
-    try {
-      tracker.start();
-      const clickAtMs = Date.now();
-      document.querySelector("#dead")?.dispatchEvent(new MouseEvent("click", {
-        bubbles: true,
-        clientX: 10,
-        clientY: 20,
-      }));
+    const span = tracker.startSpan("db.query");
+    await span.fetch("https://api.example.com/data");
 
-      await advancePastFlush();
-
-      const payload = JSON.parse(sentBodies[0] ?? "{}") as { events: { event_type: string, event_at_ms: number, data: Record<string, unknown> }[] };
-      const clicks = payload.events.filter((event) => event.event_type === "$click");
-      expect(clicks).toHaveLength(1);
-      const click = clicks[0];
-
-      // One event per physical click: the buffered $click is marked dead in
-      // place, still timestamped at the original click rather than at
-      // classification time (~3s later).
-      expect(click.data.dead).toBe(1);
-      expect(click.event_at_ms).toBe(clickAtMs);
-    } finally {
-      tracker.stop();
-    }
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const headers = new Headers(fetchSpy.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("traceparent")).toBe(`00-${span.traceId}-${span.spanId}-01`);
+    expect(headers.get("baggage")).toBeNull();
+    await span.end();
   });
 
-  it("does not flag a click as dead when it mutates the DOM", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = "<button id=\"live\">Adds content</button><div id=\"out\"></div>";
+  it("records web-vitals metrics once per page view at span end, not per intermediate update", () => {
+    vi.stubGlobal("PerformanceObserver", MockPerformanceObserver);
+    installOtel();
+    const tracker = makeTracker();
+    const recorder = Reflect.get(tracker, "_webVitalsMetricRecorder");
+    const record = vi.spyOn(recorder, "record");
+    tracker.start();
 
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
-    });
+    MockPerformanceObserver.byType("largest-contentful-paint").emit([{ startTime: 900.2 }]);
+    MockPerformanceObserver.byType("largest-contentful-paint").emit([{ startTime: 1500.7 }]);
+    expect(record).not.toHaveBeenCalled();
 
-    try {
-      tracker.start();
-      const button = document.querySelector("#live");
-      if (button == null) throw new Error("button missing");
-      button.addEventListener("click", () => {
-        document.querySelector("#out")?.appendChild(document.createElement("p"));
-      });
-      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      // Let the MutationObserver microtask run so the mutation is recorded
-      // before the dead-click sweeps start.
-      await Promise.resolve();
-
-      await advancePastFlush();
-
-      const payload = JSON.parse(sentBodies[0] ?? "{}") as { events: { event_type: string, data: Record<string, unknown> }[] };
-      const clicks = payload.events.filter((event) => event.event_type === "$click");
-      expect(clicks).toHaveLength(1);
-      expect(clicks[0].data.dead).toBeUndefined();
-    } finally {
-      tracker.stop();
-    }
+    tracker.stop();
+    expect(record).toHaveBeenCalledOnce();
+    expect(record.mock.calls[0]?.[0]).toMatchObject({ lcp_ms: 1501 });
   });
 
-  it("drains held clicks as alive on pagehide so navigation clicks are never lost", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = "<a id=\"nav\" href=\"/pricing\">Pricing</a>";
+  it("rejects invalid public event names and cyclic structured data before OTel", async () => {
+    const otel = installOtel();
+    const tracker = makeTracker();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
 
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
-    });
-
-    try {
-      tracker.start();
-      const clickAtMs = Date.now();
-      document.querySelector("#nav")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
-      // Navigation fires pagehide well before any classification sweep — the
-      // keepalive flush ships the still-unclassified click as a plain (alive)
-      // $click.
-      window.dispatchEvent(new Event("pagehide"));
-      await Promise.resolve();
-      await Promise.resolve();
-
-      const payload = JSON.parse(sentBodies[0] ?? "{}") as { events: { event_type: string, event_at_ms: number, data: Record<string, unknown> }[] };
-      const clicks = payload.events.filter((event) => event.event_type === "$click");
-      expect(clicks).toHaveLength(1);
-      expect(clicks[0].data.dead).toBeUndefined();
-      expect(clicks[0].event_at_ms).toBe(clickAtMs);
-    } finally {
-      tracker.stop();
-    }
+    await expect(tracker.trackCustomEvent("$reserved")).rejects.toThrow();
+    await expect(tracker.trackCustomEvent("valid", cyclic)).rejects.toThrow();
+    expect(otel.logsExporter.getFinishedLogRecords()).toHaveLength(0);
   });
 
-  it("holds an unclassified click out of a flush and ships it on the next one", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = "<button id=\"late\">Late click</button>";
+  it("records page views as OTel spans and clicks as child-correlated LogRecords", async () => {
+    const otel = installOtel();
+    const tracker = makeTracker({ forceFlushOtel: async () => await otel.loggerProvider.forceFlush() });
+    document.body.innerHTML = "<button id=checkout>Checkout</button>";
+    tracker.start();
+    const pageViewSpanId = tracker.getCurrentPageViewSpanId();
+    if (pageViewSpanId === null) throw new Error("Expected startup to create a page-view span");
 
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
+    document.querySelector("#checkout")?.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      clientX: 20,
+      clientY: 30,
+    }));
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    await tracker.flush();
+
+    const click = otel.logsExporter.getFinishedLogRecords().find((record) => record.eventName === "$click");
+    if (click === undefined) throw new Error("Expected a click LogRecord");
+    expect(click.spanContext).toMatchObject({ traceId: SESSION_ROOT.traceId, spanId: pageViewSpanId });
+    expect(click.attributes).toMatchObject({
+      "hexclave.signal.type": "event",
+      "hexclave.session_replay.segment.id": SEGMENT_ID,
+      "hexclave.page_view.span_id": pageViewSpanId,
     });
+    expect(click.attributes["hexclave.data"]).toMatchObject({ tag_name: "button", text: "Checkout" });
 
-    try {
-      tracker.start();
-      // Click 500ms before the 10s flush tick: classification cannot finish
-      // in time, so the flush must hold the click back rather than send it
-      // unclassified.
-      await vi.advanceTimersByTimeAsync(9_500);
-      document.querySelector("#late")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await vi.advanceTimersByTimeAsync(500);
-
-      expect(getSentEventTypes(sentBodies)).toMatchInlineSnapshot(`
-        [
-          "$page-view",
-        ]
-      `);
-
-      // By the next flush the sweep has classified it (dead — nothing
-      // observable happened) and it ships marked.
-      await vi.advanceTimersByTimeAsync(10_000);
-      const second = JSON.parse(sentBodies[1] ?? "{}") as { events: { event_type: string, data: Record<string, unknown> }[] };
-      expect(second.events.map((event) => event.event_type)).toMatchInlineSnapshot(`
-        [
-          "$click",
-        ]
-      `);
-      expect(second.events[0].data.dead).toBe(1);
-    } finally {
-      tracker.stop();
-    }
+    const pageView = otel.spansExporter.getFinishedSpans().find((span) => span.name === "$page-view");
+    if (pageView === undefined) throw new Error("Expected a page-view span");
+    expect(pageView.spanContext()).toMatchObject({ traceId: SESSION_ROOT.traceId, spanId: pageViewSpanId });
+    expect(pageView.parentSpanContext).toMatchObject({ spanId: SESSION_ROOT.spanId });
+    tracker.stop();
   });
 
-  it("captures client-side navigations when history is exposed as an accessor descriptor", async () => {
-    vi.useFakeTimers();
+  it("exposes the current page view as the ambient OTel context with correlation baggage", () => {
+    installOtel();
+    const tracker = makeTracker();
+    const preStart = tracker.getAmbientOtelContext();
+    if (preStart === null) throw new Error("Expected a session-root ambient before the first page view");
+    expect(trace.getSpanContext(preStart)).toMatchObject({ traceId: SESSION_ROOT.traceId, spanId: SESSION_ROOT.spanId });
+    expect(propagation.getBaggage(preStart)?.getEntry("hexclave.page_view.span_id")).toBeUndefined();
+    expect(makeTracker({ sessionRootContext: undefined }).getAmbientOtelContext()).toBeNull();
 
-    const historyDescriptor = Object.getOwnPropertyDescriptor(window, "history");
-    expect(historyDescriptor?.value).toBeUndefined();
-    expect(historyDescriptor?.get).toBeTypeOf("function");
+    tracker.start();
+    const pageViewSpanId = tracker.getCurrentPageViewSpanId();
+    if (pageViewSpanId === null) throw new Error("Expected startup to create a page-view span");
+    const ambient = tracker.getAmbientOtelContext();
+    if (ambient === null) throw new Error("Expected an ambient context once the page-view span exists");
+    expect(trace.getSpanContext(ambient)).toMatchObject({ traceId: SESSION_ROOT.traceId, spanId: pageViewSpanId });
+    const baggage = propagation.getBaggage(ambient);
+    expect(baggage?.getEntry("hexclave.page_view.span_id")?.value).toBe(pageViewSpanId);
+    expect(baggage?.getEntry("hexclave.session_replay.segment.id")?.value).toBe(SEGMENT_ID);
+    expect(tracker.getAmbientOtelContext()).toBe(ambient);
 
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.ok(new Response());
-      },
-    });
+    window.history.pushState({}, "", "/next-page");
+    const afterNavigation = tracker.getAmbientOtelContext();
+    if (afterNavigation === null) throw new Error("Expected an ambient context after navigation");
+    expect(trace.getSpanContext(afterNavigation)?.spanId).toBe(tracker.getCurrentPageViewSpanId());
+    expect(trace.getSpanContext(afterNavigation)?.spanId).not.toBe(pageViewSpanId);
 
-    try {
-      tracker.start();
-      window.history.pushState({}, "", "/projects/test-project");
-
-      await advancePastFlush();
-
-      expect(getSentEventTypes(sentBodies)).toMatchInlineSnapshot(`
-        [
-          "$page-view",
-          "$page-view",
-        ]
-      `);
-    } finally {
-      tracker.stop();
-    }
+    tracker.stop();
+    expect(tracker.getAmbientOtelContext()).toBeNull();
   });
 
-  it("silently ignores network errors caused by ad blockers", async () => {
+  it("keeps a click local until dead-click classification has completed", async () => {
     vi.useFakeTimers();
-    document.body.innerHTML = "<button>Click me</button>";
+    const otel = installOtel();
+    const tracker = makeTracker({ forceFlushOtel: async () => await otel.loggerProvider.forceFlush() });
+    document.body.innerHTML = "<button id=dead>Does nothing</button>";
+    tracker.start();
 
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.error(new TypeError("Failed to fetch"));
-      },
-    });
+    document.querySelector("#dead")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await tracker.flush();
+    expect(otel.logsExporter.getFinishedLogRecords().find((record) => record.eventName === "$click")).toBeUndefined();
 
-    try {
-      tracker.start();
-
-      await advancePastFlush();
-      expect(sentBodies).toHaveLength(1);
-      expect(warnSpy).not.toHaveBeenCalled();
-
-      // Unlike ANALYTICS_NOT_ENABLED, ad blocker errors do NOT disable the
-      // tracker — subsequent flushes continue attempting delivery.
-      document.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await advancePastFlush();
-      expect(sentBodies).toHaveLength(2);
-      expect(warnSpy).not.toHaveBeenCalled();
-    } finally {
-      tracker.stop();
-      warnSpy.mockRestore();
-    }
+    await vi.advanceTimersByTimeAsync(3_000);
+    await tracker.flush();
+    const click = otel.logsExporter.getFinishedLogRecords().find((record) => record.eventName === "$click");
+    if (click === undefined) throw new Error("Expected classified click");
+    expect(click.attributes["hexclave.data"]).toMatchObject({ dead: 1 });
+    tracker.stop();
   });
 
-  it("silently disables when client interface returns ANALYTICS_NOT_ENABLED as an error", async () => {
-    vi.useFakeTimers();
-    document.body.innerHTML = "<button>Click me</button>";
+  it("drops locally staged autocapture when browser identity rotates", async () => {
+    const otel = installOtel();
+    const tracker = makeTracker({ forceFlushOtel: async () => await otel.loggerProvider.forceFlush() });
+    document.body.innerHTML = "<button id=pending>Pending</button>";
+    tracker.start();
+    document.querySelector("#pending")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const sentBodies: string[] = [];
-    const tracker = new EventTracker({
-      projectId: "internal",
-      sendBatch: async (body) => {
-        sentBodies.push(body);
-        return Result.error(new KnownErrors.AnalyticsNotEnabled());
-      },
+    tracker.clearBuffer();
+    await tracker.flush();
+
+    expect(otel.logsExporter.getFinishedLogRecords().find((record) => record.eventName === "$click")).toBeUndefined();
+    tracker.stop();
+  });
+
+  it("does not install product autocapture when analytics is disabled", async () => {
+    const otel = installOtel();
+    const tracker = makeTracker({ productAnalyticsEnabled: false });
+    document.body.innerHTML = "<button id=ignored>Ignored</button>";
+    tracker.start();
+    document.querySelector("#ignored")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    await tracker.flush();
+
+    expect(otel.logsExporter.getFinishedLogRecords()).toHaveLength(0);
+    expect(otel.spansExporter.getFinishedSpans()).toHaveLength(0);
+    tracker.stop();
+  });
+
+  it("records opted-in integrity events through the same LogRecord contract", async () => {
+    const otel = installOtel();
+    const tracker = makeTracker({
+      integritySignals: true,
+      forceFlushOtel: async () => await otel.loggerProvider.forceFlush(),
     });
+    document.body.innerHTML = "<main id=target>Menu target</main>";
+    tracker.start();
+    document.querySelector("#target")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    await tracker.flush();
 
-    try {
-      tracker.start();
-
-      await advancePastFlush();
-      expect(sentBodies).toHaveLength(1);
-      expect(warnSpy).not.toHaveBeenCalled();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      expect((tracker as any)._flushTimer).toBeNull();
-
-      document.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await advancePastFlush();
-      expect(sentBodies).toHaveLength(1);
-    } finally {
-      tracker.stop();
-      warnSpy.mockRestore();
-    }
+    const event = otel.logsExporter.getFinishedLogRecords().find((record) => record.eventName === "$context-menu");
+    expect(event?.attributes["hexclave.signal.type"]).toBe("event");
+    tracker.stop();
   });
 });

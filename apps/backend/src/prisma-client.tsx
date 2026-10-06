@@ -631,8 +631,7 @@ async function rawQueryArray<Q extends RawQuery<any>[]>(tx: PrismaClientTransact
       ? Prisma.sql`SELECT * FROM (${combinedQuery.sql}) AS _`
       : combinedQuery.sql;
 
-    // Use the read replica if all queries are read-only and a replica is available
-    const queryClient = allReadOnly && '$replica' in tx
+    const queryClient = allReadOnly && '$replica' in tx && '$transaction' in tx
       ? (tx as any).$replica()
       : tx;
     const rawResult = await queryClient.$queryRaw(sqlQuery);

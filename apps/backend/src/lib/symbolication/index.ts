@@ -1,0 +1,16 @@
+export {
+  DEFAULT_JAVASCRIPT_SYMBOLICATION_LIMITS,
+  JavaScriptSymbolicationService,
+  parseStandardSourceMap,
+  type JavaScriptSymbolicationLimits,
+  type JavaScriptSymbolicationRequest,
+  type JavaScriptSymbolicationResult,
+  type ParsedSourceMap,
+  type RawJavaScriptFrame,
+  type SourceMapParseResult,
+  type SymbolicatedJavaScriptFrame,
+  type SymbolicatedJavaScriptLocation,
+  type SymbolicationDiagnostic,
+  type SymbolicationDiagnosticCode,
+  type SymbolicationSourceContext,
+} from "./javascript-symbolication";

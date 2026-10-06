@@ -851,7 +851,7 @@ describe("sendAnalyticsEventBatch encoding", () => {
     return fetchMock;
   }
 
-  it("gzips body and sends application/octet-stream when keepalive is false", async () => {
+  it("keeps sub-1-KiB bodies as plain JSON", async () => {
     const fetchMock = captureFetch();
     const iface = createClientInterface();
     const payload = JSON.stringify({ batch_id: "abc", events: [{ event_type: "$click" }] });
@@ -859,8 +859,19 @@ describe("sendAnalyticsEventBatch encoding", () => {
     await iface.sendAnalyticsEventBatch(payload, null, { keepalive: false });
 
     const init = getRequestInit(fetchMock);
-    const contentType = new Headers(init.headers).get("Content-Type");
-    expect(contentType).toBe("application/octet-stream");
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+    expect(init.body).toBe(payload);
+  });
+
+  it("gzips a compressible body when keepalive is false", async () => {
+    const fetchMock = captureFetch();
+    const iface = createClientInterface();
+    const payload = JSON.stringify({ batch_id: "abc", events: [{ event_type: "$click", data: "x".repeat(4_000) }] });
+
+    await iface.sendAnalyticsEventBatch(payload, null, { keepalive: false });
+
+    const init = getRequestInit(fetchMock);
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/octet-stream");
     expect(init.body).toBeInstanceOf(Uint8Array);
     await expect(gunzipToText(init.body)).resolves.toBe(payload);
   });
@@ -868,7 +879,7 @@ describe("sendAnalyticsEventBatch encoding", () => {
   it("falls back to plain JSON when keepalive is true (avoids racing pagehide tear-down)", async () => {
     const fetchMock = captureFetch();
     const iface = createClientInterface();
-    const payload = JSON.stringify({ batch_id: "abc", events: [] });
+    const payload = JSON.stringify({ batch_id: "abc", events: [{ data: "x".repeat(4_000) }] });
 
     await iface.sendAnalyticsEventBatch(payload, null, { keepalive: true });
 
@@ -881,7 +892,7 @@ describe("sendAnalyticsEventBatch encoding", () => {
     vi.stubGlobal("CompressionStream", undefined);
     const fetchMock = captureFetch();
     const iface = createClientInterface();
-    const payload = JSON.stringify({ batch_id: "abc", events: [] });
+    const payload = JSON.stringify({ batch_id: "abc", events: [{ data: "x".repeat(4_000) }] });
 
     await iface.sendAnalyticsEventBatch(payload, null, { keepalive: false });
 
@@ -897,7 +908,7 @@ describe("sendAnalyticsEventBatch encoding", () => {
     vi.stubGlobal("CompressionStream", ThrowingCompressionStream);
     const fetchMock = captureFetch();
     const iface = createClientInterface();
-    const payload = JSON.stringify({ batch_id: "abc", events: [] });
+    const payload = JSON.stringify({ batch_id: "abc", events: [{ data: "x".repeat(4_000) }] });
 
     await iface.sendAnalyticsEventBatch(payload, null, { keepalive: false });
 
@@ -933,7 +944,7 @@ describe("sendSessionReplayBatch encoding", () => {
   it("falls back to plain JSON when keepalive is true (avoids racing pagehide tear-down)", async () => {
     const fetchMock = captureFetch();
     const iface = createClientInterface();
-    const payload = JSON.stringify({ batch_id: "abc", events: [] });
+    const payload = JSON.stringify({ batch_id: "abc", events: [{ data: "x".repeat(4_000) }] });
 
     await iface.sendSessionReplayBatch(payload, null, { keepalive: true });
 
@@ -946,7 +957,7 @@ describe("sendSessionReplayBatch encoding", () => {
     vi.stubGlobal("CompressionStream", undefined);
     const fetchMock = captureFetch();
     const iface = createClientInterface();
-    const payload = JSON.stringify({ batch_id: "abc", events: [] });
+    const payload = JSON.stringify({ batch_id: "abc", events: [{ data: "x".repeat(4_000) }] });
 
     await iface.sendSessionReplayBatch(payload, null, { keepalive: false });
 
@@ -962,7 +973,7 @@ describe("sendSessionReplayBatch encoding", () => {
     vi.stubGlobal("CompressionStream", ThrowingCompressionStream);
     const fetchMock = captureFetch();
     const iface = createClientInterface();
-    const payload = JSON.stringify({ batch_id: "abc", events: [] });
+    const payload = JSON.stringify({ batch_id: "abc", events: [{ data: "x".repeat(4_000) }] });
 
     await iface.sendSessionReplayBatch(payload, null, { keepalive: false });
 

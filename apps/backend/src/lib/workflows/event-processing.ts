@@ -35,6 +35,16 @@ export function workflowEventRetryDelayMs(nextAttempt: number): number {
   return Math.min(60 * 60 * 1000, 60 * 1000 * 2 ** Math.min(Math.max(nextAttempt - 1, 0), 6));
 }
 
+export function didAnySkippedWorkflowResume(
+  skippedPausedWorkflowIds: ReadonlySet<string>,
+  currentPausedWorkflowIds: ReadonlySet<string>,
+): boolean {
+  for (const workflowId of skippedPausedWorkflowIds) {
+    if (!currentPausedWorkflowIds.has(workflowId)) return true;
+  }
+  return false;
+}
+
 /**
  * Splits a claimed batch into the events no workflow listens to (which only
  * need marking processed) and, per tenancy, the events to dispatch together

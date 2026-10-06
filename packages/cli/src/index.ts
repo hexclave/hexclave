@@ -18,6 +18,7 @@ import { registerFixCommand } from "./commands/fix.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerWhoamiCommand } from "./commands/whoami.js";
 import { registerTeamCommand } from "./commands/team.js";
+import { registerSourceMapsCommand } from "./commands/source-maps.js";
 
 const program = new Command();
 
@@ -31,6 +32,7 @@ registerLoginCommand(program);
 registerLogoutCommand(program);
 registerExecCommand(program);
 registerDeployCommand(program);
+registerSourceMapsCommand(program);
 registerConfigCommand(program);
 registerInitCommand(program);
 registerProjectCommand(program);

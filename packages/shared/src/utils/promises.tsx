@@ -1,4 +1,4 @@
-import { KnownError } from "..";
+import { KnownError } from "../known-errors";
 import { getProcessEnv } from "./env";
 import { HexclaveAssertionError, captureError, concatStacktraces, errorToNiceString } from "./errors";
 import { DependenciesMap } from "./maps";

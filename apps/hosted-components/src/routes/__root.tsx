@@ -220,6 +220,7 @@ function RootComponent() {
       publishableClientKey: publishableClientKeyNotNecessarySentinel,
       tokenStore: "cookie",
       baseUrl: getApiBaseUrlFromEnv(),
+      telemetry: { resource: { service: { name: "hosted-components" } } },
       urls: {
         handler: "/handler",
         signIn: "/handler/sign-in",

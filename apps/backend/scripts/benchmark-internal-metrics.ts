@@ -2372,7 +2372,6 @@ async function seedPerf(now: Date): Promise<void> {
   if (buf.length) await seed(buf, batchRows);
   // Force parts to settle so first-query cost isn't dominated by merges.
   const client = getClickhouseAdminClient();
-  await client.command({ query: "OPTIMIZE TABLE analytics_internal.events FINAL", clickhouse_settings: { mutations_sync: "2" } });
   console.log(`  done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 

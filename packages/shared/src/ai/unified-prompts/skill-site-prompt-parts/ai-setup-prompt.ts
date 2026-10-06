@@ -551,6 +551,7 @@ const shouldSetupAppPrompt: Record<PublicAppSetupPromptId, string> = {
   `,
   "fraud-protection": shouldSetupOnlyIfFitting,
   "analytics": shouldSetupAlways,
+  "warehouse": shouldSetupOnlyIfFitting,
   "teams": deindent`
     50%. When Hexclave authentication is used, and the project needs some notion of "teams", "companies", or "organizations" that group users.
   `,
@@ -762,6 +763,9 @@ const appSetupPrompt: Record<PublicAppSetupPromptId, string> =
   `,
   "analytics": deindent`
     The analytics app does not require any additional setup after enabling it. It will automatically start recording events, replays, and clickmaps after the app has been enabled in any of Hexclave's SDKs.
+  `,
+  "warehouse": deindent`
+    Warehouse gives your team a dedicated workspace to browse project tables and save ClickHouse queries. It does not require SDK setup.
   `,
   "clickmaps": deindent`
     Clickmaps use the same SDK analytics event pipeline as the Analytics app. Enable Analytics/clickmaps and make sure SDK analytics capture is not disabled; no separate code setup is needed for basic click tracking. See [Analytics](https://docs.hexclave.com/guides/apps/analytics/overview).

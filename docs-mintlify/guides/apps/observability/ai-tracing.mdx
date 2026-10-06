@@ -1,0 +1,115 @@
+---
+title: "AI and agent tracing"
+description: "First-class traces for LLM calls, tool executions, and agent runs — from the Vercel AI SDK, OpenTelemetry GenAI instrumentation, or any OTLP-emitting framework"
+---
+
+Hexclave's telemetry ingest speaks OTLP, and its spans pipeline understands AI telemetry natively. When your application calls a model, executes a tool, or runs an agent loop, those spans land in the same trace as the page view, click, and backend request that caused them — so "the user asked a question and the agent answered" is one trace, not a product-analytics event in one tool and an LLM trace in another.
+
+## Overview
+
+- **No proprietary SDK required**: AI spans arrive through the standard OTLP traces endpoint every Hexclave SDK already exports to
+- **Standards-normalized at ingest**: Hexclave recognizes both the [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai) (`gen_ai.*`, including pre-rename spellings like `gen_ai.system`) and the Vercel AI SDK's telemetry (`ai.*`, all versions), and extracts one canonical projection
+- **Queryable columns, not buried JSON**: operation, provider, model, and token usage become first-class columns on `spans`, so aggregations run at ClickHouse speed across your whole retention window
+- **Lossless**: the raw span attributes are always stored alongside the normalized columns — including prompt/completion content when your instrumentation is configured to record it
+
+## Vercel AI SDK
+
+With the Hexclave server SDK in its default `managed` OpenTelemetry mode, Hexclave registers the global tracer provider — which is exactly where the AI SDK sends its telemetry. Nothing else to wire up.
+
+On AI SDK 7, register the OpenTelemetry integration once at startup:
+
+```tsx
+import { registerTelemetry } from "ai";
+import { OpenTelemetry } from "@ai-sdk/otel";
+
+registerTelemetry(new OpenTelemetry());
+```
+
+On AI SDK 5/6, telemetry is opt-in per call instead:
+
+```tsx
+import { generateText } from "ai";
+
+const result = await generateText({
+  model: yourModel,
+  prompt: "Summarize this thread",
+  experimental_telemetry: {
+    isEnabled: true,
+    functionId: "summarize-thread",
+  },
+});
+```
+
+Either way, the spans flow through the active OTel provider into Hexclave. `functionId` surfaces as the agent name; token usage, model ids, and tool calls are all extracted automatically. If you run your own provider instead, set `observability: { openTelemetry: { provider: "existing-provider" } }` and attach Hexclave's exporter as described in [Cross-Tier Tracing](/guides/apps/observability/cross-tier-tracing#use-an-existing-opentelemetry-provider) — AI SDK telemetry follows the same path as every other span.
+
+<Note>
+The AI SDK does not record prompt and completion content by default in all versions. Check its `recordInputs`/`recordOutputs` telemetry settings (or the content-capture opt-in of whichever instrumentation you use) before assuming message content is available — Hexclave stores whatever the instrumentation sends and nothing more.
+</Note>
+
+## OpenTelemetry GenAI Instrumentation
+
+Any instrumentation that follows the OTel GenAI semantic conventions — the official Python/JS instrumentations for OpenAI, Anthropic, and Bedrock clients, or frameworks like LangChain and CrewAI through their OTel integrations — works by pointing its OTLP exporter at Hexclave. For services using a Hexclave SDK, that is already the default. For anything else (a Python agent worker, for example), configure a standard OTLP/HTTP exporter:
+
+```text
+Endpoint: https://api.hexclave.com/api/v1/analytics/otlp/v1/traces
+Headers:
+  x-hexclave-project-id: your-project-id
+  x-hexclave-access-type: server
+  x-hexclave-secret-server-key: your-server-key
+  x-hexclave-client-version: my-agent-worker/1.0.0
+```
+
+Both OTLP/HTTP encodings (`application/json` and `application/x-protobuf`) are accepted. The tenant is always resolved from the authenticated key — OTLP resource attributes cannot select a project or user.
+
+Agent frameworks with custom trace models (such as the OpenAI Agents SDK) plug in the same way through their OpenTelemetry bridges or trace processors: as long as spans leave the process as OTLP with `gen_ai.*` attributes, Hexclave normalizes them.
+
+## What Gets Normalized
+
+Every span is checked at ingest for AI telemetry across three attribute generations: the current GenAI conventions (`gen_ai.provider.name`, `gen_ai.usage.input_tokens`, ...), pre-rename GenAI spellings (`gen_ai.system`, `gen_ai.usage.prompt_tokens`, ...), and the Vercel AI SDK's `ai.*` family (`ai.model.id`, `ai.usage.promptTokens`, ...). When both vintages appear on one span, the current spelling wins. The result is stored in these columns on the `spans` table:
+
+| Column | Meaning |
+|---|---|
+| `gen_ai_operation_name` | Canonical operation: `chat`, `embeddings`, `execute_tool`, `invoke_agent`, `invoke_workflow`, `plan`, ... Non-AI spans are `NULL`, so `gen_ai_operation_name IS NOT NULL` selects exactly your AI telemetry |
+| `gen_ai_provider_name` | Provider serving the request (`openai`, `anthropic`, `aws.bedrock`, ...) |
+| `gen_ai_request_model` / `gen_ai_response_model` | Model requested vs. model the provider reports actually serving |
+| `gen_ai_input_tokens` / `gen_ai_output_tokens` | Token usage. Input includes cached tokens; output includes reasoning tokens |
+| `gen_ai_cache_read_input_tokens` / `gen_ai_reasoning_output_tokens` | Cache and reasoning breakdowns — subsets of the totals above, never add them together |
+| `gen_ai_tool_name` | Tool executed by an `execute_tool` span |
+| `gen_ai_agent_name` | Agent handling the run (for Vercel AI SDK telemetry, the `functionId`) |
+| `gen_ai_conversation_id` | Your conversation/session id linking multi-turn interactions |
+
+Legacy Vercel AI SDK spans are mapped onto the same shape the AI SDK 7 GenAI emitter produces — the outer `generateText`/`streamText` call becomes `invoke_agent`, each provider step becomes `chat`, `ai.toolCall` becomes `execute_tool` — so upgrading the AI SDK does not fork your dashboards.
+
+## Querying AI Telemetry
+
+The columns are available everywhere spans are: **Observability -> Traces** shows AI operations inside their traces, and [SQL queries](/guides/apps/warehouse/overview) can aggregate them directly — from the dashboard, from your own code, or from an agent you point at the data:
+
+```sql
+-- Token spend per model, last 7 days
+SELECT
+  gen_ai_request_model,
+  sum(gen_ai_input_tokens) AS input_tokens,
+  sum(gen_ai_output_tokens) AS output_tokens,
+  count() AS calls
+FROM spans
+WHERE gen_ai_operation_name = 'chat'
+  AND started_at >= now() - INTERVAL 7 DAY
+GROUP BY gen_ai_request_model
+ORDER BY input_tokens DESC
+```
+
+```sql
+-- Which tools do agents actually use, and how often do they fail?
+SELECT
+  gen_ai_tool_name,
+  count() AS executions,
+  countIf(status_code = 'error') AS failures
+FROM spans
+WHERE gen_ai_operation_name = 'execute_tool'
+GROUP BY gen_ai_tool_name
+ORDER BY executions DESC
+```
+
+Because AI spans participate in ordinary traces, joins with the rest of your telemetry need no special plumbing: `user_id` attributes AI spend to users, `page_view_span_id` ties an agent run to the page it served, and `trace_id` connects a slow answer to the exact model call that caused it.
+
+The raw attributes — including `gen_ai.input.messages` / `gen_ai.output.messages` content when recorded — remain in each span's `data` payload for `JSONExtract*` queries and for the trace detail view.

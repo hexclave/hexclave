@@ -19,6 +19,10 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/latest/internal/issues/reconciler",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/latest/internal/deployments-parking-sweep",
       "schedule": "*/10 * * * *"
     }

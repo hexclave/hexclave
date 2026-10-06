@@ -466,7 +466,7 @@ export function useCmdKCommands({
       commands.push({
         id: `apps/${appId}`,
         icon: <IconComponent className="h-3.5 w-3.5 stroke-emerald-600 dark:stroke-emerald-400" />,
-        label: app.displayName,
+        label: parentApp == null ? app.displayName : `${parentApp.displayName} › ${app.displayName}`,
         description: parentApp == null ? "Installed app" : `Part of ${parentApp.displayName}`,
         keywords: [
           app.displayName.toLowerCase(),
@@ -490,8 +490,12 @@ export function useCmdKCommands({
         pushUniqueNavigateCommand({
           id: `apps/${appId}/page/${toCommandIdSegment(navItem.displayName)}`,
           icon: <IconComponent className="h-3.5 w-3.5 text-muted-foreground" />,
-          label: `${app.displayName}: ${navItem.displayName}`,
-          description: `Page in ${app.displayName}`,
+          label: parentApp == null
+            ? `${app.displayName}: ${navItem.displayName}`
+            : `${parentApp.displayName} › ${app.displayName} › ${navItem.displayName}`,
+          description: parentApp == null
+            ? `Page in ${app.displayName}`
+            : `Page in ${app.displayName}, part of ${parentApp.displayName}`,
           keywords: [
             app.displayName.toLowerCase(),
             navItem.displayName.toLowerCase(),

@@ -1,42 +1,23 @@
-import { getClickhouseAdminClient } from "@/lib/clickhouse";
+import { buildTelemetryWritePlan, insertBatchEvents, normalizeBatchEvents } from "@/lib/analytics-telemetry-writers";
+import { getSharedClickhouseAdminClient } from "@/lib/clickhouse";
 import { arePlanLimitsEnforced, getBillingTeamId } from "@/lib/plan-entitlements";
+import { tryDecreasePlanItemQuantities } from "@/lib/plan-metering";
 import { findRecentSessionReplay } from "@/lib/session-replays";
-import { getHexclaveServerApp } from "@/hexclave";
+import { MAX_JAVASCRIPT_TIMESTAMP_MILLIS, telemetryMeteredAt } from "@/lib/telemetry-metering-time";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { ITEM_IDS } from "@hexclave/shared/dist/plans";
 import { adaptSchema, clientOrHigherAuthTypeSchema, yupArray, yupMixed, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { TELEMETRY_UUID_RE } from "@hexclave/shared/dist/utils/analytics-wire";
 import * as zlib from "node:zlib";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[089ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_RE = TELEMETRY_UUID_RE;
 
 const MAX_EVENTS = 500;
 const MAX_COMPRESSED_BYTES = 1 * 1024 * 1024;
 const MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024;
-
-// Lone surrogates (\uD800-\uDFFF not part of a valid pair) are technically
-// representable in JS strings but rejected by ClickHouse's JSON parser.
-// The client-side event tracker can produce these when .substring() truncates
-// text in the middle of a surrogate pair (e.g. emoji characters).
-// eslint-disable-next-line no-control-regex
-const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
-
-function stripLoneSurrogates(value: unknown): unknown {
-  if (typeof value === "string") {
-    return value.replace(LONE_SURROGATE_RE, "\uFFFD");
-  }
-  if (Array.isArray(value)) {
-    return value.map(stripLoneSurrogates);
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, stripLoneSurrogates(v)])
-    );
-  }
-  return value;
-}
 
 // Bodies sent as application/octet-stream are gzipped JSON. The encoding is
 // purely to evade keyword-matching adblockers (e.g. filters on "$click").
@@ -84,7 +65,7 @@ export const POST = createSmartRouteHandler({
     body: yupObject({
       session_replay_segment_id: yupString().defined().matches(UUID_RE, "Invalid session_replay_segment_id"),
       batch_id: yupString().defined().matches(UUID_RE, "Invalid batch_id"),
-      sent_at_ms: yupNumber().defined().integer().min(0),
+      sent_at_ms: yupNumber().defined().integer().min(0).max(MAX_JAVASCRIPT_TIMESTAMP_MILLIS),
       events: yupArray(
         yupObject({
           event_type: yupString().defined().oneOf(["$page-view", "$click"]),
@@ -112,55 +93,66 @@ export const POST = createSmartRouteHandler({
       throw new StatusError(StatusError.BadRequest, "A refresh token is required for analytics events");
     }
 
+    const events = body.events;
+    const tenancyId = auth.tenancy.id;
+    const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const projectId = auth.tenancy.project.id;
     const branchId = auth.tenancy.branchId;
     const userId = auth.user.id;
     const refreshTokenId = auth.refreshTokenId;
-    const tenancyId = auth.tenancy.id;
 
-    const app = getHexclaveServerApp();
+    const recentSession = await findRecentSessionReplay(prisma, {
+      tenancyId,
+      refreshTokenId,
+      projectUserId: userId,
+    });
+    const sessionReplayId = recentSession?.id ?? null;
+    const sessionReplaySegmentId = body.session_replay_segment_id;
 
     const billingTeamId = getBillingTeamId(auth.tenancy.project);
-    if (billingTeamId != null && arePlanLimitsEnforced()) {
-      const eventsItem = await app.getItem({ itemId: ITEM_IDS.analyticsEvents, teamId: billingTeamId });
-      const isDebited = await eventsItem.tryDecreaseQuantity(body.events.length);
-      if (!isDebited) {
-        throw new KnownErrors.ItemQuantityInsufficientAmount(ITEM_IDS.analyticsEvents, billingTeamId, body.events.length);
+    if (projectId !== "internal" && billingTeamId != null && arePlanLimitsEnforced()) {
+      const debitResult = await tryDecreasePlanItemQuantities(billingTeamId, [
+        {
+          itemId: ITEM_IDS.analyticsEvents,
+          quantity: events.length,
+          idempotency: {
+            key: `analytics-events:${tenancyId}:${body.batch_id}`,
+            createdAt: telemetryMeteredAt(body.sent_at_ms, body.sent_at_ms, new Date()),
+          },
+        },
+      ]);
+      if (debitResult.insufficientItemId != null) {
+        throw new KnownErrors.ItemQuantityInsufficientAmount(
+          debitResult.insufficientItemId,
+          billingTeamId,
+          events.length,
+        );
       }
     }
 
-    const prisma = await getPrismaClientForTenancy(auth.tenancy);
-    const recentSession = await findRecentSessionReplay(prisma, { tenancyId, refreshTokenId });
+    const clickhouseClient = getSharedClickhouseAdminClient();
 
-    const clickhouseClient = getClickhouseAdminClient();
-
-    const rows = body.events.map((event) => ({
-      event_type: event.event_type,
-      event_at: new Date(event.event_at_ms),
-      data: stripLoneSurrogates(event.data),
-      project_id: projectId,
-      branch_id: branchId,
-      user_id: userId,
-      team_id: null,
-      refresh_token_id: refreshTokenId,
-      session_replay_id: recentSession?.id ?? null,
-      session_replay_segment_id: body.session_replay_segment_id,
-    }));
-
-    await clickhouseClient.insert({
-      table: "analytics_internal.events",
-      values: rows,
-      format: "JSONEachRow",
-      clickhouse_settings: {
-        date_time_input_format: "best_effort",
-        async_insert: 1,
-      },
-    });
+    const normalizedEvents = normalizeBatchEvents(events, {
+      projectId,
+      branchId,
+      userId,
+      refreshTokenId,
+      sessionReplayId,
+      sessionReplaySegmentId,
+      runtime: "browser",
+      resource: null,
+      producer: "sdk",
+      groupingConfig: auth.tenancy.config.observability.errorGrouping,
+    }, body.batch_id);
+    // ClickHouse failures are ambiguous: the server may have committed the
+    // deduplicated batch before the transport failed. Keep the retry-stable
+    // debit above rather than refunding usage that may already be durable.
+    await insertBatchEvents(clickhouseClient, buildTelemetryWritePlan(normalizedEvents, body.batch_id));
 
     return {
       statusCode: 200,
       bodyType: "json",
-      body: { inserted: body.events.length },
+      body: { inserted: events.length },
     };
   },
 });

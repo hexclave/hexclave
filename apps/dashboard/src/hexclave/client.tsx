@@ -3,6 +3,7 @@ import { isIndependentTvDisplayPath } from "@/lib/tv-mode/routes";
 import { StackClientApp } from "@hexclave/next";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import "../polyfills";
+import { DASHBOARD_SESSION_REPLAY_BLOCK_CLASS } from "./session-replay-config";
 
 if (getPublicEnvVar("NEXT_PUBLIC_STACK_PROJECT_ID") !== "internal") {
   throw new Error("This project is not configured correctly. stack-dashboard must always use the internal project.");
@@ -30,10 +31,38 @@ export const hexclaveClientApp = new StackClientApp({
   },
   analytics: {
     enabled: !isRemoteDevelopmentEnvironment,
+    integritySignals: !isRemoteDevelopmentEnvironment,
     replays: {
+      captureKeystrokes: !isPreview && !isRemoteDevelopmentEnvironment,
       maskAllInputs: false,
-      blockClass: "hexclave-sensitive",
+      blockClass: DASHBOARD_SESSION_REPLAY_BLOCK_CLASS,
       enabled: !isPreview && !isRemoteDevelopmentEnvironment,
     },
   },
+  observability: {
+    enabled: !isRemoteDevelopmentEnvironment,
+    spanPropagation: {
+      allowedOrigins: getHexclaveApiOrigins([
+        getPublicEnvVar("NEXT_PUBLIC_BROWSER_STACK_API_URL"),
+        getPublicEnvVar("NEXT_PUBLIC_STACK_API_URL"),
+      ]),
+    },
+  },
+  telemetry: {
+    resource: {
+      service: {
+        name: "stack-dashboard",
+      },
+      deploymentEnvironmentName: process.env.NODE_ENV,
+    },
+  },
 });
+
+function getHexclaveApiOrigins(apiUrls: readonly (string | null | undefined)[]): string[] {
+  const origins = new Set<string>();
+  for (const apiUrl of apiUrls) {
+    if (apiUrl == null || apiUrl === "") continue;
+    origins.add(new URL(apiUrl).origin);
+  }
+  return [...origins];
+}

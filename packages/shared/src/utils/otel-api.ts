@@ -1,0 +1,23 @@
+export { context, createContextKey, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+export type {
+  Attributes,
+  AttributeValue,
+  Context,
+  ContextManager,
+  Exception,
+  HrTime,
+  Link,
+  Span,
+  SpanAttributes,
+  SpanAttributeValue,
+  SpanContext,
+  SpanOptions,
+  SpanStatus,
+  TimeInput,
+  TextMapGetter,
+  TextMapPropagator,
+  TextMapSetter,
+  Tracer,
+  TracerOptions,
+  TracerProvider,
+} from "@opentelemetry/api";

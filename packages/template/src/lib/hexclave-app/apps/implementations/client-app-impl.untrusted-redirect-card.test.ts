@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getGlobalUiInstance, setGlobalUiInstance } from "../../../../in-page-ui/dom";
 import { SETUP_ERROR_OVERLAY_GLOBAL_INSTANCE_KEY } from "../../../../setup-error-overlay";
 import { StackClientApp } from "../interfaces/client-app";
+import { resetManagedBrowserOtelForTesting } from "./browser-otel-sdk";
 
 function createAccessTokenString(refreshTokenId: string): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -83,7 +84,8 @@ function createCrossDomainAuthRedirectUrl(app: StackClientApp<true>, redirectUri
 }
 
 describe("cross-domain handoff rejected by the server", () => {
-  afterEach(() => {
+  afterEach(async () => {
+    await resetManagedBrowserOtelForTesting();
     // The card's own cleanup, so that the focus trap it installed is released too and does not follow the next test.
     getGlobalUiInstance(SETUP_ERROR_OVERLAY_GLOBAL_INSTANCE_KEY)?.cleanup();
     setGlobalUiInstance(SETUP_ERROR_OVERLAY_GLOBAL_INSTANCE_KEY, null);

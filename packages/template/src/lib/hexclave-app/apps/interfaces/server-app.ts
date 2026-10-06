@@ -3,7 +3,7 @@ import { Result } from "@hexclave/shared/dist/utils/results";
 import type { GenericQueryCtx } from "convex/server";
 import type { AnalyticsQueryOptions, AnalyticsQueryResponse } from "@hexclave/shared/dist/interface/crud/analytics";
 import type { AdminGetSessionReplayChunkEventsResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
-import { AsyncStoreProperty, GetCurrentPartialUserOptions, GetCurrentUserOptions } from "../../common";
+import { AsyncStoreProperty, GetCurrentPartialUserOptions, GetCurrentUserOptions, RequestLike } from "../../common";
 import { CustomerProductsList, CustomerProductsRequestOptions, InlineProduct, ServerItem } from "../../customers";
 import { DataVaultStore } from "../../data-vault";
 import { EmailDeliveryInfo, SendEmailOptions } from "../../email";
@@ -11,6 +11,8 @@ import { ServerListTeamsOptions, ServerListUsersOptions, ServerTeam, ServerTeamC
 import type { AdminSessionReplay, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, SessionReplayAllEventsResult } from "../../session-replays";
 import { ProjectCurrentServerUser, ServerOAuthProvider, ServerUser, ServerUserCreateOptions, SyncedPartialServerUser, TokenPartialUser } from "../../users";
 import { _HexclaveServerAppImpl } from "../implementations";
+import type { Span, StartSpanOptions, TrackOptions } from "../implementations/event-tracker";
+import type { Logger } from "../implementations/logs";
 import { StackClientApp, StackClientAppConstructorOptions } from "./client-app";
 
 
@@ -42,6 +44,61 @@ export type StackServerApp<HasTokenStore extends boolean = boolean, ProjectId ex
       ({ productId: string } | { product: InlineProduct }) &
       { returnUrl?: string }
     )): Promise<string>,
+
+    /**
+     * Server-side variant of `trackEvent`: attribution is explicit via `userId`
+     * (there is no session to derive it from). Items coalesce per userId and
+     * send after a short coalescing window; `await` the promise (or call
+     * `flush()`) as the delivery guarantee — the server has no page-lifetime
+     * flush cadence.
+     *
+     * Pass `request` (the incoming Request) to auto-attribute to the caller,
+     * correlate with their refresh-token/replay lifecycle, and join the active
+     * browser operation via `traceparent`. The session plus the
+     * `baggage` header provide correlation; with `request`,
+     * `userId` is derived from the session unless explicitly overridden.
+     *
+     * When the framework integration registered an ambient request provider
+     * (Next.js: `hexclaveInstrumentation().register()`), calls WITHOUT
+     * `request` made inside a request scope attribute to the caller's session
+     * automatically — `request` remains as the explicit override.
+     */
+    trackEvent(eventType: string, data?: Record<string, unknown>, options?: TrackOptions & { userId?: string, request?: RequestLike }): Promise<void>,
+
+    /**
+     * Server-side native logging (same API as the client `logger`): `$log`
+     * OpenTelemetry LogRecords through the active LoggerProvider. Inside a
+     * `withSpan({ request })` scope — or any request scope when an ambient
+     * request provider is registered (Next.js:
+     * `hexclaveInstrumentation().register()`) — logs automatically link to the
+     * caller's active page/HTTP client operation and carry the same
+     * session-replay correlation as server events — no context threading needed.
+     */
+    readonly logger: Logger,
+
+    /**
+     * Server-side variant of `startSpan`: attribution is explicit via `userId`.
+     * Child spans and span-attached events inherit the span's userId. To link a
+     * span to the caller's client session, use `withSpan(type, { request }, fn)` —
+     * `startSpan` is synchronous and cannot resolve a request.
+     */
+    startSpan(spanType: string, options?: StartSpanOptions & { userId?: string }): Span,
+
+    /**
+     * Server-side variant of `withSpan`: accepts `userId` in options; ambient
+     * parenting is AsyncLocalStorage-backed, so concurrent requests sharing one
+     * app instance never cross-parent.
+     *
+     * Pass `request` to auto-parent the span (and everything created inside the
+     * callback) under the caller's client session, resolved from the session + the
+     * `baggage` header. This is the primitive the framework
+     * adapters build on — with an adapter you never pass `request` yourself.
+     * With an ambient request provider registered (Next.js:
+     * `hexclaveInstrumentation().register()`), bare `withSpan(type, fn)` calls
+     * inside a request scope adopt the ambient request the same way.
+     */
+    withSpan<T>(spanType: string, fn: (span: Span) => Promise<T> | T): Promise<T>,
+    withSpan<T>(spanType: string, options: StartSpanOptions & { userId?: string, request?: RequestLike }, fn: (span: Span) => Promise<T> | T): Promise<T>,
 
     // IF_PLATFORM react-like
     useUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'redirect' }): ProjectCurrentServerUser<ProjectId>,

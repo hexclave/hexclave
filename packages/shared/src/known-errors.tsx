@@ -1848,6 +1848,16 @@ const AnalyticsNotEnabled = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const ObservabilityNotEnabled = createKnownErrorConstructor(
+  KnownError,
+  "OBSERVABILITY_NOT_ENABLED",
+  () => [
+    400,
+    "Observability is not enabled for this project.",
+  ] as const,
+  () => [] as const,
+);
+
 const DefaultPaymentMethodRequired = createKnownErrorConstructor(
   KnownError,
   "DEFAULT_PAYMENT_METHOD_REQUIRED",
@@ -2048,6 +2058,7 @@ export const KnownErrors = {
   AnalyticsQueryTimeout,
   AnalyticsQueryError,
   AnalyticsNotEnabled,
+  ObservabilityNotEnabled,
   TooManyImageAttachments,
   ImageAttachmentTooLarge,
 } satisfies Record<string, KnownErrorConstructor<any, any>>;

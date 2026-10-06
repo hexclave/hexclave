@@ -15,19 +15,23 @@ import { TeamPermissionDefinitionsCrud, TeamPermissionsCrud } from "@hexclave/sh
 import { TeamsCrud } from "@hexclave/shared/dist/interface/crud/teams";
 import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
 import { InternalSession } from "@hexclave/shared/dist/sessions";
+import { TELEMETRY_UUID_RE } from "@hexclave/shared/dist/utils/analytics-wire";
+import { trace as otelTrace } from "@opentelemetry/api";
 import type { AsyncCache } from "@hexclave/shared/dist/utils/caches";
+import { isBrowserLike } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { ProviderType } from "@hexclave/shared/dist/utils/oauth";
-import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
+import { ignoreUnhandledRejection, runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { suspend } from "@hexclave/shared/dist/utils/react";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { isUuid } from "@hexclave/shared/dist/utils/uuids";
 import { WebAuthnError, startRegistration } from "@simplewebauthn/browser";
+import type { Instrumentation } from "@opentelemetry/instrumentation";
 import { useMemo } from "react"; // THIS_LINE_PLATFORM react-like
 import * as yup from "yup";
 import { constructRedirectUrl } from "../../../../utils/url";
 import { ApiKey, ApiKeyCreationOptions, ApiKeyUpdateOptions, apiKeyCreationOptionsToCrud, apiKeyUpdateOptionsToCrud } from "../../api-keys";
-import { ConvexCtx, GetCurrentUserOptions } from "../../common";
+import { ConvexCtx, GetCurrentUserOptions, RequestLike } from "../../common";
 import { DeprecatedOAuthConnection, OAuthConnection } from "../../connected-accounts";
 import { ServerContactChannel, ServerContactChannelCreateOptions, ServerContactChannelUpdateOptions, serverContactChannelCreateOptionsToCrud, serverContactChannelUpdateOptionsToCrud } from "../../contact-channels";
 import { Customer, CustomerProductsList, CustomerProductsRequestOptions, InlineProduct, ServerItem } from "../../customers";
@@ -40,12 +44,42 @@ import { EditableTeamMemberProfile, ReceivedTeamInvitation, SentTeamInvitation, 
 import { ProjectCurrentServerUser, ServerOAuthProvider, ServerUser, ServerUserCreateOptions, ServerUserUpdateOptions, serverUserCreateOptionsToCrud, serverUserUpdateOptionsToCrud, withUserDestructureGuard } from "../../users";
 import { StackServerAppConstructorOptions } from "../interfaces/server-app";
 import { _HexclaveClientAppImplIncomplete } from "./client-app-impl";
-import { clientVersion, createCache, createCacheBySession, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getDefaultSecretServerKey, resolveApiUrls, resolveConstructorOptions } from "./common";
+import { clientVersion, createCache, createCacheBySession, getAnalyticsBaseUrl, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getDefaultSecretServerKey, resolveApiUrls, resolveConstructorOptions } from "./common";
+import { assertValidSpanStartInput, autoDetectedBackgroundTaskHook, getCustomTelemetryNameError, preCaught, registerTelemetryBackgroundTask, rejectedPreCaught, resolveSpanParent, withSpanImpl, getCustomTelemetryDataError, type Span, type SpanContext, type StartSpanOptions, type TrackOptions } from "./telemetry-core";
+import { buildCapturedEventData, buildErrorEventData, generateErrorEventId, installServerErrorMonitor } from "./error-capture";
+import type { CapturedErrorEvent, CaptureEvent, CaptureExceptionOptions, CaptureMessageOptions, ErrorEventId, ErrorScopeData } from "../interfaces/error-capture";
+import { DEFAULT_CONSOLE_CAPTURE_LEVELS, existingProviderConflictFor, isObservabilityEnabled, resolveOpenTelemetryProviderMode, shouldInstallManagedOtel } from "./observability-config";
+import { createLogger, installConsoleCapture, type LogEmitItem } from "./logs";
+import { emitHexclaveOtelError, emitHexclaveOtelEvent, emitHexclaveOtelLog } from "./otel-log-facade";
+import { createOtelSpanFacade } from "./otel-span-facade";
+import { getActiveOtelSpanContext } from "./otel-context";
+import { shouldCaptureNetworkRequest } from "./network-capture";
+import { buildFetchInitWithSpanContext, buildPropagationHeaderValues, decodeCorrelationBaggage, extractW3cTraceContext, readBaggageHeader, shouldPropagateSpanContext, type SpanPropagationContext } from "./span-propagation";
+import { getServerRequestContext, runWithServerRequestContext, withExplicitServerUser, type ServerRequestSpanContext } from "./server-request-context";
+import { getActiveErrorScope, mergeErrorScopeData } from "./error-scope";
+import { processErrorEvent, type ErrorProcessingResult } from "./error-processors";
+import { isOtelTracingSuppressed, runWithOtelTracingSuppressed, type ManagedOtelRegistration } from "./otel-managed";
+import { registerManagedOtelAsync, tryRequireOtelSdkSync } from "./otel-sdk-loader";
+import { createDefaultErrorIntegrationRegistry, type ErrorIntegrationRegistry, type ErrorIntegrationRuntime } from "./integration-registry";
+import { installServerLifecycle, type ServerLifecycleHandle, type ServerLifecycleInstallOptions, type ServerLifecycleSignal } from "./server-lifecycle";
+import { assertErrorAttachmentDeliveryConfigured, deliverErrorAttachments, getErrorAttachmentInputs } from "./error-attachments";
+import { serverAppInstrumentationSymbol, type ServerAppInstrumentation } from "./server-app-instrumentation";
 
 import { useAsyncCache } from "./common"; // THIS_LINE_PLATFORM react-like
 
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
+  // SAFETY: probing for the thenable protocol; reading a possibly-absent
+  // `then` as unknown claims nothing about the value.
+  return typeof (value as { then?: unknown }).then === "function";
+}
+
 export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, ProjectId extends string> extends _HexclaveClientAppImplIncomplete<HasTokenStore, ProjectId> {
   declare protected _interface: HexclaveServerInterface;
+
+  protected override _telemetryTier(): "browser" | "server" {
+    return "server";
+  }
 
   // TODO override the client user cache to use the server user cache, so we save some requests
   private readonly _currentServerUserCache = createCacheBySession(async (session) => {
@@ -472,6 +506,7 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
         const apiUrls = resolveApiUrls(resolvedOptions.baseUrl);
         return new HexclaveServerInterface({
           getBaseUrl: () => apiUrls()[0],
+          getAnalyticsBaseUrl: () => getAnalyticsBaseUrl(apiUrls()[0]),
           getApiUrls: apiUrls,
           projectId: resolvedOptions.projectId ?? getDefaultProjectId(),
           extraRequestHeaders: resolvedOptions.extraRequestHeaders ?? getDefaultExtraRequestHeaders(),
@@ -481,6 +516,23 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
         });
       })(),
     });
+
+    if (!isBrowserLike() && !("projectOwnerSession" in this._interface.options) && isObservabilityEnabled(this._observabilityOptions)) {
+      this._ensureOpenTelemetryProvider();
+      this._installServerErrorMonitor();
+      const captureConsoleLevels = this._observabilityOptions?.logs?.captureConsole ?? DEFAULT_CONSOLE_CAPTURE_LEVELS;
+      if (captureConsoleLevels.length > 0) {
+        installConsoleCapture({
+          levels: captureConsoleLevels,
+          logger: createLogger({ emit: (item) => this._emitLog(item), origin: "console" }),
+          projectId: this.projectId,
+          serviceName: this._telemetryResource.service.name,
+          captureError: (error) => {
+            ignoreUnhandledRejection(this._captureServerRequestError(error, { mechanism: "console.error", handled: true }));
+          },
+        });
+      }
+    }
   }
 
 
@@ -1690,6 +1742,7 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
       last_event_at_from_millis: options?.lastEventAtFromMillis,
       last_event_at_to_millis: options?.lastEventAtToMillis,
       click_count_min: options?.clickCountMin,
+      user_kind: options?.userKind,
     });
 
     const items: AdminSessionReplay[] = response.items.map((r) => ({
@@ -1825,4 +1878,821 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
       throw error;
     }
   }
+
+
+  private readonly _serverGlobalSpans = new Set<Span>();
+  private _telemetrySuppressionPredicate: (() => boolean) | null = null;
+  private _warnedServerGlobalSpanCap = false;
+  /** Framework/collector seam: keeps SDK-native capture aligned with the
+   * runtime's scoped tracing-suppression context. */
+  _setTelemetrySuppressionPredicate(predicate: (() => boolean) | null): void {
+    this._telemetrySuppressionPredicate = predicate;
+  }
+
+  private _isTelemetrySuppressed(): boolean {
+    return isOtelTracingSuppressed()
+      || this._telemetrySuppressionPredicate?.() === true;
+  }
+
+  override trackEvent(eventType: string, data?: Record<string, unknown>, options?: TrackOptions & { userId?: string, request?: RequestLike }): Promise<void> {
+    if (this._analyticsOptions?.enabled === false) {
+      return rejectedPreCaught("analytics is disabled");
+    }
+    if (this._clientAnalytics) {
+      if (options?.userId !== undefined) {
+        return rejectedPreCaught("userId is only supported for server-key telemetry; in the browser, events are attributed to the signed-in user");
+      }
+      return this._clientAnalytics.trackCustomEvent(eventType, data, options);
+    }
+    if (options?.request) {
+      this._ensureOpenTelemetryProvider();
+      this._installServerErrorMonitor();
+      const { request, ...rest } = options;
+      return (async () => {
+        const context = await this._resolveServerRequestContext(request, options.userId ?? null);
+        await runWithServerRequestContext(context, () => this._trackServerEvent(eventType, data, rest, context.userId));
+      })();
+    }
+    if (this._ambientRequestProvider !== null && getServerRequestContext() === null) {
+      return preCaught(this._runWithAmbientRequestScope(options?.userId ?? null, (userId) =>
+        this._trackServerEvent(eventType, data, options, userId)));
+    }
+    return this._trackServerEvent(eventType, data, options, options?.userId ?? null);
+  }
+
+  override withSpan<T>(spanType: string, fn: (span: Span) => Promise<T> | T): Promise<T>;
+  override withSpan<T>(spanType: string, options: StartSpanOptions & { userId?: string, request?: RequestLike }, fn: (span: Span) => Promise<T> | T): Promise<T>;
+  override withSpan<T>(
+    spanType: string,
+    optionsOrFn: (StartSpanOptions & { userId?: string, request?: RequestLike }) | ((span: Span) => Promise<T> | T),
+    maybeFn?: (span: Span) => Promise<T> | T,
+  ): Promise<T> {
+    const options = typeof optionsOrFn === "function" ? undefined : optionsOrFn;
+    const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+    if (!options?.request || this._clientAnalytics) {
+      if (typeof fn !== "function") {
+        return rejectedPreCaught("withSpan() requires a callback function");
+      }
+      if (!this._clientAnalytics && this._ambientRequestProvider !== null && getServerRequestContext() === null) {
+        return (async () => {
+          await this._ensureOtelReady([]);
+          return await this._runWithAmbientRequestScope(options?.userId ?? null, (userId) =>
+            withSpanImpl((type, opts) => this._startServerSpan(type, opts, userId), spanType, options ?? {}, fn));
+        })();
+      }
+      if (!this._clientAnalytics) {
+        return (async () => {
+          await this._ensureOtelReady([]);
+          return options === undefined
+            ? await super.withSpan(spanType, fn)
+            : await super.withSpan(spanType, options, fn);
+        })();
+      }
+      return options === undefined
+        ? super.withSpan(spanType, fn)
+        : super.withSpan(spanType, options, fn);
+    }
+    this._ensureOpenTelemetryProvider();
+    this._installServerErrorMonitor();
+    const { request, ...rest } = options;
+    return (async () => {
+      await this._ensureOtelReady([]);
+      const context = await this._resolveServerRequestContext(request, options.userId ?? null);
+      return await runWithServerRequestContext(context, () =>
+        withSpanImpl((type, opts) => this._startServerSpan(type, opts, context.userId), spanType, rest, fn));
+    })();
+  }
+
+  /**
+   * Resolves an incoming request into the ambient span context for a `{ request }`
+   * server span: the caller's user + refresh token from the session (server-trusted),
+   * the incoming W3C `traceparent` (which trace to join), and the client-propagated
+   * replay/segment/page ids from the `baggage` header (untrusted labels). A valid unauthenticated
+   * request resolves to an empty session; request parsing and session-resolution
+   * failures propagate.
+   *
+   * `traceparent` is not project-scoped: any upstream OTel tier may set it. We
+   * honour every valid parent, including an explicitly unsampled one, independently
+   * of optional baggage; the OTel parent-based sampler preserves that decision.
+   * Authenticated credentials, never propagation data, select the receiving tenant.
+   */
+  private async _resolveServerRequestContext(request: RequestLike, explicitUserId: string | null): Promise<ServerRequestSpanContext> {
+    let userId: string | null = null;
+    let refreshTokenId: string | null = null;
+    const session = await this._getSession(request);
+    const tokens = await session.fetchNewTokens();
+    if (tokens?.refreshToken != null) {
+      refreshTokenId = tokens.accessToken.payload.refresh_token_id;
+      userId = tokens.accessToken.payload.sub;
+    }
+    const decoded = decodeCorrelationBaggage(readBaggageHeader(request.headers));
+    const traceContext = extractW3cTraceContext(request.headers);
+    const acceptedParent = traceContext !== null
+      ? {
+        traceId: traceContext.traceId,
+        spanId: traceContext.spanId,
+        traceFlags: traceContext.traceFlags,
+        ...traceContext.traceState === undefined ? {} : { traceState: traceContext.traceState },
+      }
+      : null;
+    return withExplicitServerUser({
+      userId,
+      refreshTokenId,
+      sessionReplayId: decoded?.sessionReplayId ?? null,
+      sessionReplaySegmentId: decoded?.sessionReplaySegmentId ?? null,
+      pageViewSpanId: decoded?.pageViewSpanId ?? null,
+      incomingParent: acceptedParent,
+    }, explicitUserId);
+  }
+
+  private _ambientRequestProvider: (() => Promise<RequestLike | null>) | null = null;
+
+  /** See getServerAppInstrumentation. Public-but-underscored. */
+  _setAmbientRequestProvider(provider: (() => Promise<RequestLike | null>) | null): void {
+    this._ambientRequestProvider = provider;
+  }
+
+  /**
+   * Runs `fn` inside the framework's ambient request scope, if one can be
+   * resolved: provider yields a request → session + propagation header are
+   * resolved exactly like an explicit `{ request }`. Every failure mode
+   * degrades to running `fn` WITHOUT request context and warns on every
+   * failure — a bare telemetry call must never fail harder than it did before
+   * ambient attribution existed, since the caller never opted into request
+   * semantics, but a once-and-forget warn would hide a permanently broken
+   * provider after the first miss.
+   */
+  private async _runWithAmbientRequestScope<T>(explicitUserId: string | null, fn: (userId: string | null) => Promise<T>): Promise<T> {
+    let request: RequestLike | null = null;
+    try {
+      request = await (this._ambientRequestProvider?.() ?? null);
+    } catch (error) {
+      this._warnAmbientRequestResolveFailure(error);
+    }
+    if (request !== null) {
+      let context: ServerRequestSpanContext | null = null;
+      try {
+        context = await this._resolveServerRequestContext(request, explicitUserId);
+      } catch (error) {
+        this._warnAmbientRequestResolveFailure(error);
+      }
+      if (context !== null) {
+        const resolved = context;
+        return await runWithServerRequestContext(resolved, () => fn(resolved.userId));
+      }
+    }
+    return await fn(explicitUserId);
+  }
+
+  private _warnAmbientRequestResolveFailure(error: unknown): void {
+    console.warn("Hexclave analytics: could not resolve the ambient request for telemetry attribution; continuing without request context:", error);
+  }
+
+  /**
+   * The batch context an item is buffered/attributed under: the ambient request
+   * context when inside a `{ request }` scope, else just the explicit userId. A
+   * later explicit userId always wins over the request-derived one.
+   */
+  private _currentServerBatchContext(explicitUserId: string | null): ServerRequestSpanContext {
+    const ambient = getServerRequestContext();
+    if (ambient) {
+      return withExplicitServerUser(ambient, explicitUserId);
+    }
+    return { userId: explicitUserId, refreshTokenId: null, sessionReplayId: null, sessionReplaySegmentId: null, pageViewSpanId: null, incomingParent: null };
+  }
+
+  override startSpan(spanType: string, options?: StartSpanOptions & { userId?: string }): Span {
+    if (!isObservabilityEnabled(this._observabilityOptions)) {
+      return super.startSpan(spanType, options);
+    }
+    if (this._clientAnalytics) {
+      if (options?.userId !== undefined) {
+        throw new Error("Hexclave analytics: userId is only supported for server-key telemetry; in the browser, spans are attributed to the signed-in user");
+      }
+      return this._clientAnalytics.startSpan(spanType, options);
+    }
+    return this._startServerSpan(spanType, options, options?.userId ?? null);
+  }
+
+  override setGlobalSpan(span: Span): void {
+    if (this._clientAnalytics) {
+      this._clientAnalytics.setGlobalSpan(span);
+      return;
+    }
+    if (span.isEnded) {
+      console.warn("Hexclave analytics: setGlobalSpan() called with an already-ended span; ignoring");
+      return;
+    }
+    this._serverGlobalSpans.add(span);
+    if (this._serverGlobalSpans.size > SERVER_GLOBAL_SPAN_SOFT_CAP) {
+      const oldest = this._serverGlobalSpans.values().next();
+      if (!oldest.done) this._serverGlobalSpans.delete(oldest.value);
+      if (!this._warnedServerGlobalSpanCap) {
+        this._warnedServerGlobalSpanCap = true;
+        console.warn(`Hexclave analytics: more than ${SERVER_GLOBAL_SPAN_SOFT_CAP} global spans are registered; dropping the oldest ones (their rows remain valid, but they stop being ambient parents). End or clear global spans you no longer need.`);
+      }
+    }
+  }
+
+  override clearGlobalSpan(span: Span): void {
+    this._clientAnalytics?.clearGlobalSpan(span);
+    this._serverGlobalSpans.delete(span);
+  }
+
+  private _managedOtelRegistration: ManagedOtelRegistration | null = null;
+  private _otelReadyPromise: Promise<ManagedOtelRegistration | null> | null = null;
+  private readonly _pendingManualServerErrors = new Set<Promise<void>>();
+
+  private _ensureOtelReady(instrumentations: Instrumentation[] = []): Promise<ManagedOtelRegistration | null> {
+    if (this._managedOtelRegistration !== null) return Promise.resolve(this._managedOtelRegistration);
+    if (this._otelReadyPromise === null) {
+      this._otelReadyPromise = this._registerOpenTelemetry(instrumentations);
+    }
+    return this._otelReadyPromise;
+  }
+
+  override async flush(): Promise<void> {
+    await super.flush();
+    await this._ensureOtelReady([]);
+    await Promise.all([...this._pendingManualServerErrors]);
+    await this._managedOtelRegistration?.forceFlush();
+  }
+
+  private _serverAmbientSpanContexts(): SpanContext[] {
+    const contexts: SpanContext[] = [];
+    for (const span of this._serverGlobalSpans) {
+      if (!span.isEnded) contexts.push(span.spanContext());
+    }
+    const activeOtelSpanContext = getActiveOtelSpanContext();
+    if (activeOtelSpanContext !== null) contexts.push(activeOtelSpanContext);
+    return contexts;
+  }
+
+  /**
+   * The ambient contexts for this request, OUTERMOST FIRST: the incoming
+   * `traceparent` span (the caller's fetch — the outer context everything here
+   * happens inside), then this process's own global spans and enclosing withSpan
+   * frames. The resolver takes the LAST as parent, so a nested server span still
+   * parents under its enclosing server frame while a bare request-level span
+   * parents under the caller.
+   *
+   * All of these are ambient, so `root: true` drops them together. Session
+   * attribution (refresh token / replay / segment) is NOT here — it is stamped as
+   * scalar correlation columns, so it survives `root`.
+   */
+  private _ambientSpanContextsWith(batchContext: ServerRequestSpanContext): SpanContext[] {
+    return [
+      ...batchContext.incomingParent === null ? [] : [batchContext.incomingParent],
+      ...this._serverAmbientSpanContexts(),
+    ];
+  }
+
+  private _trackServerEvent(eventType: string, data: Record<string, unknown> | undefined, options: TrackOptions | undefined, userId: string | null): Promise<void> {
+    if (this._analyticsOptions?.enabled === false) {
+      return rejectedPreCaught("analytics is disabled");
+    }
+    const nameError = getCustomTelemetryNameError("event", eventType);
+    if (nameError) return rejectedPreCaught(nameError);
+    const dataError = getCustomTelemetryDataError(data);
+    if (dataError) return rejectedPreCaught(dataError);
+    if (userId !== null && !SERVER_TELEMETRY_UUID_RE.test(userId)) return rejectedPreCaught(`Invalid userId ${JSON.stringify(userId)}: must be a user uuid`);
+    const batchContext = this._currentServerBatchContext(userId);
+    const resolved = resolveSpanParent({
+      explicit: options?.parent,
+      ambient: this._ambientSpanContextsWith(batchContext),
+      root: options?.root,
+    });
+    if ("error" in resolved) return rejectedPreCaught(resolved.error);
+    return preCaught((async () => {
+      const registration = await this._ensureOtelReady([]);
+      emitHexclaveOtelEvent({
+        eventName: eventType,
+        data,
+        clientVersion,
+        parent: resolved.parentSpanId === null ? null : {
+          traceId: resolved.traceId,
+          spanId: resolved.parentSpanId,
+          ...resolved.traceFlags === undefined ? {} : { traceFlags: resolved.traceFlags },
+          ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
+        },
+        correlationAttributes: {
+          ...batchContext.userId === null ? {} : { "hexclave.user.id": batchContext.userId },
+          ...batchContext.refreshTokenId === null ? {} : { "hexclave.refresh_token.id": batchContext.refreshTokenId },
+          ...batchContext.sessionReplayId === null ? {} : { "hexclave.session_replay.id": batchContext.sessionReplayId },
+          ...batchContext.sessionReplaySegmentId === null ? {} : { "hexclave.session_replay.segment.id": batchContext.sessionReplaySegmentId },
+          ...batchContext.pageViewSpanId === null ? {} : { "hexclave.page_view.span_id": batchContext.pageViewSpanId },
+        },
+      });
+      await registration?.forceFlush();
+    })());
+  }
+
+  private _startServerSpan(spanType: string, options: StartSpanOptions | undefined, userId: string | null): Span {
+    assertValidSpanStartInput(spanType, options);
+    if (userId !== null && !SERVER_TELEMETRY_UUID_RE.test(userId)) {
+      throw new Error(`Hexclave analytics: invalid userId ${JSON.stringify(userId)}: must be a user uuid`);
+    }
+    const batchContext = this._currentServerBatchContext(userId);
+    const resolved = resolveSpanParent({
+      explicit: options?.parent,
+      ambient: this._ambientSpanContextsWith(batchContext),
+      links: options?.links,
+      root: options?.root,
+    });
+    if ("error" in resolved) {
+      throw new Error(`Hexclave analytics: ${resolved.error}`);
+    }
+
+    this._registerOpenTelemetryNow([]);
+    const parent = resolved.parentSpanId === null
+      ? undefined
+      : {
+        traceId: resolved.traceId,
+        spanId: resolved.parentSpanId,
+        ...resolved.traceFlags === undefined ? {} : { traceFlags: resolved.traceFlags },
+        ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
+      };
+    const span = createOtelSpanFacade({
+      tracer: otelTrace.getTracer("@hexclave/sdk", clientVersion),
+      spanType,
+      startOptions: {
+        ...options,
+        ...parent === undefined ? { root: true } : { parent, root: false },
+        links: resolved.links,
+      },
+      correlationBaggage: this._observabilityOptions?.spanPropagation?.enabled !== false,
+      correlationAttributes: {
+        ...batchContext.sessionReplayId === null ? {} : { "hexclave.session_replay.id": batchContext.sessionReplayId },
+        ...batchContext.sessionReplaySegmentId === null ? {} : { "hexclave.session_replay.segment.id": batchContext.sessionReplaySegmentId },
+        ...batchContext.pageViewSpanId === null ? {} : { "hexclave.page_view.span_id": batchContext.pageViewSpanId },
+      },
+      capabilities: {
+        trackEvent: (eventType, data, trackOptions) => this._trackServerEvent(eventType, data, trackOptions, userId),
+        onEnded: (endedSpan) => this._serverGlobalSpans.delete(endedSpan),
+        getSpanPropagationHeaders: () => this._observabilityOptions?.spanPropagation?.enabled === false ? {} : buildPropagationHeaderValues({
+          traceparent: null,
+          context: {
+            ...batchContext.sessionReplayId ? { sessionReplayId: batchContext.sessionReplayId } : {},
+            ...batchContext.sessionReplaySegmentId ? { sessionReplaySegmentId: batchContext.sessionReplaySegmentId } : {},
+            ...batchContext.pageViewSpanId ? { pageViewSpanId: batchContext.pageViewSpanId } : {},
+          },
+        }),
+        fetch: (span, input, init) => {
+          try {
+            const policy = this._getPropagationOriginPolicy();
+            const initWithHeader = buildFetchInitWithSpanContext({
+              input,
+              init,
+              headerValues: span.getSpanPropagationHeaders(),
+              selfOrigin: null,
+              allowedOrigins: policy.allowedOrigins,
+              allowLocalhost: policy.allowLocalhost,
+            });
+            return globalThis.fetch(input, initWithHeader?.init ?? init);
+          } catch {
+            return globalThis.fetch(input, init);
+          }
+        },
+      },
+    });
+    return span;
+  }
+
+
+  private _serverFetchInstrumentationInstalled = false;
+
+  /**
+   * Ensures the managed provider is registered. Its official Undici
+   * instrumentation owns fetch span lifecycle and W3C propagation; the method
+   * remains as internal adapter surface for released framework integrations.
+   */
+  _ensureOpenTelemetryProvider(): void {
+    if (this._serverFetchInstrumentationInstalled) return;
+    this._serverFetchInstrumentationInstalled = true;
+    if (this._clientAnalytics) return;
+    if (!isObservabilityEnabled(this._observabilityOptions)) return;
+    this._registerOpenTelemetryNow([]);
+  }
+
+  /**
+   * Registers the official OTel Node SDK and authenticated OTLP exporter.
+   * Managed mode fails loudly on a host provider. Auto mode adopts it.
+   * Public-but-underscored: reached through framework glue.
+   */
+  private _buildManagedOtelOptions(instrumentations: Instrumentation[]): Parameters<typeof registerManagedOtelAsync>[0] | null {
+    if (this._clientAnalytics) return null;
+    if (!isObservabilityEnabled(this._observabilityOptions)) return null;
+    const providerMode = resolveOpenTelemetryProviderMode(this._observabilityOptions?.openTelemetry?.provider);
+    if (!shouldInstallManagedOtel(providerMode)) return null;
+    const interfaceOptions = this._interface.options;
+    if (!("secretServerKey" in interfaceOptions)) return null;
+    return {
+      analyticsBaseUrl: (interfaceOptions.getAnalyticsBaseUrl ?? interfaceOptions.getBaseUrl)(),
+      projectId: this.projectId,
+      secretServerKey: interfaceOptions.secretServerKey,
+      clientVersion,
+      existingProviderConflict: existingProviderConflictFor(providerMode),
+      traceSampleRate: this._traceSampleRate,
+      resource: {
+        serviceName: this._telemetryResource.service.name,
+        ...this._telemetryResource.service.namespace === undefined ? {} : { serviceNamespace: this._telemetryResource.service.namespace },
+        ...this._telemetryResource.service.version === undefined ? {} : { serviceVersion: this._telemetryResource.service.version },
+      },
+      instrumentations,
+      shouldInstrumentOutboundRequest: (url) => {
+        if (this._isTelemetrySuppressed() || this._shouldIgnoreOwnApiFetchUrl(url)) return false;
+        const target = new URL(url);
+        if (!shouldCaptureNetworkRequest(this._networkCaptureConfig, target)) return false;
+        const policy = this._getPropagationOriginPolicy();
+        return shouldPropagateSpanContext({
+          targetUrl: target,
+          selfOrigin: null,
+          allowedOrigins: policy.allowedOrigins,
+          allowLocalhost: policy.allowLocalhost,
+        });
+      },
+    };
+  }
+
+  private _registerOpenTelemetryNow(instrumentations: Instrumentation[]): ManagedOtelRegistration | null {
+    if (this._managedOtelRegistration !== null) return this._managedOtelRegistration;
+    const options = this._buildManagedOtelOptions(instrumentations);
+    if (options === null) return null;
+    const sync = tryRequireOtelSdkSync();
+    if (sync !== null) {
+      const registration = sync.registerManagedOtel(options);
+      this._managedOtelRegistration = registration;
+      return registration;
+    }
+    runAsynchronously(() => this._ensureOtelReady(instrumentations));
+    return this._managedOtelRegistration;
+  }
+
+  async _registerOpenTelemetry(instrumentations: Instrumentation[]): Promise<ManagedOtelRegistration | null> {
+    if (this._managedOtelRegistration !== null && instrumentations.length === 0) return this._managedOtelRegistration;
+    const options = this._buildManagedOtelOptions(instrumentations);
+    if (options === null) return null;
+    const registration = await registerManagedOtelAsync(options);
+    this._managedOtelRegistration = registration;
+    return registration;
+  }
+
+  private _trackServerError(data: CapturedErrorEvent, userId: string | null): Promise<void> {
+    const batchContext = this._currentServerBatchContext(userId);
+    const resolved = resolveSpanParent({ ambient: this._ambientSpanContextsWith(batchContext) });
+    if ("error" in resolved) return rejectedPreCaught(resolved.error);
+    return preCaught((async () => {
+      const registration = await this._ensureOtelReady([]);
+      emitHexclaveOtelError({
+        data,
+        clientVersion,
+        parent: resolved.parentSpanId === null ? null : {
+          traceId: resolved.traceId,
+          spanId: resolved.parentSpanId,
+          ...resolved.traceFlags === undefined ? {} : { traceFlags: resolved.traceFlags },
+          ...resolved.traceState === undefined ? {} : { traceState: resolved.traceState },
+        },
+        correlationAttributes: {
+          ...batchContext.userId === null ? {} : { "hexclave.user.id": batchContext.userId },
+          ...batchContext.refreshTokenId === null ? {} : { "hexclave.refresh_token.id": batchContext.refreshTokenId },
+          ...batchContext.sessionReplayId === null ? {} : { "hexclave.session_replay.id": batchContext.sessionReplayId },
+          ...batchContext.sessionReplaySegmentId === null ? {} : { "hexclave.session_replay.segment.id": batchContext.sessionReplaySegmentId },
+          ...batchContext.pageViewSpanId === null ? {} : { "hexclave.page_view.span_id": batchContext.pageViewSpanId },
+        },
+      });
+      await registration?.forceFlush();
+    })());
+  }
+
+  /**
+   * Public capture returns its event ID synchronously, but `flush()` must still
+   * include the asynchronous server delivery it started. Track that promise
+   * here while preserving the existing fire-and-forget error observation path.
+   */
+  private _processServerError(data: CapturedErrorEvent, scope: ErrorScopeData | undefined, originalException?: unknown): Promise<CapturedErrorEvent | null> {
+    const configured = this._observabilityOptions?.errorCapture;
+    const attachments = getErrorAttachmentInputs(scope);
+    assertErrorAttachmentDeliveryConfigured(attachments, configured?.attachmentTransport, configured?.onAttachmentPending);
+    const processed = processErrorEvent(data, {
+      eventProcessors: configured?.eventProcessors,
+      scopeProcessors: scope?.eventProcessors,
+      beforeSend: configured?.beforeSend,
+      hint: {
+        eventId: data.event_id,
+        mechanism: typeof data.mechanism_type === "string" ? data.mechanism_type : "captured",
+        handled: data.handled === true,
+        ...originalException === undefined ? {} : { originalException },
+        scope: scope ?? {},
+        attachments,
+      },
+      onFailure: (failure) => {
+        console.warn(`Hexclave error processor ${failure.reason} in ${failure.stage} (${failure.processorName}); event dropped`);
+      },
+    });
+    const accepted = (result: ErrorProcessingResult): CapturedErrorEvent | null => result.status === "accepted" ? result.event : null;
+    return isPromiseLike(processed) ? preCaught(Promise.resolve(processed).then(accepted)) : Promise.resolve(accepted(processed));
+  }
+
+  private _queueManualServerError(data: CapturedErrorEvent, scope: ErrorScopeData | undefined, originalException?: unknown): void {
+    const pending = this._processServerError(data, scope, originalException).then((processed) => {
+      if (processed === null) return;
+      return this._trackServerError(processed, null).then(async () => {
+        await this._deliverServerErrorAttachments(processed.event_id, scope);
+      });
+    });
+    this._pendingManualServerErrors.add(pending);
+    runAsynchronously(pending.then(
+      () => {
+        this._pendingManualServerErrors.delete(pending);
+      },
+      (error) => {
+        this._pendingManualServerErrors.delete(pending);
+        throw error;
+      },
+    ));
+  }
+
+  private async _deliverServerErrorAttachments(eventId: ErrorEventId, scope: ErrorScopeData | undefined): Promise<void> {
+    const attachments = getErrorAttachmentInputs(scope);
+    if (attachments.length === 0) return;
+    const configured = this._observabilityOptions?.errorCapture;
+    await deliverErrorAttachments({
+      eventId,
+      attachments,
+      transport: configured?.attachmentTransport,
+      onPending: configured?.onAttachmentPending,
+    });
+  }
+
+  protected override _captureManualException(error: unknown, options: CaptureExceptionOptions | undefined, scope: ErrorScopeData | undefined): ErrorEventId {
+    this.assertServerErrorCaptureAvailable();
+    const eventId = generateErrorEventId();
+    const data = buildErrorEventData(error, {
+      mechanismType: options?.mechanism ?? "captured.exception",
+      handled: options?.handled ?? true,
+      release: this._telemetryResource.service.version ?? null,
+      environment: this._telemetryResource.deploymentEnvironmentName ?? null,
+      sdkVersion: clientVersion,
+      eventId,
+      scope: mergeErrorScopeData(scope, options),
+    });
+    this._ensureOpenTelemetryProvider();
+    this._queueManualServerError(data, mergeErrorScopeData(scope, options), error);
+    return eventId;
+  }
+
+  protected override _captureManualMessage(message: string, options: CaptureMessageOptions | undefined, scope: ErrorScopeData | undefined): ErrorEventId {
+    this.assertServerErrorCaptureAvailable();
+    const eventId = generateErrorEventId();
+    const data = buildCapturedEventData({
+      message,
+      name: "Message",
+      handled: true,
+      mechanism: options?.mechanism ?? "captured.message",
+      ...options,
+    }, {
+      eventId,
+      release: this._telemetryResource.service.version ?? null,
+      environment: this._telemetryResource.deploymentEnvironmentName ?? null,
+      sdkVersion: clientVersion,
+      scope,
+    });
+    this._ensureOpenTelemetryProvider();
+    this._queueManualServerError(data, mergeErrorScopeData(scope, options));
+    return eventId;
+  }
+
+  protected override _captureManualEvent(event: CaptureEvent, scope: ErrorScopeData | undefined): ErrorEventId {
+    this.assertServerErrorCaptureAvailable();
+    const eventId = generateErrorEventId();
+    const data = buildCapturedEventData(event, {
+      eventId,
+      release: this._telemetryResource.service.version ?? null,
+      environment: this._telemetryResource.deploymentEnvironmentName ?? null,
+      sdkVersion: clientVersion,
+      scope,
+    });
+    this._ensureOpenTelemetryProvider();
+    this._queueManualServerError(data, mergeErrorScopeData(scope, event));
+    return eventId;
+  }
+
+  private assertServerErrorCaptureAvailable(): void {
+    if (!isObservabilityEnabled(this._observabilityOptions)) {
+      throw new Error("Hexclave error capture is unavailable because observability is disabled");
+    }
+  }
+
+  /**
+   * Records one uncaught server-side error as a `$error` OTel LogRecord. Built for
+   * framework glue (Next.js onRequestError) and the uncaught-exception
+   * monitor; a `request` links the error to the original caller's session
+   * exactly like `trackEvent({ request })`. Public-but-underscored: reached
+   * via getServerAppInstrumentation. In managed mode the returned promise
+   * settles after the provider flushes and is pre-caught.
+   */
+  _captureServerRequestError(error: unknown, info: { mechanism: string, handled: boolean, request?: RequestLike, data?: Record<string, unknown> }): Promise<void> {
+    if (this._isTelemetrySuppressed()) return Promise.resolve();
+    const scope = getActiveErrorScope()?.snapshot();
+    const data: CapturedErrorEvent = {
+      ...info.data ?? {},
+      ...buildErrorEventData(error, {
+        mechanismType: info.mechanism,
+        handled: info.handled,
+        release: this._telemetryResource.service.version ?? null,
+        environment: this._telemetryResource.deploymentEnvironmentName ?? null,
+        sdkVersion: clientVersion,
+        scope,
+      }),
+    };
+    const eventId = data.event_id;
+    if (typeof eventId === "string") this._recordErrorEventId(eventId);
+    if (info.request !== undefined) {
+      const request = info.request;
+      return preCaught((async () => {
+        const context = await this._resolveServerRequestContext(request, null);
+        const processed = await this._processServerError(data, scope, error);
+        if (processed === null) return;
+        await runWithServerRequestContext(context, () => this._trackServerError(processed, context.userId));
+        await this._deliverServerErrorAttachments(processed.event_id, scope);
+      })());
+    }
+    return preCaught((async () => {
+      const processed = await this._processServerError(data, scope, error);
+      if (processed !== null) {
+        await this._trackServerError(processed, null);
+        await this._deliverServerErrorAttachments(processed.event_id, scope);
+      }
+    })());
+  }
+
+  private _serverErrorMonitorInstalled = false;
+  private _serverErrorIntegrationRegistry: ErrorIntegrationRegistry | null = null;
+  private _serverLifecycleHandle: ServerLifecycleHandle | null = null;
+
+  /**
+   * Installs the process-level uncaught-exception monitor (one `$error` event
+   * per crash, `mechanism_type: "node.uncaughtexception"`). Idempotent per app
+   * instance and replace-keyed per project on globalThis (HMR — see
+   * installServerErrorMonitor). Installed eagerly by
+   * `hexclaveInstrumentation().register()` and lazily on the first
+   * `{ request }`-scoped telemetry call, mirroring the outbound-fetch install.
+   * Public-but-underscored: reached via getServerAppInstrumentation.
+   */
+  _installServerErrorMonitor(): void {
+    if (this._serverErrorMonitorInstalled) return;
+    if (this._clientAnalytics) return;
+    if (!isObservabilityEnabled(this._observabilityOptions)) return;
+    if (this._observabilityOptions?.errorCapture?.enabled === false) return;
+    const runtime: ErrorIntegrationRuntime = {
+      captureException: (error, options) => this.captureException(error, options),
+      addBreadcrumb: () => undefined,
+      node: {
+        onUncaughtException: (handler, _options) => {
+          const uninstall = installServerErrorMonitor({
+            projectId: this.projectId,
+            capture: handler,
+          });
+          return uninstall ?? (() => undefined);
+        },
+      },
+    };
+    const registry = createDefaultErrorIntegrationRegistry(runtime);
+    registry.installDefaults();
+    this._serverErrorIntegrationRegistry = registry;
+    this._serverErrorMonitorInstalled = true;
+  }
+
+  /**
+   * Installs the semantics-changing host lifecycle hooks only when the owner
+   * explicitly opts in. The ordinary monitor above remains observation-only:
+   * app construction and framework registration never alter crash ownership.
+   *
+   * The lifecycle helper captures and drains through this app's existing
+   * `$error` pipeline, then removes its listeners before rethrowing, exiting,
+   * or re-emitting the host signal. Its deadline is intentionally bounded so a
+   * broken exporter cannot keep a process alive after a fatal event.
+   * Public-but-underscored: framework lifecycle owners reach this through
+   * `getServerAppInstrumentation`.
+   */
+  _installServerLifecycle(options: Omit<ServerLifecycleInstallOptions, "ownerKey" | "capture" | "flush"> = {}): ServerLifecycleHandle | null {
+    if (this._serverLifecycleHandle?.active === true) return this._serverLifecycleHandle;
+    if (this._clientAnalytics) return null;
+    if (!isObservabilityEnabled(this._observabilityOptions)) return null;
+    if (this._observabilityOptions?.errorCapture?.enabled === false) return null;
+
+    const capture = (error: unknown, info: { signal: ServerLifecycleSignal }): Promise<void> => {
+      const fatal = info.signal === "uncaughtException" || info.signal === "unhandledRejection";
+      const mechanism = info.signal === "uncaughtException"
+        ? "auto.node.onuncaughtexception"
+        : info.signal === "unhandledRejection"
+          ? "auto.node.onunhandledrejection"
+          : "auto.node.signal";
+      return this._captureServerRequestError(error, {
+        mechanism,
+        handled: !fatal,
+        data: {
+          signal: info.signal,
+          ...info.signal === "uncaughtException" ? { level: "fatal" } : {},
+          ...info.signal === "unhandledRejection" ? { level: "error", unhandled_promise_rejection: true } : {},
+          ...!fatal ? { level: "warning" } : {},
+        },
+      });
+    };
+
+    const handle = installServerLifecycle({
+      ...options,
+      ownerKey: this.projectId,
+      capture,
+      flush: async () => await this.flush(),
+    });
+    this._serverLifecycleHandle = handle;
+    return handle;
+  }
+
+  /** Explicit teardown seam used by framework lifecycle owners and tests. */
+  _uninstallErrorIntegrations(): void {
+    this._serverLifecycleHandle?.uninstall();
+    this._serverLifecycleHandle = null;
+    this._serverErrorIntegrationRegistry?.uninstallAll();
+    this._serverErrorIntegrationRegistry = null;
+    this._serverErrorMonitorInstalled = false;
+  }
+
+  /** Server-side OTel LogRecord sink behind `app.logger`. */
+  protected override _emitLog(item: LogEmitItem): "ok" | "unavailable" {
+    if (this._isTelemetrySuppressed()) return "ok";
+    if (!isObservabilityEnabled(this._observabilityOptions)) return "unavailable";
+    if (this._clientAnalytics) return super._emitLog(item);
+    this._registerOpenTelemetryNow([]);
+    const requestContext = getServerRequestContext();
+    if (requestContext !== null) {
+      this._emitServerLogWithRequestContext(item, requestContext);
+      return "ok";
+    }
+    if (this._ambientRequestProvider !== null) {
+      const ambientLog = this._runWithAmbientRequestScope(null, async () => {
+        const resolved = getServerRequestContext();
+        if (resolved !== null) {
+          this._emitServerLogWithRequestContext(item, resolved);
+        } else {
+          emitHexclaveOtelLog(item, clientVersion);
+        }
+      });
+      registerTelemetryBackgroundTask(
+        this._telemetryOptions?.waitUntil ?? autoDetectedBackgroundTaskHook,
+        ambientLog,
+        "server ambient logger",
+      );
+      runAsynchronously(ambientLog);
+      return "ok";
+    }
+    emitHexclaveOtelLog(item, clientVersion);
+    return "ok";
+  }
+
+  /**
+   * Emits one logger record with the same request attribution
+   * _trackServerEvent/_trackServerError stamp on events and errors: the
+   * `hexclave.*` correlation scalars from the resolved request context, plus —
+   * only when no OTel span is already active (a logger call inside
+   * `withSpan({ request })` should stay parented under THAT span via the
+   * active context) — the request's incoming W3C parent, so a bare logger call
+   * still joins the caller's trace.
+   */
+  private _emitServerLogWithRequestContext(item: LogEmitItem, requestContext: ServerRequestSpanContext): void {
+    emitHexclaveOtelLog(item, clientVersion, {
+      ...getActiveOtelSpanContext() !== null || requestContext.incomingParent === null
+        ? {}
+        : { parent: requestContext.incomingParent },
+      correlationAttributes: {
+        ...requestContext.userId === null ? {} : { "hexclave.user.id": requestContext.userId },
+        ...requestContext.refreshTokenId === null ? {} : { "hexclave.refresh_token.id": requestContext.refreshTokenId },
+        ...requestContext.sessionReplayId === null ? {} : { "hexclave.session_replay.id": requestContext.sessionReplayId },
+        ...requestContext.sessionReplaySegmentId === null ? {} : { "hexclave.session_replay.segment.id": requestContext.sessionReplaySegmentId },
+        ...requestContext.pageViewSpanId === null ? {} : { "hexclave.page_view.span_id": requestContext.pageViewSpanId },
+      },
+    });
+  }
+
+  /** SDK-internal facade consumed through the cycle-free symbol lookup. */
+  [serverAppInstrumentationSymbol](): ServerAppInstrumentation {
+    return {
+      ensureOpenTelemetryProvider: () => this._ensureOpenTelemetryProvider(),
+      installServerErrorMonitor: () => this._installServerErrorMonitor(),
+      installServerLifecycle: (options) => this._installServerLifecycle(options),
+      uninstallErrorIntegrations: () => this._uninstallErrorIntegrations(),
+      setTelemetrySuppressionPredicate: (predicate) => this._setTelemetrySuppressionPredicate(predicate),
+      runWithTelemetrySuppressed: async (fn) => await runWithOtelTracingSuppressed(fn),
+      captureServerRequestError: (error, info) => this._captureServerRequestError(error, info),
+      setAmbientRequestProvider: (provider) => this._setAmbientRequestProvider(provider),
+      registerOpenTelemetry: (instrumentations) => this._registerOpenTelemetry(instrumentations),
+    };
+  }
 }
+
+export { getServerAppInstrumentation, type ServerAppInstrumentation } from "./server-app-instrumentation";
+
+const SERVER_TELEMETRY_UUID_RE = TELEMETRY_UUID_RE;
+
+const SERVER_GLOBAL_SPAN_SOFT_CAP = 1000;

@@ -6,6 +6,7 @@ import { globalPrismaClient, globalPrismaConnectionString, globalPrismaSchema, s
 import { spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
+import postgres from "postgres";
 import * as readline from "readline";
 import { seed } from "../prisma/seed";
 import { runBackfillInternalFreePlans } from "./backfill-internal-free-plans";
@@ -18,6 +19,29 @@ import { runClickhouseMigrations } from "./clickhouse-migrations";
 import { runRegenInternalSubscriptionsToLatest } from "./regen-internal-subscriptions-to-latest";
 
 const getClickhouseClient = () => getClickhouseAdminClient();
+
+// Serializes ClickHouse migrations across replicas that run `migrate` at startup;
+// derived rollup rebuilds share staging tables and must not interleave.
+const CLICKHOUSE_MIGRATION_LOCK_ID = 59129035;
+
+const runClickhouseMigrationsExclusively = async () => {
+  const sql = postgres(globalPrismaConnectionString, { max: 1 });
+  try {
+    const connection = await sql.reserve();
+    try {
+      await connection`SELECT pg_advisory_lock(${CLICKHOUSE_MIGRATION_LOCK_ID})`;
+      try {
+        await runClickhouseMigrations();
+      } finally {
+        await connection`SELECT pg_advisory_unlock(${CLICKHOUSE_MIGRATION_LOCK_ID})`;
+      }
+    } finally {
+      connection.release();
+    }
+  } finally {
+    await sql.end();
+  }
+};
 
 const dropSchema = async () => {
   await globalPrismaClient.$executeRaw(Prisma.sql`DROP SCHEMA ${sqlQuoteIdent(globalPrismaSchema)} CASCADE`);
@@ -175,7 +199,7 @@ const migrate = async (selectedMigrationFiles?: { migrationName: string, sql: st
 
   console.log('='.repeat(60) + '\n');
 
-  await runClickhouseMigrations();
+  await runClickhouseMigrationsExclusively();
 
   return result;
 };

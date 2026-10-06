@@ -7,6 +7,8 @@ import { DEFAULT_BRANCH_ID, Tenancy, getSoleTenancyFromProjectBranchQuery } from
 import { decodeAccessToken } from "@/lib/tokens";
 import { authenticateWorkflowRunTokenRequestOrThrow, getWorkflowRunTokenForRequest } from "@/lib/workflows/run-token";
 import { globalPrismaClient, rawQueryAll } from "@/prisma-client";
+import { resolveCustomerRequestObservability } from "@/lib/customer-request-observability";
+import { isObservabilityAppEnabled } from "@/lib/issues/observability-gate";
 import { KnownErrors } from "@hexclave/shared";
 import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
 import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
@@ -16,6 +18,7 @@ import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/
 import { HexclaveAssertionError, StatusError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { deindent } from "@hexclave/shared/dist/utils/strings";
 import { traceSpan, withTraceSpan } from "@hexclave/shared/dist/utils/telemetry";
+import * as zlib from "node:zlib";
 import * as yup from "yup";
 
 const allowedMethods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
@@ -115,6 +118,42 @@ async function validate<T>(obj: SmartRequest, schema: yup.Schema<T>, req: Reques
 }
 
 
+const MAX_DECODED_BODY_BYTES = 8 * 1024 * 1024;
+
+async function decodeBodyContentEncoding(req: Request, bodyBuffer: ArrayBuffer): Promise<Uint8Array> {
+  const contentEncoding = req.headers.get("content-encoding")?.trim().toLowerCase() ?? "";
+  const raw = new Uint8Array(bodyBuffer);
+  if (contentEncoding === "" || contentEncoding === "identity") return raw;
+  if (contentEncoding !== "gzip" && contentEncoding !== "deflate") {
+    throw new KnownErrors.BodyParsingError("Unsupported Content-Encoding in request body: " + contentEncoding);
+  }
+  try {
+    // Per RFC 9110, "deflate" is the zlib-wrapped format, which is what
+    // inflate expects; raw-deflate senders are out of spec and get a 400.
+    // Use the worker-pool APIs here: JSON parsing is necessarily on the main
+    // thread, but decompression must not block every other request first.
+    return await new Promise<Buffer>((resolve, reject) => {
+      const callback = (error: Error | null, result: Buffer) => {
+        if (error !== null) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      };
+      if (contentEncoding === "gzip") {
+        zlib.gunzip(raw, { maxOutputLength: MAX_DECODED_BODY_BYTES }, callback);
+      } else {
+        zlib.inflate(raw, { maxOutputLength: MAX_DECODED_BODY_BYTES }, callback);
+      }
+    });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ERR_BUFFER_TOO_LARGE") {
+      throw new StatusError(StatusError.PayloadTooLarge, "Request body too large");
+    }
+    throw new KnownErrors.BodyParsingError(`Invalid ${contentEncoding}-encoded request body`);
+  }
+}
+
 async function parseBody(req: Request, bodyBuffer: ArrayBuffer): Promise<SmartRequest["body"]> {
   const contentType = req.method === "GET" || req.method === "HEAD" ? undefined : req.headers.get("content-type")?.split(";")[0];
 
@@ -132,7 +171,11 @@ async function parseBody(req: Request, bodyBuffer: ArrayBuffer): Promise<SmartRe
       return undefined;
     }
     case "application/json": {
-      const text = getText();
+      const decoded = await decodeBodyContentEncoding(req, bodyBuffer);
+      if (decoded.byteLength > MAX_DECODED_BODY_BYTES) {
+        throw new StatusError(StatusError.PayloadTooLarge, "Request body too large");
+      }
+      const text = new TextDecoder().decode(decoded);
       try {
         return JSON.parse(text);
       } catch (e) {
@@ -141,6 +184,20 @@ async function parseBody(req: Request, bodyBuffer: ArrayBuffer): Promise<SmartRe
     }
     case "application/octet-stream": {
       return bodyBuffer;
+    }
+    case "application/x-sentry-envelope": {
+      const decoded = await decodeBodyContentEncoding(req, bodyBuffer);
+      if (decoded.byteLength > MAX_DECODED_BODY_BYTES) {
+        throw new StatusError(StatusError.PayloadTooLarge, "Request body too large");
+      }
+      return decoded;
+    }
+    case "application/x-protobuf": {
+      const decoded = await decodeBodyContentEncoding(req, bodyBuffer);
+      if (decoded.byteLength > MAX_DECODED_BODY_BYTES) {
+        throw new StatusError(StatusError.PayloadTooLarge, "Request body too large");
+      }
+      return decoded;
     }
     case "text/plain": {
       return getText();
@@ -355,6 +412,15 @@ const parseAuth = withTraceSpan('smart request parseAuth', async (req: Request):
   }
 
   const user = await queriesResults.userIfOnGlobalPrismaClient;
+
+  resolveCustomerRequestObservability({
+    projectId,
+    branchId,
+    userId: userId ?? null,
+    refreshTokenId: refreshTokenId ?? null,
+    observabilityEnabled: isObservabilityAppEnabled(tenancy),
+    headers: req.headers,
+  });
 
   return {
     project,

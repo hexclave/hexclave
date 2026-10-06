@@ -17,6 +17,7 @@ turbo.log
 .vercel
 .output
 .nitro
+.eve
 
 # https://stackoverflow.com/questions/76510164/can-i-safely-delete-vite-config-ts-timestamp-files
 vite.config.ts.timestamp-*

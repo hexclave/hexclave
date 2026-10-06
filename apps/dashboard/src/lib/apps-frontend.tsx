@@ -1,6 +1,6 @@
 import type { JSX } from "react";
 import { Link } from "@/components/link";
-import { ChartLineIcon, ChatCircleDotsIcon, ClipboardTextIcon, CodeIcon, CreditCardIcon, CursorClickIcon, EnvelopeSimpleIcon, FingerprintSimpleIcon, GraphIcon, KeyIcon, MailboxIcon, MonitorPlayIcon, RocketIcon, ShieldCheckIcon, ShieldWarningIcon, SparkleIcon, TelevisionSimpleIcon, TerminalWindowIcon, TreeStructureIcon, TriangleIcon, UserGearIcon, UsersIcon, VaultIcon, WebhooksLogoIcon } from "@phosphor-icons/react";
+import { ChartLineIcon, ChatCircleDotsIcon, ClipboardTextIcon, CodeIcon, CreditCardIcon, CursorClickIcon, DatabaseIcon, EnvelopeSimpleIcon, FingerprintSimpleIcon, GraphIcon, KeyIcon, MailboxIcon, MonitorPlayIcon, RocketIcon, ShieldCheckIcon, ShieldWarningIcon, SparkleIcon, TelevisionSimpleIcon, TerminalWindowIcon, TreeStructureIcon, TriangleIcon, UserGearIcon, UsersIcon, VaultIcon, WebhooksLogoIcon } from "@phosphor-icons/react";
 import { StackAdminApp } from "@hexclave/next";
 import type { AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { getRelativePart, isChildUrl } from "@hexclave/shared/dist/utils/urls";
@@ -27,7 +27,15 @@ type BreadcrumbDefinition = {
 type AppNavigationItem = {
   displayName: string,
   href: string,
+  section?: string,
   external?: boolean,
+  /**
+   * When true, sidebar rendering hides this item unless the current project is
+   * `internal`. isAppNavigationItemVisible is the filter. No shipped item sets
+   * this after Growth/GTM was removed; the field stays so that helper and the
+   * AppNavigationItem type stay the same shape.
+   */
+  internalOnly?: boolean,
   matchPath?: (relativePart: string) => boolean,
   getBreadcrumbItems?: (hexclaveAdminApp: StackAdminApp<false>, relativePart: string) => Promise<BreadcrumbDefinition | null | undefined>,
 };
@@ -357,7 +365,12 @@ export const ALL_APPS_FRONTEND = {
       { displayName: "Catalyst", href: "." },
     ],
     screenshots: [],
-    storeDescription: <></>,
+    storeDescription: (
+      <>
+        <p>Catalyst is the project kit: which apps are enabled and where to go next.</p>
+        <p>Use it as a jumping-off point to the Launch Checklist, Apps, and settings. It does not generate a starter app yet.</p>
+      </>
+    ),
   },
   neon: {
     icon: createSvgIcon(() => <>
@@ -424,16 +437,49 @@ export const ALL_APPS_FRONTEND = {
     icon: ChartLineIcon,
     href: "analytics",
     navigationItems: [
-      { displayName: "Tables", href: "./tables" },
+      { displayName: "Paths", href: "./paths" },
       { displayName: "Replays", href: "../session-replays" },
       { displayName: "Clickmaps", href: "./clickmaps" },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Analytics helps you understand how people use your product.</p>
+        <p>Explore paths, compare route audiences, watch replays, and inspect clickmaps without leaving the dashboard.</p>
+      </>
+    ),
+  },
+  observability: {
+    icon: CodeIcon,
+    href: "observability",
+    navigationItems: [
+      { displayName: "Issues", href: "./issues" },
+      { displayName: "Logs", href: "./logs" },
+      { displayName: "Traces", href: "./traces" },
+      { displayName: "Services", href: "./services" },
+      { displayName: "Performance", href: "./performance" },
+      { displayName: "Registry", href: "./registry" },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Observability connects errors, logs, traces, and service performance to the user activity that caused them.</p>
+        <p>Enable it independently from Analytics to investigate application health and performance.</p>
+      </>
+    ),
+  },
+  warehouse: {
+    icon: DatabaseIcon,
+    href: "warehouse",
+    navigationItems: [
+      { displayName: "Tables", href: "./tables" },
       { displayName: "Queries", href: "./queries" },
     ],
     screenshots: [],
     storeDescription: (
       <>
-        <p>Analytics provides direct access to your project&apos;s analytics data stored in ClickHouse.</p>
-        <p>Browse tables, explore event data, and gain insights into user behavior and system performance.</p>
+        <p>Warehouse gives you direct access to the data available in your project.</p>
+        <p>Browse tables and save ClickHouse queries in a dedicated data-exploration workspace.</p>
       </>
     ),
   },

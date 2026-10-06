@@ -230,3 +230,32 @@ export class AsyncStore<T> implements ReadonlyAsyncStore<T> {
     return { unsubscribe };
   }
 }
+
+import.meta.vitest?.test("AsyncStore.setAsync commits normally when no newer update intervenes", async ({ expect }) => {
+  const store = new AsyncStore<string>();
+  expect(store.get().status).toBe("pending");
+  expect(await store.setAsync(Promise.resolve("value"))).toBe(true);
+  expect(store.get()).toEqual({ status: "ok", data: "value" });
+
+  expect(await store.setAsync(Promise.resolve("value2"))).toBe(true);
+  expect(store.get()).toEqual({ status: "ok", data: "value2" });
+});
+
+import.meta.vitest?.test("AsyncStore.setAsync propagates fetch rejections as rejected state", async ({ expect }) => {
+  const store = new AsyncStore<string>();
+  const error = new Error("fetch failed");
+  expect(await store.setAsync(Promise.reject(error))).toBe(true);
+  expect(store.get()).toEqual({ status: "error", error });
+});
+
+import.meta.vitest?.test("AsyncStore.set during an in-flight setAsync wins over the older fetch result", async ({ expect }) => {
+  const store = new AsyncStore<string>();
+  let resolveFetch!: (value: string) => void;
+  const setAsyncPromise = store.setAsync(new Promise<string>((resolve) => {
+    resolveFetch = resolve;
+  }));
+  store.set("newer-sync-value");
+  resolveFetch("older-fetched-value");
+  expect(await setAsyncPromise).toBe(false);
+  expect(store.get()).toEqual({ status: "ok", data: "newer-sync-value" });
+});

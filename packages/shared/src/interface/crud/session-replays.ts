@@ -1,3 +1,5 @@
+export type AdminSessionReplayUserKind = "anonymous" | "verified";
+
 export type AdminListSessionReplaysOptions = {
   limit?: number,
   cursor?: string,
@@ -8,6 +10,11 @@ export type AdminListSessionReplaysOptions = {
   last_event_at_from_millis?: number,
   last_event_at_to_millis?: number,
   click_count_min?: number,
+  /**
+   * Restrict to anonymous users (`isAnonymous`) or verified users (non-anonymous).
+   * Omitted means both. "verified" here is identified / signed-up, not email-verified.
+   */
+  user_kind?: AdminSessionReplayUserKind,
 };
 
 export type AdminListSessionReplaysResponse = {

@@ -183,7 +183,13 @@ export function HexclaveCompanion({ className, glassBg = false }: { className?: 
   useEffect(() => {
     runAsynchronously(async () => {
       const baseUrl = getPublicEnvVar('NEXT_PUBLIC_STACK_API_URL') || '';
-      const response = await fetch(`${baseUrl}/api/latest/internal/changelog`);
+      let response: Response;
+      try {
+        response = await fetch(`${baseUrl}/api/latest/internal/changelog`);
+      } catch (e) {
+        console.warn("Could not fetch changelog, skipping changelog notification check", e);
+        return;
+      }
       if (!response.ok) {
         return;
       }

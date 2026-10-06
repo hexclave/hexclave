@@ -36,6 +36,14 @@ export async function enqueueExternalDbSyncBatch(tenancyIds: string[], client: P
       json_build_object(
         'url',  '/api/latest/internal/external-db-sync/sync-engine',
         'body', json_build_object('tenancyId', t.tenancy_id),
+        'job', json_build_object(
+          'schemaVersion', 1,
+          'jobId', 'sentinel-sync-key-' || t.tenancy_id,
+          'jobType', 'external-db-sync',
+          'tenancyId', t.tenancy_id,
+          'deduplicationKey', 'sentinel-sync-key-' || t.tenancy_id,
+          'payload', json_build_object('tenancyId', t.tenancy_id)
+        ),
         'flowControl', json_build_object('key', 'sentinel-sync-key', 'parallelism', 20)
       ),
       NULL,

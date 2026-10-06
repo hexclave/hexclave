@@ -25,6 +25,8 @@ export type AdminSessionReplayChunk = {
   createdAt: Date,
 };
 
+export type SessionReplayUserKind = "anonymous" | "verified";
+
 export type ListSessionReplaysOptions = {
   limit?: number,
   cursor?: string,
@@ -35,6 +37,7 @@ export type ListSessionReplaysOptions = {
   lastEventAtFromMillis?: number,
   lastEventAtToMillis?: number,
   clickCountMin?: number,
+  userKind?: SessionReplayUserKind,
 };
 
 export type ListSessionReplaysResult = {

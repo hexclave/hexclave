@@ -6,6 +6,7 @@ import { listManagedProjectIds } from "@/lib/projects";
 import type { SmartRequestAuth } from "@/route-handlers/smart-request";
 import { captureError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { Json } from "@hexclave/shared/dist/utils/json";
+import { getAiTelemetry } from "@/lib/ai/telemetry";
 import { generateText, stepCountIs, streamText, type StepResult, type ToolSet } from "ai";
 
 export const USER_FACING_ERROR_MESSAGE = "The AI service is temporarily unavailable. Please try again later.";
@@ -72,6 +73,7 @@ export function handleStreamMode(ctx: ModeContext & {
     abortSignal: controller.signal,
     stopWhen: stepCountIs(stepLimit),
     providerOptions: { openrouter: OPENROUTER_PROVIDER_OPTIONS },
+    experimental_telemetry: getAiTelemetry("hexclave.ai.query.stream"),
     onStepFinish: (step) => { completedSteps.push(step); },
     onFinish: ({ text, steps, usage, response }) => {
       clearTimeout(timeoutId);
@@ -131,6 +133,7 @@ export async function handleGenerateMode(ctx: ModeContext & {
       abortSignal: controller.signal,
       stopWhen: stepCountIs(stepLimit),
       providerOptions: { openrouter: OPENROUTER_PROVIDER_OPTIONS },
+      experimental_telemetry: getAiTelemetry("hexclave.ai.query.generate"),
       onStepFinish: (step) => { completedSteps.push(step); },
     }).finally(() => clearTimeout(timeoutId));
   } catch (err) {

@@ -1,19 +1,17 @@
 ---
-title: "Queries & Tables"
-description: "Inspect raw analytics rows and run read-only ClickHouse SQL against your project's dataset"
-sidebarTitle: "Queries & Tables"
+title: "Warehouse"
+description: "Browse project data and run read-only ClickHouse SQL against your project's dataset"
+sidebarTitle: "Overview"
 ---
 
-The Analytics app stores your project's data in [ClickHouse](https://clickhouse.com/) and gives you two ways to explore it:
+The Warehouse app gives you two ways to explore the project data stored in [ClickHouse](https://clickhouse.com/):
 
 - **Tables** - a point-and-click grid for browsing raw rows. Best for "what just happened?" triage.
 - **Queries** - a read-only ClickHouse SQL workspace for aggregation, joins, and reusable analysis.
 
 Both read from the same dataset and are automatically scoped to the current project and branch, so you never see another tenant's data and you never have to filter by `project_id` yourself.
 
-<Note>
-  This guide covers how to *use* Tables and Queries. For enabling the app and capturing events from the SDK, see the [Analytics overview](./overview).
-</Note>
+Enable Warehouse under **Apps -> Warehouse** in the dashboard. Analytics and Observability remain separate apps that produce data Warehouse can query.
 
 ## What you can query
 
@@ -50,7 +48,7 @@ Your dataset is exposed as a set of read-only views. Reference them directly by 
 | `user_id` | `Nullable(String)` | The acting user, when authenticated |
 | `team_id` | `Nullable(String)` | Reserved; currently always `NULL` |
 | `refresh_token_id` | `Nullable(String)` | Session's refresh token, when applicable |
-| `session_replay_id` | `Nullable(String)` | Linked [session replay](./overview#session-replays), if one exists |
+| `session_replay_id` | `Nullable(String)` | Linked [session replay](/guides/apps/analytics/replays-and-clickmaps#session-replays), if one exists |
 | `session_replay_segment_id` | `Nullable(String)` | Replay segment that produced the event |
 | `project_id` / `branch_id` | `String` | Tenant identity - filtered automatically; you rarely need these |
 | `created_at` | `DateTime64(3, 'UTC')` | Ingestion time (usually a few ms after `event_at`) |
@@ -72,7 +70,7 @@ The shape of `data` depends on `event_type`. The built-in event types are:
 
 ## Tables
 
-Open **Analytics → Tables**, then pick a table from the sidebar (it opens on `events` by default). The grid shows every column the table returns, newest rows first.
+Open **Warehouse -> Tables**, then pick a table from the sidebar. It opens on `events` by default. The grid shows every column the table returns, newest rows first.
 
 What you can do here:
 
@@ -87,7 +85,7 @@ Rows load incrementally as you scroll (50 at a time), so large tables stay respo
 
 ## Queries
 
-Open **Analytics → Queries** to get a SQL editor. Write a query, run it, and the results appear in the same grid (with the same sorting, search, and CSV export as Tables).
+Open **Warehouse -> Queries** to get a SQL editor. Write a query and run it. The results appear in the same grid, with the same sorting, search, and CSV export as Tables.
 
 A minimal starting point:
 
@@ -287,5 +285,6 @@ ORDER BY refreshes DESC
 
 ## Related
 
-- [Analytics Overview](./overview) - enabling the app and capturing events from the SDK.
+- [Analytics](/guides/apps/analytics/overview) - capture product behavior for paths, replays, and clickmaps.
+- [Observability](/guides/apps/observability/overview) - capture errors, logs, traces, and performance data.
 - [Sign-up Rules](../authentication/sign-up-rules) - the source of `$sign-up-rule-trigger` events.

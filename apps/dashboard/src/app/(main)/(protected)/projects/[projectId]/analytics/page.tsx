@@ -1,6 +1,5 @@
-import { redirect } from "next/navigation";
+import AnalyticsOverview from "./analytics-overview";
 
-export default async function Page({ params }: { params: Promise<{ projectId: string }> }) {
-  const { projectId } = await params;
-  redirect(`/projects/${projectId}/analytics/tables`);
+export default function Page() {
+  return <AnalyticsOverview />;
 }

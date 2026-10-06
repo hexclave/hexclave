@@ -68,6 +68,7 @@
     "@babel/traverse": "^7.28.5",
     "@babel/types": "^7.28.5",
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^2.10.0",
     "@simplewebauthn/browser": "^13.2.2",
     "@vercel/functions": "^2.0.0",
     "bcryptjs": "^3.0.2",

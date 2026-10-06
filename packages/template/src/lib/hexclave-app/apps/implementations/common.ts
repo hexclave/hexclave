@@ -2,8 +2,8 @@ import { InternalSession } from "@hexclave/shared/dist/sessions";
 import { AsyncCache } from "@hexclave/shared/dist/utils/caches";
 import { isBrowserLike } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, captureError, concatStacktraces, throwErr } from "@hexclave/shared/dist/utils/errors";
-import { createGlobal, getGlobal } from "@hexclave/shared/dist/utils/globals";
-import { filterUndefined, omit } from "@hexclave/shared/dist/utils/objects";
+import { createGlobal, getGlobal, setGlobal } from "@hexclave/shared/dist/utils/globals";
+import { filterUndefined, isRecord, omit } from "@hexclave/shared/dist/utils/objects";
 import { ReactPromise, runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { use } from "@hexclave/shared/dist/utils/react";
 import { Result } from "@hexclave/shared/dist/utils/results";
@@ -175,23 +175,29 @@ export function getAnalyticsBaseUrl(regularBaseUrl: string): string {
 
 
 function fetchBackendUrlsInBackground(primaryBaseUrl: string): void {
-  createGlobal('__stack-fetch-backend-urls-started', () => {
-    runAsynchronously(async () => {
-      try {
-        const res = await fetch(`${primaryBaseUrl}/api/v1/internal/backend-urls`);
-        if (!res.ok) {
-          return;
-        }
-        const data = await res.json();
-        if (!Array.isArray(data.urls) || !data.urls.every((u: unknown) => typeof u === 'string')) {
-          return;
-        }
-        createGlobal('__stack-fetched-backend-urls', () => data.urls as string[]);
-      } catch (e) {
-        captureError('fetch-backend-urls-in-background', e);
+  if (getGlobal('__stack-fetch-backend-urls-started')) {
+    return;
+  }
+  setGlobal('__stack-fetch-backend-urls-started', true);
+  runAsynchronously(async () => {
+    try {
+      const res = await fetch(`${primaryBaseUrl}/api/v1/internal/backend-urls`);
+      if (!res.ok) {
+        return;
       }
-    });
-    return true;
+      const data: unknown = await res.json();
+      if (!isRecord(data) || !Array.isArray(data.urls)) {
+        return;
+      }
+      const urls: string[] = [];
+      for (const url of data.urls) {
+        if (typeof url !== 'string') return;
+        urls.push(url);
+      }
+      createGlobal('__stack-fetched-backend-urls', () => urls);
+    } catch (e) {
+      captureError('fetch-backend-urls-in-background', e);
+    }
   });
 }
 

@@ -11,8 +11,8 @@ import {
   yupUnion,
 } from "../../schema-fields";
 import { SUPPORTED_CURRENCIES } from "../../utils/currency-constants";
-import { typedFromEntries } from "../../utils/objects";
 import { throwErr } from "../../utils/errors";
+import { typedFromEntries } from "../../utils/objects";
 
 
 const USD_CURRENCY = SUPPORTED_CURRENCIES.find((currency) => currency.code === "USD") ?? throwErr("USD currency configuration missing in SUPPORTED_CURRENCIES");

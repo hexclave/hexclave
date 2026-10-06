@@ -30,10 +30,18 @@ import { setTimeout as sleep } from "timers/promises";
 // while package builds warm up, and fail immediately for other import failures.
 //
 // In addition to workspace packages, the probe checks that the generated Prisma
-// client exists. When `turbo run dev` starts the backend, `codegen-prisma:watch`
-// (`prisma generate --watch`) performs an initial generation that briefly removes
-// and recreates `src/generated/prisma/`. If `codegen-docs` runs during that
-// window it fails with ERR_MODULE_NOT_FOUND for `@/generated/prisma/client`.
+// client is actually importable. When `turbo run dev` starts the backend,
+// `codegen-prisma:watch` (`prisma generate --watch`) rewrites
+// `src/generated/prisma/` in place, so individual files can exist while the
+// module graph is still incomplete. An existence check on one file treats that
+// window as ready, then `codegen-docs` dies with ERR_MODULE_NOT_FOUND. So the
+// probe (a) imports the real client entrypoint, which fails retryably while any
+// file of its graph is missing, and (b) requires the generated tree to have
+// been quiet for a moment, so a pass cannot land in the middle of a rewrite
+// burst. Neither guard can prove the initial `prisma generate` of THIS dev run
+// already happened (on a warm checkout the committed output is importable and
+// quiet before the generator even starts), which is why the caller retries the
+// eager `codegen-docs` once — see `generate-openapi-docs:watch`.
 const repoRoot = path.resolve(__dirname, "..");
 const backendDir = path.join(repoRoot, "apps/backend");
 const timeoutMs = 60_000;
@@ -43,11 +51,32 @@ const probeScript = `
 (async () => {
   await import('@hexclave/js');
   await import('@hexclave/shared/dist/utils/env');
-  const { existsSync, readdirSync } = await import('node:fs');
+  const { readdirSync, statSync } = await import('node:fs');
   const { join } = await import('node:path');
-  const generatedDir = join(process.cwd(), 'src', 'generated', 'prisma');
-  if (!existsSync(generatedDir) || readdirSync(generatedDir).length === 0) {
-    const err = new Error('ERR_MODULE_NOT_FOUND: Generated Prisma client not yet available at ' + generatedDir);
+  const { pathToFileURL } = await import('node:url');
+  const prismaDir = join(process.cwd(), 'src', 'generated', 'prisma');
+  // Importing the entrypoint pulls the full generated graph through tsx, so a
+  // half-written tree fails here with a retryable module-not-found.
+  await import(pathToFileURL(join(prismaDir, 'client.ts')).href);
+  // Reject a pass while the generator is mid-burst: prisma writes the whole
+  // tree in quick succession, so any file younger than the window means a
+  // rewrite is (likely still) in progress.
+  const quietWindowMs = 1500;
+  const newestMtimeMs = (dir) => {
+    let newest = 0;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        newest = Math.max(newest, newestMtimeMs(entryPath));
+      } else {
+        newest = Math.max(newest, statSync(entryPath).mtimeMs);
+      }
+    }
+    return newest;
+  };
+  const age = Date.now() - newestMtimeMs(prismaDir);
+  if (age < quietWindowMs) {
+    const err = new Error('ERR_MODULE_NOT_FOUND: Generated Prisma client was rewritten ' + Math.round(age) + 'ms ago; waiting for the generator to settle at ' + prismaDir);
     throw err;
   }
 })().then(

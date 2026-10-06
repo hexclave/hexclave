@@ -17,31 +17,33 @@ export const confirmAlertMessage = "Are you sure you want to leave this page? Ch
 
 export function useRouter() {
   const router = useNextRouter();
-  const context = useRouterConfirm();
+  const { needConfirm, showNavigationDialog } = useRouterConfirm();
 
-  return {
-    push: (...args: Parameters<typeof router.push>) => {
-      if (context.needConfirm) {
-        context.showNavigationDialog(() => router.push(...args));
-        return;
-      }
-      router.push(...args);
-    },
-    replace: (...args: Parameters<typeof router.replace>) => {
-      if (context.needConfirm) {
-        context.showNavigationDialog(() => router.replace(...args));
-        return;
-      }
-      router.replace(...args);
-    },
-    back: () => {
-      if (context.needConfirm) {
-        context.showNavigationDialog(() => router.back());
-        return;
-      }
-      router.back();
-    },
-  };
+  const push = React.useCallback((...args: Parameters<typeof router.push>) => {
+    if (needConfirm) {
+      showNavigationDialog(() => router.push(...args));
+      return;
+    }
+    router.push(...args);
+  }, [needConfirm, router, showNavigationDialog]);
+
+  const replace = React.useCallback((...args: Parameters<typeof router.replace>) => {
+    if (needConfirm) {
+      showNavigationDialog(() => router.replace(...args));
+      return;
+    }
+    router.replace(...args);
+  }, [needConfirm, router, showNavigationDialog]);
+
+  const back = React.useCallback(() => {
+    if (needConfirm) {
+      showNavigationDialog(() => router.back());
+      return;
+    }
+    router.back();
+  }, [needConfirm, router, showNavigationDialog]);
+
+  return React.useMemo(() => ({ push, replace, back }), [back, push, replace]);
 }
 
 export function useRouterConfirm() {

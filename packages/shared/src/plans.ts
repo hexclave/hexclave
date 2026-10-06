@@ -16,6 +16,7 @@ export const ITEM_IDS = {
   emailsPerMonth: "emails_per_month",
   analyticsTimeoutSeconds: "analytics_timeout_seconds",
   analyticsEvents: "analytics_events",
+  analyticsSpans: "analytics_spans",
   sessionReplays: "session_replays",
   onboardingCall: "onboarding_call",
 } as const;
@@ -31,6 +32,7 @@ export type PlanProductOfferings = {
   emailsPerMonth: number,
   analyticsTimeoutSeconds: number,
   analyticsEvents: number,
+  analyticsSpans: number,
   sessionReplays: number,
 };
 
@@ -48,6 +50,7 @@ export const PLAN_LIMITS: {
     emailsPerMonth: 1_000,
     analyticsTimeoutSeconds: 10,
     analyticsEvents: 100_000,
+    analyticsSpans: 100_000,
     sessionReplays: 2_500,
   },
   team: {
@@ -56,6 +59,7 @@ export const PLAN_LIMITS: {
     emailsPerMonth: 25_000,
     analyticsTimeoutSeconds: 60,
     analyticsEvents: 500_000,
+    analyticsSpans: 500_000,
     sessionReplays: 2_500,
   },
   growth: {
@@ -64,6 +68,7 @@ export const PLAN_LIMITS: {
     emailsPerMonth: 25_000,
     analyticsTimeoutSeconds: 300,
     analyticsEvents: 1_000_000,
+    analyticsSpans: 1_000_000,
     sessionReplays: 2_500,
   },
 };

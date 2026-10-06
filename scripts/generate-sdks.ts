@@ -135,6 +135,13 @@ withGeneratorLock(async () => {
     "src/tanstack-start-server-context.combined.ts",
     "src/tanstack-start-server-context.default.ts",
     "src/tanstack-start-server-context.server.ts",
+    "src/integrations/tanstack-start.ts",
+    "src/integrations/tanstack-start.test.ts",
+  ]);
+  const nextOnlyTemplateFiles = new Set([
+    "src/integrations/next.ts",
+    "src/integrations/next.test.ts",
+    "next.d.ts",
   ]);
   const templateOnlyFiles = new Set([
     "src/tanstack-start-server-context.d.ts",
@@ -205,7 +212,7 @@ withGeneratorLock(async () => {
         "src/providers/",
       ];
 
-      if (tanstackStartOnlyTemplateFiles.has(relativePath) || templateOnlyFiles.has(relativePath)) {
+      if (tanstackStartOnlyTemplateFiles.has(relativePath) || nextOnlyTemplateFiles.has(relativePath) || templateOnlyFiles.has(relativePath)) {
         return false;
       } else if (ignores.some((ignorePath) => relativePath.startsWith(ignorePath)) || relativePath.endsWith(".tsx")) {
         return false;
@@ -233,7 +240,7 @@ withGeneratorLock(async () => {
       return baseEditFn({ relativePath, content, platforms: PLATFORMS["react"] });
     },
     filterFn: (relativePath) => {
-      return hasGeneratedContent(relativePath, PLATFORMS["react"]) && !tanstackStartOnlyTemplateFiles.has(relativePath);
+      return hasGeneratedContent(relativePath, PLATFORMS["react"]) && !tanstackStartOnlyTemplateFiles.has(relativePath) && !nextOnlyTemplateFiles.has(relativePath);
     },
   });
 
@@ -244,7 +251,7 @@ withGeneratorLock(async () => {
       return baseEditFn({ relativePath, content, platforms: PLATFORMS["tanstack-start"] });
     },
     filterFn: (relativePath) => {
-      return hasGeneratedContent(relativePath, PLATFORMS["tanstack-start"]) && !templateOnlyFiles.has(relativePath);
+      return hasGeneratedContent(relativePath, PLATFORMS["tanstack-start"]) && !templateOnlyFiles.has(relativePath) && !nextOnlyTemplateFiles.has(relativePath);
     },
   });
 }).catch((error) => {

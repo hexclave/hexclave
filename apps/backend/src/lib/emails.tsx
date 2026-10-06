@@ -1,6 +1,6 @@
 import { globalPrismaClient } from '@/prisma-client';
 import { runAsynchronouslyAndWaitUntil } from '@/utils/background-tasks';
-import { EmailOutboxCreatedWith } from '@/generated/prisma/client';
+import { EmailOutboxCreatedWith, type Prisma } from '@/generated/prisma/client';
 import { DEFAULT_EMAIL_THEMES, DEFAULT_TEMPLATE_IDS } from '@hexclave/shared/dist/helpers/emails';
 import { UsersCrud } from '@hexclave/shared/dist/interface/crud/users';
 import { getEnvBoolean, getEnvVariable } from '@hexclave/shared/dist/utils/env';
@@ -9,6 +9,7 @@ import { Json } from '@hexclave/shared/dist/utils/json';
 import { runEmailQueueStep, serializeRecipient } from './email-queue-step';
 import { LowLevelEmailConfig, isSecureEmailPort } from './emails-low-level';
 import { Tenancy } from './tenancies';
+import { createHash } from 'node:crypto';
 
 
 /**
@@ -49,23 +50,35 @@ export async function sendEmailToMany(options: {
   createdWith: { type: "draft", draftId: string } | { type: "programmatic-call", templateId: string | null },
   overrideSubject?: string,
   overrideNotificationCategoryId?: string,
+  idempotencyKey?: string,
 }) {
+  if (options.idempotencyKey !== undefined && (options.idempotencyKey.length === 0 || options.idempotencyKey.length > 256)) {
+    throw new HexclaveAssertionError("Email idempotency keys must contain 1-256 characters");
+  }
   await globalPrismaClient.emailOutbox.createMany({
-    data: options.recipients.map(recipient => ({
-      tenancyId: options.tenancy.id,
-      tsxSource: options.tsxSource,
-      themeId: options.themeId,
-      isHighPriority: options.isHighPriority,
-      createdWith: options.createdWith.type === "draft" ? EmailOutboxCreatedWith.DRAFT : EmailOutboxCreatedWith.PROGRAMMATIC_CALL,
-      emailDraftId: options.createdWith.type === "draft" ? options.createdWith.draftId : undefined,
-      emailProgrammaticCallTemplateId: options.createdWith.type === "programmatic-call" ? options.createdWith.templateId : undefined,
-      to: serializeRecipient(recipient)!,
-      extraRenderVariables: options.extraVariables,
-      scheduledAt: options.scheduledAt,
-      shouldSkipDeliverabilityCheck: options.shouldSkipDeliverabilityCheck,
-      overrideSubject: options.overrideSubject,
-      overrideNotificationCategoryId: options.overrideNotificationCategoryId,
-    })),
+    data: options.recipients.map((recipient) => {
+      const serializedRecipient = serializeRecipient(recipient)!;
+      const row: Prisma.EmailOutboxCreateManyInput = {
+        tenancyId: options.tenancy.id,
+        tsxSource: options.tsxSource,
+        themeId: options.themeId,
+        isHighPriority: options.isHighPriority,
+        createdWith: options.createdWith.type === "draft" ? EmailOutboxCreatedWith.DRAFT : EmailOutboxCreatedWith.PROGRAMMATIC_CALL,
+        emailDraftId: options.createdWith.type === "draft" ? options.createdWith.draftId : undefined,
+        emailProgrammaticCallTemplateId: options.createdWith.type === "programmatic-call" ? options.createdWith.templateId : undefined,
+        to: serializedRecipient,
+        extraRenderVariables: options.extraVariables,
+        scheduledAt: options.scheduledAt,
+        shouldSkipDeliverabilityCheck: options.shouldSkipDeliverabilityCheck,
+        overrideSubject: options.overrideSubject,
+        overrideNotificationCategoryId: options.overrideNotificationCategoryId,
+      };
+      if (options.idempotencyKey !== undefined) {
+        row.id = emailOutboxIdForIdempotencyKey(options.tenancy.id, options.idempotencyKey, JSON.stringify(serializedRecipient));
+      }
+      return row;
+    }),
+    skipDuplicates: options.idempotencyKey !== undefined,
   });
 
   if (!getEnvBoolean("STACK_EMAIL_BRANCHING_DISABLE_QUEUE_AUTO_TRIGGER")) {
@@ -73,6 +86,23 @@ export async function sendEmailToMany(options: {
     // who didn't set up the cron job correctly, and also just in case something happens to the cron job.
     runAsynchronouslyAndWaitUntil(runEmailQueueStep());
   }
+}
+
+export function emailOutboxIdForIdempotencyKey(tenancyId: string, idempotencyKey: string, recipientKey: string): string {
+  const digest = createHash("sha256")
+    .update(tenancyId)
+    .update("\0")
+    .update(idempotencyKey)
+    .update("\0")
+    .update(recipientKey)
+    .digest();
+  // RFC 4122 variant + v5 bits make the deterministic digest a valid UUID for
+  // the existing EmailOutbox primary key. SHA-256 retains substantially more
+  // collision resistance than the 122 UUID payload bits can represent.
+  digest[6] = digest[6] & 0x0f | 0x50;
+  digest[8] = digest[8] & 0x3f | 0x80;
+  const hex = digest.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export async function sendEmailFromDefaultTemplate(options: {

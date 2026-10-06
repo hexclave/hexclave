@@ -58,5 +58,30 @@ describe("parseWebhookOpenAPI", () => {
         },
       },
     });
+    expect(result).not.toMatchObject({
+      webhooks: {
+        "user.created": {
+          post: {
+            requestBody: {
+              content: {
+                "application/json": {
+                  schema: {
+                    properties: {
+                      data: {
+                        properties: {
+                          display_name: {
+                            enum: [null],
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
   });
 });

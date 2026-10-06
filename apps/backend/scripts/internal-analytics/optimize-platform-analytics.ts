@@ -53,7 +53,7 @@ async function seed() {
   for (let off = 0; off < NUM_EVENTS; off += CHUNK) {
     const n = Math.min(CHUNK, NUM_EVENTS - off);
     await chAdmin.command({ query: `
-      INSERT INTO bench_pa.events SELECT
+      INSERT INTO bench_pa.events (event_type, event_at, data, project_id, branch_id, user_id, team_id, refresh_token_id, session_replay_id, session_replay_segment_id, created_at) SELECT
         ['$token-refresh','$token-refresh','$token-refresh','$token-refresh','$token-refresh','$token-refresh','$token-refresh','$page-view','$page-view','$click'][((number+${off}) % 10)+1],
         now64(3,'UTC') - toIntervalSecond(cityHash64(number+${off},'t') % (90*86400)),
         CAST(concat('{"is_anonymous":', toString(toUInt8(cityHash64((number+${off}) % ${NUM_USERS},'a') % 10 = 0)), ',"ip_info":{"country_code":"', ${cc}, '"},"referrer":""}'), 'JSON'),

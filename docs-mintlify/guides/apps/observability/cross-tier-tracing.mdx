@@ -1,0 +1,307 @@
+---
+title: "Cross-tier tracing"
+description: "Backend spans automatically join the trace of the client request that caused them — no glue code"
+---
+
+When your frontend calls your backend, Hexclave puts both tiers in **one trace**: the button click, the `fetch` it fires, and the database work behind it all share a `trace_id`, and the backend's top-level span names the browser's OTel HTTP client span as its `parent_span_id`. Nothing to wire up.
+
+The hierarchy travels in the standard W3C [`traceparent`](https://www.w3.org/TR/trace-context/) header — the same header OpenTelemetry uses. That is the whole interop story: a Hexclave-instrumented frontend continues a trace into a non-Hexclave backend, an OTel-instrumented service continues a trace into a Hexclave one, and your existing collector, APM, or log pipeline can join on the same ids without a translation layer.
+
+**Zero config is the point.** In managed mode the SDK registers OpenTelemetry's official fetch and XMLHttpRequest instrumentations in browsers and Undici instrumentation on Node. Head-sampled traces carry `traceparent`; `withSpan({ request })` or a [framework adapter](/guides/apps/observability/framework-adapters) completes the loop.
+
+## How It Works
+
+Two halves, both automatic once set up:
+
+1. **Client**: the official OTel instrumentations create HTTP client spans and attach eligible headers to your own origin and allowlisted cross-origin targets:
+   - **`traceparent`** — the standard W3C header carries the HTTP client span's `trace_id` and `span_id`. This establishes the hierarchy.
+   - **`baggage`** — the standard W3C baggage header. Hexclave uses namespaced entries for the current tab's segment id, session replay id, and current `$page-view` span id. None of it is parentage or tenant identity.
+2. **Server**: passing the incoming request to `withSpan`/`trackEvent` (or using a [framework adapter](/guides/apps/observability/framework-adapters), which does it for you) resolves the caller's sign-in session from the request's auth tokens, adopts the trace from `traceparent`, preserves `tracestate`, and reads allowlisted Hexclave correlation from W3C `baggage` — so everything recorded inside is a descendant of the exact `fetch` that triggered the work, and filterable by the page and tab it came from.
+
+<Info>
+A request that arrives **without** a `traceparent` is a root activity in its own right: the SDK mints a fresh `trace_id` and gives the request's span a `NULL` `parent_span_id`. So a server that nobody traced into still produces complete, well-formed traces.
+</Info>
+
+<Info>
+When the receiving service records telemetry in a **different project** from the
+caller, it keeps its own trace tree and records the verified client request as a
+span link instead of adopting it as a parent. This is how Hexclave's own service
+telemetry can remain rooted in the internal project while still linking back to
+the customer's HTTP client span. Only the authenticated server boundary may
+create that cross-project link; public ingestion cannot choose another project's
+scope.
+</Info>
+
+## The Client Side
+
+Nothing to do beyond having observability enabled (`observability: { enabled: true }`) with a persistent token store (like `"cookie"` or `"nextjs-cookie"`, the usual setups) — the headers are attached automatically, for both `fetch` and XHR-based HTTP clients (like axios' default browser adapter), to requests going to:
+
+- **Your own origin** — same-origin requests always qualify.
+- **Your project's trusted domains** — the exact origins derived from the trusted-domain list your project already maintains for auth redirects. If your frontend and API live on different domains and both are trusted domains, cross-origin propagation works with zero config. Wildcard trusted domains are skipped — propagation matches exact origins only, so wildcards never silently widen the policy. And when your project's "allow localhost" development flag is on, `localhost`/loopback targets on **any** port qualify too, so split-port local dev (app on `:3000`, API on `:4000`) also needs no config.
+- **Anything in `spanPropagation.allowedOrigins`** — for targets that aren't trusted domains:
+
+```tsx
+import { HexclaveClientApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  // ...your existing client app options
+  telemetry: {
+    resource: { service: { name: "stack-dashboard" } },
+  },
+  observability: {
+    enabled: true,
+    spanPropagation: {
+      allowedOrigins: ["https://api.example.com"],  // exact origins, matched scheme+host+port
+      // useTrustedDomains: false,                  // opt out of the trusted-domain defaults
+      // enabled: false,                            // turn the automatic header off entirely
+    },
+  },
+});
+```
+
+<Info>
+Cross-origin targets receive the headers only if their CORS config allows it: add both `traceparent` and `baggage` to the server's `Access-Control-Allow-Headers`.
+</Info>
+
+Details worth knowing:
+
+- The trusted-domain list is fetched asynchronously the first time propagation needs it; until it loads — and permanently if loading fails — the policy falls back to same-origin plus `allowedOrigins`. Fail-closed, never fail-open.
+- Requests with `mode: "no-cors"` are skipped (browsers strip custom headers there anyway).
+- If you set `traceparent` yourself, the SDK never overwrites it. Caller baggage is composable: the SDK preserves unrelated entries and adds or updates only its `hexclave.*` correlation keys.
+- Span lifecycle, semantic HTTP attributes, status, errors, and propagation are owned by the official OTel instrumentations rather than an SDK-specific wrapper.
+- `traceparent`, `tracestate`, and allowlisted W3C `baggage` ride the same origin policy. They can reveal something about the caller, so none escapes the policy.
+
+### Other transports
+
+`fetch` and XHR are instrumented automatically. For transports that allow custom headers but that the SDK cannot instrument — manually-built requests, WebSocket-adjacent handshake endpoints you control — get the header yourself:
+
+```tsx
+const headers = hexclaveClientApp.getSpanPropagationHeaders();
+// { traceparent: "00-<32 hex>-<16 hex>-01", baggage: "hexclave.session_replay.segment.id=<uuid>" }
+// — standard trace context when sampled, plus allowlisted correlation baggage
+
+// pin to a specific span instead of the ambient context:
+const pinned = span.getSpanPropagationHeaders();
+```
+
+Browser `navigator.sendBeacon` calls and WebSocket handshakes do not support
+custom HTTP headers, so the SDK cannot link these transports automatically. The
+server SDK reads context only from request headers. If your application carries
+these header values in a payload or protocol message, reconstruct a request with
+them restored as real headers before calling `withSpan(..., { request }, ...)`.
+
+`getSpanPropagationHeaders({ root: true })` suppresses ambient hierarchy so the receiving backend starts a fresh trace, while still carrying the tab segment id — correlation is identity, not parenting. `span.fetch(url)` is a convenience that performs a `fetch` with headers pinned to that span and follows the same origin policy. When the span's trace is head-sampled, `traceparent` names that exact span and the backend becomes its direct child; otherwise the request carries correlation only and becomes a separate backend root rather than pointing at a parent that may be dropped.
+
+## Network Capture (OTel HTTP client spans)
+
+Every outgoing request admitted by `observability.network` becomes a standard OTel client span. The official instrumentation defines the span name and HTTP semantic attributes, ends it at the correct protocol lifecycle boundary, and records failures using OTel status and exception conventions.
+
+```tsx
+import { HexclaveClientApp } from "@hexclave/js";
+// replace `js` with the correct framework SDK package
+
+export const hexclaveClientApp = new HexclaveClientApp({
+  // ...your existing client app options
+  telemetry: {
+    resource: { service: { name: "stack-dashboard" } },
+  },
+  observability: {
+    enabled: true,
+    traceSampleRate: 1,               // optional override: full root sampling (default is 0.1)
+    network: {
+      // enabled: false,             // turn off automatic HTTP client spans
+      // allowOrigins: ["https://api.example.com"],  // record ONLY these origins
+      // denyOrigins: ["https://cdn.example.com"],   // never record these origins
+      ignoreUrls: ["/health"],       // substring match on the full URL
+    },
+  },
+});
+```
+
+In managed server mode, `traceSampleRate` configures OpenTelemetry's parent-based ratio sampler: an upstream sampled/not-sampled decision is preserved, while new root traces are selected at the configured probability. This rate samples traces only — session replays, product events, logs, and errors are independent signals and are not gated on it. Session replay recording stays on whenever analytics replays are enabled; see [Replays & Clickmaps](/guides/apps/analytics/replays-and-clickmaps). Retaining a complete trace based on a failure or final latency is tail sampling and belongs at a Collector or another backend buffering boundary; the SDK does not claim to promote already-dropped spans. `allowOrigins` and `denyOrigins` are mutually exclusive (setting both throws at app construction).
+
+Network capture is independent of `spanPropagation`: `network` controls which requests get spans, `spanPropagation` controls which requests carry the headers.
+
+`traceparent` and `tracestate` are injected by the registered OpenTelemetry propagator. A not-sampled upstream decision remains valid trace context and can still be forwarded with flags `00`; recording/export is the sampler's decision, not a reason to invent a second root. Correlation baggage can ride independently.
+
+## The Server Side
+
+Pass the incoming request to `withSpan` (or `trackEvent`):
+
+```tsx
+import { hexclaveServerApp } from "./hexclave";
+
+export async function POST(request: Request) {
+  return await hexclaveServerApp.withSpan("checkout-api", { request }, async (span) => {
+    // this span joins the caller's trace as a child of their HTTP client span,
+    // and everything created inside the callback nests under it
+    await span.trackEvent("payment-authorized", { amount: 129.99 });
+    return Response.json({ ok: true });
+  });
+}
+```
+
+With `request`, the SDK resolves:
+
+- **From the auth tokens** (trusted): the caller's sign-in session (`refresh_token_id`) and user id. `userId` is derived automatically unless you override it.
+- **From `traceparent`**: the sampled trace to join and the span to nest under. A missing or unsampled `traceparent` means this request *is* a root activity — fresh trace, `NULL` parent — because an unsampled context does not promise its parent row exists.
+- **From `baggage`** (labels): valid allowlisted `hexclave.*` entries for the tab segment id, session replay id, and page-view span id, stamped as correlation columns. Other vendors' entries are preserved but not promoted. Baggage never selects the project; authenticated credentials do.
+
+Anything accepted as `RequestLike` works: a fetch `Request`, Next.js `NextRequest`, or any object whose `headers` either exposes a `get(name)` method or is a plain record of string values. (Node's raw `req.headers` types values as `string | string[]`, so pass a small wrapper rather than the raw `req` — or use a [framework adapter](/guides/apps/observability/framework-adapters).) Unauthenticated requests are fine — the span still records, just without user attribution.
+
+`startSpan` is synchronous and cannot resolve a request — use `withSpan(type, { request }, fn)` for request-linked spans.
+
+<Info>
+If you use Next.js, TanStack Start, tRPC, oRPC, Elysia, or Convex, skip the manual `{ request }` entirely — the [framework adapters](/guides/apps/observability/framework-adapters) resolve the caller and wrap your handlers in request-linked spans automatically.
+</Info>
+
+### Bare calls on Next.js
+
+On Next.js, once [`hexclaveInstrumentation().register()`](#server-side-instrumentation) has run, even passing `request` is optional: bare `withSpan`, `trackEvent`, and `logger` calls made inside a request scope — route handlers, server actions, React Server Components — resolve the ambient request via `next/headers` and behave exactly as if you had passed `{ request }`:
+
+```tsx
+export async function POST() {
+  return await hexclaveServerApp.withSpan("checkout-api", async (span) => {
+    // still in the caller's trace — the ambient request was resolved
+    // automatically, `traceparent` and all
+    return Response.json({ ok: true });
+  });
+}
+```
+
+An explicit `request` always wins as an override, and it remains the framework-agnostic path everywhere else. `startSpan` stays synchronous and never consults the ambient request. If resolving the ambient request fails, the SDK warns once and records the telemetry without request context — a bare call never fails harder than it would have without ambient attribution.
+
+## Server-Side Instrumentation
+
+The server tier gets the same treatment as the browser — and most of it needs no setup at all. Constructing a `HexclaveServerApp` eagerly installs:
+
+- **Outbound HTTP spans**: official Undici instrumentation records allowed `fetch` calls under the active OTel context and propagates the configured W3C context.
+- **The uncaught-exception monitor**: uncaught server errors become [`$error` events](/guides/apps/observability/errors-and-logs) — observation-only, it never changes your process's crash behavior.
+
+On Next.js, additionally wire up your `instrumentation.ts` for the two pieces that need framework hooks. Next compiles that file for Edge as well as Node — keep the `process.env.NEXT_RUNTIME` check **inline** (not behind a helper) so the Edge bundle does not follow Node-only OpenTelemetry / `async_hooks` code:
+
+```ts instrumentation.ts
+import type { HexclaveNextInstrumentation } from "@hexclave/next/next";
+
+let instrumentationPromise: Promise<HexclaveNextInstrumentation | null> | undefined;
+
+function getInstrumentation(): Promise<HexclaveNextInstrumentation | null> {
+  instrumentationPromise ??= (async () => {
+    if (process.env.NEXT_RUNTIME !== "nodejs") return null;
+    const { hexclaveInstrumentation } = await import("@hexclave/next/next");
+    const { hexclaveServerApp } = await import("./hexclave");
+    return hexclaveInstrumentation(hexclaveServerApp);
+  })();
+  return instrumentationPromise;
+}
+
+export async function register() {
+  await (await getInstrumentation())?.register();
+}
+
+export async function onRequestError(
+  ...args: Parameters<HexclaveNextInstrumentation["onRequestError"]>
+) {
+  const instrumentation = await getInstrumentation();
+  if (instrumentation === null) return;
+  await instrumentation.onRequestError(...args);
+}
+```
+
+- `register()` registers the managed OTel provider/instrumentations and the ambient request provider that makes [bare telemetry calls attribute automatically](#bare-calls-on-next-js) in route handlers, server actions, and RSCs.
+- `onRequestError` reports every error Next.js catches during request handling as a `$error` event, linked to the caller's client session via the request's headers. This hook only exists through `instrumentation.ts`, so it always needs the wiring above.
+
+<Info>
+If the Observability app isn't enabled for your project, server telemetry disables itself for the rest of the process after the first rejected batch, with a single console warning — the eager instrumentation never keeps sending doomed batches for every outgoing fetch.
+</Info>
+
+<Info>
+Next.js treats `import-in-the-middle` and `require-in-the-middle` as server externals (OpenTelemetry uses them to hook `import`/`require`). With pnpm they are not hoisted from `@opentelemetry/instrumentation`, so add them as direct dependencies of the Next.js app if you see "Package import-in-the-middle can't be external".
+</Info>
+
+## Multi-Hop Propagation
+
+Server→server hops continue the trace automatically: official Undici instrumentation opens a client span in the active context and sends a `traceparent` naming that hop. Each hop therefore parents to the hop above it. A non-Hexclave service that forwards W3C context keeps the chain intact.
+
+Servers have no "own origin", so the automatic headers ride only to the propagation policy's origins: `spanPropagation.allowedOrigins` plus the trusted-domain defaults (the same exact-origin rules as in the browser, including the localhost dev allowance). For other transports (queues, RPC frameworks, trusted services outside the policy), carry the headers yourself:
+
+```tsx
+await hexclaveServerApp.withSpan("orchestrate", { request }, async (span) => {
+  // outbound fetches in here are already OTel client spans; for a
+  // non-fetch transport, pin the context to this span explicitly:
+  const headers = span.getSpanPropagationHeaders();
+  await postToInternalQueue(payload, { headers });
+});
+```
+
+Note that on the server, `span.fetch(url)` does **not** attach the headers to arbitrary URLs (that would leak trace ids and session labels to third parties) — add the origin to your project's trusted domains or `allowedOrigins`, or pass `span.getSpanPropagationHeaders()` explicitly to targets you trust.
+
+## Trust Model
+
+<Warning>
+Both propagation headers are client-controlled. The sign-in session and user id are resolved server-side from auth tokens and are trustworthy; the trace/span ids from `traceparent` and the correlation ids from `baggage` are best-effort labels. Use them for telemetry and debugging — never for authorization, billing, or security decisions.
+</Warning>
+
+Malformed, oversized, or unknown-version headers are silently ignored — propagation never causes a request to fail. A `traceparent` the SDK cannot parse simply means the request is treated as a new root activity.
+
+## Use an Existing OpenTelemetry Provider
+
+If your server already owns OpenTelemetry, tell Hexclave not to register process-wide globals and add its standard OTLP exporter and correlation processor to your provider:
+
+```tsx
+import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { logs } from "@opentelemetry/api-logs";
+import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs";
+import {
+  createHexclaveCorrelationSpanProcessor,
+  createHexclaveOtlpLogExporter,
+  createHexclaveOtlpTraceExporter,
+} from "@hexclave/next/otel";
+// replace `next` with the correct framework SDK package
+
+const exporter = createHexclaveOtlpTraceExporter({
+  analyticsBaseUrl: "https://api.hexclave.com",
+  projectId: "your-project-id",
+  secretServerKey: "your-server-key",
+  clientVersion: "my-service/1.0.0",
+});
+
+const provider = new NodeTracerProvider({
+  spanProcessors: [
+    createHexclaveCorrelationSpanProcessor(),
+    new BatchSpanProcessor(exporter),
+  ],
+});
+provider.register();
+
+const loggerProvider = new LoggerProvider({
+  processors: [new BatchLogRecordProcessor({
+    exporter: createHexclaveOtlpLogExporter({
+      analyticsBaseUrl: "https://api.hexclave.com",
+      projectId: "your-project-id",
+      secretServerKey: "your-server-key",
+      clientVersion: "my-service/1.0.0",
+    }),
+  })],
+});
+logs.setGlobalLoggerProvider(loggerProvider);
+```
+
+Then set `observability: { openTelemetry: { provider: "existing-provider" } }` on the Hexclave server app. Your application remains responsible for its resource, sampler, instrumentations, context manager, propagator, flush, and shutdown lifecycle. Hexclave does not inspect or replace them.
+
+## Options Reference
+
+On the `observability` constructor option (client and server apps):
+
+| Option | Default | What it does |
+|---|---|---|
+| `spanPropagation.enabled` | `true` | Auto-attach filtered Hexclave correlation `baggage`; standard OTel `traceparent`/`tracestate` propagation remains independent |
+| `spanPropagation.allowedOrigins` | `[]` | Extra origins (besides same-origin in the browser and the trusted-domain defaults) that receive the headers; exact matches |
+| `spanPropagation.useTrustedDomains` | `true` | Also send the headers to exact origins derived from the project's trusted domains (wildcards skipped), plus localhost/loopback targets when the project allows localhost |
+| `traceSampleRate` | `0.1` | Managed provider's parent-based root-trace sampling probability. Does not sample session replays, events, logs, or errors. |
+| `openTelemetry.provider` | `"managed"` | `"managed"` installs Hexclave's official Node provider/exporter; `"existing-provider"` leaves globals to your application |
+| `network.enabled` | `true` | Record outgoing requests as OTel HTTP client spans |
+| `network.allowOrigins` / `network.denyOrigins` | — | Origin filters (exact matches; mutually exclusive) |
+| `network.ignoreUrls` | `[]` | URL substrings that are never recorded |

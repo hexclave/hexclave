@@ -41,6 +41,7 @@
     "db:migration-gen": "pnpm pre && pnpm run --filter=@hexclave/backend db:migration-gen",
     "db:reset": "pnpm pre && pnpm run --filter=@hexclave/backend db:reset",
     "db:seed": "pnpm pre && pnpm run --filter=@hexclave/backend db:seed",
+    "db:seed-source-maps": "pnpm run --filter=@hexclave/backend db:seed-source-maps",
     "db:init": "pnpm pre && pnpm run --filter=@hexclave/backend db:init",
     "db:migrate": "pnpm pre && pnpm run --filter=@hexclave/backend db:migrate",
     "db:backfill-bulldozer-from-prisma": "pnpm pre && pnpm run --filter=@hexclave/backend db:backfill-bulldozer-from-prisma",
@@ -82,7 +83,8 @@
     "generate-sdks:watch": "chokidar --silent -c 'pnpm run generate-sdks' './packages/template' --ignore './packages/template/package.json' --ignore '**/node_modules/**' --ignore '**/dist/**' --ignore '**/.turbo/**' --throttle 2000",
     "generate-openapi-docs:watch": "pnpm exec tsx ./scripts/wait-for-dev-package-imports.ts && pnpm run --filter=@hexclave/backend codegen-docs && chokidar --silent -c 'pnpm run --filter=@hexclave/backend codegen-docs' './apps/backend/src/app/api/latest/**/route.{js,jsx,ts,tsx}' './apps/backend/src/lib/openapi.ts' './packages/shared/src/interface/webhooks.ts' --throttle 2000",
     "generate-setup-prompt-docs:watch": "pnpm run generate-setup-prompt-docs && chokidar --silent -c 'pnpm run generate-setup-prompt-docs' './docs-mintlify/docs.json' './packages/shared/src/ai/unified-prompts/**/*.ts' './scripts/generate-setup-prompt-docs.ts' --throttle 2000",
-    "build-packages:watch": "tsdown --workspace='packages/*' && pnpm -C packages/dashboard-ui-components run build-iife && pnpm -C packages/dashboard-ui-components run copy-iife && tsdown --workspace='packages/*' --watch"
+    "build-packages:watch": "tsdown --workspace='packages/*' && pnpm -C packages/dashboard-ui-components run build-iife && pnpm -C packages/dashboard-ui-components run copy-iife && tsdown --workspace='packages/*' --watch",
+    "ouii-shi": "pnpm kms & (pnpm build || true) && pnpm codegen && pnpm restart-deps"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.9",

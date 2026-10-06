@@ -156,6 +156,7 @@ it("should set refresh token cookies for trusted parent domains", async ({ expec
 
   const email = `${crypto.randomUUID()}@trusted-cookie.test`;
   const password = "password";
+  const writesBeforeSignUp = cookieWrites.length;
 
   const signUpResult = await clientApp.signUpWithCredential({
     email,
@@ -175,8 +176,9 @@ it("should set refresh token cookies for trusted parent domains", async ({ expec
   const defaultCookieName = getDefaultRefreshCookieName(clientApp.projectId, true);
   const customCookieName = getCustomRefreshCookieName(clientApp.projectId, "example.com");
 
-  const defaultReady = await waitUntil(() => cookieStore.has(defaultCookieName), 2_000);
-  expect(defaultReady).toBe(true);
+  // The default cookie is transient here: it is replaced once the trusted parent domain resolves.
+  const defaultWritten = await waitUntil(() => cookieWrites.slice(writesBeforeSignUp).some((entry) => entry.trim().toLowerCase().startsWith(`${defaultCookieName.toLowerCase()}=`) && !/^[^=]+=\s*(;|$)/.test(entry.trim())), 2_000);
+  expect(defaultWritten).toBe(true);
 
   const customReady = await waitUntil(() => cookieStore.has(customCookieName), 10_000);
   expect(customReady).toBe(true);

@@ -35,6 +35,7 @@ const AUTH_USERS_ITEM_ID = "auth_users";
 const DASHBOARD_ADMINS_ITEM_ID = "dashboard_admins";
 const EMAILS_PER_MONTH_ITEM_ID = "emails_per_month";
 const ANALYTICS_EVENTS_ITEM_ID = "analytics_events";
+const ANALYTICS_SPANS_ITEM_ID = "analytics_spans";
 const SESSION_REPLAYS_ITEM_ID = "session_replays";
 const ANALYTICS_TIMEOUT_SECONDS_ITEM_ID = "analytics_timeout_seconds";
 
@@ -71,6 +72,11 @@ const USAGE_SECTION_INFO_BY_ITEM_ID = new Map<string, UsageSectionInfo>([
     icon: ALL_APPS_FRONTEND.emails.icon,
   }],
   [ANALYTICS_EVENTS_ITEM_ID, {
+    id: "analytics",
+    title: "Analytics",
+    icon: ALL_APPS_FRONTEND.analytics.icon,
+  }],
+  [ANALYTICS_SPANS_ITEM_ID, {
     id: "analytics",
     title: "Analytics",
     icon: ALL_APPS_FRONTEND.analytics.icon,

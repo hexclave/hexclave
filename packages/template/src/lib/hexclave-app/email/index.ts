@@ -235,6 +235,9 @@ type SendEmailOptionsBase = {
   notificationCategoryName?: string,
   scheduledAt?: Date,
   variables?: Record<string, unknown>,
+  /** Stable request key. Retrying with the same key does not enqueue the
+   * recipient emails twice. */
+  idempotencyKey?: string,
 }
 
 

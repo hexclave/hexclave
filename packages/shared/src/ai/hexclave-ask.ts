@@ -1,7 +1,7 @@
+import { isRecord } from "../utils/objects";
+
 export const HEXCLAVE_ASK_BACKEND_TIMEOUT_MS = 45_000;
 export const HEXCLAVE_ASK_PUBLIC_ERROR_MESSAGE = "Hexclave AI is temporarily unavailable. Please try again later.";
-
-type JsonRecord = Record<string, unknown>;
 
 type AiTextContent = {
   type: "text",
@@ -82,10 +82,6 @@ export function getHexclaveAskRequestMetadata(
     requestHost: new URL(request.url).host.slice(0, 255),
     mcpProtocolVersion: getBoundedHeader(request.headers, "mcp-protocol-version", 100),
   };
-}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseAiQueryResponse(value: unknown): AiQueryResponse {

@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-
 import { appSetupPrompts } from "../ai/unified-prompts/skill-site-prompt-parts/ai-setup-prompt";
-import { ALL_APPS, expandAppSoftRequirements } from "./apps-config";
+import { ALL_APPS, expandAppSoftRequirements, getParentAppId } from "./apps-config";
+
+describe("app hierarchy", () => {
+  it("keeps Observability and Warehouse independent from Analytics", () => {
+    expect(getParentAppId("observability")).toBeNull();
+    expect(getParentAppId("warehouse")).toBeNull();
+    expect(getParentAppId("clickmaps")).toBe("analytics");
+    expect(getParentAppId("session-replays")).toBe("analytics");
+  });
+});
 
 describe("app soft requirements", () => {
   it("expands requirements recursively without adding unrelated apps", () => {
@@ -22,6 +30,12 @@ describe("app soft requirements", () => {
       "emails",
       "teams",
     ]);
+  });
+
+  it("defines softRequirements for every app", () => {
+    for (const [appId, app] of Object.entries(ALL_APPS)) {
+      expect(Array.isArray(app.softRequirements), `${appId} is missing softRequirements`).toBe(true);
+    }
   });
 
   it("only references standalone apps", () => {

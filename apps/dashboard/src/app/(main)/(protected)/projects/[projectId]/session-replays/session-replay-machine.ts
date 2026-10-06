@@ -857,7 +857,9 @@ export function replayReducer(state: ReplayState, action: ReplayAction): Reducer
           state: {
             ...state,
             playbackMode: "paused",
-            playerError: "Unable to play: recording data may be incomplete. Try reloading.",
+            playerError: state.streams.some((stream) => state.hasFullSnapshotByTab.has(stream.tabKey))
+              ? "Unable to play: recording data may be incomplete. Try reloading."
+              : "Unable to play: this recording contains no full page snapshot, so its incremental updates cannot be reconstructed.",
             playingWithoutProgressSinceMs: null,
           },
           effects: [],

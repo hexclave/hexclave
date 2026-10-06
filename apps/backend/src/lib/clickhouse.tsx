@@ -1,11 +1,35 @@
 import { createClient, type ClickHouseClient, type ClickHouseSettings } from "@clickhouse/client";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import type { Json } from "@hexclave/shared/dist/utils/json";
 
 // Re-exported so other modules can hold a typed ClickHouse client (e.g. to
 // thread a single warmed client through helpers) without taking a direct
 // dependency on the @clickhouse/client package.
 export type { ClickHouseClient } from "@clickhouse/client";
+
+// Lone surrogates (\uD800-\uDFFF not part of a valid pair) are technically
+// representable in JS strings but rejected by ClickHouse's JSON parser.
+// The client-side event tracker can produce these when .substring() truncates
+// text in the middle of a surrogate pair (e.g. emoji characters).
+// The string overload lets callers sanitizing a single string keep the string
+// type without re-narrowing the result.
+export function stripLoneSurrogates(value: string): string;
+export function stripLoneSurrogates(value: Json): Json;
+export function stripLoneSurrogates(value: Json): Json {
+  if (typeof value === "string") {
+    return value.toWellFormed();
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => stripLoneSurrogates(entry));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, stripLoneSurrogates(v)])
+    );
+  }
+  return value;
+}
 
 function getAdminAuth() {
   return {
@@ -52,15 +76,42 @@ export const EXTERNAL_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
   ...BOUNDED_ANALYTICS_CLICKHOUSE_SETTINGS,
 };
 
+let sharedClickhouseAdminClient: ClickHouseClient | undefined;
+
+export type ClickhouseWriteAvailability = "configured" | "absent";
+
+export function getClickhouseWriteAvailability(): ClickhouseWriteAvailability {
+  return getEnvVariable("STACK_CLICKHOUSE_URL", "") === "" ? "absent" : "configured";
+}
+
+/**
+ * Process-wide admin client for hot request paths (telemetry ingest and other
+ * per-request reads/writes). Each client owns a keep-alive HTTP connection
+ * pool, so creating one per request either leaks sockets (if never closed) or
+ * throws away connection reuse (if closed per call — a full TCP handshake per
+ * request). This one is created lazily and NEVER closed; its sockets live for
+ * the process lifetime, which is exactly right for a serverful deployment.
+ *
+ * Use getClickhouseAdminClient() (and close it in a finally) only for one-shot
+ * work outside the request path — migrations, scripts, batch jobs — where a
+ * bounded lifetime matters more than connection reuse.
+ */
+export function getSharedClickhouseAdminClient(): ClickHouseClient {
+  sharedClickhouseAdminClient ??= getClickhouseAdminClient();
+  return sharedClickhouseAdminClient;
+}
+
+let sharedClickhouseExternalClient: ClickHouseClient | undefined;
+
 export function getClickhouseExternalClient() {
-  return createClickhouseClient(
+  sharedClickhouseExternalClient ??= createClickhouseClient(
     "external",
     getEnvVariable("STACK_CLICKHOUSE_DATABASE", "default"),
     EXTERNAL_CLICKHOUSE_SETTINGS,
   );
+  return sharedClickhouseExternalClient;
 }
 
-// Safety net for heavy analytical reads against `analytics_internal.events`:
 // GROUP BY spills to disk at ~50% of the per-query cap (leaving headroom for
 // the post-spill merge), grace_hash partitions large join build sides instead
 // of allocating one giant hash table, and the per-user cap bounds total
@@ -75,12 +126,15 @@ export const METRICS_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
   ...BOUNDED_ANALYTICS_CLICKHOUSE_SETTINGS,
 };
 
+let sharedClickhouseMetricsClient: ClickHouseClient | undefined;
+
 export function getClickhouseAdminClientForMetrics() {
-  return createClickhouseClient(
+  sharedClickhouseMetricsClient ??= createClickhouseClient(
     "admin",
     getEnvVariable("STACK_CLICKHOUSE_DATABASE", "default"),
     METRICS_CLICKHOUSE_SETTINGS,
   );
+  return sharedClickhouseMetricsClient;
 }
 
 export const getQueryTimingStats = async (client: ClickHouseClient, queryId: string) => {

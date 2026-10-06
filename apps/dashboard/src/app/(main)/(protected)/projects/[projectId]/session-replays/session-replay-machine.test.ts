@@ -1753,7 +1753,7 @@ describe("stall detection", () => {
     state.replayerReady.clear();
     const { state: s } = dispatch(state, { type: "TOGGLE_PLAY_PAUSE", nowMs: 1000 });
     expect(s.playbackMode).toBe("paused");
-    expect(s.playerError).toContain("Unable to play");
+    expect(s.playerError).toBe("Unable to play: this recording contains no full page snapshot, so its incremental updates cannot be reconstructed.");
   });
 
   it("TOGGLE_PLAY_PAUSE stays paused with error when activeTabKey is null", () => {

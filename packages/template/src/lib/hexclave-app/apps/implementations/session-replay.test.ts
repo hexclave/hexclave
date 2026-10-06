@@ -4,13 +4,55 @@ import { KnownErrors } from "@hexclave/shared/dist/known-errors";
 import { describe, expect, it, vi } from "vitest";
 import * as errors from "@hexclave/shared/dist/utils/errors";
 import { Result } from "@hexclave/shared/dist/utils/results";
-import { analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions, SessionRecorder } from "./session-replay";
+import { canInlineStylesheetLink, getOrRotateSession, SessionRecorder } from "./session-replay";
+import { analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions } from "./analytics-config";
+import { telemetryOptionsToJson } from "./telemetry-config";
+
+const TEST_RESOURCE = { service: { name: "test-client" } } as const;
+
+describe("session replay lifecycle", () => {
+  it("rotates after the maximum replay duration even when the tab stays active", () => {
+    const key = "session-replay-max-duration-test";
+    localStorage.setItem(key, JSON.stringify({
+      session_id: "12345678-1234-4123-8123-123456789abc",
+      created_at_ms: 1,
+      last_activity_ms: 12 * 60 * 60 * 1000,
+    }));
+
+    const rotated = getOrRotateSession({ key, nowMs: 12 * 60 * 60 * 1000 + 2 });
+    expect(rotated.session_id).not.toBe("12345678-1234-4123-8123-123456789abc");
+  });
+});
+
+const rrwebMocks = vi.hoisted(() => {
+  type TestRrwebEvent = { type: number, timestamp: number, data: Record<string, unknown> };
+  let emit: ((event: TestRrwebEvent) => void) | undefined;
+  // Faithful to real rrweb: takeFullSnapshot emits a Meta event (type 4)
+  // immediately before the FullSnapshot (type 2). The replayer keeps its
+  // iframe hidden until the first Meta sizes it, so the recorder must never
+  // drop the Meta half of a snapshot — tests rely on the mock modeling this.
+  const takeFullSnapshot = vi.fn(() => {
+    emit?.({ type: 4, timestamp: Date.now(), data: { href: "https://example.com/", width: 1280, height: 720 } });
+    emit?.({ type: 2, timestamp: Date.now(), data: {} });
+  });
+  const record = Object.assign(vi.fn((options: { emit: (event: TestRrwebEvent) => void }) => {
+    emit = options.emit;
+    return () => {};
+  }), { takeFullSnapshot });
+  const emitEvent = (event: TestRrwebEvent) => {
+    if (emit === undefined) throw new Error("rrweb record() has not started");
+    emit(event);
+  };
+  return { record, takeFullSnapshot, emitEvent };
+});
+vi.mock("@rrweb/record", () => ({ record: rrwebMocks.record }));
 
 describe("session replay options", () => {
   it("enables replays by default", () => {
     expect(getSessionReplayOptions(undefined).enabled).toBe(true);
     expect(getSessionReplayOptions({}).enabled).toBe(true);
     expect(getSessionReplayOptions({ replays: {} }).enabled).toBe(true);
+    expect(getSessionReplayOptions(undefined).captureKeystrokes).toBe(false);
   });
 
   it("preserves explicit replay opt-out", () => {
@@ -24,12 +66,14 @@ describe("analytics option JSON conversion", () => {
       enabled: false,
       replays: {
         enabled: true,
+        captureKeystrokes: true,
         blockClass: /stack-sensitive/u,
       },
     });
 
     expect(json?.enabled).toBe(false);
     expect(json?.replays?.enabled).toBe(true);
+    expect(json?.replays?.captureKeystrokes).toBe(true);
   });
 
   it("preserves top-level analytics options when deserializing replay block classes", () => {
@@ -43,9 +87,421 @@ describe("analytics option JSON conversion", () => {
     expect(roundTripped?.enabled).toBe(false);
     expect(roundTripped?.replays?.blockClass).toEqual(/stack-sensitive/u);
   });
+
+  it("omits the function-valued telemetry lifecycle hook from serialized apps", () => {
+    const waitUntil = vi.fn();
+    expect(telemetryOptionsToJson({ waitUntil })).toBeUndefined();
+  });
+});
+
+describe("canInlineStylesheetLink", () => {
+  function makeLink(sheet: unknown): HTMLLinkElement {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    Object.defineProperty(link, "sheet", { value: sheet });
+    return link;
+  }
+
+  it("is false when the sheet hasn't been attached", () => {
+    expect(canInlineStylesheetLink(makeLink(null))).toBe(false);
+  });
+
+  it("is false when reading cssRules throws (cross-origin without CORS)", () => {
+    const sheet = {
+      get cssRules(): CSSRuleList {
+        throw new DOMException("not allowed", "SecurityError");
+      },
+    };
+    expect(canInlineStylesheetLink(makeLink(sheet))).toBe(false);
+  });
+
+  it("is false for an empty sheet", () => {
+    expect(canInlineStylesheetLink(makeLink({ cssRules: [] }))).toBe(false);
+  });
+
+  it("is true for a readable non-empty sheet", () => {
+    expect(canInlineStylesheetLink(makeLink({ cssRules: [{}] }))).toBe(true);
+  });
+});
+
+describe("SessionRecorder stylesheet re-snapshot", () => {
+  function makeRecorder(replayOptions: ConstructorParameters<typeof SessionRecorder>[1] = {}) {
+    return new SessionRecorder(
+      {
+        projectId: "test-project",
+        resource: TEST_RESOURCE,
+        sendBatch: async () => Result.ok(new Response("ok", { status: 200 })),
+      },
+      replayOptions,
+    );
+  }
+
+  it("always blocks Hexclave-owned nested replay players", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder({ blockClass: "customer-secret", blockSelector: ".customer-private" });
+
+    try {
+      await startRecorder(recorder);
+
+      expect(rrwebMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+        blockClass: "customer-secret",
+        blockSelector: "[data-hexclave-session-replay-block], .customer-private",
+      }));
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  async function startRecorder(recorder: SessionRecorder) {
+    recorder.start();
+    // Flush the dynamic import("@rrweb/record") microtasks so record() runs and the
+    // stylesheet-load listener is attached.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rrwebMocks.record).toHaveBeenCalledTimes(1);
+  }
+
+  function attachStylesheetLink(options: { sheet: unknown }): HTMLLinkElement {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "https://example.com/app.css";
+    Object.defineProperty(link, "sheet", { value: options.sheet });
+    document.head.appendChild(link);
+    return link;
+  }
+
+  it("re-takes a full snapshot (debounced) when a stylesheet finishes loading during recording", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder();
+
+    try {
+      await startRecorder(recorder);
+
+      const link = attachStylesheetLink({ sheet: { cssRules: [{}] } });
+      link.dispatchEvent(new Event("load"));
+
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(900);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      const link2 = attachStylesheetLink({ sheet: { cssRules: [{}] } });
+      link2.dispatchEvent(new Event("load"));
+      await vi.advanceTimersByTimeAsync(900);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(rrwebMocks.takeFullSnapshot).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).toHaveBeenCalledTimes(1);
+
+      link.remove();
+      link2.remove();
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("suppresses post-sign-out mutations until authentication resumes with a fresh full snapshot", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder();
+
+    try {
+      await startRecorder(recorder);
+      recorder.clearBuffer();
+      recorder.setSessionReplaySegmentId("next-user-segment");
+
+      rrwebMocks.emitEvent({ type: 3, timestamp: Date.now(), data: {} });
+      expect(Reflect.get(recorder, "_events")).toEqual([]);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      recorder.captureFullSnapshotForCurrentSegment();
+      rrwebMocks.emitEvent({ type: 3, timestamp: Date.now() + 1, data: {} });
+
+      expect(rrwebMocks.takeFullSnapshot).toHaveBeenCalledOnce();
+      // The Meta event must survive the rotation gate alongside the
+      // FullSnapshot — without it the replayer never unhides its iframe and
+      // the whole segment plays back as a blank white frame.
+      expect(Reflect.get(recorder, "_events")).toMatchObject([
+        { type: 4 },
+        { type: 2 },
+        { type: 3 },
+      ]);
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-snapshot for stylesheets rrweb can't inline, or for non-stylesheet loads", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder();
+
+    try {
+      await startRecorder(recorder);
+
+      const crossOriginLink = attachStylesheetLink({
+        sheet: {
+          get cssRules(): CSSRuleList {
+            throw new DOMException("not allowed", "SecurityError");
+          },
+        },
+      });
+      crossOriginLink.dispatchEvent(new Event("load"));
+
+      const img = document.createElement("img");
+      document.body.appendChild(img);
+      img.dispatchEvent(new Event("load"));
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      crossOriginLink.remove();
+      img.remove();
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending re-snapshot when recording stops", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder();
+
+    try {
+      await startRecorder(recorder);
+
+      const link = attachStylesheetLink({ sheet: { cssRules: [{}] } });
+      link.dispatchEvent(new Event("load"));
+
+      recorder.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      link.dispatchEvent(new Event("load"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      link.remove();
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("canInlineStylesheetLink", () => {
+  function makeLink(sheet: unknown): HTMLLinkElement {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    Object.defineProperty(link, "sheet", { value: sheet });
+    return link;
+  }
+
+  it("is false when the sheet hasn't been attached", () => {
+    expect(canInlineStylesheetLink(makeLink(null))).toBe(false);
+  });
+
+  it("is false when reading cssRules throws (cross-origin without CORS)", () => {
+    const sheet = {
+      get cssRules(): CSSRuleList {
+        throw new DOMException("not allowed", "SecurityError");
+      },
+    };
+    expect(canInlineStylesheetLink(makeLink(sheet))).toBe(false);
+  });
+
+  it("is false for an empty sheet", () => {
+    expect(canInlineStylesheetLink(makeLink({ cssRules: [] }))).toBe(false);
+  });
+
+  it("is true for a readable non-empty sheet", () => {
+    expect(canInlineStylesheetLink(makeLink({ cssRules: [{}] }))).toBe(true);
+  });
+});
+
+describe("SessionRecorder stylesheet re-snapshot", () => {
+  function makeRecorder() {
+    return new SessionRecorder(
+      {
+        projectId: "test-project",
+        resource: TEST_RESOURCE,
+        sendBatch: async () => Result.ok(new Response("ok", { status: 200 })),
+      },
+      {},
+    );
+  }
+
+  async function startRecorder(recorder: SessionRecorder) {
+    recorder.start();
+    // Flush the dynamic import("@rrweb/record") microtasks so record() runs and the
+    // stylesheet-load listener is attached.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rrwebMocks.record).toHaveBeenCalledTimes(1);
+  }
+
+  function attachStylesheetLink(options: { sheet: unknown }): HTMLLinkElement {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "https://example.com/app.css";
+    Object.defineProperty(link, "sheet", { value: options.sheet });
+    document.head.appendChild(link);
+    return link;
+  }
+
+  it("re-takes a full snapshot (debounced) when a stylesheet finishes loading during recording", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder();
+
+    try {
+      await startRecorder(recorder);
+
+      const link = attachStylesheetLink({ sheet: { cssRules: [{}] } });
+      link.dispatchEvent(new Event("load"));
+
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(900);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      const link2 = attachStylesheetLink({ sheet: { cssRules: [{}] } });
+      link2.dispatchEvent(new Event("load"));
+      await vi.advanceTimersByTimeAsync(900);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(rrwebMocks.takeFullSnapshot).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).toHaveBeenCalledTimes(1);
+
+      link.remove();
+      link2.remove();
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-snapshot for stylesheets rrweb can't inline, or for non-stylesheet loads", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder();
+
+    try {
+      await startRecorder(recorder);
+
+      const crossOriginLink = attachStylesheetLink({
+        sheet: {
+          get cssRules(): CSSRuleList {
+            throw new DOMException("not allowed", "SecurityError");
+          },
+        },
+      });
+      crossOriginLink.dispatchEvent(new Event("load"));
+
+      const img = document.createElement("img");
+      document.body.appendChild(img);
+      img.dispatchEvent(new Event("load"));
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      crossOriginLink.remove();
+      img.remove();
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending re-snapshot when recording stops", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const recorder = makeRecorder();
+
+    try {
+      await startRecorder(recorder);
+
+      const link = attachStylesheetLink({ sheet: { cssRules: [{}] } });
+      link.dispatchEvent(new Event("load"));
+
+      recorder.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      link.dispatchEvent(new Event("load"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rrwebMocks.takeFullSnapshot).not.toHaveBeenCalled();
+
+      link.remove();
+    } finally {
+      recorder.stop();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("SessionRecorder flush", () => {
+  it("regenerates the first full snapshot when its upload fails", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+
+    const storageKey = `hexclave:session-replay:v1:test-project`;
+    localStorage.setItem(storageKey, JSON.stringify({
+      session_id: "test-session",
+      created_at_ms: Date.now(),
+      last_activity_ms: Date.now(),
+    }));
+
+    const sentBodies: string[] = [];
+    const recorder = new SessionRecorder(
+      {
+        projectId: "test-project",
+        resource: TEST_RESOURCE,
+        sendBatch: async (body) => {
+          sentBodies.push(body);
+          return sentBodies.length === 1
+            ? Result.error(new Error("temporary network failure"))
+            : Result.ok(new Response("ok", { status: 200 }));
+        },
+      },
+      {},
+    );
+    const captureWarningSpy = vi.spyOn(errors, "captureWarning").mockImplementation(() => {});
+
+    try {
+      recorder.start();
+      await vi.advanceTimersByTimeAsync(0);
+      rrwebMocks.emitEvent({ type: 2, timestamp: Date.now(), data: { initial: true } });
+      rrwebMocks.emitEvent({ type: 3, timestamp: Date.now() + 1, data: { stale: true } });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sentBodies).toHaveLength(1);
+      expect(JSON.parse(sentBodies[0]).events).toMatchObject([{ type: 2 }, { type: 3 }]);
+      expect(rrwebMocks.takeFullSnapshot).toHaveBeenCalledOnce();
+      expect(Reflect.get(recorder, "_events")).toMatchObject([{ type: 4 }, { type: 2 }]);
+
+      rrwebMocks.emitEvent({ type: 3, timestamp: Date.now() + 2, data: { fresh: true } });
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sentBodies).toHaveLength(2);
+      expect(JSON.parse(sentBodies[1]).events).toMatchObject([{ type: 4 }, { type: 2 }, { type: 3 }]);
+    } finally {
+      recorder.stop();
+      captureWarningSpy.mockRestore();
+      localStorage.removeItem(storageKey);
+      vi.useRealTimers();
+    }
+  });
+
   it("silently ignores network errors caused by ad blockers", async () => {
     vi.useFakeTimers();
 
@@ -60,6 +516,7 @@ describe("SessionRecorder flush", () => {
     const recorder = new SessionRecorder(
       {
         projectId: "test-project",
+        resource: TEST_RESOURCE,
         sendBatch: async (body) => {
           sentBodies.push(body);
           return Result.error(new TypeError("Failed to fetch"));
@@ -82,6 +539,10 @@ describe("SessionRecorder flush", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(sentBodies).toHaveLength(1);
+      expect(JSON.parse(sentBodies[0])).toMatchObject({
+        schema_version: 2,
+        resource: TEST_RESOURCE,
+      });
       expect(warnSpy).not.toHaveBeenCalled();
 
       // Unlike ANALYTICS_NOT_ENABLED, ad blocker errors do NOT disable the
@@ -118,6 +579,7 @@ describe("SessionRecorder flush", () => {
     const recorder = new SessionRecorder(
       {
         projectId: "test-project",
+        resource: TEST_RESOURCE,
         sendBatch: async (body) => {
           sentBodies.push(body);
           return Result.ok(new Response("ok", { status: 200 }));
@@ -162,6 +624,59 @@ describe("SessionRecorder flush", () => {
     }
   });
 
+  it("keeps all batches from one flush on the segment id captured before sign-out rotation", async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+
+    const storageKey = `hexclave:session-replay:v1:test-project`;
+    localStorage.setItem(storageKey, JSON.stringify({
+      session_id: "test-session",
+      created_at_ms: Date.now(),
+      last_activity_ms: Date.now(),
+    }));
+
+    const sentBodies: string[] = [];
+    const materializedSegments: string[] = [];
+    const recorder = new SessionRecorder(
+      {
+        projectId: "test-project",
+        resource: TEST_RESOURCE,
+        sendBatch: async (body) => {
+          sentBodies.push(body);
+          if (sentBodies.length === 1) recorder.setSessionReplaySegmentId("new-segment");
+          return Result.ok(new Response("ok", { status: 200 }));
+        },
+        sessionReplaySegmentId: "old-segment",
+        onSessionReplaySegmentMaterialized: async (segmentId) => {
+          materializedSegments.push(segmentId);
+        },
+      },
+      {},
+    );
+
+    try {
+      recorder.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rrwebMocks.record).toHaveBeenCalledTimes(1);
+
+      const largeData = "x".repeat(500_000);
+      rrwebMocks.emitEvent({ type: 2, timestamp: Date.now(), data: { payload: largeData } });
+      rrwebMocks.emitEvent({ type: 3, timestamp: Date.now() + 1, data: { payload: largeData } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sentBodies).toHaveLength(2);
+      const batch1 = JSON.parse(sentBodies[0]);
+      const batch2 = JSON.parse(sentBodies[1]);
+      expect(batch1.session_replay_segment_id).toBe("old-segment");
+      expect(batch2.session_replay_segment_id).toBe("old-segment");
+      expect(materializedSegments).toEqual(["old-segment", "old-segment"]);
+    } finally {
+      recorder.stop();
+      localStorage.removeItem(storageKey);
+      vi.useRealTimers();
+    }
+  });
+
   it("sends a single oversized event alone without dropping it", async () => {
     vi.useFakeTimers();
 
@@ -176,6 +691,7 @@ describe("SessionRecorder flush", () => {
     const recorder = new SessionRecorder(
       {
         projectId: "test-project",
+        resource: TEST_RESOURCE,
         sendBatch: async (body) => {
           sentBodies.push(body);
           return Result.ok(new Response("ok", { status: 200 }));
@@ -225,6 +741,7 @@ describe("SessionRecorder flush", () => {
     const recorder = new SessionRecorder(
       {
         projectId: "test-project",
+        resource: TEST_RESOURCE,
         sendBatch: async (body) => {
           sentBodies.push(body);
           return Result.ok(new Response("ok", { status: 200 }));
@@ -275,6 +792,7 @@ describe("SessionRecorder flush", () => {
     const recorder = new SessionRecorder(
       {
         projectId: "test-project",
+        resource: TEST_RESOURCE,
         sendBatch: async (body) => {
           sentBodies.push(body);
           return Result.ok(new Response("ok", { status: 200 }));
@@ -328,6 +846,7 @@ describe("SessionRecorder flush", () => {
     const recorder = new SessionRecorder(
       {
         projectId: "test-project",
+        resource: TEST_RESOURCE,
         sendBatch: async () => {
           calls += 1;
           // A poorly-compressible event can clear the client-side caps yet still
@@ -383,6 +902,7 @@ describe("SessionRecorder flush", () => {
     const recorder = new SessionRecorder(
       {
         projectId: "test-project",
+        resource: TEST_RESOURCE,
         sendBatch: async (body) => {
           sentBodies.push(body);
           return Result.error(new KnownErrors.AnalyticsNotEnabled());

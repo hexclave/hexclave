@@ -151,6 +151,8 @@ function getBotChallengeRequestFields(botChallenge: BotChallengeInput | undefine
   };
 }
 
+const MIN_GZIP_JSON_BODY_BYTES = 1024;
+
 async function encodeGzipJsonBody(
   jsonBody: string,
   options: { keepalive: boolean },
@@ -167,8 +169,15 @@ async function encodeGzipJsonBody(
     return { body: jsonBody, contentType: "application/json" };
   }
   try {
-    const stream = new Blob([jsonBody]).stream().pipeThrough(new CompressionStreamCtor("gzip"));
+    const source = new Blob([jsonBody]);
+    if (source.size < MIN_GZIP_JSON_BODY_BYTES) {
+      return { body: jsonBody, contentType: "application/json" };
+    }
+    const stream = source.stream().pipeThrough(new CompressionStreamCtor("gzip"));
     const buffer = await new Response(stream).arrayBuffer();
+    if (buffer.byteLength >= source.size) {
+      return { body: jsonBody, contentType: "application/json" };
+    }
     return { body: new Uint8Array(buffer), contentType: "application/octet-stream" };
   } catch {
     // Broken CompressionStream (e.g. Safari < 16.4): fall back to plain JSON.

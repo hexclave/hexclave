@@ -324,14 +324,27 @@ Use for:
 Props:
 
 - `label`
-- `color`: `"blue" | "cyan" | "purple" | "green" | "orange" | "red"`
+- `color`: `"blue" | "cyan" | "purple" | "green" | "orange" | "red" | "zinc"`
 - `icon` (optional)
 - `size`: `"sm" | "md"`
 - `contentMode`: `"both" | "text" | "icon"`
 
+Color meanings:
+
+| color | use for |
+| --- | --- |
+| `green` | success, healthy, active, resolved |
+| `red` | failure, error, destructive state |
+| `orange` | warning, degraded, needs attention, regressed |
+| `blue` | informational, in progress |
+| `cyan` / `purple` | category / type labels that need to be told apart |
+| `zinc` | **no state at all** — neutral labels (`debug`, `trace`, an environment name, a release tag, "ignored") |
+
 Rules:
 
 - choose color by meaning, not preference
+- reach for `zinc` rather than `blue` when a label carries no severity — `blue` reads as "informational", and spending it on a neutral label devalues it everywhere else on the page
+- never clone the pill formula locally to get a color that isn't here; add the color to `DesignBadge` instead (that is exactly why `zinc` exists — the Observability logs level chip used to be a local copy)
 - use `contentMode="icon"` only when `icon` is provided
 - for icon-only badges, accessibility is already handled via `aria-label`
 

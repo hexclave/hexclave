@@ -1,0 +1,156 @@
+---
+title: "Error Grouping"
+sidebarTitle: "Grouping"
+description: "How Hexclave decides that two error occurrences are the same bug — exception type plus normalized stack frames, never line numbers"
+---
+
+Grouping is the whole product. If it splits too eagerly you get a thousand issues for one bug; if it merges too eagerly you get one issue that hides ten. This page describes exactly what Hexclave hashes, so you can predict what will and won't collapse.
+
+Grouping runs **server-side, at ingest**, on the raw stack string the SDK ships. It is a pure function of the occurrence — no network, no database, no source maps — so the answer is the same every time and every occurrence is grouped by the time it is queryable.
+
+## The Grouping Key
+
+Every occurrence is reduced to a flat, ordered list of normalized strings ("leaves"), and that list is hashed into a 128-bit `issue_hash`. The list is:
+
+```
+[ exception type, *frame leaves ]
+```
+
+Each **contributing frame** adds up to two leaves, oldest frame first:
+
+1. **`module`, falling back to `filename`.** The module is a bundler-independent logical name derived from the path (see [Surviving a redeploy](#surviving-a-redeploy)); it wins over the filename because it is already origin-independent. A filename is lowercased down to its basename and dropped entirely when the frame's path has a URL origin (a minified `main-a1b2c3.js` is deployment noise) or when it names no file at all (`<anonymous>`, `[native code]`).
+2. **The function name**, reduced to the part after the last `.` — so `Foo.prototype.bar` and `bar` are the same function reached two ways, which is exactly how V8 renders them depending on the call site. Dropped when it identifies nothing: `?`, `<anonymous>`, `<anonymous function>`, `eval`, `native`, and Gecko's nested-closure suffix `.../<`.
+
+**Line and column numbers are never hashed.** They move on any edit to the file, so hashing them would split an issue on an unrelated commit. This is the single biggest difference from the old client-side `data.fingerprint`, which hashed the first raw stack line verbatim.
+
+Two more rules do real work:
+
+- **The exception type leads the list.** A `TypeError` and a `RangeError` thrown from the same helper are different bugs with different fixes; without this leaf they would share every other leaf and collapse into one issue.
+- **Consecutive identical frames collapse.** A stack overflow repeats the same frame to a depth that depends on the call site, so without collapsing you would get a new issue per recursion depth.
+
+Leaves are length-prefixed and separated by `U+001F` before hashing, so the encoding is injective — `["ab", "c"]` and `["a", "bc"]` cannot produce the same hash.
+
+<Info>
+`culprit` — the "where it happened" line on the issue row — is derived from the last in-app frame (falling back to the last frame) and is **never hashed**. It is free to change shape without splitting anything.
+</Info>
+
+## App and System Variants
+
+Two hashes are computed for every stack:
+
+- **`system`** — over every frame.
+- **`app`** — over the same list with non-in-app frames zeroed: they contribute no leaves, but still occupy their positions so recursion collapse sees them.
+
+The `app` variant owns the occurrence whenever it exists and actually differs from `system`, because it answers the question you care about. Two different bugs in your components that both bottom out in the same `react-dom` frame must not merge; the same bug in your code reached through two different library call paths must. When every frame is in-app the two lists are identical and there is only one hash. When no in-app frame contributed, the `system` hash owns the occurrence.
+
+A frame is **in-app** by a fixed ruleset, not a configurable DSL:
+
+| Platform | Not your code |
+|---|---|
+| Browser (`javascript`) | anything under `/node_modules/`, anything prefixed `webpack-internal:` or `node:`, and Next.js's own `/_next/static/chunks/framework*` runtime |
+| Server (`node`) | anything without an absolute or relative path prefix (Node builtins like `events.js`), anything with a `scheme://` prefix, and anything containing `node_modules/` |
+
+The same ruleset is what read-time symbolication will re-derive from original paths, so a symbolicated frame can never disagree with the hash that owns it.
+
+<Info>
+Non-in-app frames are *zeroed*, not deleted, before recursion collapse runs — otherwise `a -> lib -> a -> lib -> a` would collapse to one frame in the app variant while staying five frames long in the system variant, and the two variants would disagree about a stack they should agree about.
+</Info>
+
+Every occurrence has **exactly one owning hash** (the `issue_hash` column). The other variant is recorded in `issue_hashes` for diagnosis and for matching a new occurrence to an existing issue — it is never used to resolve which issue an occurrence belongs to. That single-owner rule is what makes [unmerge retroactive](/guides/apps/observability/issues#merge-and-unmerge).
+
+## Surviving a Redeploy
+
+Bundlers rename every chunk on every build. If the chunk name were hashed as-is, every deploy would split every issue in your project in two.
+
+So before a path becomes a leaf, its content hash is stripped:
+
+```
+static/chunks/4711-a1b2c3d4.js          ->  static/chunks/4711     (webpack)
+[root-of-the-server]__a1b2c3._.js       ->  [root-of-the-server]   (Turbopack)
+/_next/static/<buildId>/pages/app.js    ->  _next/static/pages/app (Next.js build id dropped)
+```
+
+Both bundlers' shapes are covered, and Next.js's per-build `_next/static/<buildId>/` segment is dropped as well. A chunk named purely after its hash collapses to the constant `<hash>` — such a name carries no logical information, and the function-name leaf still separates the frames. That is a deliberate trade: occasionally over-merging two anonymous chunks beats being wrong on literally every rebuild.
+
+Node frames get no module: their paths are absolute and stable, so the filename leaf already does the job.
+
+## Non-`Error` Throws Get Their Own Rule
+
+`throw "nope"`, `throw { code: 1 }`, and a promise rejected with a string are all captured, but the SDK has to normalize them: they carry `name: "Error"`, a synthesized message, and a stack that describes the *capture site*, not the throw site — usually a single nameless URL frame that the frame rules above drop outright.
+
+Without a dedicated rule, every non-`Error` throw in a project would share the same empty leaf list and collapse into one useless issue. So when `data.synthetic` is set, the leaves are instead:
+
+```
+[ "synthetic", parameterized message, top frame path ]
+```
+
+Two different string throws stay two different issues; two occurrences of the same one collapse.
+
+## Message Parameterization
+
+When a message has to be hashed — the synthetic rule above, or a stackless throw where no frame contributed anything — the per-occurrence parts of the message are replaced with placeholders first, so `User 4f1c8b2e-… not found` doesn't open a new issue on every request:
+
+| Pattern | Placeholder |
+|---|---|
+| URLs | `<url>` |
+| Email addresses | `<email>` |
+| UUIDs | `<uuid>` |
+| ISO dates and datetimes | `<date>` |
+| IPv4 / IPv6 addresses | `<ip>` |
+| `0x…` and bare hex runs of 8+ digits | `<hex>` |
+| Decimals | `<float>` |
+| Integers | `<int>` |
+
+Order matters and is part of the algorithm: a UUID is matched before the generic hex rule so it doesn't shred into `<hex>-<int>-<int>-…`, and a date before the integer rule so `2026-08-01` doesn't become `<int>-<int>-<int>`. Numeric matches have no trailing word boundary, so `took 30s` and `took 45s` are the same issue.
+
+## Variants You May See
+
+The `issue_variant` column on every occurrence records which rule produced its owning hash:
+
+| Variant | Meaning |
+|---|---|
+| `app` | Hashed the in-app frames only. The normal, best case. |
+| `system` | Hashed every frame — either no in-app frame contributed, or both variants agreed. |
+| `message` | No frame contributed anything hashable (a stackless throw, grouped on exception type + parameterized message), or the synthetic rule fired (grouped on `synthetic` + parameterized message + top frame path). |
+| `degraded` | Grouping itself threw. A deterministic hash of type + parameterized message was used instead, and `grouping_degraded = 1`. |
+
+`degraded` exists because the contract the rest of the system rests on is "**no empty hash, ever**" — an occurrence with no owning hash would be unreachable from every issue query. A bug in the grouper costs grouping *quality*, never queryability, and the degraded population stays measurable:
+
+```sql
+SELECT issue_variant, count() AS occurrences
+FROM errors
+WHERE event_at > now() - INTERVAL 7 DAY
+GROUP BY issue_variant
+ORDER BY occurrences DESC;
+```
+
+Because the degraded hash uses the same encoding as the `message` variant, a degraded occurrence lands in the *same* issue as a correctly-grouped message-variant occurrence of the same error, rather than spawning an orphan.
+
+## Bounds
+
+The parser is on the ingest hot path and takes untrusted input, so it is bounded rather than complete:
+
+- Each stack line is truncated to **1024 characters** before any regex touches it.
+- At most **50 frames** are parsed (matching the SDK's own `Error.stackTraceLimit`, so a full stack is never clipped by the server first), scanning at most 500 lines.
+- The message is capped at **8 KB** before parameterization.
+- The parser never throws on garbage; unparseable input degrades to the message variant.
+
+Frames are stored oldest-first — the crash site is the **last** frame — matching how the UI renders them.
+
+## Algorithm Versions
+
+The grouping algorithm is versioned. Every occurrence records the config id that produced its hash (`issue_grouping_config`, currently `hexclave-js:2026-08-01`), and an issue's hashes are only meaningful within the config that produced them.
+
+When a new algorithm ships, the old one stays *readable*: on a miss against the active config's hash, older configs in the project's readable chain are consulted, and a match attaches the new config's hashes to the existing issue. An algorithm is only retired once a migration has rewritten every stored hash — never on a wall-clock timer, because a dormant issue that recurred after the timer would silently become a brand-new issue.
+
+This lives in **environment-level configuration** (`observability.errorGrouping`), deliberately not in your committed `hexclave.config.ts`: which grouping algorithm a project runs is an operational rollout knob, and a committed config file must never be able to pin a project to an algorithm that is no longer run.
+
+<Warning>
+Grouping is computed once, at ingest, and never recomputed. Changing the algorithm does not retroactively regroup existing occurrences, and source maps never influence grouping — symbolication changes what you *see* in a stack trace, never which issue an occurrence belongs to.
+</Warning>
+
+## Next Steps
+
+- [Error Tracking](/guides/apps/observability/error-tracking) — the capture-to-issue pipeline
+- [Triaging Issues](/guides/apps/observability/issues) — resolve, ignore, merge, unmerge
+- [Querying Errors](/guides/apps/observability/querying-errors) — `issue_hash` in SQL

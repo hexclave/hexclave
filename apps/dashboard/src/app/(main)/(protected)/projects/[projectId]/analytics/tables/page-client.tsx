@@ -5,11 +5,15 @@ import { DesignSelectorDropdown } from "@/components/design-components/select";
 import { Button, Typography } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { ArrowClockwiseIcon, CodeIcon } from "@phosphor-icons/react";
+import type { AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppEnabledGuard } from "../../app-enabled-guard";
 import { PageLayout } from "../../page-layout";
+import { useAdminApp } from "../../use-admin-app";
 import { AnalyticsEventLimitBanner } from "../shared";
+import { replaceLocationSearch } from "../../observability/filters";
+import { TelemetryRowLinks } from "../../observability/telemetry-row-links";
 import {
   QueryDataGrid,
   type QueryDataGridMode,
@@ -26,7 +30,7 @@ type TableConfig = {
   defaultOrderDir: "asc" | "desc",
 };
 
-type TableId = string;
+export type TableId = string;
 
 const AVAILABLE_TABLES = new Map<TableId, TableConfig>([
   [
@@ -34,6 +38,33 @@ const AVAILABLE_TABLES = new Map<TableId, TableConfig>([
     {
       displayName: "Events",
       baseQuery: "SELECT * FROM default.events",
+      defaultOrderBy: "event_at",
+      defaultOrderDir: "desc",
+    },
+  ],
+  [
+    "spans",
+    {
+      displayName: "Spans",
+      baseQuery: "SELECT * FROM default.spans",
+      defaultOrderBy: "started_at",
+      defaultOrderDir: "desc",
+    },
+  ],
+  [
+    "logs",
+    {
+      displayName: "Logs",
+      baseQuery: "SELECT * FROM default.logs",
+      defaultOrderBy: "event_at",
+      defaultOrderDir: "desc",
+    },
+  ],
+  [
+    "errors",
+    {
+      displayName: "Errors",
+      baseQuery: "SELECT * FROM default.errors",
       defaultOrderBy: "event_at",
       defaultOrderDir: "desc",
     },
@@ -143,9 +174,29 @@ const AVAILABLE_TABLE_OPTIONS = [...AVAILABLE_TABLES.entries()].map(
   ([value, config]) => ({ value, label: config.displayName }),
 );
 
+const TELEMETRY_TABLE_IDS = new Set(["events", "spans", "logs", "errors"]);
+
+const TELEMETRY_DETAIL_TECHNICAL_COLUMNS = [
+  "trace_id",
+  "span_id",
+  "parent_span_id",
+  "page_view_span_id",
+  "session_replay_id",
+  "session_replay_segment_id",
+  "refresh_token_id",
+] as const;
+
+function readInitialTableId(): TableId {
+  if (typeof window === "undefined") return "events";
+  const raw = new URLSearchParams(window.location.search).get("table");
+  if (raw != null && AVAILABLE_TABLES.has(raw)) return raw;
+  return "events";
+}
+
 // ─── Per-table content ──────────────────────────────────────────────
 
-function TableContent({ tableId }: { tableId: TableId }) {
+export function TableContent({ tableId }: { tableId: TableId }) {
+  const adminApp = useAdminApp();
   const tableConfig = AVAILABLE_TABLES.get(tableId) ?? throwErr(`Unknown analytics table: ${tableId}`);
 
   // AI thread behind the search bar — constrained to row filters over this
@@ -209,16 +260,29 @@ function TableContent({ tableId }: { tableId: TableId }) {
         fillHeight
         stickyTop={0}
         horizontalScrollbarPosition="top"
+        detailTitle={`${tableConfig.displayName} details`}
+        detailTechnicalColumns={TELEMETRY_TABLE_IDS.has(tableId) ? TELEMETRY_DETAIL_TECHNICAL_COLUMNS : undefined}
+        detailExtraContent={TELEMETRY_TABLE_IDS.has(tableId)
+          ? (row) => <TelemetryRowLinks row={row} projectId={adminApp.projectId} />
+          : undefined}
       />
     </div>
   );
 }
 
-export default function PageClient() {
-  const [selectedTable, setSelectedTable] = useState<TableId | null>("events");
+export default function PageClient({ appId }: { appId: AppId }) {
+  const [selectedTable, setSelectedTable] = useState<TableId | null>(readInitialTableId);
+
+  useEffect(() => {
+    if (selectedTable == null) return;
+    const params = new URLSearchParams(typeof window === "undefined" ? "" : window.location.search);
+    if (selectedTable === "events") params.delete("table");
+    else params.set("table", selectedTable);
+    replaceLocationSearch(params);
+  }, [selectedTable]);
 
   return (
-    <AppEnabledGuard appId="analytics">
+    <AppEnabledGuard appId={appId}>
       {/* containedHeight: page fills the shell under the header and scrolls internally,
           so table rows cannot travel behind the floating dark-mode header. */}
       <PageLayout fillWidth noPadding containedHeight>
@@ -245,7 +309,7 @@ export default function PageClient() {
               the same radius on both sides (nav top-right ↔ tables top-left).
               Light: only round the left edge — the shell card already owns the
               top-right radius, so an inner tr curve reads as a stray notch. */}
-          <div className="flex min-h-0 flex-1 overflow-hidden rounded-l-2xl dark:rounded-tr-2xl lg:ml-0.5">
+          <div className="flex min-h-0 flex-1 overflow-hidden rounded-l-2xl dark:rounded-tr-2xl lg:-ml-px">
             {/* Use the same surface treatment as the primary sidebar so equal radii render
                 identically. Omit the right border to keep the sidebar/grid junction divider-free. */}
             <div className="hidden w-48 min-h-0 flex-shrink-0 flex-col overflow-hidden rounded-l-2xl bg-black/[0.03] dark:border dark:border-r-0 dark:border-foreground/5 dark:bg-foreground/5 dark:backdrop-blur-2xl dark:shadow-sm lg:flex">

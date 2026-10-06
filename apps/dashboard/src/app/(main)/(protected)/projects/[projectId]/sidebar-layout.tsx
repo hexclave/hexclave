@@ -21,6 +21,7 @@ import {
 } from "@/components/ui";
 import { WalkthroughProvider } from "@/components/walkthrough/walkthrough-provider";
 import { ALL_APPS_FRONTEND, DUMMY_ORIGIN, getAppPath, getItemPath, hasNavigationItems, testAppPath, testItemPath, type NavigableAppFrontend } from "@/lib/apps-frontend";
+import { isAppNavigationItemVisible } from "@/lib/app-navigation-visibility";
 import { getAppEnableConfigUpdate, getEnabledAppIds, getEnabledNavigableAppIds } from "@/lib/apps-utils";
 import { useUpdateConfig } from "@/components/config-update";
 import { cn } from "@/lib/utils";
@@ -38,8 +39,8 @@ import {
   UsersIcon,
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
-import { TooltipPortal } from "@radix-ui/react-tooltip";
-import { ALL_APPS, type AppId } from "@hexclave/shared/dist/apps/apps-config";
+import { ALL_APPS, getParentAppId, type AppId } from "@hexclave/shared/dist/apps/apps-config";
+import { typedKeys } from "@hexclave/shared/dist/utils/objects";
 import { usePathname } from "next/navigation";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useAdminApp, useProjectId } from "./use-admin-app";
@@ -59,6 +60,7 @@ type AppSection = {
   items: {
     name: string,
     href: string,
+    section?: string,
     external?: boolean,
     match: (fullUrl: URL) => boolean,
   }[],
@@ -301,11 +303,9 @@ function NavItem({
               </Button>
             )}
           </TooltipTrigger>
-          <TooltipPortal>
-            <TooltipContent side="right" className="!z-[9999]">
-              {item.name}
-            </TooltipContent>
-          </TooltipPortal>
+          <TooltipContent side="right" className="!z-[9999]">
+            {item.name}
+          </TooltipContent>
         </Tooltip>
       </div>
     );
@@ -374,8 +374,15 @@ function NavItem({
           )}
         >
           <div className="space-y-2 py-2 pl-3">
-            {item.items.map((navItem) => (
-              <NavSubItem key={navItem.href} item={navItem} href={navItem.href} onClick={onClick} />
+            {item.items.map((navItem, index) => (
+              <div key={navItem.href}>
+                {navItem.section != null && navItem.section !== item.items[index - 1]?.section && (
+                  <Typography className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/70">
+                    {navItem.section}
+                  </Typography>
+                )}
+                <NavSubItem item={navItem} href={navItem.href} onClick={onClick} />
+              </div>
             ))}
           </div>
         </div>
@@ -455,13 +462,33 @@ function AppNavItem({
       return null;
     }
     const navigableFrontend: NavigableAppFrontend = appFrontend;
-    const items = navigableFrontend.navigationItems
+    const ownItems = navigableFrontend.navigationItems
+      .filter((navItem) => isAppNavigationItemVisible(projectId, navItem))
       .map((navItem) => ({
         name: navItem.displayName,
         href: getItemPath(projectId, navigableFrontend, navItem),
+        section: navItem.section,
         external: navItem.external,
         match: (fullUrl: URL) => testItemPath(projectId, navigableFrontend, navItem, fullUrl),
       }));
+    const childItems = typedKeys(ALL_APPS)
+      .filter((candidateId) => getParentAppId(candidateId) === appId)
+      .flatMap((candidateId) => {
+        const childFrontend = ALL_APPS_FRONTEND[candidateId];
+        if (!hasNavigationItems(childFrontend)) return [];
+        return childFrontend.navigationItems
+          .filter((navItem) => isAppNavigationItemVisible(projectId, navItem))
+          .map((navItem) => ({
+            name: navItem.displayName,
+            href: getItemPath(projectId, childFrontend, navItem),
+            section: ALL_APPS[candidateId].displayName,
+            external: navItem.external,
+            match: (fullUrl: URL) => testItemPath(projectId, childFrontend, navItem, fullUrl),
+          }));
+      });
+    const primaryItems = ownItems.filter((item) => item.section == null);
+    const sectionItems = ownItems.filter((item) => item.section != null);
+    const items = [...primaryItems, ...childItems, ...sectionItems];
     return {
       name: app.displayName,
       appId,
@@ -516,17 +543,14 @@ function SidebarContent({
   // Memoize getDefaultExpandedSections to prevent recreating the function
   const getDefaultExpandedSections = useCallback((): Set<AppId> => {
     const currentUrl = new URL(pathname, DUMMY_ORIGIN);
-    for (const enabledApp of enabledApps) {
+    for (const enabledApp of getEnabledAppIds(config.apps.installed)) {
       const appFrontend = ALL_APPS_FRONTEND[enabledApp];
-      if (!(appFrontend as any)) {
-        continue;
-      }
       if (testAppPath(projectId, appFrontend, currentUrl)) {
-        return new Set([enabledApp]);
+        return new Set([getParentAppId(enabledApp) ?? enabledApp]);
       }
     }
     return new Set(["authentication"]);
-  }, [enabledApps, pathname, projectId]);
+  }, [config.apps.installed, pathname, projectId]);
 
   const [expandedSections, setExpandedSections] = useState<Set<AppId>>(() => getDefaultExpandedSections());
   const [isProjectSettingsExpanded, setIsProjectSettingsExpanded] = useState(() =>
@@ -693,11 +717,9 @@ function SidebarContent({
                   <SidebarIcon className={cn("h-4 w-4 transition-transform duration-200", isCollapsed && "rotate-180")} />
                 </Button>
               </TooltipTrigger>
-              <TooltipPortal>
-                <TooltipContent side="right" className="!z-[9999]">
-                  {isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                </TooltipContent>
-              </TooltipPortal>
+              <TooltipContent side="right" className="!z-[9999]">
+                {isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              </TooltipContent>
             </Tooltip>
           )}
         </div>
@@ -734,6 +756,19 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
 
   const projectId = useProjectId();
   const pathname = usePathname();
+  const childAppBreadcrumb = useMemo(() => {
+    const currentUrl = new URL(pathname, DUMMY_ORIGIN);
+    for (const appId of typedKeys(ALL_APPS)) {
+      const parentAppId = getParentAppId(appId);
+      const appFrontend = ALL_APPS_FRONTEND[appId];
+      if (parentAppId == null || !hasNavigationItems(appFrontend)) continue;
+      const page = appFrontend.navigationItems.find((item) => testItemPath(projectId, appFrontend, item, currentUrl));
+      if (page != null) {
+        return [ALL_APPS[parentAppId].displayName, ALL_APPS[appId].displayName, page.displayName];
+      }
+    }
+    return null;
+  }, [pathname, projectId]);
   // Custom dashboard detail pages have a transparent iframe background; the companion should match.
   const isCustomDashboardPage = /\/dashboards\/[^/]+/.test(pathname);
 
@@ -744,7 +779,7 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
   return (
     <WalkthroughProvider>
       <TooltipProvider>
-        <div className="mx-auto w-full flex h-screen min-h-0 flex-col overflow-y-auto dark:bg-background dark:shadow-2xl dark:border-x dark:border-border/5">
+        <div className="mx-auto flex h-screen min-h-0 w-full flex-col overflow-y-auto has-[[data-scroll-main]:not([style*='display:_none'])]:overflow-hidden dark:border-x dark:border-border/5 dark:bg-background dark:shadow-2xl">
           {/* Header - Glassmorphic with vertical blur gradient (light) / Floating card (dark) */}
           <div className="sticky top-0 z-20 relative dark:top-3 dark:mx-3 dark:mb-3 dark:mt-3 dark:rounded-2xl">
             {/* Vertical blur layer behind header - light mode only */}
@@ -789,6 +824,14 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
                   <Logo height={24} href="/" />
                   <CaretRightIcon className="h-4 w-4 text-muted-foreground/50" />
                   <ProjectSwitcher currentProjectId={projectId} />
+                  {childAppBreadcrumb?.map((item) => (
+                    <div key={item} className="flex min-w-0 items-center gap-2">
+                      <CaretRightIcon className="h-4 w-4 shrink-0 text-muted-foreground/50" />
+                      <Typography className="max-w-32 truncate text-sm text-muted-foreground">
+                        {item}
+                      </Typography>
+                    </div>
+                  ))}
                 </div>
 
                 {/* Mobile: Logo */}
@@ -814,7 +857,7 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
           <SpotlightSearchWrapper projectId={projectId} />
 
           {/* Body Layout (Left Sidebar + Content + Right Companion) */}
-          <div className="relative flex flex-1 items-start w-full has-[[data-contained-height]]:min-h-0 has-[[data-contained-height]]:items-stretch">
+          <div className="relative flex w-full flex-1 items-start has-[[data-contained-height]:not([style*='display:_none'])]:min-h-0 has-[[data-contained-height]:not([style*='display:_none'])]:items-stretch has-[[data-scroll-main]:not([style*='display:_none'])]:min-h-0 has-[[data-scroll-main]:not([style*='display:_none'])]:items-stretch">
             {/* Left Sidebar - Sticky */}
             <aside
               className={cn(
@@ -830,7 +873,7 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
             </aside>
 
             {/* Main Content Area */}
-            <main className="flex-1 min-w-0 pt-1 pb-3 px-3 lg:pl-0 lg:pr-24 dark:py-0 dark:px-2 dark:pb-3 dark:lg:pr-24 has-[[data-contained-height]]:flex has-[[data-contained-height]]:min-h-0 has-[[data-contained-height]]:flex-col">
+            <main className="min-w-0 flex-1 px-3 pb-3 pt-1 has-[[data-contained-height]:not([style*='display:_none'])]:flex has-[[data-contained-height]:not([style*='display:_none'])]:min-h-0 has-[[data-contained-height]:not([style*='display:_none'])]:flex-col has-[[data-scroll-main]:not([style*='display:_none'])]:min-h-0 has-[[data-scroll-main]:not([style*='display:_none'])]:overflow-x-hidden has-[[data-scroll-main]:not([style*='display:_none'])]:overflow-y-auto has-[[data-scroll-main]:not([style*='display:_none'])]:overscroll-contain has-[[data-scroll-main]:not([style*='display:_none'])]:[container-type:size] lg:pl-0 lg:pr-24 dark:px-2 dark:py-0 dark:pb-3 dark:lg:pr-24">
               <div className={cn(
               "relative flex min-w-0 flex-col overflow-visible has-[[data-full-bleed]]:h-full",
               // Light mode card styling (companion gutter is on <main>, not here — avoids empty card chrome behind Stack Companion)
@@ -838,7 +881,7 @@ export default function SidebarLayout(props: { children?: React.ReactNode }) {
               // Dark mode: remove card styling
               "dark:bg-transparent dark:backdrop-blur-none dark:shadow-none dark:rounded-none dark:border-0",
               // Contained pages own their internal scroll regions, so the shell must pass down a finite flex height instead of sizing to content.
-              "has-[[data-contained-height]]:flex-1 has-[[data-contained-height]]:min-h-0 has-[[data-contained-height]]:overflow-hidden",
+              "has-[[data-contained-height]:not([style*='display:_none'])]:flex-1 has-[[data-contained-height]:not([style*='display:_none'])]:min-h-0 has-[[data-contained-height]:not([style*='display:_none'])]:overflow-hidden",
               // Full-bleed pages (email editors etc.): remove card styling in light mode too
               "has-[[data-full-bleed]]:min-h-0 has-[[data-full-bleed]]:bg-transparent has-[[data-full-bleed]]:backdrop-blur-none has-[[data-full-bleed]]:shadow-none has-[[data-full-bleed]]:rounded-none has-[[data-full-bleed]]:border-0",
             )}>

@@ -40,6 +40,7 @@ const USAGE_ITEM_LABELS = new Map<ItemId, string>([
   [ITEM_IDS.authUsers, "Auth users"],
   [ITEM_IDS.emailsPerMonth, "Emails per month"],
   [ITEM_IDS.analyticsEvents, "Analytics events"],
+  [ITEM_IDS.analyticsSpans, "Analytics spans"],
   [ITEM_IDS.sessionReplays, "Session replays"],
   [ITEM_IDS.analyticsTimeoutSeconds, "Analytics timeout"],
   [ITEM_IDS.onboardingCall, "Onboarding call"],
@@ -332,12 +333,41 @@ async function countAnalyticsEventsForProjects(projectIds: string[], period: Usa
 
   const clickhouseClient = getClickhouseAdminClientForMetrics();
   const result = await clickhouseClient.query({
+    query: getAnalyticsEventsUsageQueryForTest(),
+    query_params: {
+      projectIds,
+      periodStart: formatClickhouseDateTimeParam(period.start),
+      periodEnd: formatClickhouseDateTimeParam(period.end),
+    },
+    format: "JSONEachRow",
+  });
+  const rows: { total: string | number }[] = await result.json();
+  return Number(rows[0]?.total ?? 0);
+}
+
+export function getAnalyticsEventsUsageQueryForTest(): string {
+  return `
+    SELECT count() AS total
+    FROM analytics_internal.events
+    PREWHERE project_id IN {projectIds:Array(String)}
+      AND event_at >= {periodStart:DateTime}
+      AND event_at < {periodEnd:DateTime}
+  `;
+}
+
+async function countAnalyticsSpansForProjects(projectIds: string[], period: UsagePeriod): Promise<number> {
+  if (projectIds.length === 0) {
+    return 0;
+  }
+
+  const clickhouseClient = getClickhouseAdminClientForMetrics();
+  const result = await clickhouseClient.query({
     query: `
       SELECT count() AS total
-      FROM analytics_internal.events
-      WHERE project_id IN {projectIds:Array(String)}
-        AND event_at >= {periodStart:DateTime}
-        AND event_at < {periodEnd:DateTime}
+      FROM analytics_internal.span_writes
+      PREWHERE project_id IN {projectIds:Array(String)}
+        AND created_at >= {periodStart:DateTime}
+        AND created_at < {periodEnd:DateTime}
     `,
     query_params: {
       projectIds,
@@ -356,6 +386,7 @@ function buildRows(options: {
   authUsers: number,
   emails: number,
   analyticsEvents: number,
+  analyticsSpans: number,
   sessionReplays: number,
 }): PlanUsageRow[] {
   const limits = PLAN_LIMITS[options.planId];
@@ -387,6 +418,13 @@ function buildRows(options: {
       kind: "metered",
       used: options.analyticsEvents,
       limit: limits.analyticsEvents,
+    }),
+    buildUsageRow({
+      itemId: ITEM_IDS.analyticsSpans,
+      displayName: getUsageItemLabel(ITEM_IDS.analyticsSpans),
+      kind: "metered",
+      used: options.analyticsSpans,
+      limit: limits.analyticsSpans,
     }),
     buildUsageRow({
       itemId: ITEM_IDS.sessionReplays,
@@ -431,10 +469,11 @@ export async function getPlanUsageForProject(project: UsageSourceProject, now: D
     countDashboardAdmins(internalTenancy, ownerTeamId, now),
   ]);
 
-  const [authUsers, meteredUsage, analyticsEvents] = await Promise.all([
+  const [authUsers, meteredUsage, analyticsEvents, analyticsSpans] = await Promise.all([
     getNonAnonymousUserCountForTenancies(ownedScope.tenancyIds),
     sumTenancyMeteredUsage(ownedScope.tenancyIds, period),
     countAnalyticsEventsForProjects(ownedScope.projectIds, period),
+    countAnalyticsSpansForProjects(ownedScope.projectIds, period),
   ]);
 
   return {
@@ -452,6 +491,7 @@ export async function getPlanUsageForProject(project: UsageSourceProject, now: D
       authUsers,
       emails: meteredUsage.emails,
       analyticsEvents,
+      analyticsSpans,
       sessionReplays: meteredUsage.sessionReplays,
     }),
   };

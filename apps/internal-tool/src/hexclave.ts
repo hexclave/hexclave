@@ -14,6 +14,7 @@ function createHexclaveClientApp() {
     tokenStore: "cookie",
     redirectMethod: "window",
     baseUrl: apiUrl,
+    telemetry: { resource: { service: { name: "stack-internal-tool" } } },
     urls: {
       handler: "/handler",
       afterSignIn: "/",

@@ -2,6 +2,7 @@ import { getClickhouseAdminClient } from "@/lib/clickhouse";
 import { captureError, HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, adminAuthTypeSchema, yupArray, yupBoolean, yupNumber, yupObject, yupRecord, yupString } from "@hexclave/shared/dist/schema-fields";
+import { buildSecurityEventsOffendersQuery, buildSecurityEventsSummaryQuery } from "./security-event-queries";
 
 const MAX_EVENT_ROWS = 5000;
 const DEFAULT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -188,57 +189,7 @@ export const GET = createSmartRouteHandler({
         },
       ]));
       const summaryResult = await client.query({
-        query: `
-          SELECT
-            'category' AS kind,
-            multiIf(
-              event_type = '$sign-in-attempt', 'sign_in_attempt',
-              event_type = '$permission-check', 'permission_check',
-              event_type = '$user-restricted', 'user_restricted',
-              'sign_up_rule'
-            ) AS bucket,
-            count() AS count
-          FROM analytics_internal.events
-          ${sharedWhere}
-            AND event_type IN ('$sign-in-attempt', '$permission-check', '$user-restricted', '$sign-up-rule-trigger')
-          GROUP BY bucket
-          UNION ALL
-          SELECT
-            'outcome' AS kind,
-            concat(
-              multiIf(
-                event_type = '$sign-in-attempt', 'sign_in_attempt',
-                event_type = '$permission-check', 'permission_check',
-                event_type = '$user-restricted', 'user_restricted',
-                'sign_up_rule'
-              ),
-              '.',
-              COALESCE(
-                NULLIF(CAST(data.outcome, 'Nullable(String)'), ''),
-                if(CAST(data.action, 'Nullable(String)') = 'reject', 'denied', 'restricted')
-              )
-            ) AS bucket,
-            count() AS count
-          FROM analytics_internal.events
-          ${sharedWhere}
-            AND event_type IN ('$sign-in-attempt', '$permission-check', '$user-restricted', '$sign-up-rule-trigger')
-          GROUP BY bucket
-          UNION ALL
-          SELECT
-            'reason' AS kind,
-              multiIf(
-                event_type = '$sign-in-attempt', concat('sign_in_attempt.', NULLIF(CAST(data.failure_reason, 'Nullable(String)'), '')),
-                event_type = '$permission-check', concat('permission_check.', NULLIF(CAST(data.permission_id, 'Nullable(String)'), '')),
-                event_type = '$user-restricted', concat('user_restricted.', NULLIF(CAST(data.restricted_reason, 'Nullable(String)'), '')),
-                concat('sign_up_rule.', NULLIF(CAST(data.action, 'Nullable(String)'), ''))
-              ) AS bucket,
-            count() AS count
-          FROM analytics_internal.events
-          ${sharedWhere}
-            AND event_type IN ('$sign-in-attempt', '$permission-check', '$user-restricted', '$sign-up-rule-trigger')
-          GROUP BY bucket
-          HAVING bucket IS NOT NULL
-        `,
+        query: buildSecurityEventsSummaryQuery(sharedWhere),
         query_params: {
           ...sharedParams,
         },
@@ -250,46 +201,7 @@ export const GET = createSmartRouteHandler({
         summary[row.bucket] = (summary[row.bucket] ?? 0) + Number(row.count);
       }
       const offendersResult = await client.query({
-        query: `
-          SELECT 'email' AS kind, NULLIF(CAST(data.email, 'Nullable(String)'), '') AS value, count() AS count
-          FROM analytics_internal.events
-          ${sharedWhere}
-            AND (
-              (event_type = '$sign-in-attempt' AND CAST(data.outcome, 'Nullable(String)') = 'failed')
-              OR event_type IN ('$permission-check', '$user-restricted')
-              OR (event_type = '$sign-up-rule-trigger' AND CAST(data.action, 'Nullable(String)') IN ('reject', 'restrict'))
-            )
-            AND NULLIF(CAST(data.email, 'Nullable(String)'), '') IS NOT NULL
-          GROUP BY value
-          ORDER BY count DESC
-          LIMIT 10
-          UNION ALL
-          SELECT 'ip' AS kind, NULLIF(CAST(data.ip_info.ip, 'Nullable(String)'), '') AS value, count() AS count
-          FROM analytics_internal.events
-          ${sharedWhere}
-            AND (
-              (event_type = '$sign-in-attempt' AND CAST(data.outcome, 'Nullable(String)') = 'failed')
-              OR event_type IN ('$permission-check', '$user-restricted')
-              OR (event_type = '$sign-up-rule-trigger' AND CAST(data.action, 'Nullable(String)') IN ('reject', 'restrict'))
-            )
-            AND NULLIF(CAST(data.ip_info.ip, 'Nullable(String)'), '') IS NOT NULL
-          GROUP BY value
-          ORDER BY count DESC
-          LIMIT 10
-          UNION ALL
-          SELECT 'country' AS kind, NULLIF(CAST(data.ip_info.country_code, 'Nullable(String)'), '') AS value, count() AS count
-          FROM analytics_internal.events
-          ${sharedWhere}
-            AND (
-              (event_type = '$sign-in-attempt' AND CAST(data.outcome, 'Nullable(String)') = 'failed')
-              OR event_type IN ('$permission-check', '$user-restricted')
-              OR (event_type = '$sign-up-rule-trigger' AND CAST(data.action, 'Nullable(String)') IN ('reject', 'restrict'))
-            )
-            AND NULLIF(CAST(data.ip_info.country_code, 'Nullable(String)'), '') IS NOT NULL
-          GROUP BY value
-          ORDER BY count DESC
-          LIMIT 10
-        `,
+        query: buildSecurityEventsOffendersQuery(sharedWhere),
         query_params: {
           ...sharedParams,
         },

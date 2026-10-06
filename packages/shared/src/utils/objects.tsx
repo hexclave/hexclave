@@ -16,6 +16,22 @@ import.meta.vitest?.test("isNotNull", ({ expect }) => {
   expect(isNotNull([])).toBe(true);
 });
 
+/**
+ * True for plain-ish objects (including class instances), excluding null and
+ * arrays.
+ */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+import.meta.vitest?.test("isRecord", ({ expect }) => {
+  expect(isRecord(null)).toBe(false);
+  expect(isRecord(undefined)).toBe(false);
+  expect(isRecord([])).toBe(false);
+  expect(isRecord("x")).toBe(false);
+  expect(isRecord({})).toBe(true);
+  expect(isRecord(new Date())).toBe(true);
+});
+
 export type DeepPartial<T> = T extends object ? (T extends any[] ? { [P in keyof T]: DeepPartial<T[P]> } : { [P in keyof T]?: DeepPartial<T[P]> }) : T;
 export type DeepRequired<T> = T extends object ? { [P in keyof T]-?: DeepRequired<T[P]> } : T;
 export type DeepRequiredOrUndefined<T> = T extends object ? { [P in keyof { [K in keyof T]-?: K}]: DeepRequiredOrUndefined<T[P]> } : T;

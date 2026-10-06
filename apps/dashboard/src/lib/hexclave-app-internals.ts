@@ -197,7 +197,7 @@ export async function fetchMetricsOrThrow(
 ): Promise<MetricsResponse> {
   const queryString = getMetricsQueryString(includeAnonymous, filters);
   const path = `/internal/metrics${queryString ? `?${queryString}` : ""}`;
-  return applyMetricsResponseDefaults(await MetricsResponseBodySchema.validate(await fetchJsonOrThrow(adminApp, path)));
+  return await MetricsResponseBodySchema.validate(await fetchJsonOrThrow(adminApp, path));
 }
 
 export async function fetchMetricsUserCountsOrThrow(adminApp: object): Promise<MetricsUserCounts> {

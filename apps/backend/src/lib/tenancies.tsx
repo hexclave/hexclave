@@ -4,6 +4,7 @@ import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
 import { getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { deepPlainEquals } from "@hexclave/shared/dist/utils/objects";
+import { DEFAULT_BRANCH_ID } from "./branch-constants";
 import { getRenderedOrganizationConfigQuery } from "./config";
 import { getProject, getProjectQuery } from "./projects";
 
@@ -16,7 +17,7 @@ import { getProject, getProjectQuery } from "./projects";
  *
  * // TODO do the thing above
  */
-export const DEFAULT_BRANCH_ID = "main";
+export { DEFAULT_BRANCH_ID } from "./branch-constants";
 
 /**
  * @deprecated UNUSED: This function is only kept for development mode validation in getTenancyFromProject.
@@ -219,4 +220,3 @@ export async function getTenancyFromProject(projectId: string, branchId: string,
 
   return result;
 }
-

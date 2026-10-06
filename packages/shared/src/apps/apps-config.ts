@@ -188,8 +188,22 @@ export const ALL_APPS = {
   },
   "analytics": {
     displayName: "Analytics",
-    subtitle: "View and explore analytics data",
+    subtitle: "Understand product usage and user behavior",
     tags: ["developers", "operations"],
+    stage: "stable",
+    softRequirements: [],
+  },
+  "observability": {
+    displayName: "Observability",
+    subtitle: "Investigate errors, logs, traces, and service performance",
+    tags: ["developers", "operations"],
+    stage: "alpha",
+    softRequirements: [],
+  },
+  "warehouse": {
+    displayName: "Warehouse",
+    subtitle: "Explore your project's data with tables and SQL queries",
+    tags: ["developers", "operations", "storage"],
     stage: "stable",
     softRequirements: [],
   },

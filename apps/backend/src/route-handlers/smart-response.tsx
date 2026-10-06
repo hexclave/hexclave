@@ -93,7 +93,7 @@ export async function createResponse<T extends SmartResponse>(req: Request | nul
 
     switch (bodyType) {
       case "empty": {
-        arrayBufferBody = new ArrayBuffer(0);
+        arrayBufferBody = [204, 205, 304].includes(status) ? null : new ArrayBuffer(0);
         break;
       }
       case "json": {
