@@ -103,6 +103,84 @@ export function HostedAuthMessage(props: {
   );
 }
 
+/**
+ * "Something is asking for access to your account — allow it?" card, shared by
+ * every device-style authorization (CLI login, agent sign-in). Keeps the
+ * icon/title/details/warning/two-button shape identical across flows so users
+ * learn it once; callers only supply the words and the handlers.
+ */
+export function HostedAuthConsentCard(props: {
+  icon: React.ReactNode,
+  title: React.ReactNode,
+  details?: React.ReactNode,
+  warningTitle: string,
+  warning: React.ReactNode,
+  primaryText: string,
+  primaryAction: HostedAuthMessageAction,
+  secondaryText: string,
+  secondaryAction: HostedAuthMessageAction,
+  disabled?: boolean,
+  fullPage?: boolean,
+}) {
+  return (
+    <HostedAuthShell fullPage={props.fullPage}>
+      <div className="text-center">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+          {props.icon}
+        </div>
+        <Typography type="h2" className="mb-2 text-xl font-semibold tracking-tight">
+          {props.title}
+        </Typography>
+        {props.details}
+      </div>
+
+      <div className="mt-6 rounded-xl border border-destructive/20 bg-destructive/5 p-4 text-left">
+        <Typography className="text-xs font-semibold text-destructive mb-1 uppercase tracking-wider">
+          {props.warningTitle}
+        </Typography>
+        <Typography className="text-xs text-muted-foreground leading-relaxed">
+          {props.warning}
+        </Typography>
+      </div>
+
+      <div className="mt-6 flex flex-col gap-2.5">
+        <Button
+          onClick={props.primaryAction}
+          disabled={props.disabled}
+          className="h-10 rounded-xl font-semibold shadow-sm hover:shadow"
+        >
+          {props.primaryText}
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={props.secondaryAction}
+          disabled={props.disabled}
+          className="h-10 rounded-xl font-semibold"
+        >
+          {props.secondaryText}
+        </Button>
+      </div>
+    </HostedAuthShell>
+  );
+}
+
+/** Error body used by the confirmation pages: a one-line summary plus a monospace detail box. */
+export function HostedAuthErrorDetails(props: {
+  summary: string,
+  detail: string,
+}) {
+  return (
+    <div className="flex flex-col gap-1 text-center">
+      <Typography className="text-sm text-destructive">
+        {props.summary}
+      </Typography>
+      <Typography className="text-xs text-muted-foreground font-mono bg-muted p-2 rounded-lg break-all">
+        {props.detail}
+      </Typography>
+    </div>
+  );
+}
+
 export function HostedAuthLoading(props: {
   fullPage?: boolean,
 }) {

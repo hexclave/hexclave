@@ -1,5 +1,4 @@
-import { recordExternalDbSyncDeletion } from "@/lib/external-db-sync";
-import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
+import { revokeRefreshTokenSession } from "@/lib/tokens";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { Prisma } from "@/generated/prisma/client";
 import { KnownErrors } from "@hexclave/shared";
@@ -32,22 +31,9 @@ export const DELETE = createSmartRouteHandler({
     }
 
     try {
-      const prisma = await getPrismaClientForTenancy(tenancy);
-
-      await recordExternalDbSyncDeletion(globalPrismaClient, {
-        tableName: "ProjectUserRefreshToken",
-        tenancyId: tenancy.id,
-        refreshTokenId,
-      });
-
-      const result = await globalPrismaClient.projectUserRefreshToken.deleteMany({
-        where: {
-          tenancyId: tenancy.id,
-          id: refreshTokenId,
-        },
-      });
+      const deletedCount = await revokeRefreshTokenSession({ tenancyId: tenancy.id, refreshTokenId });
       // If no records were deleted, throw the same error as before
-      if (result.count === 0) {
+      if (deletedCount === 0) {
         throw new KnownErrors.RefreshTokenNotFoundOrExpired();
       }
     } catch (e) {

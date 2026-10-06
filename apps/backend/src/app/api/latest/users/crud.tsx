@@ -3,6 +3,7 @@ import { getRenderedOrganizationConfigQuery, getRenderedProjectConfigQuery } fro
 import { demoteAllContactChannelsToNonPrimary, setContactChannelAsPrimaryByValue } from "@/lib/contact-channel";
 import { normalizeEmail } from "@/lib/emails";
 import { arePlanLimitsEnforced, getBillingTeamId, getTeamWideAuthUsersCapacity, getTeamWideNonAnonymousUserCount } from "@/lib/plan-entitlements";
+import { revokeAllRefreshTokenSessionsForUser } from "@/lib/tokens";
 import { recordExternalDbSyncContactChannelDeletionsForUser, recordExternalDbSyncDeletion, recordExternalDbSyncNotificationPreferenceDeletionsForUser, recordExternalDbSyncOAuthAccountDeletionsForUser, recordExternalDbSyncProjectPermissionDeletionsForUser, recordExternalDbSyncRefreshTokenDeletionsForUser, recordExternalDbSyncTeamMemberDeletionsForUser, recordExternalDbSyncTeamPermissionDeletionsForUser, withExternalDbSyncUpdate } from "@/lib/external-db-sync";
 import { grantDefaultProjectPermissions } from "@/lib/permissions";
 import { ensureTeamMembershipExists, ensureUserExists } from "@/lib/request-checks";
@@ -1311,16 +1312,9 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
 
     // if user password changed, reset all refresh tokens
     if (passwordHash !== undefined) {
-      await recordExternalDbSyncRefreshTokenDeletionsForUser(globalPrismaClient, {
+      await revokeAllRefreshTokenSessionsForUser({
         tenancyId: auth.tenancy.id,
         projectUserId: params.user_id,
-      });
-
-      await globalPrismaClient.projectUserRefreshToken.deleteMany({
-        where: {
-          tenancyId: auth.tenancy.id,
-          projectUserId: params.user_id,
-        },
       });
     }
 

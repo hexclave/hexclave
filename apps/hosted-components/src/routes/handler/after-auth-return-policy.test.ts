@@ -31,6 +31,7 @@ describe("hosted after-auth return policy", () => {
     "account-settings",
     "team-invitation",
     "cli-auth-confirm",
+    "agent-auth-confirm",
     "unknown",
   ])("does not guard the standalone %s page", (handlerPath) => {
     expect(requiresAfterAuthReturn({

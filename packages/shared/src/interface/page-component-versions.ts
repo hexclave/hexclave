@@ -1473,6 +1473,71 @@ export function getCustomPagePrompts(): Record<PageComponentKey, CustomPagePromp
       `,
       versions: {},
     }),
+    agentAuthConfirm: createCustomPagePrompt({
+      key: "agentAuthConfirm",
+      title: "Agent Auth Confirmation",
+      minSdkVersion: "0.0.1",
+      structure: deindent`
+        - Use \`useAgentAuthConfirmation()\`.
+        - If \`status === "invalid"\`, show an invalid-link state (the URL has no \`code\`).
+        - If \`status === "loading"\` or \`status === "redirecting"\`, show a loading state.
+        - If \`status === "error"\`, show the error and a retry action.
+        - If \`status === "approved"\`, tell the user the agent now has access and that they can revoke it from their account settings.
+        - If \`status === "denied"\`, confirm that the agent was not granted access.
+        - Otherwise (\`status === "ready"\`), show \`agent.name\`, \`agent.description\`, \`agent.url\` and \`userHint\`, and offer \`approve()\` and \`deny()\`.
+        - Use \`isLoading\` to disable the actions while a request is in flight.
+      `,
+      reactExample: deindent`
+        export default function CustomAgentAuthConfirmPage() {
+          const agentAuth = useAgentAuthConfirmation();
+
+          if (agentAuth.status === "invalid") {
+            return <MessageCard title="Invalid agent authorization link" />;
+          }
+
+          if (agentAuth.status === "approved") {
+            return <MessageCard title="Agent connected">{agentAuth.agent?.name} can now act on your behalf. You can revoke its access from your account settings at any time.</MessageCard>;
+          }
+
+          if (agentAuth.status === "denied") {
+            return <MessageCard title="Agent denied">The agent was not granted access.</MessageCard>;
+          }
+
+          if (agentAuth.status === "error") {
+            return (
+              <MessageCard
+                title="Agent authorization failed"
+                primaryButtonText="Try again"
+                primaryAction={agentAuth.retry}
+              >
+                {agentAuth.error?.message}
+              </MessageCard>
+            );
+          }
+
+          if (agentAuth.status !== "ready") {
+            return <MessageCard title="Loading..." />;
+          }
+
+          return (
+            <MessageCard
+              title={\`Allow \${agentAuth.agent.name} to access your account?\`}
+              primaryButtonText={agentAuth.isLoading ? "Approving..." : "Approve"}
+              primaryAction={agentAuth.approve}
+              secondaryButtonText="Deny"
+              secondaryAction={agentAuth.deny}
+            >
+              {agentAuth.agent.description}
+            </MessageCard>
+          );
+        }
+      `,
+      notes: deindent`
+        - Be explicit that approving creates a new session for the agent on the user's account with the user's full permissions.
+        - The hook owns the protocol details: reading \`code\`, redirecting to sign-in when needed, inspecting the attempt, and calling approve/deny.
+      `,
+      versions: {},
+    }),
     mfa: createCustomPagePrompt({
       key: "mfa",
       title: "MFA",

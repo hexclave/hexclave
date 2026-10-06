@@ -13,6 +13,7 @@ import {
   HostedSignIn,
   HostedSignUp,
   HostedTeamInvitation,
+  HostedAgentAuthConfirm,
   HostedCliAuthConfirm,
   HostedOnboarding,
 } from '../../hosted-components/auth';
@@ -80,6 +81,10 @@ const hostedPages = new Map<string, HostedPage>([
   ["cli-auth-confirm", {
     pageKey: "cliAuthConfirm",
     render: () => <HostedCliAuthConfirm fullPage />,
+  }],
+  ["agent-auth-confirm", {
+    pageKey: "agentAuthConfirm",
+    render: () => <HostedAgentAuthConfirm fullPage />,
   }],
   ["onboarding", {
     pageKey: "onboarding",

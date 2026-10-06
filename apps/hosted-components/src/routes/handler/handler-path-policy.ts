@@ -10,6 +10,7 @@ const canonicalHandlerPaths = [
   "magic-link-callback",
   "team-invitation",
   "cli-auth-confirm",
+  "agent-auth-confirm",
   "mfa",
   "error",
   "onboarding",

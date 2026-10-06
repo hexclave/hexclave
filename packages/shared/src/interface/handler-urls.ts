@@ -16,6 +16,7 @@ export type HandlerPageUrls = Record<
   | "accountSettings"
   | "teamInvitation"
   | "cliAuthConfirm"
+  | "agentAuthConfirm"
   | "mfa"
   | "error"
   | "onboarding",
@@ -50,7 +51,7 @@ export type DefaultHandlerUrlTarget = { type: "hosted" | "handler-component" };
  *
  * **Page keys** (`signIn`, `signUp`, `signOut`, `emailVerification`, `passwordReset`,
  * `forgotPassword`, `oauthCallback`, `magicLinkCallback`, `accountSettings`,
- * `teamInvitation`, `cliAuthConfirm`, `mfa`, `error`, `onboarding`, `handler`):
+ * `teamInvitation`, `cliAuthConfirm`, `agentAuthConfirm`, `mfa`, `error`, `onboarding`, `handler`):
  *   - A URL string (e.g. `"/my-sign-in"`) — custom path.
  *   - `{ type: "custom", url: "...", version: 0 }` — custom URL with version tracking.
  *   - `{ type: "hosted" }` — Stack's hosted page.

@@ -32,6 +32,7 @@ export function ActiveSessionsPage(props?: {
     id: string,
     isCurrentSession: boolean,
     isImpersonation?: boolean,
+    agentName?: string | null,
     createdAt: string,
     lastUsedAt?: string,
     geoInfo?: {
@@ -52,6 +53,7 @@ export function ActiveSessionsPage(props?: {
     id: session.id,
     isCurrentSession: session.isCurrentSession,
     isImpersonation: session.isImpersonation || false,
+    agentName: session.agentName ?? null,
     createdAt: session.createdAt,
     lastUsedAt: session.lastUsedAt,
     geoInfo: session.geoInfo,
@@ -218,13 +220,18 @@ export function ActiveSessionsPage(props?: {
                           </div>
                           <div className="flex flex-col">
                             <span className="text-sm font-semibold text-foreground flex items-center gap-1.5">
-                              {session.isCurrentSession ? "Current Session" : "Other Session"}
+                              {session.isCurrentSession ? "Current Session" : session.agentName ?? "Other Session"}
                               {session.isCurrentSession && (
                                 <Badge className="bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[10px] px-2 py-0 border-0 font-bold rounded-full">
                                   Active
                                 </Badge>
                               )}
                             </span>
+                            {session.agentName != null && (
+                              <Badge className="bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-400 border border-sky-200 dark:border-sky-900/30 text-[9px] px-1.5 py-0 font-semibold rounded-md w-fit mt-1">
+                                Agent
+                              </Badge>
+                            )}
                             {session.isImpersonation && (
                               <Badge className="bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400 border border-amber-200 dark:border-amber-900/30 text-[9px] px-1.5 py-0 font-semibold rounded-md w-fit mt-1">
                                 Impersonation

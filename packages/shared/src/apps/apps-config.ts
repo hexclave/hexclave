@@ -216,6 +216,14 @@ export const ALL_APPS = {
     stage: "alpha",
     softRequirements: ["authentication"],
   },
+  "agent-auth": {
+    displayName: "Agent Auth",
+    subtitle: "Let AI agents sign in to your app with their own approved, revocable sessions",
+    tags: ["auth", "developers", "security"],
+    stage: "alpha",
+    softRequirements: ["authentication"],
+    parentAppId: "authentication",
+  },
   "compliance": {
     displayName: "Compliance Center",
     subtitle: "Review access, denials, and compliance posture",
