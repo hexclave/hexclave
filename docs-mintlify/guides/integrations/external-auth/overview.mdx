@@ -111,6 +111,8 @@ This walkthrough assumes a Next.js app that already uses [`@clerk/nextjs`](https
     ```
 
     The `NEXT_PUBLIC_HEXCLAVE_*` values come from your project; the API URL is `http://localhost:8102` against a local development environment.
+
+    The SDK keeps the token store's `subscribe` subscription for as long as the token store lives and never unsubscribes it, so each `HexclaveClientApp` you create leaves one Clerk listener behind. Mount this component once near the root of your app (not in a route that remounts) so that only one app is created.
   </Step>
 </Steps>
 
@@ -137,7 +139,7 @@ The `clerkTokenStore` calls `getToken()` without a template name, so it receives
   1. Delete the existing Hexclave user for that Clerk account on the project's **Users** page.
   2. Sign out of Clerk and sign in again, or sign up with a different email.
 
-  Clerk only adds the claims to newly issued tokens, and without step 1 the existing Hexclave user keeps its empty profile.
+  Clerk only adds the claims to newly issued tokens, and without step 1 the existing Hexclave user keeps its empty profile. Deleting a user also removes its authentication methods, team memberships and other project data, so only do this for a disposable test identity or project.
 </Warning>
 
 ## Set up WorkOS in a Next.js app
@@ -168,11 +170,12 @@ This walkthrough assumes a Next.js app that already uses [`@workos-inc/authkit-n
       if (accessToken == null || sessionId == null) {
         return NextResponse.json({ error: "Not signed in" }, { status: 401 });
       }
-      return NextResponse.json({ accessToken, sessionId });
+      // The response carries a live bearer token, so it must never be served from a cache.
+      return NextResponse.json({ accessToken, sessionId }, { headers: { "Cache-Control": "no-store" } });
     }
     ```
 
-    This route returns a live access token to the signed-in user's own browser. Keep it same-origin and do not log its response.
+    This route returns a live access token to the signed-in user's own browser. Keep it same-origin, keep `Cache-Control: no-store`, and do not log its response.
   </Step>
   <Step title="Connect Hexclave to the WorkOS session">
     Create a `HexclaveClientApp` whose token store reads from that route:
@@ -235,7 +238,7 @@ This walkthrough assumes a Next.js app that already uses [`@workos-inc/authkit-n
     }
     ```
 
-    Pass `signedIn` from a server component, for example `const { user } = await withAuth();` followed by `<HexclaveUserCard signedIn={user != null} />`. The `NEXT_PUBLIC_HEXCLAVE_*` values come from your project; the API URL is `http://localhost:8102` against a local development environment.
+    Pass `signedIn` from a server component, and key the component by the WorkOS session ID so that switching to a different WorkOS account rebuilds it instead of reusing the previous account's cached Hexclave session: `const { user, sessionId } = await withAuth();` followed by `<HexclaveUserCard key={sessionId} signedIn={user != null} />`. The `NEXT_PUBLIC_HEXCLAVE_*` values come from your project; the API URL is `http://localhost:8102` against a local development environment.
   </Step>
 </Steps>
 
@@ -262,7 +265,7 @@ The default WorkOS access token contains `sub`, `sid`, `client_id`, `iss`, `exp`
   1. Delete the existing Hexclave user for that WorkOS account on the project's **Users** page.
   2. Sign out and sign in again, so that WorkOS issues a token from the new template.
 
-  Without step 1 the existing Hexclave user keeps its empty profile.
+  Without step 1 the existing Hexclave user keeps its empty profile. Deleting a user also removes its authentication methods, team memberships and other project data, so only do this for a disposable test identity or project.
 </Warning>
 
 After signing in again, the claim-name helper described under [Troubleshooting](#the-hexclave-user-has-no-email-or-name) lists `email` and `name`, and the new Hexclave user has both. The email is stored as unverified unless the token also has `email_verified: true` as a boolean.
