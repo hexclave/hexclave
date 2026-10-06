@@ -86,6 +86,16 @@ export default function RootLayout({
           ? "(function(){try{var t=localStorage.getItem('theme');var d=document.documentElement;var r=t==='dark'||t==='light'?t:'light';d.classList.add(r);d.style.colorScheme=r}catch(e){}})()"
           : "(function(){try{var t=localStorage.getItem('theme');var d=document.documentElement;var r=t==='dark'||t==='light'?t:window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';d.classList.add(r);d.style.colorScheme=r}catch(e){}})()"
         }} />
+
+        {/* Argide — in-app support agent (browser-use) */}
+        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
+        <script dangerouslySetInnerHTML={{ __html: "window.argide = window.argide || [];" }} />
+        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
+        <script
+          src="https://dashboard.argide.ai/argide-b2b.iife.js"
+          data-product-id="prod_8ea9a04d-ba34-4d1c-a5c7-efd8f792c1f4"
+          data-api-url="https://api.argide.ai"
+        />
       </head>
       <body
         className={cn(
