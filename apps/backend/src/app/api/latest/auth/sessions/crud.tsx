@@ -115,7 +115,9 @@ export const sessionsCrudHandlers = createLazyProxy(() => createCrudHandlers(ses
     if (sessionUserId == null || (auth.type === 'client' && auth.user?.id !== sessionUserId)) {
       throw new StatusError(StatusError.NotFound, 'Session not found.');
     }
-    if (session != null && auth.refreshTokenId === params.id) {
+    // External sessions are guarded the same way: an external access token carries the external session's
+    // id as its refreshTokenId, so without this a client could revoke the session it is using here.
+    if (auth.refreshTokenId === params.id) {
       throw new KnownErrors.CannotDeleteCurrentSession();
     }
 

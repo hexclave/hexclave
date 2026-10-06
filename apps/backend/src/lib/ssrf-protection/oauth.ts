@@ -132,9 +132,13 @@ export async function safeOAuthFetch(
             responseHeaders.set(name, value);
           }
         }
-        resolve(new Response(Buffer.concat(chunks), {
+        // The Response constructor throws a TypeError for a body on null-body statuses, even an empty
+        // one. This runs inside an event callback, so that throw would escape the promise as an
+        // uncaught exception rather than reject it.
+        const status = res.statusCode ?? 500;
+        resolve(new Response([204, 205, 304].includes(status) ? null : Buffer.concat(chunks), {
           headers: responseHeaders,
-          status: res.statusCode ?? 500,
+          status,
           statusText: res.statusMessage,
         }));
       });

@@ -198,7 +198,9 @@ describe("external authentication token exchange", () => {
       sessionId: "provider-session-revocation-crud",
     }));
     expect(second.status).toBe(200);
-    backendContext.set({ userAuth: { accessToken: second.body.access_token } });
+    // The current session cannot be deleted through this endpoint (see the dedicated test below), so
+    // revoke the second session from the first one's access token.
+    backendContext.set({ userAuth: { accessToken: afterSignOut.body.access_token } });
     const sessionsBeforeDelete = await niceBackendFetch("/api/v1/auth/sessions", {
       method: "GET",
       accessType: "client",
@@ -234,6 +236,28 @@ describe("external authentication token exchange", () => {
       id: second.body.session_id,
       is_current_session: true,
     }));
+  });
+
+  it("does not let an external session delete itself through the sessions endpoint", async ({ expect }) => {
+    await configureProject();
+    const exchanged = await exchange(await createProviderToken({ sessionId: "provider-session-self-delete" }));
+    expect(exchanged.status).toBe(200);
+    backendContext.set({ userAuth: { accessToken: exchanged.body.access_token } });
+
+    const response = await niceBackendFetch(`/api/v1/auth/sessions/${exchanged.body.session_id}`, {
+      method: "DELETE",
+      accessType: "client",
+      query: { user_id: exchanged.body.user_id },
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("CANNOT_DELETE_CURRENT_SESSION");
+
+    const stillValid = await niceBackendFetch("/api/v1/auth/sessions", {
+      method: "GET",
+      accessType: "client",
+      query: { user_id: exchanged.body.user_id },
+    });
+    expect(stillValid.status).toBe(200);
   });
 
   it("does not overwrite a profile edited after the first exchange", async ({ expect }) => {
