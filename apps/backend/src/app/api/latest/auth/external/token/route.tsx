@@ -19,8 +19,8 @@ export const POST = createSmartRouteHandler({
       user: adaptSchema.optional(),
     }).defined(),
     body: yupObject({
-      provider_id: yupString().oneOf(externalAuthProviderIds).defined(),
-      token: yupString().defined().nonEmpty(),
+      provider_id: yupString().oneOf(externalAuthProviderIds).defined().meta({ openapiField: { description: 'The external authentication integration that issued the token.', exampleValue: 'clerk-integration' } }),
+      token: yupString().defined().nonEmpty().meta({ openapiField: { description: "The provider's signed session token (a JWT). It must contain sub, sid and exp claims.", exampleValue: '<external-provider-jwt>' } }),
     }).defined(),
   }),
   response: yupObject({

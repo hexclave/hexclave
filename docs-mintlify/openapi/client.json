@@ -2271,17 +2271,24 @@
                       "clerk-integration",
                       "better-auth-integration",
                       "workos-integration"
-                    ]
+                    ],
+                    "example": "clerk-integration",
+                    "description": "The external authentication integration that issued the token."
                   },
                   "token": {
-                    "type": "string"
+                    "type": "string",
+                    "example": "<external-provider-jwt>",
+                    "description": "The provider's signed session token (a JWT). It must contain sub, sid and exp claims."
                   }
                 },
                 "required": [
                   "provider_id",
                   "token"
                 ],
-                "example": {}
+                "example": {
+                  "provider_id": "clerk-integration",
+                  "token": "<external-provider-jwt>"
+                }
               }
             }
           }
