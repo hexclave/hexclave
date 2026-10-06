@@ -23,8 +23,11 @@ Configure the matching Better Auth values:
 - audience: `better-auth-integration-demo`
 - JWKS URL: `http://localhost:8114/api/auth/jwks`
 
-If you use a custom port prefix, update these values and the API URLs in
-`.env.local` together; `.env` files do not derive ports automatically.
+If you use a custom port prefix, export `NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX` in
+your terminal before running `pnpm dev` (the `dev` script reads it from the
+shell, not from `.env.local`), and then update the dashboard URL,
+`BETTER_AUTH_URL`, the issuer and JWKS URL, and `NEXT_PUBLIC_HEXCLAVE_API_URL`
+together; `.env` files do not derive ports automatically.
 
 The example intentionally does not include provider credentials, access tokens,
 or user credentials. The local SQLite database is created at runtime.

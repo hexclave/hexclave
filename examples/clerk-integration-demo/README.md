@@ -36,4 +36,6 @@ dashboard under **Sessions → Customize session token**:
 
 Hexclave maps these claims only when it first creates the user, so delete the
 existing Hexclave user on the project's **Users** page, then sign out of Clerk
-and sign in again.
+and sign in again. Deleting a user also removes its authentication methods, team
+memberships and other project data, so do this only for a disposable test
+identity or project.

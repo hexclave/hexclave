@@ -43,7 +43,9 @@ Hexclave creates the user with an empty profile. To map them:
    ```
 
 2. Delete the existing Hexclave user on the project's **Users** page. Hexclave
-   maps these claims only when it first creates the user.
+   maps these claims only when it first creates the user. Deleting a user also
+   removes its authentication methods, team memberships and other project data,
+   so do this only for a disposable test identity or project.
 3. Sign out and sign in again so WorkOS issues a token from the new template.
 
 The email is stored as unverified unless the token has `email_verified: true`
