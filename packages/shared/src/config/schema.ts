@@ -158,7 +158,13 @@ const clerkIntegrationSchema = yupObject({
 const betterAuthIntegrationSchema = yupObject({
   issuer: schemaFields.urlSchema.optional(),
   audience: yupString().optional(),
-  jwksUrl: schemaFields.urlSchema.optional(),
+  // The JWKS is fetched with safeOAuthFetch, which only speaks HTTP(S); any other scheme that is a
+  // syntactically valid URL (eg. ftp://) would pass urlSchema and then fail every token exchange.
+  jwksUrl: schemaFields.urlSchema.test({
+    name: 'http-or-https',
+    message: (params) => `${params.path} must use HTTP or HTTPS`,
+    test: (value) => value == null || (URL.canParse(value) && ['http:', 'https:'].includes(new URL(value).protocol)),
+  }).optional(),
 });
 
 const workosIntegrationSchema = yupObject({
