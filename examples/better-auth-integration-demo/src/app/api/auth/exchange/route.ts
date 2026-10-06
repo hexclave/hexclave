@@ -58,6 +58,12 @@ async function fetchWithTimeout(request: Request, input: string, init: RequestIn
 }
 
 export async function POST(request: Request) {
+  // This route acts on the ambient Better Auth cookies, so reject requests from other origins (including
+  // same-site sibling origins that browsers still send the cookies to).
+  const origin = request.headers.get("origin");
+  if (origin == null || origin !== new URL(request.url).origin) {
+    return NextResponse.json({ error: "Cross-origin exchange requests are not allowed" }, { status: 403 });
+  }
   const auth = getAuth();
   const session = await auth.api.getSession({ headers: request.headers });
   if (session == null) return NextResponse.json({ error: "Not signed in" }, { status: 401 });

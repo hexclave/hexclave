@@ -9,5 +9,6 @@ export async function GET(request: Request) {
   if (token == null || typeof token.token !== "string") {
     return NextResponse.json({ error: "Better Auth token unavailable" }, { status: 502 });
   }
-  return NextResponse.json({ token: token.token });
+  // The response carries a reusable bearer JWT, so it must never be served from a browser or proxy cache.
+  return NextResponse.json({ token: token.token }, { headers: { "Cache-Control": "no-store" } });
 }

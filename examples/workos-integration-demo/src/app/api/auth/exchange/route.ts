@@ -95,38 +95,34 @@ export async function POST(request: Request) {
   if (result == null) {
     return NextResponse.json({ error: "Hexclave returned an invalid token exchange response" }, { status: 502 });
   }
-  let profile: { primary_email?: string | null, display_name?: string | null } = {};
-  if (result.access_token.length > 0) {
-    let profileResponse: Response;
-    try {
-      profileResponse = await fetchWithTimeout(request, new URL("/api/v1/users/me", apiUrl).toString(), {
-        headers: {
-          "x-hexclave-access-token": result.access_token,
-          "x-hexclave-access-type": "client",
-          "x-hexclave-project-id": projectId,
-        },
-      });
-    } catch (error) {
-      if (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) {
-        return NextResponse.json({ error: "Hexclave user lookup timed out" }, { status: 504 });
-      }
-      throw error;
+  let profileResponse: Response;
+  try {
+    profileResponse = await fetchWithTimeout(request, new URL("/api/v1/users/me", apiUrl).toString(), {
+      headers: {
+        "x-hexclave-access-token": result.access_token,
+        "x-hexclave-access-type": "client",
+        "x-hexclave-project-id": projectId,
+      },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      return NextResponse.json({ error: "Hexclave user lookup timed out" }, { status: 504 });
     }
-    if (!profileResponse.ok || !(profileResponse.headers.get("content-type") ?? "").includes("application/json")) {
-      return NextResponse.json({ error: "Hexclave user lookup failed after token exchange" }, { status: 502 });
-    }
-    const parsedProfile = parseProfileResponse(await profileResponse.json().catch(() => null));
-    if (parsedProfile == null) {
-      return NextResponse.json({ error: "Hexclave returned an invalid user profile response" }, { status: 502 });
-    }
-    profile = parsedProfile;
+    throw error;
+  }
+  if (!profileResponse.ok || !(profileResponse.headers.get("content-type") ?? "").includes("application/json")) {
+    return NextResponse.json({ error: "Hexclave user lookup failed after token exchange" }, { status: 502 });
+  }
+  const parsedProfile = parseProfileResponse(await profileResponse.json().catch(() => null));
+  if (parsedProfile == null) {
+    return NextResponse.json({ error: "Hexclave returned an invalid user profile response" }, { status: 502 });
   }
   return NextResponse.json({
     sessionId: result.session_id,
     userId: result.user_id,
     isNewUser: result.is_new_user,
-    primaryEmail: profile.primary_email ?? null,
-    displayName: profile.display_name ?? null,
+    primaryEmail: parsedProfile.primary_email ?? null,
+    displayName: parsedProfile.display_name ?? null,
     error: result.error ?? result.code,
   }, { status: response.status });
 }

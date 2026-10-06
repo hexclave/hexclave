@@ -13,5 +13,8 @@ export async function GET() {
       firstName: user.firstName,
       lastName: user.lastName,
     },
+  }, {
+    // The response carries a live bearer token, so it must never be served from a browser or proxy cache.
+    headers: { "Cache-Control": "no-store" },
   });
 }

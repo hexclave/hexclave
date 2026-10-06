@@ -48,6 +48,11 @@ async function fetchWithTimeout(request: Request, input: string, init: RequestIn
 }
 
 export async function POST(request: Request) {
+  // The README promises a same-origin exchange, so enforce it like the other demos do.
+  const origin = request.headers.get("origin");
+  if (origin == null || origin !== new URL(request.url).origin) {
+    return NextResponse.json({ error: "Cross-origin exchange requests are not allowed" }, { status: 403 });
+  }
   const body: unknown = await request.json().catch(() => null);
   if (!isRecord(body) || typeof body.token !== "string" || body.token.length === 0) {
     return NextResponse.json({ error: "A Clerk session token is required" }, { status: 400 });
