@@ -8,8 +8,12 @@ describe("Clerk authorized parties", () => {
     expect(() => validateAuthorizedParty({ azp: undefined }, undefined)).not.toThrow();
   });
 
-  it("rejects a token whose azp does not match a configured allowlist", () => {
-    expect(() => validateAuthorizedParty({ azp: "https://unexpected.example.com" }, ["http://localhost:8115"])).toThrowError(
+  // A token without `azp` must fail too: otherwise omitting the claim would bypass the allowlist.
+  it.each([
+    { azp: "https://unexpected.example.com" },
+    { azp: undefined },
+  ])("rejects a token whose azp does not match a configured allowlist: %j", (payload) => {
+    expect(() => validateAuthorizedParty(payload, ["http://localhost:8115"])).toThrowError(
       expect.objectContaining({
         constructorArgs: ["authorized_party_mismatch"],
       }),

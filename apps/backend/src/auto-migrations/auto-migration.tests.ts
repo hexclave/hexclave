@@ -336,7 +336,7 @@ import.meta.vitest?.test("does not record a migration when its outside-transacti
 // Note that this file deliberately does NOT start with a lone SPLIT_STATEMENT_SENTINEL: that leading
 // sentinel (present in most older migrations) made the runner execute a no-op chunk inside the
 // transaction first, which accidentally released the pinned snapshot and masked the bug.
-import.meta.vitest?.test("applies a CREATE INDEX CONCURRENTLY migration via RUN_OUTSIDE_TRANSACTION_SENTINEL", runTest(async ({ expect, prismaClient }) => {
+import.meta.vitest?.test("applies a CREATE INDEX CONCURRENTLY migration via RUN_OUTSIDE_TRANSACTION_SENTINEL", runTest(async ({ connectionString, expect, prismaClient }) => {
   const migrationFiles = [
     {
       migrationName: "001-create-table",
@@ -352,7 +352,7 @@ import.meta.vitest?.test("applies a CREATE INDEX CONCURRENTLY migration via RUN_
     },
   ];
 
-  const result = await applyMigrations({ prismaClient, migrationFiles, schema: 'public' });
+  const result = await applyMigrations({ prismaClient, migrationFiles, outsideTransactionConnectionString: connectionString, schema: 'public' });
   expect(result.newlyAppliedMigrationNames).toEqual(["001-create-table", "002-create-index-concurrently"]);
 
   const indexes = await prismaClient.$queryRaw`
