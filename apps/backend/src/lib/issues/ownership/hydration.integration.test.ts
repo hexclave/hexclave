@@ -1,5 +1,6 @@
 import { DEFAULT_BRANCH_ID, getSoleTenancyFromProjectBranch, getTenancy, type Tenancy } from "@/lib/tenancies";
-import { globalPrismaClient } from "@/prisma-client";
+import { globalPrismaClient, retryTransaction } from "@/prisma-client";
+import { recordExternalDbSyncContactChannelDeletionsForUser, recordExternalDbSyncDeletion, recordExternalDbSyncTeamMemberDeletionsForTeam, recordExternalDbSyncTeamMemberDeletionsForUser } from "@/lib/external-db-sync";
 import { IssueOwnerSource, IssueOwnerType } from "@/generated/prisma/client";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -128,13 +129,24 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await globalPrismaClient.issueOwner.deleteMany({ where: { tenancyId: tenancy.id, issueId } });
-  await globalPrismaClient.teamMember.deleteMany({ where: { tenancyId: internalTenancy.id, teamId } });
-  await globalPrismaClient.team.deleteMany({ where: { tenancyId: internalTenancy.id, teamId } });
-  await globalPrismaClient.projectUser.deleteMany({
-    where: { tenancyId: internalTenancy.id, projectUserId: internalTeamMemberId },
-  });
-  await globalPrismaClient.projectUser.deleteMany({
-    where: { tenancyId: tenancy.id, projectUserId: { in: [currentUserId, otherBranchUserId] } },
+  // Synced tables only propagate deletions to ClickHouse through DeletedRow; a raw
+  // deleteMany would leave stale rows that fail verify-data-integrity.
+  await retryTransaction(globalPrismaClient, async (tx) => {
+    await recordExternalDbSyncTeamMemberDeletionsForTeam(tx, { tenancyId: internalTenancy.id, teamId });
+    await recordExternalDbSyncDeletion(tx, { tableName: "Team", tenancyId: internalTenancy.id, teamId });
+    await tx.teamMember.deleteMany({ where: { tenancyId: internalTenancy.id, teamId } });
+    await tx.team.deleteMany({ where: { tenancyId: internalTenancy.id, teamId } });
+    const users = [
+      { tenancyId: internalTenancy.id, projectUserId: internalTeamMemberId },
+      { tenancyId: tenancy.id, projectUserId: currentUserId },
+      { tenancyId: tenancy.id, projectUserId: otherBranchUserId },
+    ];
+    for (const user of users) {
+      await recordExternalDbSyncDeletion(tx, { tableName: "ProjectUser", ...user });
+      await recordExternalDbSyncContactChannelDeletionsForUser(tx, user);
+      await recordExternalDbSyncTeamMemberDeletionsForUser(tx, user);
+      await tx.projectUser.deleteMany({ where: user });
+    }
   });
   await globalPrismaClient.issue.deleteMany({ where: { tenancyId: tenancy.id, id: issueId } });
 });

@@ -1,6 +1,7 @@
 import { getSoleTenancyFromProjectBranch, DEFAULT_BRANCH_ID, type Tenancy } from "@/lib/tenancies";
 import { IssueAlertDeliveryOutcome, IssueAlertDeliveryState, WorkflowRunState } from "@/generated/prisma/enums";
 import { globalPrismaClient, retryTransaction } from "@/prisma-client";
+import { recordExternalDbSyncContactChannelDeletionsForUser, recordExternalDbSyncDeletion, recordExternalDbSyncTeamMemberDeletionsForTeam } from "@/lib/external-db-sync";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as errorUtils from "@hexclave/shared/dist/utils/errors";
@@ -314,37 +315,58 @@ describe.sequential("issue alert workflow delivery proof", () => {
 
   afterAll(async () => {
     if (tenancy !== undefined) {
+      const tenancyId = tenancy.id;
       if (subjects.length > 0) {
-        await globalPrismaClient.emailOutbox.deleteMany({
-          where: { tenancyId: tenancy.id, overrideSubject: { in: subjects } },
+        const outboxes = await globalPrismaClient.emailOutbox.findMany({
+          where: { tenancyId, overrideSubject: { in: subjects } },
+          select: { id: true },
+        });
+        // Synced tables only propagate deletions to ClickHouse through DeletedRow; a raw
+        // deleteMany would leave stale rows that fail verify-data-integrity.
+        await retryTransaction(globalPrismaClient, async (tx) => {
+          for (const { id } of outboxes) {
+            await recordExternalDbSyncDeletion(tx, { tableName: "EmailOutbox", tenancyId, emailOutboxId: id });
+          }
+          await tx.emailOutbox.deleteMany({ where: { tenancyId, id: { in: outboxes.map(({ id }) => id) } } });
         });
       }
       if (eventIds.length > 0) {
-        await globalPrismaClient.workflowEvent.deleteMany({ where: { tenancyId: tenancy.id, id: { in: eventIds } } });
+        await globalPrismaClient.workflowEvent.deleteMany({ where: { tenancyId, id: { in: eventIds } } });
       }
       if (runIds.length > 0) {
-        await globalPrismaClient.workflowRun.deleteMany({ where: { tenancyId: tenancy.id, id: { in: runIds } } });
+        await globalPrismaClient.workflowRun.deleteMany({ where: { tenancyId, id: { in: runIds } } });
       }
       if (deliveryIds.length > 0) {
-        await globalPrismaClient.issueAlertDelivery.deleteMany({ where: { tenancyId: tenancy.id, id: { in: deliveryIds } } });
+        await globalPrismaClient.issueAlertDelivery.deleteMany({ where: { tenancyId, id: { in: deliveryIds } } });
       }
       if (databaseRule !== undefined) {
-        await globalPrismaClient.issueAlertCooldownClaim.deleteMany({ where: { tenancyId: tenancy.id, ruleId: databaseRule.databaseId } });
-        await globalPrismaClient.issueAlertRule.deleteMany({ where: { tenancyId: tenancy.id, id: databaseRule.databaseId } });
+        await globalPrismaClient.issueAlertCooldownClaim.deleteMany({ where: { tenancyId, ruleId: databaseRule.databaseId } });
+        await globalPrismaClient.issueAlertRule.deleteMany({ where: { tenancyId, id: databaseRule.databaseId } });
       }
       if (issueId !== undefined) {
-        await globalPrismaClient.issue.deleteMany({ where: { tenancyId: tenancy.id, id: issueId } });
+        await globalPrismaClient.issue.deleteMany({ where: { tenancyId, id: issueId } });
       }
       if (workflowWasCreated) {
         await deleteWorkflow(tenancy, ISSUE_ALERT_EMAIL_WORKFLOW_ID);
       }
       if (recipientOwnerTeamId !== undefined) {
-        await globalPrismaClient.teamMember.deleteMany({ where: { tenancyId: tenancy.id, teamId: recipientOwnerTeamId } });
-        await globalPrismaClient.team.deleteMany({ where: { tenancyId: tenancy.id, teamId: recipientOwnerTeamId } });
+        const teamId = recipientOwnerTeamId;
+        await retryTransaction(globalPrismaClient, async (tx) => {
+          await recordExternalDbSyncTeamMemberDeletionsForTeam(tx, { tenancyId, teamId });
+          await recordExternalDbSyncDeletion(tx, { tableName: "Team", tenancyId, teamId });
+          await tx.teamMember.deleteMany({ where: { tenancyId, teamId } });
+          await tx.team.deleteMany({ where: { tenancyId, teamId } });
+        });
       }
       if (recipientIds.length > 0) {
-        await globalPrismaClient.projectUser.deleteMany({
-          where: { tenancyId: tenancy.id, projectUserId: { in: recipientIds } },
+        await retryTransaction(globalPrismaClient, async (tx) => {
+          for (const projectUserId of recipientIds) {
+            await recordExternalDbSyncDeletion(tx, { tableName: "ProjectUser", tenancyId, projectUserId });
+            await recordExternalDbSyncContactChannelDeletionsForUser(tx, { tenancyId, projectUserId });
+          }
+          await tx.projectUser.deleteMany({
+            where: { tenancyId, projectUserId: { in: recipientIds } },
+          });
         });
       }
     }
