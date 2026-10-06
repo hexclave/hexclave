@@ -496,4 +496,34 @@ describe("external authentication token exchange", () => {
     expect(response.status).toBe(400);
     expect(response.body.code).toBe("EXTERNAL_AUTH_PROVIDER_NOT_CONFIGURED");
   });
+
+  // The WorkOS verifier always fetches signing keys from api.workos.com (only the issuer can be
+  // overridden), so a token signed by this file's local JWKS server can never verify. These tests
+  // therefore only cover the configuration gates, which are rejected before any network access.
+  it("requires the WorkOS integration app to be enabled", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await Project.updateConfig({
+      "apps.installed.workos-integration.enabled": false,
+      "workos-integration.clientId": "client_e2e",
+    });
+    backendContext.set({ userAuth: null });
+
+    const response = await exchange(await createProviderToken(), "workos-integration");
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("EXTERNAL_AUTH_PROVIDER_NOT_CONFIGURED");
+    expect(response.body.details).toMatchObject({ reason: "provider_disabled" });
+  });
+
+  it("requires a WorkOS client ID once the WorkOS integration app is enabled", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await Project.updateConfig({
+      "apps.installed.workos-integration.enabled": true,
+    });
+    backendContext.set({ userAuth: null });
+
+    const response = await exchange(await createProviderToken(), "workos-integration");
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("EXTERNAL_AUTH_PROVIDER_NOT_CONFIGURED");
+    expect(response.body.details).toMatchObject({ reason: "required_setting_missing" });
+  });
 });

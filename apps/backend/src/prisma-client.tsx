@@ -127,7 +127,6 @@ export const globalPrismaConnectionString: string = globalVar.__hexclave_actual_
 let actualReplicaConnectionString: string = globalVar.__hexclave_actual_replica_connection_string ??= await resolveConnectionStringWithOrbStack(originalReplicaConnectionString);
 
 export type PrismaClientWithReplica<T extends PrismaClient = PrismaClient> = Omit<T, "$on"> & {
-  $primary: () => Omit<T, "$on">,
   $replica: () => Omit<T, "$on">,
   // You should always never use $primary. Usually, the primary blocks writes until they have been replicated to the
   // replica. This is only useful in rare cases, for example when we aren't writing for the blocked write because the

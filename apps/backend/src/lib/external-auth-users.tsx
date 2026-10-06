@@ -71,6 +71,9 @@ export async function getOrCreateExternalAuthSession(options: {
         // External identity providers follow the existing federated sign-up rule path.
         authMethod: "oauth",
         oauthProvider: options.providerId,
+        // The external provider's account creation time is not part of the verified identity, so
+        // account-age risk rules must treat it as unknown rather than guess.
+        oauthAccountCreatedAtMillis: null,
         requestContext,
         turnstileAssessment: getDisabledBotChallengeAssessment(),
       }),

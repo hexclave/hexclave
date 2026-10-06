@@ -20,3 +20,20 @@ the local Hexclave backend.
 The same-origin exchange route accepts POST only. It validates the provider
 token input and every backend response before returning safe display data.
 The provider token is never written to disk or committed.
+
+## Getting the user's email and name
+
+Clerk's default session token has no `email` or `name` claim, so Hexclave
+creates the user with an empty profile. To map them, add the claims in the Clerk
+dashboard under **Sessions → Customize session token**:
+
+```json
+{
+  "email": "{{user.primary_email_address}}",
+  "name": "{{user.full_name}}"
+}
+```
+
+Hexclave maps these claims only when it first creates the user, so delete the
+existing Hexclave user on the project's **Users** page, then sign out of Clerk
+and sign in again.

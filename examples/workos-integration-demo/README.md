@@ -26,3 +26,25 @@ WorkOS for the port you use.
 The example intentionally does not include provider credentials, access tokens,
 or user credentials. The WorkOS issuer is derived from the configured client ID
 by the Hexclave dashboard unless an explicit override is required.
+
+## Getting the user's email and name
+
+A WorkOS AuthKit access token has no `email` or `name` claim by default, so
+Hexclave creates the user with an empty profile. To map them:
+
+1. In the WorkOS dashboard, open **Authentication → Features → JWT Template**
+   and save:
+
+   ```json
+   {
+     "email": {{ user.email }},
+     "name": "{{ user.first_name || '' }} {{ user.last_name || '' }}"
+   }
+   ```
+
+2. Delete the existing Hexclave user on the project's **Users** page. Hexclave
+   maps these claims only when it first creates the user.
+3. Sign out and sign in again so WorkOS issues a token from the new template.
+
+The email is stored as unverified unless the token has `email_verified: true`
+(a boolean).
