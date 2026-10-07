@@ -75,6 +75,8 @@ it("should allow valid code and return product data", async ({ expect }) => {
     NiceResponse {
       "status": 200,
       "body": {
+        "allow_promo_codes": false,
+        "allow_stacking_promo_codes": false,
         "already_bought_non_stackable": false,
         "charges_enabled": false,
         "conflicting_products": [],
@@ -255,6 +257,8 @@ it("should include conflicting_products when switching within the same group", a
     NiceResponse {
       "status": 200,
       "body": {
+        "allow_promo_codes": false,
+        "allow_stacking_promo_codes": false,
         "already_bought_non_stackable": false,
         "charges_enabled": null,
         "conflicting_products": [
@@ -359,6 +363,8 @@ it("should reject untrusted return_url and accept trusted return_url", async ({ 
     NiceResponse {
       "status": 200,
       "body": {
+        "allow_promo_codes": false,
+        "allow_stacking_promo_codes": false,
         "already_bought_non_stackable": false,
         "charges_enabled": false,
         "conflicting_products": [],
