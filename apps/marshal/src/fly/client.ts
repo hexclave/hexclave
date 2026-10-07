@@ -241,7 +241,7 @@ export class FlyClient {
       throw new FlyApiError(response.status, "graphql", text.slice(0, 500) || `HTTP ${response.status} (non-JSON body)`);
     }
     const errors = json.errors ?? [];
-    if (options?.allowNotFound && errors.length > 0 && errors.every((error) => /could not find/i.test(error.message))) {
+    if (response.ok && options?.allowNotFound && errors.length > 0 && errors.every((error) => /could not find/i.test(error.message))) {
       return null;
     }
     if (!response.ok || errors.length > 0) {
@@ -264,14 +264,33 @@ export class FlyClient {
     });
   }
 
+  private async appExists(name: string): Promise<boolean> {
+    // Missing-app reads through the Machines API incur a several-second delay.
+    // GraphQL answers the same existence check promptly. Leave getApp on the
+    // Machines API for callers that need its existing app-details response.
+    const result = await this.fetchGraphql<unknown>(
+      `query($app: String!) { app(name: $app) { name } }`,
+      { app: name },
+      { allowNotFound: true, read: true },
+    );
+    if (result === null) return false;
+    if (typeof result !== "object" || !("app" in result)) {
+      throw new FlyApiError(502, "graphql app lookup", "app lookup returned no app field");
+    }
+    if (result.app === null) return false;
+    if (typeof result.app !== "object" || !("name" in result.app) || result.app.name !== name) {
+      throw new FlyApiError(502, "graphql app lookup", "app lookup returned an unexpected app identity");
+    }
+    return true;
+  }
+
   async ensureApp(name: string, network: string): Promise<void> {
-    const existing = await this.getApp(name);
-    if (existing !== null) return;
+    if (await this.appExists(name)) return;
     try {
       await this.createApp(name, network);
     } catch (error) {
       // Lost a create race — the app now existing is the state we wanted.
-      if (error instanceof FlyApiError && (error.status === 409 || error.status === 422) && (await this.getApp(name)) !== null) return;
+      if (error instanceof FlyApiError && (error.status === 409 || error.status === 422) && await this.appExists(name)) return;
       throw error;
     }
   }
