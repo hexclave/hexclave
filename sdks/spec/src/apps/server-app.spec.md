@@ -482,6 +482,112 @@ Errors:
     when: no replay with that id exists in this project
 
 
+## renderSessionReplay(sessionReplayId, options?)
+
+Arguments:
+  sessionReplayId: string - the replay's id
+  options.sessionReplaySegmentId: string? - which tab of the replay to render, default the tab with the most events
+  options.fps: number? - frames per second, 1-30, default 15
+  options.speed: number? - playback speed multiplier, 0.25-8, default 1
+  options.skipInactivity: boolean? - cut idle stretches longer than 2s to about 1s, default true
+
+Returns: SessionReplayRender
+  {
+    id: string,
+    sessionReplayId: string,
+    sessionReplaySegmentId: string,
+    status: "queued" | "rendering" | "succeeded" | "failed",
+    progress: number | null,
+    options: { fps: number, speed: number, skipInactivity: boolean },
+    errorMessage: string | null,
+    createdAt: Date,
+    startedAt: Date | null,
+    finishedAt: Date | null,
+    video: { url: string, urlExpiresAt: Date, byteLength: number, width: number, height: number, durationMs: number } | null
+  }
+
+Request:
+  POST /api/v1/session-replays/{session_replay_id}/renders [server-only]
+  Body: { session_replay_segment_id?: string, fps?: number, speed?: number, skip_inactivity?: boolean }
+
+Response:
+  {
+    id: string,
+    session_replay_id: string,
+    session_replay_segment_id: string,
+    status: "queued" | "rendering" | "succeeded" | "failed",
+    progress: number | null,
+    options: { fps: number, speed: number, skip_inactivity: boolean },
+    error_message: string | null,
+    created_at_millis: number,
+    started_at_millis: number | null,
+    finished_at_millis: number | null,
+    video: { url: string, url_expires_at_millis: number, byte_length: number, width: number, height: number, duration_ms: number } | null
+  }
+
+Starts rendering one tab of a replay to an MP4 video and returns the render, normally already
+`rendering`. Rendering runs in the background and takes roughly as long as the replay. Map the
+response with the same snake_case → camelCase rules as the other replay methods (millis → Date).
+
+Errors:
+  ItemNotFound
+    code: "ITEM_NOT_FOUND"
+    when: no replay with that id exists in this project
+  400: the replay has no recorded data, the segment id does not belong to it, or it is too large to render
+  429: the project already has 3 renders queued or rendering
+
+
+## getSessionReplayRender(sessionReplayId, renderId)
+
+Arguments:
+  sessionReplayId: string - the replay's id
+  renderId: string - the render's id
+
+Returns: SessionReplayRender (see renderSessionReplay)
+
+Request:
+  GET /api/v1/session-replays/{session_replay_id}/renders/{render_id} [server-only]
+
+Returns the current state of a render. Polling it also moves the render along. Once `status` is
+`succeeded`, `video.url` is a download URL that expires at `video.urlExpiresAt`; fetch the render
+again for a fresh one.
+
+Errors:
+  ItemNotFound
+    code: "ITEM_NOT_FOUND"
+    when: no render with that id exists for that replay in this project
+
+
+## listSessionReplayRenders(sessionReplayId)
+
+Arguments:
+  sessionReplayId: string - the replay's id
+
+Returns: SessionReplayRender[] (see renderSessionReplay)
+
+Request:
+  GET /api/v1/session-replays/{session_replay_id}/renders [server-only]
+
+Response:
+  { items: [SessionReplayRender response, as in renderSessionReplay] }
+
+Returns the 20 most recent renders of the replay, newest first.
+
+
+## waitForSessionReplayRender(sessionReplayId, renderId, options?)
+
+Arguments:
+  sessionReplayId: string - the replay's id
+  renderId: string - the render's id
+  options.timeoutMs: number? - give up after this long, default 30 minutes
+  options.pollIntervalMs: number? - delay between polls, default 3000
+
+Returns: SessionReplayRender (see renderSessionReplay), with status "succeeded"
+
+Calls getSessionReplayRender until the render succeeds. Throws if it fails (with its
+errorMessage) or the timeout passes. No request of its own.
+
+
 ## sendEmail(options)
 
 Arguments:

@@ -1,7 +1,7 @@
 import { HexclaveServerInterface, KnownErrors } from "@hexclave/shared";
 import type { AnalyticsQueryOptions, AnalyticsQueryResponse } from "@hexclave/shared/dist/interface/crud/analytics";
-import type { AdminGetSessionReplayChunkEventsResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
-import type { AdminSessionReplay, AdminSessionReplayChunk, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, SessionReplayAllEventsResult } from "../../session-replays";
+import type { AdminGetSessionReplayChunkEventsResponse, AdminSessionReplayRenderResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
+import type { AdminSessionReplay, AdminSessionReplayChunk, AdminSessionReplayRender, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, ListSessionReplaysOptions, ListSessionReplaysResult, RenderSessionReplayOptions, SessionReplayAllEventsResult } from "../../session-replays";
 import { ContactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
 import { ItemCrud } from "@hexclave/shared/dist/interface/crud/items";
 import { NotificationPreferenceCrud } from "@hexclave/shared/dist/interface/crud/notification-preferences";
@@ -18,7 +18,7 @@ import { InternalSession } from "@hexclave/shared/dist/sessions";
 import type { AsyncCache } from "@hexclave/shared/dist/utils/caches";
 import { HexclaveAssertionError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { ProviderType } from "@hexclave/shared/dist/utils/oauth";
-import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
+import { runAsynchronously, wait } from "@hexclave/shared/dist/utils/promises";
 import { suspend } from "@hexclave/shared/dist/utils/react";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { isUuid } from "@hexclave/shared/dist/utils/uuids";
@@ -1775,6 +1775,67 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
         events: ce.events,
       })),
     };
+  }
+
+  private _sessionReplayRenderFromApi(r: AdminSessionReplayRenderResponse): AdminSessionReplayRender {
+    return {
+      id: r.id,
+      sessionReplayId: r.session_replay_id,
+      sessionReplaySegmentId: r.session_replay_segment_id,
+      status: r.status,
+      progress: r.progress,
+      options: {
+        fps: r.options.fps,
+        speed: r.options.speed,
+        skipInactivity: r.options.skip_inactivity,
+      },
+      errorMessage: r.error_message,
+      createdAt: new Date(r.created_at_millis),
+      startedAt: r.started_at_millis == null ? null : new Date(r.started_at_millis),
+      finishedAt: r.finished_at_millis == null ? null : new Date(r.finished_at_millis),
+      video: r.video == null ? null : {
+        url: r.video.url,
+        urlExpiresAt: new Date(r.video.url_expires_at_millis),
+        byteLength: r.video.byte_length,
+        width: r.video.width,
+        height: r.video.height,
+        durationMs: r.video.duration_ms,
+      },
+    };
+  }
+
+  async renderSessionReplay(sessionReplayId: string, options?: RenderSessionReplayOptions): Promise<AdminSessionReplayRender> {
+    const response = await this._interface.createSessionReplayRender(sessionReplayId, {
+      session_replay_segment_id: options?.sessionReplaySegmentId,
+      fps: options?.fps,
+      speed: options?.speed,
+      skip_inactivity: options?.skipInactivity,
+    });
+    return this._sessionReplayRenderFromApi(response);
+  }
+
+  async getSessionReplayRender(sessionReplayId: string, renderId: string): Promise<AdminSessionReplayRender> {
+    return this._sessionReplayRenderFromApi(await this._interface.getSessionReplayRender(sessionReplayId, renderId));
+  }
+
+  async listSessionReplayRenders(sessionReplayId: string): Promise<AdminSessionReplayRender[]> {
+    const response = await this._interface.listSessionReplayRenders(sessionReplayId);
+    return response.items.map((r) => this._sessionReplayRenderFromApi(r));
+  }
+
+  async waitForSessionReplayRender(sessionReplayId: string, renderId: string, options?: { timeoutMs?: number, pollIntervalMs?: number }): Promise<AdminSessionReplayRender> {
+    const deadline = Date.now() + (options?.timeoutMs ?? 30 * 60_000);
+    while (true) {
+      const render = await this.getSessionReplayRender(sessionReplayId, renderId);
+      if (render.status === "succeeded") return render;
+      if (render.status === "failed") {
+        throw new Error(`Session replay render ${renderId} failed: ${render.errorMessage ?? "unknown error"}`);
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for session replay render ${renderId} (status: ${render.status})`);
+      }
+      await wait(options?.pollIntervalMs ?? 3000);
+    }
   }
 
   protected override async _refreshSession(session: InternalSession) {

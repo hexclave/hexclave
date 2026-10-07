@@ -14,7 +14,7 @@ import { _HexclaveServerAppImpl } from "../implementations";
 import { StackClientApp, StackClientAppConstructorOptions } from "./client-app";
 
 
-export type { AdminSessionReplay, AdminSessionReplayChunk, ListSessionReplaysOptions, ListSessionReplaysResult, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, SessionReplayAllEventsResult } from "../../session-replays";
+export type { AdminSessionReplay, AdminSessionReplayChunk, AdminSessionReplayRender, ListSessionReplaysOptions, ListSessionReplaysResult, ListSessionReplayChunksOptions, ListSessionReplayChunksResult, RenderSessionReplayOptions, SessionReplayAllEventsResult } from "../../session-replays";
 
 
 /** @deprecated Use `HexclaveServerAppConstructorOptions` from the `@hexclave/*` package instead — same symbol, new brand name. See https://docs.hexclave.com/migration. */
@@ -124,6 +124,17 @@ export type StackServerApp<HasTokenStore extends boolean = boolean, ProjectId ex
     listSessionReplayChunks(sessionReplayId: string, options?: ListSessionReplayChunksOptions): Promise<ListSessionReplayChunksResult>,
     getSessionReplayChunkEvents(sessionReplayId: string, chunkId: string): Promise<AdminGetSessionReplayChunkEventsResponse>,
     getSessionReplayEvents(sessionReplayId: string, options?: { offset?: number, limit?: number }): Promise<SessionReplayAllEventsResult>,
+    /**
+     * Starts rendering a session replay to an MP4 video. Rendering runs in the
+     * background; poll with `getSessionReplayRender` or wait with
+     * `waitForSessionReplayRender`, then download `render.video.url`.
+     */
+    renderSessionReplay(sessionReplayId: string, options?: RenderSessionReplayOptions): Promise<AdminSessionReplayRender>,
+    getSessionReplayRender(sessionReplayId: string, renderId: string): Promise<AdminSessionReplayRender>,
+    /** The 20 most recent renders of a replay, newest first. */
+    listSessionReplayRenders(sessionReplayId: string): Promise<AdminSessionReplayRender[]>,
+    /** Polls a render until it succeeds (resolves) or fails (throws). */
+    waitForSessionReplayRender(sessionReplayId: string, renderId: string, options?: { timeoutMs?: number, pollIntervalMs?: number }): Promise<AdminSessionReplayRender>,
   }
   & AsyncStoreProperty<"user", [id: string], ServerUser | null, false>
   & Omit<AsyncStoreProperty<"users", [], ServerUser[], true>, "listUsers" | "useUsers">

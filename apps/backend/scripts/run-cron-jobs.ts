@@ -9,6 +9,8 @@ const endpoints: { path: string, intervalMs: number, target?: Target }[] = [
   { path: "/api/latest/internal/external-db-sync/sequencer", intervalMs: 1000 },
   { path: "/api/latest/internal/external-db-sync/poller", intervalMs: 1000 },
   { path: "/api/latest/internal/workflow-engine-step", intervalMs: 1000 },
+  // Status polls advance renders too; this only catches the ones nobody is watching.
+  { path: "/api/latest/internal/session-replay-renders-step", intervalMs: 5000 },
   // The Free plan's deployment window. Ten minutes hosted (see vercel.json); the
   // same cadence here, because a sweep that ran every second locally would call
   // Marshal on every tick for a limit measured in hours.

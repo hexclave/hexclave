@@ -29,6 +29,7 @@ import { PageLayout } from "../page-layout";
 import { useAdminApp, useServerApp } from "../use-admin-app";
 import { SessionReplayLimitBanner } from "../analytics/shared";
 import { ReplayUserOverview, ReplayUserOverviewSkeleton } from "./replay-user-overview";
+import { RenderVideoButton, type RenderableTab } from "./render-video-dialog";
 import {
   ALLOWED_PLAYER_SPEEDS,
   areStatesRenderEquivalent,
@@ -1471,6 +1472,13 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
     return `Tab ${idx}`;
   }, [ms.tabLabelIndex]);
 
+  const renderableTabs = useMemo((): RenderableTab[] => {
+    return fullStreams
+      .flatMap((stream) => stream.sessionReplaySegmentId == null ? [] : [{ stream, segmentId: stream.sessionReplaySegmentId }])
+      .sort((a, b) => (ms.tabLabelIndex.get(a.stream.tabKey) ?? Infinity) - (ms.tabLabelIndex.get(b.stream.tabKey) ?? Infinity))
+      .map(({ stream, segmentId }) => ({ sessionReplaySegmentId: segmentId, label: getTabLabel(stream.tabKey) }));
+  }, [fullStreams, getTabLabel, ms.tabLabelIndex]);
+
   const activeHasEvents = useMemo(() => {
     if (!activeStream) return false;
     void uiVersion;
@@ -1932,6 +1940,13 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                     <Typography className="text-sm font-medium truncate" />
                   )}
                   <div className="flex items-center gap-1">
+                    {selectedRecordingId && (
+                      <RenderVideoButton
+                        sessionReplayId={selectedRecordingId}
+                        tabs={renderableTabs}
+                        activeSegmentId={activeStream?.sessionReplaySegmentId ?? null}
+                      />
+                    )}
                     {selectedRecordingId && (
                       <Button
                         variant="ghost"

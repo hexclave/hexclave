@@ -19,6 +19,10 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/latest/internal/session-replay-renders-step",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/latest/internal/deployments-parking-sweep",
       "schedule": "*/10 * * * *"
     }
