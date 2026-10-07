@@ -4,7 +4,7 @@ import { KnownErrors } from "@hexclave/shared";
 import { externalAuthProviderIds, getWorkOSVerificationUrls, type ExternalAuthProviderId } from "@hexclave/shared/dist/interface/external-auth";
 import { emailSchema } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
-import { createRemoteJWKSet, customFetch, decodeJwt, decodeProtectedHeader, errors as joseErrors, jwtVerify, type JWTPayload } from "jose";
+import { createRemoteJWKSet, customFetch, decodeJwt, decodeProtectedHeader, errors as joseErrors, jwtVerify, type JWTHeaderParameters, type JWTPayload } from "jose";
 
 export { externalAuthProviderIds };
 export type { ExternalAuthProviderId };
@@ -25,7 +25,33 @@ type ProviderVerificationConfig = {
   audience?: string,
   authorizedParties?: string[],
   clientId?: string,
+  rejectedTokenTypes?: string[],
 };
+
+// Clerk signs session tokens, OAuth access tokens (when Clerk acts as an OAuth provider for third-party
+// apps), and JWT-template tokens with the same instance keys and issuer, and Clerk session tokens carry
+// no audience. JWT-template tokens can never carry `sid` (which we require), but an OAuth access token
+// is not documented to be free of it — and it is a delegated, scope-limited credential held by a third
+// party, so exchanging it for a full Hexclave session would be a privilege escalation. OAuth access
+// tokens are explicitly typed (RFC 9068), so reject that type. This matters most when no authorized
+// parties are configured, since `azp` would otherwise be the only thing tying the token to our app.
+const CLERK_REJECTED_TOKEN_TYPES = ["at+jwt"];
+
+function normalizeTokenType(typ: string): string {
+  // RFC 7515 §4.1.9: media types are case-insensitive, and the "application/" prefix may be omitted.
+  const lowercased = typ.toLowerCase();
+  return lowercased.startsWith("application/") ? lowercased.slice("application/".length) : lowercased;
+}
+
+export function validateTokenType(typ: unknown, rejectedTokenTypes: string[] | undefined): void {
+  if (rejectedTokenTypes == null || typ == null) return;
+  if (typeof typ !== "string") {
+    throw new KnownErrors.InvalidExternalAuthToken("malformed_token");
+  }
+  if (rejectedTokenTypes.includes(normalizeTokenType(typ))) {
+    throw new KnownErrors.InvalidExternalAuthToken("unsupported_token_type");
+  }
+}
 
 const remoteJwkSets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 const MAX_CACHED_REMOTE_JWK_SETS = 100;
@@ -109,6 +135,7 @@ function getProviderVerificationConfig(
         issuer,
         jwksUrl: new URL("/.well-known/jwks.json", issuer).toString(),
         authorizedParties: getAuthorizedParties(config.authorizedParties),
+        rejectedTokenTypes: CLERK_REJECTED_TOKEN_TYPES,
       };
     }
     case "better-auth-integration": {
@@ -199,12 +226,14 @@ export async function verifyExternalAuthToken(options: {
   validateTokenEncoding(options.token);
 
   let payload: JWTPayload;
+  let protectedHeader: JWTHeaderParameters;
   try {
     const verified = await jwtVerify(options.token, getRemoteJwkSet(config.jwksUrl), {
       issuer: config.issuer,
       ...config.audience == null ? {} : { audience: config.audience },
     });
     payload = verified.payload;
+    protectedHeader = verified.protectedHeader;
   } catch (error) {
     const reason = getExternalAuthTokenErrorReason(error);
     if (reason != null) {
@@ -216,6 +245,7 @@ export async function verifyExternalAuthToken(options: {
     });
   }
 
+  validateTokenType(protectedHeader.typ, config.rejectedTokenTypes);
   validateAuthorizedParty(payload, config.authorizedParties);
   if (config.clientId != null && payload.client_id !== config.clientId) {
     throw new KnownErrors.InvalidExternalAuthToken("client_id_mismatch");

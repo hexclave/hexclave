@@ -1444,6 +1444,7 @@ const externalAuthTokenReasons = [
   "authorized_party_mismatch",
   "client_id_mismatch",
   "missing_claim",
+  "unsupported_token_type",
   "unknown",
 ] as const;
 type ExternalAuthTokenReason = typeof externalAuthTokenReasons[number];

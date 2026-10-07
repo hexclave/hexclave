@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { KnownError, KnownErrors } from "@hexclave/shared";
 import { errors as joseErrors } from "jose";
-import { getExternalAuthTokenErrorReason, validateAuthorizedParty } from "./external-auth";
+import { getExternalAuthTokenErrorReason, validateAuthorizedParty, validateTokenType } from "./external-auth";
 
 describe("Clerk authorized parties", () => {
   it("allows verification to proceed when the optional allowlist is blank", () => {
@@ -21,6 +21,35 @@ describe("Clerk authorized parties", () => {
   });
 });
 
+describe("Clerk token types", () => {
+  const rejected = ["at+jwt"];
+
+  it.each([undefined, "JWT", "jwt"])("accepts a session token with typ %j", (typ) => {
+    expect(() => validateTokenType(typ, rejected)).not.toThrow();
+  });
+
+  // OAuth access tokens issued by Clerk to third-party apps share the issuer and keys of session tokens.
+  it.each(["at+jwt", "AT+JWT", "application/at+jwt", "Application/AT+JWT"])("rejects an OAuth access token with typ %j", (typ) => {
+    expect(() => validateTokenType(typ, rejected)).toThrowError(
+      expect.objectContaining({
+        constructorArgs: ["unsupported_token_type"],
+      }),
+    );
+  });
+
+  it("rejects a non-string typ header", () => {
+    expect(() => validateTokenType(42, rejected)).toThrowError(
+      expect.objectContaining({
+        constructorArgs: ["malformed_token"],
+      }),
+    );
+  });
+
+  it("does not restrict token types for providers without a denylist", () => {
+    expect(() => validateTokenType("at+jwt", undefined)).not.toThrow();
+  });
+});
+
 describe("external authentication diagnostics", () => {
   it.each([
     "malformed_token",
@@ -31,6 +60,7 @@ describe("external authentication diagnostics", () => {
     "authorized_party_mismatch",
     "client_id_mismatch",
     "missing_claim",
+    "unsupported_token_type",
     "unknown",
   ] as const)("preserves invalid-token reason %s", (reason) => {
     const error = new KnownErrors.InvalidExternalAuthToken(reason);

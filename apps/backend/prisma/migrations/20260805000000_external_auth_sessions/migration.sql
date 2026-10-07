@@ -1,3 +1,9 @@
+-- Adding the foreign key below takes a SHARE ROW EXCLUSIVE lock on AuthMethod, which conflicts with
+-- every write to it. Without a lock timeout it would queue behind any transaction that has touched
+-- AuthMethod, and every sign-up, auth method change, and user deletion (which cascades into AuthMethod)
+-- would queue behind IT. Failing fast and re-running the migration is the better outcome.
+SET LOCAL lock_timeout = '3s';
+
 CREATE TABLE "ExternalAuthMethod" (
     "tenancyId" UUID NOT NULL,
     "authMethodId" UUID NOT NULL,
