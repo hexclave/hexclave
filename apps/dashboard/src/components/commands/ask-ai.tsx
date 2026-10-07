@@ -82,6 +82,7 @@ const AIChatPreviewInner = memo(function AIChatPreview({
           </div>
         )}
         <Thread
+          useOffWhiteLightMode
           composerPlaceholder="Ask a follow-up question..."
           runningStatusMessages={RUNNING_STATUS_MESSAGES}
           assistantContentComponents={assistantContentComponents}

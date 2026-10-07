@@ -14,23 +14,26 @@ import {
   DashboardToolUI,
   type AssistantComposerApi,
 } from "@/components/vibe-coding";
-import { ToolCallContent } from "@/components/vibe-coding/chat-adapters";
+import { ToolCallContent, type DashboardChip } from "@/components/vibe-coding/chat-adapters";
+import type { AppId } from "@/lib/apps-frontend";
 import { useUpdateConfig } from "@/components/config-update";
 import { useDashboardUser } from "@/lib/dashboard-user";
+import { getPublicEnvVar } from "@/lib/env";
 import { cn } from "@/lib/utils";
 import {
   ChatCircleIcon,
+  CursorClickIcon,
   FloppyDiskIcon,
   PencilSimpleIcon,
   TrashIcon,
+  WarningIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { ALL_APPS } from "@hexclave/shared/dist/apps/apps-config";
 import { typedEntries } from "@hexclave/shared/dist/utils/objects";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
-import type { AppId } from "@/lib/apps-frontend";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
-import { getPublicEnvVar } from "@/lib/env";
+import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageLayout } from "../../page-layout";
@@ -145,8 +148,9 @@ function DashboardDetailContent({
 
   // Coalesce duplicate error reports — React re-renders a crashed component several times,
   // and uncaught-error listeners can fire twice for the same exception. We only surface the
-  // first unique error per 2-second window so the composer isn't stomped on repeatedly.
+  // first unique error per 2-second window so the chip bar isn't spammed.
   const lastErrorRef = useRef<{ signature: string, at: number } | null>(null);
+
   const handleDashboardRuntimeError = useCallback(
     (err: DashboardRuntimeError) => {
       const signature = `${err.message}::${(err.stack ?? "").slice(0, 200)}`;
@@ -156,54 +160,83 @@ function DashboardDetailContent({
       }
       lastErrorRef.current = { signature, at: now };
 
-      // Build a compact fix-request prompt. We keep the stack to ~1200 chars so the
-      // agent gets enough context to localize the bug without drowning in frame noise.
-      const stackSlice = (err.stack ?? "").trim().slice(0, 1200);
-      const componentStackSlice = (err.componentStack ?? "").trim().slice(0, 400);
-      const prefill = [
-        "The dashboard just crashed at runtime. Please diagnose and fix it.",
-        "",
-        "Error:",
-        err.message,
-        stackSlice ? `\nStack:\n${stackSlice}` : "",
-        componentStackSlice ? `\nComponent stack:${componentStackSlice}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-      // Open the chat panel if it's closed so the user sees the pre-filled composer.
-      // The iframe panel doesn't unmount when chat toggles, so no reload cost.
       setIsChatOpen(true);
-      composerApiRef.current?.setText(prefill);
+
+      const errorChip: DashboardChip = {
+        kind: "error",
+        id: generateUuid(),
+        message: err.message,
+        stack: err.stack,
+        componentStack: err.componentStack,
+      };
+      setPendingChips((prev) => [...prev, errorChip]);
+
+      const api = composerApiRef.current;
+      if (api && api.getText().trim().length === 0) {
+        api.setText("could you please fix this error");
+      }
 
       toast({
         variant: "destructive",
         title: "Dashboard crashed",
-        description: "Error added to chat — hit send to fix it.",
+        description: "Error added as a chip — hit send to fix it.",
       });
     },
     [toast],
   );
 
+  const [pendingChips, setPendingChips] = useState<DashboardChip[]>([]);
+  const pendingChipsRef = useRef<DashboardChip[]>([]);
+  useEffect(() => {
+    pendingChipsRef.current = pendingChips;
+  }, [pendingChips]);
+
+  const getPendingChips = useCallback(() => pendingChipsRef.current, []);
+  const consumePendingChips = useCallback(() => {
+    pendingChipsRef.current = [];
+    setPendingChips([]);
+  }, []);
+  const removePendingChip = useCallback((id: string) => {
+    setPendingChips((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      pendingChipsRef.current = next;
+      return next;
+    });
+  }, []);
+
   const handleWidgetSelected = useCallback(
     (selection: WidgetSelection) => {
-      const api = composerApiRef.current;
-      if (!api) return;
-
       setIsChatOpen(true);
+      const { heading, selectorPath, outerHTMLSnippet } = selection.metadata;
+      const name = (heading && heading.trim().length > 0 && heading.trim().length <= 60)
+        ? heading.trim()
+        : "Widget";
 
-      const { heading, tagName, rect, textPreview } = selection.metadata;
-      const name = heading ?? `${tagName} (${rect.width}×${rect.height})`;
-      const domContext = [
-        `[Widget: ${name}]`,
-        textPreview ? `Content: ${textPreview.slice(0, 200)}` : "",
-      ].filter(Boolean).join("\n");
+      setPendingChips((prev) => [
+        ...prev,
+        { kind: "widget", id: generateUuid(), name, selectorPath, outerHTMLSnippet },
+      ]);
 
-      const currentText = api.getText();
-      api.setText(domContext + "\n" + currentText);
+      const api = composerApiRef.current;
+      if (api && api.getText().trim().length === 0) {
+        api.setText("please update this widget");
+      }
     },
     [],
   );
+
+  const handleAddComponent = useCallback(() => {
+    setIsChatOpen(true);
+    setPendingChips((prev) => {
+      if (prev.some((c) => c.kind === "action-add-component")) return prev;
+      return [...prev, { kind: "action-add-component", id: generateUuid() }];
+    });
+
+    const api = composerApiRef.current;
+    if (api && api.getText().trim().length === 0) {
+      api.setText("please add a component");
+    }
+  }, []);
 
   useEffect(() => {
     if (!hasUnsavedChanges) return;
@@ -368,6 +401,7 @@ function DashboardDetailContent({
             onReady={handleIframeReady}
             onRuntimeError={handleDashboardRuntimeError}
             onWidgetSelected={handleWidgetSelected}
+            onAddComponentClicked={handleAddComponent}
             isChatOpen={isChatOpen}
           />
         </div>
@@ -450,7 +484,12 @@ function DashboardDetailContent({
               />
               <div className="flex-1 min-h-0">
                 <AssistantChat
-                  chatAdapter={createDashboardChatAdapter(backendBaseUrl, currentTsxSource, handleCodeUpdate, currentUser, enabledAppIds, projectId, handleRunStart, handleRunEnd)}
+                  chatAdapter={createDashboardChatAdapter(backendBaseUrl, currentTsxSource, handleCodeUpdate, currentUser, enabledAppIds, projectId, handleRunStart, handleRunEnd, getPendingChips, consumePendingChips)}
+                  composerTopContent={
+                    pendingChips.length > 0
+                      ? <ChipBar chips={pendingChips} onRemove={removePendingChip} />
+                      : undefined
+                  }
                   historyAdapter={createHistoryAdapter(adminApp, dashboardId)}
                   toolComponents={<DashboardToolUI setCurrentCode={(code) => setCurrentTsxSource(stampEsmVersion(code, packageJson.version))} currentCode={currentTsxSource} />}
                   useOffWhiteLightMode
@@ -495,6 +534,64 @@ const DASHBOARD_COMPOSER_PLACEHOLDER = {
     "revenue and subscription growth",
   ],
 } as const;
+
+function ChipBar({
+  chips,
+  onRemove,
+}: {
+  chips: DashboardChip[],
+  onRemove: (id: string) => void,
+}) {
+  return (
+    <div className="shrink-0 px-3 pt-2.5 pb-1 flex items-center gap-1.5 flex-wrap">
+      {chips.map((c) => {
+        if (c.kind === "widget") {
+          return (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => onRemove(c.id)}
+              title={`${c.name} — click to remove. Sent with your next message.`}
+              className="group inline-flex items-center gap-1.5 max-w-[200px] pl-1.5 pr-1 py-0.5 rounded-full bg-primary/[0.08] hover:bg-primary/[0.14] ring-1 ring-primary/15 hover:ring-primary/25 text-primary text-xs transition-colors"
+            >
+              <CursorClickIcon className="h-3 w-3 shrink-0" weight="fill" />
+              <span className="truncate font-medium">{c.name}</span>
+              <XIcon className="h-2.5 w-2.5 shrink-0 opacity-50 group-hover:opacity-100 transition-opacity" weight="bold" />
+            </button>
+          );
+        }
+        if (c.kind === "action-add-component") {
+          return (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => onRemove(c.id)}
+              title="Add a new component — click to remove."
+              className="group inline-flex items-center gap-1.5 max-w-[200px] pl-2 pr-1 py-0.5 rounded-full bg-emerald-500/10 hover:bg-emerald-500/15 ring-1 ring-emerald-500/20 hover:ring-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-xs transition-colors"
+            >
+              <span className="truncate font-medium">Add component</span>
+              <XIcon className="h-2.5 w-2.5 shrink-0 opacity-50 group-hover:opacity-100 transition-opacity" weight="bold" />
+            </button>
+          );
+        }
+        // error
+        return (
+          <button
+            key={c.id}
+            type="button"
+            onClick={() => onRemove(c.id)}
+            title={`${c.message} — click to remove. Sent with your next message.`}
+            className="group inline-flex items-center gap-1.5 max-w-[200px] pl-1.5 pr-1 py-0.5 rounded-full bg-red-500/10 hover:bg-red-500/15 ring-1 ring-red-500/20 hover:ring-red-500/30 text-red-700 dark:text-red-400 text-xs transition-colors"
+          >
+            <WarningIcon className="h-3 w-3 shrink-0" weight="fill" />
+            <span className="truncate font-medium">Error</span>
+            <XIcon className="h-2.5 w-2.5 shrink-0 opacity-50 group-hover:opacity-100 transition-opacity" weight="bold" />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function ChatPanelHeader({
   displayName,
