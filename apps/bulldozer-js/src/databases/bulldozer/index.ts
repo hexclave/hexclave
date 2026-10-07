@@ -1736,6 +1736,18 @@ export function defineFlatMapTable(mapper: (row: { groupKey: PiledriverObject, r
 
 export function defineConcatTable(): BulldozerTableImplementation {
   const inputKeys = (inputTables: Record<string, BulldozerTableImplementationInputTable>) => Object.keys(inputTables).sort();
+  const compareGroupKeysOf = (
+    inputTables: Record<string, BulldozerTableImplementationInputTable>,
+    keys: string[],
+    a: PiledriverObject,
+    b: PiledriverObject,
+  ) => {
+    const inputTableKey = keys.at(0);
+    if (inputTableKey === undefined) throw new Error("Concat table must have at least one input");
+    // Concat inputs descend from a common ancestor table, so their group orderings agree; the
+    // first sorted input key is a deterministic comparator authority for the whole concat.
+    return inputTables[inputTableKey].compareGroupKeys({ a, b });
+  };
   const rowIdentifier = (inputTableKey: string, id: string) => JSON.stringify([inputTableKey, id]);
   const rowSortKey = (concatIndex: number, sortKey: PiledriverObject): PiledriverObject => [concatIndex, sortKey];
   const concatIndex = (keys: string[], inputTableKey: string) => {
@@ -1791,16 +1803,81 @@ export function defineConcatTable(): BulldozerTableImplementation {
       if (range.limit === 0) return;
       let yielded = 0;
       const inputRange = { ...range, limit: undefined };
-      const seen = new Set<string>();
       const keys = inputKeys(inputTables);
-      for (const inputTableKey of range.reverse ? [...keys].reverse() : keys) {
-        for await (const { groupKey } of inputTables[inputTableKey].listGroups({ range: inputRange })) {
-          const canonicalKey = canonicalGroupKeyString(groupKey);
-          if (seen.has(canonicalKey)) continue;
-          seen.add(canonicalKey);
-          yield { groupKey };
-          if (range.limit !== undefined && ++yielded >= range.limit) return;
+      const comparatorInputKey = keys.at(0);
+      if (comparatorInputKey === undefined) throw new Error("Concat table must have at least one input");
+      const compareTotal = (a: PiledriverObject, b: PiledriverObject) =>
+        compareGroupKeysOf(inputTables, keys, a, b) || compareStrings(canonicalGroupKeyString(a), canonicalGroupKeyString(b));
+      type InputState = {
+        inputTableKey: string,
+        iterator: AsyncIterator<{ groupKey: PiledriverObject }>,
+        current: { groupKey: PiledriverObject } | undefined,
+        previousGroupKey: PiledriverObject | undefined,
+        done: boolean,
+      };
+      const states: InputState[] = [];
+      const advance = async (state: InputState) => {
+        const next = await state.iterator.next();
+        if (next.done) {
+          state.done = true;
+          state.current = undefined;
+          return;
         }
+        state.done = false;
+        if (
+          state.previousGroupKey !== undefined
+          && (range.reverse
+            ? compareTotal(state.previousGroupKey, next.value.groupKey) < 0
+            : compareTotal(state.previousGroupKey, next.value.groupKey) > 0)
+        ) {
+          throw new Error(`Concat input table ${state.inputTableKey} yielded group keys out of order according to input table ${comparatorInputKey}'s comparator. Concat requires all of its inputs to agree on group key ordering, because it pushes group range bounds down into each input.`);
+        }
+        state.previousGroupKey = next.value.groupKey;
+        state.current = next.value;
+      };
+      try {
+        for (const inputTableKey of keys) {
+          states.push({
+            inputTableKey,
+            iterator: inputTables[inputTableKey].listGroups({ range: inputRange })[Symbol.asyncIterator](),
+            current: undefined,
+            previousGroupKey: undefined,
+            done: false,
+          });
+        }
+        await Promise.all(states.map(advance));
+        let previousCanonicalKey: string | undefined;
+        for (;;) {
+          let selected: { state: InputState, groupKey: PiledriverObject } | undefined;
+          for (const state of states) {
+            const current = state.current;
+            if (current === undefined) continue;
+            if (
+              selected === undefined
+              || (range.reverse
+                ? compareTotal(current.groupKey, selected.groupKey) > 0
+                : compareTotal(current.groupKey, selected.groupKey) < 0)
+            ) {
+              selected = { state, groupKey: current.groupKey };
+            }
+          }
+          if (selected === undefined) return;
+          // Equal group keys are adjacent in the merged stream (the canonical-string tie-break makes
+          // the order total), so comparing against the previously yielded key is enough to dedupe
+          // groups that several inputs share — no set of all seen keys needed.
+          const canonicalKey = canonicalGroupKeyString(selected.groupKey);
+          if (canonicalKey !== previousCanonicalKey) {
+            previousCanonicalKey = canonicalKey;
+            yield { groupKey: selected.groupKey };
+            if (range.limit !== undefined && ++yielded >= range.limit) return;
+          }
+          await advance(selected.state);
+        }
+      } finally {
+        // Manual async-iterator use does not provide for-await's automatic cleanup on early return.
+        await Promise.all(states.map(async state => {
+          if (!state.done) await state.iterator.return?.(undefined);
+        }));
       }
     },
     async * listRowsInGroup({ inputTables, groupKey, range }) {
@@ -1883,7 +1960,7 @@ export function defineConcatTable(): BulldozerTableImplementation {
       };
     },
     compareGroupKeys({ serializedTable, inputTables, a, b }): number {
-      return 0;
+      return compareGroupKeysOf(inputTables, inputKeys(inputTables), a, b);
     },
     compareSortKeys({ serializedTable, inputTables, a, b }): number {
       return compareOutputSortKeys(inputTables, inputKeys(inputTables), a, b);
