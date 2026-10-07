@@ -1,5 +1,6 @@
 import { Prisma } from "@/generated/prisma/client";
 import { getClickhouseAdminClientForMetrics } from "@/lib/clickhouse";
+import { CLICKHOUSE_ANALYTICS_DB, PlatformAnalyticsClickhouseQueryError, buildPlatformAnalyticsClickhouseQueries, runPlatformAnalyticsClickhouseQueries, type CountRow, type PlatformAnalyticsClickhouseResults } from "./clickhouse-queries";
 import { ensurePlatformAdmin } from "@/lib/platform-admin";
 import { DEFAULT_BRANCH_ID } from "@/lib/tenancies";
 import { globalPrismaClient } from "@/prisma-client";
@@ -21,14 +22,6 @@ const USD_CURRENCY = SUPPORTED_CURRENCIES.find((currency) => currency.code === "
 const WINDOW_DAYS = 30;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const LEADERBOARD_LIMIT = 500;
-// 1-in-N consistent user-level sampling for the new/retained/reactivated activity
-// split, with counts scaled back up by N. The split's window function + all-history
-// scan made it the heaviest query in this route (~1.3 GiB peak at 1M users / 50M
-// events); sampling 1/4 cuts that ~78% for a ~0.4% mean error. The same cityHash
-// bucket is applied to both subqueries so each sampled user's full activity
-// sequence is preserved (retention/reactivation stay unbiased). See
-// scripts/benchmark-platform-analytics.ts.
-const ACTIVITY_SPLIT_SAMPLE = 4;
 const INTERNAL_PROJECT_ID = "internal";
 const AVG_DAYS_PER_MONTH = 365.25 / 12;
 const MRR_SUBSCRIPTION_STATUSES = ["active", "trialing"];
@@ -42,8 +35,6 @@ function chDateTime(date: Date): string {
   // ClickHouse DateTime params are "YYYY-MM-DDTHH:MM:SS" with no timezone; treated as UTC.
   return date.toISOString().slice(0, 19);
 }
-
-type CountRow = { projectId: string, c: string | number };
 
 function rowsToMap(rows: CountRow[]): Map<string, number> {
   const out = new Map<string, number>();
@@ -232,231 +223,21 @@ export const GET = createSmartRouteHandler({
     }
 
     const clickhouse = getClickhouseAdminClientForMetrics();
-    const chQuery = async <T,>(query: string, params: Record<string, unknown>): Promise<T[]> => {
-      const result = await clickhouse.query({ query, query_params: params, format: "JSONEachRow" });
-      return await result.json<T>();
-    };
-
-    const internalProjectId = INTERNAL_PROJECT_ID;
-    const userScope = `branch_id = {branchId:String} AND sync_is_deleted = 0`;
-    const customerUserScope = `${userScope} AND project_id != {internalProjectId:String}`;
-    const customerEventScope = `project_id != {internalProjectId:String}`;
-    const baseParams = { branchId, internalProjectId };
-    const windowParams = { branchId, internalProjectId, since: sinceParam, until: untilParam };
-    const twoWindowParams = { branchId, internalProjectId, priorSince: priorSinceParam, mid: midParam, until: untilParam };
-
-    let ch: {
-      dauSeries: Array<{ day: string, c: string | number }>,
-      pvSeries: Array<{ day: string, pv: string | number, visitors: string | number }>,
-      signupSeries: Array<{ day: string, c: string | number }>,
-      mauProjects: Array<{ mauCur: string | number, mauPrev: string | number, projCur: string | number, projPrev: string | number }>,
-      userCounts: Array<{ total: string | number, totalPrev: string | number, verified: string | number, verifiedPrev: string | number, anonymous: string | number }>,
-      country: Array<{ country_code: string, c: string | number }>,
-      deadClicks: Array<{ clicks: string | number, dead: string | number }>,
-      split: Array<{ day: string, total_count: string, new_count: string, retained_count: string, reactivated_count: string }>,
-      totalsByProject: CountRow[],
-      verifiedByProject: CountRow[],
-      signupsByProject: Array<{ projectId: string, cur: string | number, prev: string | number }>,
-      activeByProject: Array<{ projectId: string, cur: string | number, prev: string | number }>,
-      sparkByProject: Array<{ projectId: string, day: string, c: string | number }>,
-      teamsByProject: CountRow[],
-      oauthByProject: CountRow[],
-      emailsByProject: CountRow[],
-      analyticsByProject: CountRow[],
-    };
+    const chQueries = buildPlatformAnalyticsClickhouseQueries(CLICKHOUSE_ANALYTICS_DB, {
+      branchId,
+      internalProjectId: INTERNAL_PROJECT_ID,
+      since: sinceParam,
+      priorSince: priorSinceParam,
+      mid: midParam,
+      until: untilParam,
+    });
+    let ch: PlatformAnalyticsClickhouseResults;
     try {
-      // FINAL normally merges every partition before evaluating the IN set;
-      // hashing the key is a deliberate accuracy-for-memory tradeoff: a
-      // 64-bit collision is negligible at these row counts for this internal
-      // KPI. Limiting FINAL read parallelism also avoids buffering one large
-      // block per reader on object-backed storage.
-      const verifiedSubquery = `
-        cityHash64(project_id, id) IN (
-          SELECT cityHash64(project_id, user_id)
-          FROM analytics_internal.contact_channels FINAL
-          WHERE branch_id = {branchId:String} AND sync_is_deleted = 0
-            AND type = 'EMAIL' AND is_verified = 1
-          SETTINGS do_not_merge_across_partitions_select_final = 1
-        )`;
-      // Every FINAL read over the synced tables (users, contact_channels, teams, ...) gets the
-      // same low-parallelism settings: on object-backed storage each reader buffers a whole
-      // block per part, and the platform-wide users table has enough parts that default
-      // parallelism alone overran the 488 MiB per-query cap while reading parts (not while
-      // aggregating). Deliberately NOT setting do_not_merge_across_partitions_select_final here:
-      // the sync writes deletion tombstones with signed_up_at / created_at = deletedAt (see
-      // db-sync-mappings.ts), so a tombstone usually lands in a different month partition than
-      // the live row it supersedes, and partition-local FINAL would keep counting deleted rows.
-      const finalQuerySettings = "SETTINGS max_threads = 1, max_final_threads = 1, max_block_size = 1024";
-      const [
-        dauSeries, pvSeries, signupSeries, mauProjects, userCounts, country, deadClicks, split,
-        totalsByProject, verifiedByProject, signupsByProject, activeByProject, sparkByProject,
-        teamsByProject, oauthByProject, emailsByProject, analyticsByProject,
-      ] = await Promise.all([
-        // Platform daily DAU (active users) over the visible window.
-        chQuery<{ day: string, c: string | number }>(`
-          SELECT toDate(event_at) AS day, uniqExact(sipHash64(assumeNotNull(user_id))) AS c
-          FROM analytics_internal.events
-          WHERE event_type = '$token-refresh' AND user_id IS NOT NULL
-            AND ${customerEventScope}
-            AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
-          GROUP BY day ORDER BY day ASC
-        `, windowParams),
-        // Page views + unique visitors per day. Exact distinct counts are taken
-        // over hashed user ids: the state is kept once per day group, so 36-char
-        // uuids across every customer project overran the metrics memory limit.
-        chQuery<{ day: string, pv: string | number, visitors: string | number }>(`
-          SELECT toDate(event_at) AS day,
-            countIf(event_type = '$page-view') AS pv,
-            uniqExactIf(sipHash64(assumeNotNull(user_id)), event_type = '$page-view') AS visitors
-          FROM analytics_internal.events
-          WHERE event_type IN ('$page-view', '$click')
-            AND ${customerEventScope}
-            AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
-          GROUP BY day ORDER BY day ASC
-        `, windowParams),
-        // Signups per day (users table).
-        chQuery<{ day: string, c: string | number }>(`
-          SELECT toDate(signed_up_at, 'UTC') AS day, count() AS c
-          FROM analytics_internal.users FINAL
-          WHERE ${customerUserScope} AND is_anonymous = 0
-            AND signed_up_at >= {since:DateTime} AND signed_up_at < {until:DateTime}
-          GROUP BY day ORDER BY day ASC
-          ${finalQuerySettings}
-        `, windowParams),
-        // MAU + active projects, current vs prior 30d window (single pass over 60d).
-        chQuery<{ mauCur: string | number, mauPrev: string | number, projCur: string | number, projPrev: string | number }>(`
-          SELECT
-            uniqExactIf(sipHash64(assumeNotNull(user_id)), event_at >= {mid:DateTime}) AS mauCur,
-            uniqExactIf(sipHash64(assumeNotNull(user_id)), event_at < {mid:DateTime}) AS mauPrev,
-            uniqExactIf(project_id, event_at >= {mid:DateTime}) AS projCur,
-            uniqExactIf(project_id, event_at < {mid:DateTime}) AS projPrev
-          FROM analytics_internal.events
-          WHERE event_type = '$token-refresh' AND user_id IS NOT NULL
-            AND ${customerEventScope}
-            AND event_at >= {priorSince:DateTime} AND event_at < {until:DateTime}
-        `, twoWindowParams),
-        // User stock counts: total, verified, anonymous (now + as-of window start).
-        chQuery<{ total: string | number, totalPrev: string | number, verified: string | number, verifiedPrev: string | number, anonymous: string | number }>(`
-          SELECT
-            countIf(is_anonymous = 0) AS total,
-            countIf(is_anonymous = 0 AND signed_up_at < {mid:DateTime}) AS totalPrev,
-            countIf(is_anonymous = 0 AND ${verifiedSubquery}) AS verified,
-            countIf(is_anonymous = 0 AND signed_up_at < {mid:DateTime} AND ${verifiedSubquery}) AS verifiedPrev,
-            countIf(is_anonymous = 1) AS anonymous
-          FROM analytics_internal.users FINAL
-          WHERE ${customerUserScope}
-          ${finalQuerySettings}
-        `, { branchId, internalProjectId, mid: midParam }),
-        // Users by country (for the globe) over the window.
-        chQuery<{ country_code: string, c: string | number }>(`
-          SELECT country_code, count() AS c FROM (
-            SELECT argMax(cc, event_at) AS country_code FROM (
-              SELECT sipHash64(user_id) AS user_hash, event_at, CAST(data.ip_info.country_code, 'Nullable(String)') AS cc
-              FROM analytics_internal.events
-              WHERE event_type = '$token-refresh' AND user_id IS NOT NULL
-                AND ${customerEventScope}
-                AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
-            ) WHERE cc IS NOT NULL GROUP BY user_hash
-          ) WHERE country_code IS NOT NULL GROUP BY country_code ORDER BY c DESC
-        `, windowParams),
-        // Dead-click health over the window.
-        chQuery<{ clicks: string | number, dead: string | number }>(`
-          SELECT count() AS clicks, sum(is_dead) AS dead
-          FROM analytics_internal.clickmap_events
-          WHERE ${customerEventScope}
-            AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
-        `, windowParams),
-        // New / retained / reactivated split across all projects.
-        chQuery<{ day: string, total_count: string, new_count: string, retained_count: string, reactivated_count: string }>(`
-          SELECT
-            toString(w.day) AS day,
-            count() * ${ACTIVITY_SPLIT_SAMPLE} AS total_count,
-            countIf(f.first_date = w.day) * ${ACTIVITY_SPLIT_SAMPLE} AS new_count,
-            countIf(f.first_date < w.day AND w.prev_day = addDays(w.day, -1)) * ${ACTIVITY_SPLIT_SAMPLE} AS retained_count,
-            countIf(f.first_date < w.day AND (isNull(w.prev_day) OR w.prev_day < addDays(w.day, -1))) * ${ACTIVITY_SPLIT_SAMPLE} AS reactivated_count
-          FROM (
-            SELECT day, entity_id, lagInFrame(day, 1) OVER (PARTITION BY entity_id ORDER BY day) AS prev_day
-            FROM (
-              SELECT DISTINCT toDate(event_at) AS day, sipHash64(assumeNotNull(user_id)) AS entity_id
-              FROM analytics_internal.events
-              WHERE event_type = '$token-refresh' AND user_id IS NOT NULL
-                AND ${customerEventScope}
-                AND cityHash64(assumeNotNull(user_id)) % ${ACTIVITY_SPLIT_SAMPLE} = 0
-                AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
-                AND coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0
-            )
-          ) AS w
-          LEFT JOIN (
-            SELECT sipHash64(assumeNotNull(user_id)) AS entity_id, toDate(min(event_at)) AS first_date
-            FROM analytics_internal.events
-            WHERE event_type = '$token-refresh' AND user_id IS NOT NULL
-              AND ${customerEventScope}
-              AND cityHash64(assumeNotNull(user_id)) % ${ACTIVITY_SPLIT_SAMPLE} = 0
-              AND event_at < {until:DateTime}
-              AND coalesce(CAST(data.is_anonymous, 'Nullable(UInt8)'), 0) = 0
-            GROUP BY entity_id
-          ) AS f USING (entity_id)
-          GROUP BY w.day ORDER BY w.day ASC
-        `, windowParams),
-        // Per-project total users.
-        chQuery<CountRow>(`
-          SELECT project_id AS projectId, count() AS c
-          FROM analytics_internal.users FINAL
-          WHERE ${customerUserScope} AND is_anonymous = 0 GROUP BY project_id
-          ${finalQuerySettings}
-        `, baseParams),
-        // Per-project verified users.
-        chQuery<CountRow>(`
-          SELECT project_id AS projectId, count() AS c
-          FROM analytics_internal.users FINAL
-          WHERE ${customerUserScope} AND is_anonymous = 0 AND ${verifiedSubquery} GROUP BY project_id
-          ${finalQuerySettings}
-        `, baseParams),
-        // Per-project signups, current vs prior window.
-        chQuery<{ projectId: string, cur: string | number, prev: string | number }>(`
-          SELECT project_id AS projectId,
-            countIf(signed_up_at >= {mid:DateTime}) AS cur,
-            countIf(signed_up_at < {mid:DateTime}) AS prev
-          FROM analytics_internal.users FINAL
-          WHERE ${customerUserScope} AND is_anonymous = 0
-            AND signed_up_at >= {priorSince:DateTime} AND signed_up_at < {until:DateTime}
-          GROUP BY project_id
-          ${finalQuerySettings}
-        `, twoWindowParams),
-        // Per-project active users, current vs prior window.
-        chQuery<{ projectId: string, cur: string | number, prev: string | number }>(`
-          SELECT project_id AS projectId,
-            uniqExactIf(sipHash64(assumeNotNull(user_id)), event_at >= {mid:DateTime}) AS cur,
-            uniqExactIf(sipHash64(assumeNotNull(user_id)), event_at < {mid:DateTime}) AS prev
-          FROM analytics_internal.events
-          WHERE event_type = '$token-refresh' AND user_id IS NOT NULL
-            AND ${customerEventScope}
-            AND event_at >= {priorSince:DateTime} AND event_at < {until:DateTime}
-          GROUP BY project_id
-        `, twoWindowParams),
-        // Per-project daily active sparkline (visible window).
-        chQuery<{ projectId: string, day: string, c: string | number }>(`
-          SELECT project_id AS projectId, toDate(event_at) AS day, uniqExact(sipHash64(assumeNotNull(user_id))) AS c
-          FROM analytics_internal.events
-          WHERE event_type = '$token-refresh' AND user_id IS NOT NULL
-            AND ${customerEventScope}
-            AND event_at >= {since:DateTime} AND event_at < {until:DateTime}
-          GROUP BY project_id, day
-        `, windowParams),
-        // Feature adoption signals (per project) from synced CH tables.
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.teams FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.connected_accounts FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.email_outboxes FINAL WHERE ${customerUserScope} GROUP BY project_id ${finalQuerySettings}`, baseParams),
-        chQuery<CountRow>(`SELECT project_id AS projectId, count() AS c FROM analytics_internal.events WHERE event_type = '$page-view' AND branch_id = {branchId:String} AND ${customerEventScope} GROUP BY project_id`, baseParams),
-      ]);
-      ch = {
-        dauSeries, pvSeries, signupSeries, mauProjects, userCounts, country, deadClicks, split,
-        totalsByProject, verifiedByProject, signupsByProject, activeByProject, sparkByProject,
-        teamsByProject, oauthByProject, emailsByProject, analyticsByProject,
-      };
+      ch = await runPlatformAnalyticsClickhouseQueries(clickhouse, chQueries);
     } catch (cause) {
-      throw new HexclaveAssertionError(`Failed to load platform analytics from ClickHouse: ${cause instanceof Error ? cause.message : String(cause)}`, {
-        cause, userId: req.auth.user.id,
+      const queryName = cause instanceof PlatformAnalyticsClickhouseQueryError ? cause.queryName : "unknown";
+      throw new HexclaveAssertionError(`Failed to load platform analytics from ClickHouse (query: ${queryName}): ${cause instanceof Error ? cause.message : String(cause)}`, {
+        cause, queryName, userId: req.auth.user.id,
       });
     }
 
@@ -575,7 +356,14 @@ export const GET = createSmartRouteHandler({
 
     // ---- KPIs ----
     const mp = ch.mauProjects[0] ?? { mauCur: 0, mauPrev: 0, projCur: 0, projPrev: 0 };
-    const uc = ch.userCounts[0] ?? { total: 0, totalPrev: 0, verified: 0, verifiedPrev: 0, anonymous: 0 };
+    const uc = { total: 0, totalPrev: 0, verified: 0, verifiedPrev: 0, anonymous: 0 };
+    for (const r of ch.usersByProject) {
+      uc.total += num(r.total);
+      uc.totalPrev += num(r.totalPrev);
+      uc.verified += num(r.verified);
+      uc.verifiedPrev += num(r.verifiedPrev);
+      uc.anonymous += num(r.anonymous);
+    }
     const dauAvgCur = Math.round(series.reduce((s, p) => s + p.active_users, 0) / Math.max(1, WINDOW_DAYS));
     const mauCur = num(mp.mauCur);
     const mauPrev = num(mp.mauPrev);
@@ -658,8 +446,8 @@ export const GET = createSmartRouteHandler({
     ];
 
     // ---- Per-project leaderboard ----
-    const totalsMap = rowsToMap(ch.totalsByProject);
-    const verifiedMap = rowsToMap(ch.verifiedByProject);
+    const totalsMap = new Map(ch.usersByProject.map((r) => [r.projectId, num(r.total)]));
+    const verifiedMap = new Map(ch.usersByProject.map((r) => [r.projectId, num(r.verified)]));
     const signupsMap = new Map(ch.signupsByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
     const activeMap = new Map(ch.activeByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
     const revenueMap = new Map(pg.revenueByProject.map((r) => [r.projectId, { cur: num(r.cur), prev: num(r.prev) }]));
