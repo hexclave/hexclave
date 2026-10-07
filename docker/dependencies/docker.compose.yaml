@@ -341,6 +341,7 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse-config.d/table-engine-grants.xml:/etc/clickhouse-server/config.d/table-engine-grants.xml:ro
     ulimits:
       nofile:
         soft: 262144

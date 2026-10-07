@@ -549,7 +549,7 @@ it("has a restricted user and roles", async ({ expect }) => {
       "body": {
         "result": [
           {
-            "assigned_roles": [],
+            "assigned_roles": ["analytics_reader"],
             "user": "limited_user",
           },
         ],
@@ -569,24 +569,6 @@ it("has limited grants", async ({ expect }) => {
       "status": 200,
       "body": {
         "result": [
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT TABLE ENGINE ON * TO limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON AzureBlobStorage FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON Distributed FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON File FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON HDFS FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON Hive FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON JDBC FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON Kafka FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON MongoDB FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON MySQL FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON NATS FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON ODBC FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON PostgreSQL FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON RabbitMQ FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON Redis FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON S3 FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON SQLite FROM limited_user" },
-          { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "REVOKE TABLE ENGINE ON URL FROM limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW DATABASES ON default.* TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.connected_accounts TO limited_user" },
           { "GRANTS WITH IMPLICIT FINAL FORMAT JSONEachRow": "GRANT SHOW TABLES, SHOW COLUMNS, SELECT ON default.contact_channels TO limited_user" },
@@ -1212,22 +1194,7 @@ it("shows grants", async ({ expect }) => {
   expect(stripQueryId(response, expect)).toMatchInlineSnapshot(`
     NiceResponse {
       "status": 200,
-      "body": {
-        "result": [
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.connected_accounts TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.contact_channels TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.email_outboxes TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.events TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.notification_preferences TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.project_permissions TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.refresh_tokens TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.team_invitations TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.team_member_profiles TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.team_permissions TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.teams TO limited_user" },
-          { "GRANTS FORMAT JSONEachRow": "GRANT SELECT ON default.users TO limited_user" },
-        ],
-      },
+      "body": { "result": [{ "GRANTS FORMAT JSONEachRow": "GRANT analytics_reader TO limited_user" }] },
       "headers": Headers { <some fields may have been hidden> },
     }
   `);

@@ -42,7 +42,7 @@ For local app development, use [Local Development](/guides/going-further/local-d
 
 Use a managed Postgres service for production. The server reads its database URL from `STACK_DATABASE_CONNECTION_STRING`.
 
-Use a managed ClickHouse service or your own ClickHouse cluster. The server reads its ClickHouse URL and credentials from `STACK_CLICKHOUSE_URL`, `STACK_CLICKHOUSE_ADMIN_USER`, `STACK_CLICKHOUSE_ADMIN_PASSWORD`, and `STACK_CLICKHOUSE_EXTERNAL_PASSWORD`, and the database name from `STACK_CLICKHOUSE_DATABASE` (defaults to `default` when unset—set it to match the database you use in ClickHouse).
+Use a managed ClickHouse service or your own ClickHouse cluster. The server reads its ClickHouse URL and credentials from `STACK_CLICKHOUSE_URL`, `STACK_CLICKHOUSE_ADMIN_USER`, `STACK_CLICKHOUSE_ADMIN_PASSWORD`, and `STACK_CLICKHOUSE_EXTERNAL_PASSWORD`, and the database name from `STACK_CLICKHOUSE_DATABASE` (defaults to `default` when unset—set it to match the database you use in ClickHouse). To use the Data Warehouse app, also set `STACK_CLICKHOUSE_PUBLIC_HOST` to the ClickHouse hostname your users can reach.
 
 Self-hosting requires PostgreSQL 15 or newer.
 

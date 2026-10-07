@@ -1,3 +1,4 @@
+import type { DataWarehouseCredentialsJson, DataWarehouseJson } from "@hexclave/shared/dist/interface/admin-interface";
 import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse } from "@hexclave/shared/dist/interface/admin-metrics";
 import type { Transaction, TransactionType } from "@hexclave/shared/dist/interface/crud/transactions";
 import { InternalSession } from "@hexclave/shared/dist/sessions";
@@ -80,6 +81,7 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
   & AsyncStoreProperty<"emailTemplates", [], { id: string, displayName: string, themeId?: string, tsxSource: string }[], true>
   & AsyncStoreProperty<"emailDrafts", [], { id: string, displayName: string, themeId: string | undefined | false, tsxSource: string, sentAt: Date | null }[], true>
   & AsyncStoreProperty<"workflows", [], AdminWorkflow[], true>
+  & AsyncStoreProperty<"dataWarehouse", [], DataWarehouseJson, false>
   & AsyncStoreProperty<"stripeAccountInfo", [], { account_id: string, charges_enabled: boolean, details_submitted: boolean, payouts_enabled: boolean } | null, false>
   & AsyncStoreProperty<
     "transactions",
@@ -154,6 +156,11 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
     upgradeWorkflowRuns(workflowId: string, options: { toVersion: number, runKey?: string, fromVersion?: number }): Promise<AdminWorkflowUpgradeResult>,
     retryWorkflowRun(runId: string): Promise<void>,
     sendWorkflowEvent(name: string, data?: unknown): Promise<{ eventId: string }>,
+
+    // Data Warehouse. Both verbs return the password exactly once — there is
+    // no read path that can hand it back later.
+    provisionDataWarehouse(): Promise<DataWarehouseCredentialsJson>,
+    rotateDataWarehousePassword(): Promise<DataWarehouseCredentialsJson>,
 
     setupPayments(): Promise<{ url: string }>,
     createStripeWidgetAccountSession(): Promise<{ client_secret: string }>,
