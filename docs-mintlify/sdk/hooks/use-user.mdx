@@ -8,6 +8,8 @@ mode: "wide"
 
 This standalone React hook is an alias for `useHexclaveApp().useUser()`. It only exists for convenience; it does not have any additional functionality.
 
+Call it from a Client Component. It suspends until the current user is resolved, including after a return from [hosted auth pages](/guides/going-further/hosted-vs-handler).
+
 For more information, please refer to the [documentation for `hexclaveClientApp.useUser()`](/sdk/objects/hexclave-app#stackclientappuseuseroptions).
 
 ## Usage
@@ -25,6 +27,21 @@ function MyComponent() {
   return <div>Hello, {user.displayName}</div>;
 }
 ```
+
+To require a signed-in user and send everyone else to sign-in (then back to this page), pass `{ or: "redirect" }`:
+
+```jsx
+"use client";
+
+import { useUser } from "@hexclave/next";  // replace `next` with the correct framework SDK package
+
+export default function DashboardPage() {
+  const user = useUser({ or: "redirect" });
+  return <h1>Welcome, {user.displayName ?? user.primaryEmail ?? user.id}</h1>;
+}
+```
+
+Do not use `getUser({ or: "redirect" })` on the server. Use `{ or: "throw" }` in route handlers and server actions, and map that to `401`/`403` yourself. See [Ship production-ready auth](/guides/other/tutorials/ship-production-ready-auth).
 
 ## Related
 
