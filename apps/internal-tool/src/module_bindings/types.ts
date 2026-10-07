@@ -109,6 +109,9 @@ export const McpCallLog = __t.object("McpCallLog", {
   publishedToQa: __t.bool(),
   publishedAt: __t.option(__t.timestamp()),
   qaReviewRequestedAt: __t.timestamp(),
+  context: __t.string(),
+  user: __t.string(),
+  project: __t.string(),
 });
 export type McpCallLog = __Infer<typeof McpCallLog>;
 

@@ -1,6 +1,6 @@
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPendingCallRegistry } from "../lib/pending-call-registry";
 import { spacetimeDbName } from "../lib/spacetimedb-constants";
 import { DbConnection, type ErrorContext, type EventContext } from "../module_bindings";
@@ -100,6 +100,23 @@ type PagedRows<Row> = {
   rows: Row[],
   nextBeforeCreatedAtMicros: bigint | undefined,
   nextBeforeId: bigint | undefined,
+};
+
+export type AiUsageTableFilters = {
+  createdAtOrAfterMicros: bigint | undefined,
+  systemPromptId: string | undefined,
+  modelId: string | undefined,
+  mode: "stream" | "generate" | undefined,
+  isAuthenticated: boolean | undefined,
+  hasError: boolean | undefined,
+};
+
+export type McpReviewTableFilters = {
+  createdAtOrAfterMicros: bigint | undefined,
+  toolName: string | undefined,
+  hasError: boolean | undefined,
+  qaState: "pending" | "review-failed" | "error" | "pass" | "warn" | "fail" | "feature-request" | undefined,
+  humanReviewState: "required" | "reviewed" | "not-reviewed" | undefined,
 };
 
 const HISTORY_PAGE_SIZE = 50;
@@ -356,12 +373,12 @@ function useTableSubscription<Row extends { id: bigint }>(
     };
   }, [binding, getToken, requireAuth, pendingCalls]);
 
-  const callReducer = async <T>(call: (conn: DbConnection) => Promise<T>): Promise<T> => {
+  const callReducer = useCallback(async <T,>(call: (conn: DbConnection) => Promise<T>): Promise<T> => {
     if (conn == null) {
       throw new Error("Not connected to SpacetimeDB yet. Try again in a moment.");
     }
     return await pendingCalls.track(call(conn));
-  };
+  }, [conn, pendingCalls]);
 
   const loadOlder = async (): Promise<void> => {
     const pageOlder = binding.pageOlder;
@@ -424,6 +441,11 @@ const mcpBinding: TableBinding<McpCallLogRow> = {
     beforeCreatedAtMicros: cursor?.beforeCreatedAtMicros,
     beforeId: cursor?.beforeId,
     limit,
+    createdAtOrAfterMicros: undefined,
+    toolName: undefined,
+    hasError: undefined,
+    qaState: undefined,
+    humanReviewState: undefined,
   }),
 };
 
@@ -444,6 +466,12 @@ const aiQueryBinding: TableBinding<AiQueryLogRow> = {
     beforeCreatedAtMicros: cursor?.beforeCreatedAtMicros,
     beforeId: cursor?.beforeId,
     limit,
+    createdAtOrAfterMicros: undefined,
+    systemPromptId: undefined,
+    modelId: undefined,
+    mode: undefined,
+    isAuthenticated: undefined,
+    hasError: undefined,
   }),
 };
 
@@ -493,7 +521,25 @@ const feedbackBinding: TableBinding<FeedbackLogRow> = {
 };
 
 export function useMcpCallLogs(getToken?: GetSpacetimeToken) {
-  return useTableSubscription(mcpBinding, getToken, true);
+  const subscription = useTableSubscription(mcpBinding, getToken, true);
+  const queryFilteredPage = useCallback(async (
+    filters: McpReviewTableFilters,
+    cursor: PageCursor | null,
+    limit: number,
+  ): Promise<PagedRows<McpCallLogRow>> => {
+    const args = {
+      beforeCreatedAtMicros: cursor?.beforeCreatedAtMicros,
+      beforeId: cursor?.beforeId,
+      limit,
+      createdAtOrAfterMicros: filters.createdAtOrAfterMicros,
+      toolName: filters.toolName,
+      hasError: filters.hasError,
+      qaState: filters.qaState,
+      humanReviewState: filters.humanReviewState,
+    };
+    return await subscription.callReducer(conn => conn.procedures.pageMcpCallLog(args));
+  }, [subscription.callReducer]);
+  return { ...subscription, queryFilteredPage };
 }
 
 /**
@@ -505,7 +551,26 @@ export function useFeedbackLog(getToken?: GetSpacetimeToken) {
 }
 
 export function useAiQueryLogs(getToken?: GetSpacetimeToken) {
-  return useTableSubscription(aiQueryBinding, getToken, true);
+  const subscription = useTableSubscription(aiQueryBinding, getToken, true);
+  const queryFilteredPage = useCallback(async (
+    filters: AiUsageTableFilters,
+    cursor: PageCursor | null,
+    limit: number,
+  ): Promise<PagedRows<AiQueryLogRow>> => {
+    const args = {
+      beforeCreatedAtMicros: cursor?.beforeCreatedAtMicros,
+      beforeId: cursor?.beforeId,
+      limit,
+      createdAtOrAfterMicros: filters.createdAtOrAfterMicros,
+      systemPromptId: filters.systemPromptId,
+      modelId: filters.modelId,
+      mode: filters.mode,
+      isAuthenticated: filters.isAuthenticated,
+      hasError: filters.hasError,
+    };
+    return await subscription.callReducer(conn => conn.procedures.pageAiQueryLog(args));
+  }, [subscription.callReducer]);
+  return { ...subscription, queryFilteredPage };
 }
 
 /**
