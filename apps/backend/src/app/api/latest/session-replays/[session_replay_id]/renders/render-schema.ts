@@ -3,7 +3,7 @@ import { yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/di
 export const sessionReplayRenderSchema = yupObject({
   id: yupString().defined(),
   session_replay_id: yupString().defined(),
-  session_replay_segment_id: yupString().defined().meta({ openapiField: { description: "The tab (segment) of the replay that was rendered." } }),
+  session_replay_segment_id: yupString().nullable().defined().meta({ openapiField: { description: "The one tab (segment) rendered, or null when the whole replay is rendered, following the active tab like the dashboard player." } }),
   status: yupString().oneOf(["queued", "rendering", "succeeded", "failed"]).defined(),
   progress: yupNumber().nullable().defined().meta({ openapiField: { description: "Fraction of frames rendered so far (0 to 1), or null before rendering starts." } }),
   options: yupObject({

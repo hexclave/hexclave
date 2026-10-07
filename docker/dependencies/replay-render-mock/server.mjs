@@ -42,8 +42,9 @@ async function readJson(path) {
 }
 
 async function startJob(params) {
-  if (!Array.isArray(params?.events_urls) || params.events_urls.some((u) => typeof u !== "string") || typeof params.upload_url !== "string") {
-    throw Object.assign(new Error("params.events_urls (string[]) and params.upload_url (string) are required"), { statusCode: 400 });
+  const validTabs = Array.isArray(params?.tabs) && params.tabs.every((tab) => Array.isArray(tab?.chunks) && tab.chunks.every((c) => typeof c?.url === "string"));
+  if (!validTabs || typeof params.upload_url !== "string") {
+    throw Object.assign(new Error("params.tabs[].chunks[].url and params.upload_url are required"), { statusCode: 400 });
   }
   const running = [...jobs.values()].filter((job) => job.exitCode == null).length;
   if (running >= MAX_JOBS) {
@@ -54,7 +55,7 @@ async function startJob(params) {
   await mkdir(dir, { recursive: true });
   await writeFile(`${dir}/params.json`, JSON.stringify({
     ...params,
-    events_urls: params.events_urls.map(rewriteHostUrl),
+    tabs: params.tabs.map((tab) => ({ ...tab, chunks: tab.chunks.map((c) => ({ ...c, url: rewriteHostUrl(c.url) })) })),
     upload_url: rewriteHostUrl(params.upload_url),
   }));
   const child = spawn("node", ["/app/render.mjs", dir], { cwd: "/app", stdio: ["ignore", "pipe", "pipe"] });

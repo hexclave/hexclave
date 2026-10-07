@@ -486,7 +486,7 @@ Errors:
 
 Arguments:
   sessionReplayId: string - the replay's id
-  options.sessionReplaySegmentId: string? - which tab of the replay to render, default the tab with the most events
+  options.sessionReplaySegmentId: string? - render only this tab; by default every tab is rendered, following the active tab like the dashboard player
   options.fps: number? - frames per second, 1-30, default 15
   options.speed: number? - playback speed multiplier, 0.25-8, default 1
   options.skipInactivity: boolean? - cut idle stretches longer than 2s to about 1s, default true
@@ -495,7 +495,7 @@ Returns: SessionReplayRender
   {
     id: string,
     sessionReplayId: string,
-    sessionReplaySegmentId: string,
+    sessionReplaySegmentId: string | null,
     status: "queued" | "rendering" | "succeeded" | "failed",
     progress: number | null,
     options: { fps: number, speed: number, skipInactivity: boolean },
@@ -514,7 +514,7 @@ Response:
   {
     id: string,
     session_replay_id: string,
-    session_replay_segment_id: string,
+    session_replay_segment_id: string | null,
     status: "queued" | "rendering" | "succeeded" | "failed",
     progress: number | null,
     options: { fps: number, speed: number, skip_inactivity: boolean },
@@ -525,9 +525,11 @@ Response:
     video: { url: string, url_expires_at_millis: number, byte_length: number, width: number, height: number, duration_ms: number } | null
   }
 
-Starts rendering one tab of a replay to an MP4 video and returns the render, normally already
-`rendering`. Rendering runs in the background and takes roughly as long as the replay. Map the
-response with the same snake_case → camelCase rules as the other replay methods (millis → Date).
+Starts rendering a replay to an MP4 video and returns the render, normally already `rendering`.
+By default the video covers every tab and cuts between them exactly where the dashboard player
+does (sessionReplaySegmentId is then null in the result). Rendering runs in the background and
+takes roughly as long as the replay. Map the response with the same snake_case → camelCase rules
+as the other replay methods (millis → Date).
 
 Errors:
   ItemNotFound

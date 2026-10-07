@@ -7,21 +7,33 @@
 //   node render.mjs <job-dir>
 //
 // <job-dir>/params.json (written by the backend, data only):
-//   events_urls          presigned GETs, one per stored chunk of ONE replay segment
+//   tabs: [{ tab_key, label_index, chunks: [{ url, first_event_at_ms, last_event_at_ms }] }]
+//     the replay's tabs (segments) to render, each chunk as a presigned GET
 //   upload_url           presigned PUT for the finished video (Content-Type video/mp4)
 //   fps, speed, skip_inactivity, max_output_seconds
 //
 // Writes <job-dir>/progress.json while rendering and <job-dir>/result.json when
 // done. The VM holds no credentials: everything it can reach is those URLs.
 //
-// Frames are deterministic: every output frame advances the rrweb Replayer to
-// an exact offset and screenshots it, so a slow machine renders slower rather
-// than dropping frames.
+// With several tabs the video follows the active tab exactly like the dashboard
+// player does: the rule lives in session-replay-timeline.ts, a verbatim copy of
+// packages/shared/src/utils/session-replay-timeline.ts placed next to this file
+// (Node runs it through its built-in TypeScript type stripping).
+//
+// Frames are deterministic: each output frame advances the shown tab's rrweb
+// Replayer to an exact timestamp and screenshots it, so a slow machine renders
+// slower rather than dropping frames.
 import { spawn } from "node:child_process";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { gunzipSync } from "node:zlib";
 import puppeteer from "puppeteer";
+import {
+  INTER_TAB_GAP_FAST_FORWARD_MULTIPLIER,
+  computeReplayGlobalTimeline,
+  decideReplayActiveTab,
+  mergeReplayChunkRanges,
+} from "./session-replay-timeline.ts";
 
 const require = createRequire(import.meta.url);
 const RRWEB_JS = require.resolve("rrweb/dist/rrweb.min.js");
@@ -29,6 +41,8 @@ const RRWEB_CSS = require.resolve("rrweb/dist/rrweb.min.css");
 
 const MAX_EVENTS_BYTES = 256 * 1024 * 1024;
 const IDLE_THRESHOLD_MS = 2000;
+const MAX_WIDTH = 1920;
+const MAX_HEIGHT = 1200;
 
 const jobDir = process.argv[2];
 const startedAt = Date.now();
@@ -38,18 +52,32 @@ async function main() {
   const params = JSON.parse(await readFile(`${jobDir}/params.json`, "utf8"));
   const fps = clamp(params.fps ?? 15, 1, 30);
   const speed = clamp(params.speed ?? 1, 0.25, 8);
-  const idleThresholdMs = params.skip_inactivity === false ? Infinity : IDLE_THRESHOLD_MS;
+  const skipInactivity = params.skip_inactivity !== false;
   const maxOutputSeconds = clamp(params.max_output_seconds ?? 600, 1, 1800);
 
-  const events = await loadEvents(params.events_urls);
-  if (events.length === 0) throw new RenderError("The replay has no events to render.");
-  events.sort((a, b) => a.timestamp - b.timestamp);
-  if (!events.some((e) => e.type === 2)) throw new RenderError("The replay has no full snapshot, so there is nothing to render.");
+  const tabs = await loadTabs(params.tabs);
+  const timeline = tabs.map((t) => ({
+    tabKey: t.tabKey,
+    labelIndex: t.labelIndex,
+    ranges: t.ranges,
+    hasFullSnapshot: t.hasFullSnapshot,
+  }));
+  if (!timeline.some((t) => t.hasFullSnapshot)) {
+    throw new RenderError("The replay has no full snapshot, so there is nothing to render.");
+  }
 
-  const meta = events.find((e) => e.type === 4)?.data ?? {};
-  const width = even(clamp(meta.width ?? 1280, 320, 1920));
-  const height = even(clamp(meta.height ?? 720, 240, 1200));
-  const frameOffsets = buildFrameOffsets(events, { fps, speed, idleThresholdMs, maxFrames: Math.floor(maxOutputSeconds * fps) });
+  const plan = buildFramePlan(tabs, timeline, {
+    step: (1000 / fps) * speed,
+    skipInactivity,
+    maxFrames: Math.floor(maxOutputSeconds * fps),
+    holdFrames: Math.round(fps / 2),
+  });
+  if (plan.length === 0) throw new RenderError("The replay has no frames to render.");
+  const shownTabs = tabs.filter((t) => plan.some((f) => f.tabKey === t.tabKey));
+
+  // One canvas for the whole video, big enough for the largest tab shown.
+  const width = even(clamp(Math.max(...shownTabs.map((t) => t.width)), 320, MAX_WIDTH));
+  const height = even(clamp(Math.max(...shownTabs.map((t) => t.height)), 240, MAX_HEIGHT));
 
   const browser = await puppeteer.launch({
     executablePath: process.env.CHROME_PATH ?? "/usr/local/bin/chrome-headless-shell",
@@ -73,7 +101,15 @@ async function main() {
         // data:/blob: URLs have no useful origin
       }
     });
-    await page.setContent(`<!doctype html><html><head><style>html,body{margin:0;padding:0;background:#fff;overflow:hidden}.replayer-wrapper{position:relative}</style></head><body></body></html>`);
+    await page.setContent(`<!doctype html><html><head><style>
+      html, body { margin: 0; padding: 0; overflow: hidden; background: #111; }
+      .tab { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; visibility: hidden; }
+      .tab.active { visibility: visible; }
+      .stage { transform-origin: center center; background: #fff; }
+      .replayer-wrapper { position: relative; }
+      #label { position: absolute; top: 12px; left: 12px; z-index: 10; padding: 4px 10px; border-radius: 6px;
+        font: 600 14px/1.4 -apple-system, system-ui, sans-serif; color: #fff; background: rgba(17, 17, 17, 0.75); display: none; }
+    </style></head><body><div id="label"></div></body></html>`);
     await page.addStyleTag({ path: RRWEB_CSS });
     await page.addScriptTag({ path: RRWEB_JS });
 
@@ -82,37 +118,71 @@ async function main() {
     // advanced for synchronously applied events), duplicating DOM nodes on
     // every frame. Each event is cast exactly once, in order, through rrweb's
     // own synchronous cast function instead.
-    await page.evaluate(async (evs) => {
-      // eslint-disable-next-line no-undef
-      const replayer = new rrweb.Replayer(evs, {
-        root: document.body,
-        skipInactive: false,
-        showWarning: false,
-        showDebug: false,
-        mouseTail: false,
-        triggerFocus: false,
-        // Keeps the replay iframe sandboxed without allow-scripts.
-        UNSAFE_replayCanvas: false,
-      });
-      // Let the constructor's deferred first-snapshot rebuild run before casting.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const all = replayer.service.state.context.events;
-      const t0 = all[0].timestamp;
-      let next = 0;
-      window.__advanceTo = (offset) => {
-        const before = next;
-        while (next < all.length && all[next].timestamp - t0 <= offset) {
-          replayer.getCastFn(all[next], true)();
-          next++;
+    await page.evaluate((canvas, tabInfo, showLabels) => {
+      const tabsByKey = new Map(tabInfo.map((t) => [t.tabKey, t]));
+      const players = new Map();
+      const label = document.getElementById("label");
+      let shownKey = null;
+
+      async function getPlayer(tabKey) {
+        const existing = players.get(tabKey);
+        if (existing) return existing;
+        const info = tabsByKey.get(tabKey);
+        const container = document.createElement("div");
+        container.className = "tab";
+        const stage = document.createElement("div");
+        stage.className = "stage";
+        stage.style.width = `${info.width}px`;
+        stage.style.height = `${info.height}px`;
+        stage.style.transform = `scale(${Math.min(1, canvas.width / info.width, canvas.height / info.height)})`;
+        container.appendChild(stage);
+        document.body.appendChild(container);
+        // eslint-disable-next-line no-undef
+        const replayer = new rrweb.Replayer(window.__events.get(tabKey), {
+          root: stage,
+          skipInactive: false,
+          showWarning: false,
+          showDebug: false,
+          mouseTail: false,
+          triggerFocus: false,
+          // Keeps the replay iframe sandboxed without allow-scripts.
+          UNSAFE_replayCanvas: false,
+        });
+        // Let the constructor's deferred first-snapshot rebuild run before casting.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const player = { container, replayer, events: replayer.service.state.context.events, next: 0 };
+        players.set(tabKey, player);
+        return player;
+      }
+
+      window.__render = async (tabKey, ts) => {
+        const player = await getPlayer(tabKey);
+        const before = player.next;
+        while (player.next < player.events.length && player.events[player.next].timestamp <= ts) {
+          player.replayer.getCastFn(player.events[player.next], true)();
+          player.next++;
         }
         // Synchronous casts queue DOM mutations; rrweb applies them on "flush",
         // which its own seek path emits after each synchronous batch.
-        if (next !== before) replayer.emitter.emit("flush");
+        if (player.next !== before) player.replayer.emitter.emit("flush");
+        if (shownKey !== tabKey) {
+          players.get(shownKey)?.container.classList.remove("active");
+          player.container.classList.add("active");
+          shownKey = tabKey;
+          if (showLabels) {
+            label.textContent = `Tab ${tabsByKey.get(tabKey).labelIndex}`;
+            label.style.display = "block";
+          }
+        }
       };
-      window.__advanceTo(0);
-    }, events);
-    // Give fonts and images referenced by the first snapshot a chance to load.
-    await page.waitForNetworkIdle({ idleTime: 500, timeout: 8000 }).catch(() => warnings.push("Some page assets were still loading after 8s."));
+    }, { width, height }, shownTabs.map((t) => ({ tabKey: t.tabKey, labelIndex: t.labelIndex, width: t.width, height: t.height })), shownTabs.length > 1);
+    // Events go in separately: one evaluate argument per tab keeps each message small.
+    await page.evaluate(() => {
+      window.__events = new Map();
+    });
+    for (const tab of shownTabs) {
+      await page.evaluate((key, evs) => window.__events.set(key, evs), tab.tabKey, tab.events);
+    }
 
     const outPath = `${jobDir}/out.mp4`;
     const ffmpeg = spawn("ffmpeg", [
@@ -132,18 +202,27 @@ async function main() {
     });
 
     let lastProgressWrite = 0;
-    for (let i = 0; i < frameOffsets.length; i++) {
-      await page.evaluate((offset) => window.__advanceTo(offset), frameOffsets[i]);
+    let previousTabKey = null;
+    let tabSwitches = 0;
+    for (let i = 0; i < plan.length; i++) {
+      const frame = plan[i];
+      await page.evaluate((key, ts) => window.__render(key, ts), frame.tabKey, frame.ts);
+      if (frame.tabKey !== previousTabKey) {
+        if (previousTabKey !== null) tabSwitches++;
+        previousTabKey = frame.tabKey;
+        // A newly shown tab may reference fonts and images that are not loaded yet.
+        await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => warnings.push("Some page assets were still loading after 5s."));
+      }
       const jpeg = await page.screenshot({ type: "jpeg", quality: 85, optimizeForSpeed: true });
       if (!ffmpeg.stdin.write(jpeg)) await new Promise((resolve) => ffmpeg.stdin.once("drain", resolve));
       if (Date.now() - lastProgressWrite > 1000) {
         lastProgressWrite = Date.now();
-        await writeFile(`${jobDir}/progress.json`, JSON.stringify({ frame: i + 1, total: frameOffsets.length }));
+        await writeFile(`${jobDir}/progress.json`, JSON.stringify({ frame: i + 1, total: plan.length }));
       }
     }
     ffmpeg.stdin.end();
     await ffmpegDone;
-    await writeFile(`${jobDir}/progress.json`, JSON.stringify({ frame: frameOffsets.length, total: frameOffsets.length }));
+    await writeFile(`${jobDir}/progress.json`, JSON.stringify({ frame: plan.length, total: plan.length }));
 
     const video = await readFile(outPath);
     const res = await fetch(params.upload_url, {
@@ -153,19 +232,22 @@ async function main() {
     });
     if (!res.ok) throw new RenderError(`Uploading the video failed with HTTP ${res.status}.`);
 
+    const { globalTotalMs } = computeReplayGlobalTimeline(tabs);
     await writeResult({
       status: "ok",
       width,
       height,
       fps,
-      frame_count: frameOffsets.length,
-      replay_duration_ms: events.at(-1).timestamp - events[0].timestamp,
-      output_duration_ms: Math.round(frameOffsets.length / fps * 1000),
+      frame_count: plan.length,
+      tab_count: shownTabs.length,
+      tab_switches: tabSwitches,
+      replay_duration_ms: globalTotalMs,
+      output_duration_ms: Math.round(plan.length / fps * 1000),
       output_bytes: (await stat(outPath)).size,
       failed_requests: failedRequests,
       failed_origins: [...failedOrigins].slice(0, 20),
       render_ms: Date.now() - startedAt,
-      warnings,
+      warnings: [...new Set(warnings)],
     });
   } finally {
     await browser.close().catch(() => {});
@@ -174,50 +256,107 @@ async function main() {
 
 class RenderError extends Error {}
 
-async function loadEvents(urls) {
-  if (!Array.isArray(urls) || urls.length === 0) throw new RenderError("No replay chunks to render.");
-  const events = [];
-  let totalBytes = 0;
-  for (const url of urls) {
-    const res = await fetch(url);
-    if (!res.ok) throw new RenderError(`Downloading a replay chunk failed with HTTP ${res.status}.`);
-    const raw = Buffer.from(await res.arrayBuffer());
-    totalBytes += raw.byteLength;
-    if (totalBytes > MAX_EVENTS_BYTES) throw new RenderError("The replay is too large to render.");
-    // Chunks are stored gzipped; fetch() already inflated them if the object
-    // was served with Content-Encoding: gzip.
-    const body = JSON.parse((raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw) : raw).toString("utf8"));
-    const chunkEvents = Array.isArray(body) ? body : body.events;
-    if (!Array.isArray(chunkEvents)) throw new RenderError("A replay chunk is malformed.");
-    for (const event of chunkEvents) {
-      if (typeof event === "object" && event !== null && typeof event.timestamp === "number" && typeof event.type === "number") {
-        events.push(event);
+/**
+ * Plans every output frame up front: the timestamp to show and which tab shows
+ * it. The tab follows decideReplayActiveTab, the dashboard player's own rule.
+ */
+function buildFramePlan(tabs, timeline, { step, skipInactivity, maxFrames, holdFrames }) {
+  const tabsByKey = new Map(tabs.map((t) => [t.tabKey, t]));
+  const plan = [];
+  let ts = computeReplayGlobalTimeline(tabs).globalStartTs;
+  let active = null;
+  while (plan.length < maxFrames) {
+    const decision = decideReplayActiveTab(timeline, active, ts);
+    if (decision.type === "end") break;
+    if (decision.type === "switch") {
+      active = decision.tabKey;
+    } else if (decision.type === "gap") {
+      if (skipInactivity || active == null) {
+        ts = decision.startTs;
+        active = decision.tabKey;
+        continue;
       }
+      // Like the player: hold the last tab while fast-forwarding to the next one.
+      plan.push({ ts, tabKey: active });
+      ts = Math.min(decision.startTs, ts + step * INTER_TAB_GAP_FAST_FORWARD_MULTIPLIER);
+      continue;
     }
+    plan.push({ ts, tabKey: active });
+    ts += step;
+    if (skipInactivity) ts = skipIdle(tabsByKey.get(active), ts);
   }
-  return events;
+  // Hold the last frame for half a second so the video doesn't end on a cut.
+  const last = plan.at(-1);
+  if (last != null) {
+    for (let i = 0; i < holdFrames && plan.length < maxFrames; i++) plan.push(last);
+  }
+  return plan;
 }
 
-// Offsets (ms after the first event) to advance to, one per output frame. With
-// skip-inactivity, gaps longer than idleThresholdMs are cut to about a second.
-function buildFrameOffsets(events, { fps, speed, idleThresholdMs, maxFrames }) {
-  const t0 = events[0].timestamp;
-  const end = events.at(-1).timestamp - t0 + 500;
-  const step = (1000 / fps) * speed;
-  const times = events.map((e) => e.timestamp - t0);
-  const offsets = [];
-  let t = 0;
-  let next = 0;
-  while (t <= end && offsets.length < maxFrames) {
-    offsets.push(Math.round(t));
-    t += step;
-    while (next < times.length && times[next] <= t) next++;
-    const prev = next > 0 ? times[next - 1] : 0;
-    if (next < times.length && times[next] - prev > idleThresholdMs && t > prev + 500 && t < times[next] - 500) {
-      t = times[next] - 500;
-    }
+/**
+ * Within the shown tab, cuts idle stretches longer than IDLE_THRESHOLD_MS down
+ * to about a second — but never past the end of the tab's current recording
+ * range, where the shared rule may hand over to another tab.
+ */
+function skipIdle(tab, ts) {
+  const times = tab.eventTimes;
+  let lo = 0;
+  let hi = times.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= ts) lo = mid + 1;
+    else hi = mid;
   }
-  return offsets;
+  if (lo === 0 || lo >= times.length) return ts;
+  const prev = times[lo - 1];
+  const next = times[lo];
+  if (next - prev <= IDLE_THRESHOLD_MS || ts <= prev + 500 || ts >= next - 500) return ts;
+  const range = tab.ranges.find((r) => r.startTs <= ts && ts <= r.endTs);
+  const limit = range == null ? next - 500 : Math.min(next - 500, range.endTs + 1);
+  return Math.max(ts, limit);
+}
+
+async function loadTabs(paramTabs) {
+  if (!Array.isArray(paramTabs) || paramTabs.length === 0) throw new RenderError("No replay tabs to render.");
+  let totalBytes = 0;
+  const tabs = [];
+  for (const paramTab of paramTabs) {
+    const events = [];
+    for (const chunk of paramTab.chunks) {
+      const res = await fetch(chunk.url);
+      if (!res.ok) throw new RenderError(`Downloading a replay chunk failed with HTTP ${res.status}.`);
+      const raw = Buffer.from(await res.arrayBuffer());
+      totalBytes += raw.byteLength;
+      if (totalBytes > MAX_EVENTS_BYTES) throw new RenderError("The replay is too large to render.");
+      // Chunks are stored gzipped; fetch() already inflated them if the object
+      // was served with Content-Encoding: gzip.
+      const body = JSON.parse((raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw) : raw).toString("utf8"));
+      const chunkEvents = Array.isArray(body) ? body : body.events;
+      if (!Array.isArray(chunkEvents)) throw new RenderError("A replay chunk is malformed.");
+      for (const event of chunkEvents) {
+        if (typeof event === "object" && event !== null && typeof event.timestamp === "number" && typeof event.type === "number") {
+          events.push(event);
+        }
+      }
+    }
+    events.sort((a, b) => a.timestamp - b.timestamp);
+    const chunkSpans = paramTab.chunks.map((c) => ({ firstEventAtMs: c.first_event_at_ms, lastEventAtMs: c.last_event_at_ms }));
+    const meta = events.find((e) => e.type === 4)?.data ?? {};
+    tabs.push({
+      tabKey: paramTab.tab_key,
+      labelIndex: paramTab.label_index,
+      events,
+      eventTimes: events.map((e) => e.timestamp),
+      // Like the player, the timeline comes from chunk metadata, not the events.
+      ranges: mergeReplayChunkRanges(chunkSpans),
+      firstEventAtMs: Math.min(...chunkSpans.map((c) => c.firstEventAtMs)),
+      lastEventAtMs: Math.max(...chunkSpans.map((c) => c.lastEventAtMs)),
+      hasFullSnapshot: events.some((e) => e.type === 2),
+      width: clamp(meta.width ?? 1280, 320, 4096),
+      height: clamp(meta.height ?? 720, 240, 4096),
+    });
+  }
+  return tabs;
 }
 
 function clamp(n, lo, hi) {

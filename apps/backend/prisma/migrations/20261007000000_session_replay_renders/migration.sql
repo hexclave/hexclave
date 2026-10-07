@@ -9,7 +9,7 @@ CREATE TABLE "SessionReplayRender" (
     "id" UUID NOT NULL,
     "tenancyId" UUID NOT NULL,
     "sessionReplayId" UUID NOT NULL,
-    "sessionReplaySegmentId" TEXT NOT NULL,
+    "sessionReplaySegmentId" TEXT,
     "status" "SessionReplayRenderStatus" NOT NULL DEFAULT 'QUEUED',
     "options" JSONB NOT NULL,
     "progress" DOUBLE PRECISION,

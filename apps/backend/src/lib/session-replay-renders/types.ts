@@ -3,7 +3,13 @@
  * Data only: the machine that runs the renderer gets these URLs and nothing else.
  */
 export type ReplayRenderJobParams = {
-  events_urls: string[],
+  /** The tabs (segments) to render; with several, the video follows the active tab. */
+  tabs: Array<{
+    tab_key: string,
+    /** The N of "Tab N", numbered across all of the replay's tabs like the player does. */
+    label_index: number,
+    chunks: Array<{ url: string, first_event_at_ms: number, last_event_at_ms: number }>,
+  }>,
   upload_url: string,
   fps: number,
   speed: number,
@@ -19,6 +25,8 @@ export type ReplayRenderResult =
     height: number,
     fps: number,
     frame_count: number,
+    tab_count: number,
+    tab_switches: number,
     replay_duration_ms: number,
     output_duration_ms: number,
     output_bytes: number,

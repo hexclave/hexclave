@@ -40,6 +40,7 @@ PUPPETEER_SKIP_DOWNLOAD=1 npm install --no-audit --no-fund --omit=dev
 npx puppeteer browsers install chrome-headless-shell
 ln -sf "$(find /opt/puppeteer-cache -type f -name chrome-headless-shell | head -1)" /usr/local/bin/chrome-headless-shell
 mv /tmp/render.mjs /opt/replay-render/render.mjs
+mv /tmp/session-replay-timeline.ts /opt/replay-render/session-replay-timeline.ts
 chmod -R a+rX /opt/replay-render /opt/puppeteer-cache /opt/node
 
 # The renderer runs as this user; it owns nothing but its own job directory.

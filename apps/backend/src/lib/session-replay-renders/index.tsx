@@ -3,6 +3,7 @@ import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { createPresignedDownloadUrl, createPresignedUploadUrl, downloadByteRange, headBytes } from "@/s3";
 import { KnownErrors } from "@hexclave/shared";
 import { captureError, StatusError } from "@hexclave/shared/dist/utils/errors";
+import { computeReplayTabLabelIndex } from "@hexclave/shared/dist/utils/session-replay-timeline";
 import { getReplayRenderRuntime, getRuntimeByName } from "./runtime";
 import { FREESTYLE_RENDER_VM_TTL_SECONDS } from "./runtime-freestyle";
 import type { ReplayRenderHandle, ReplayRenderJobParams, ReplayRenderResult } from "./types";
@@ -12,8 +13,8 @@ type TenancyPrisma = Awaited<ReturnType<typeof getPrismaClientForTenancy>>;
 export const SESSION_REPLAY_RENDER_LIMITS = {
   /** Renders that are queued or rendering at once, per project. */
   maxActivePerTenancy: 3,
-  /** Stored (compressed) size of the replay segment being rendered. */
-  maxSegmentBytes: 256 * 1024 * 1024,
+  /** Stored (compressed) size of the recording data being rendered. */
+  maxRecordingBytes: 256 * 1024 * 1024,
   /** Length of the output video. */
   maxOutputSeconds: 10 * 60,
   /** Wall-clock budget for one render, start to upload; stays inside the VM's own TTL. */
@@ -32,7 +33,8 @@ export type SessionReplayRenderOptions = {
 export type SessionReplayRenderApi = {
   id: string,
   session_replay_id: string,
-  session_replay_segment_id: string,
+  /** Null when the whole replay is rendered, following the active tab. */
+  session_replay_segment_id: string | null,
   status: "queued" | "rendering" | "succeeded" | "failed",
   progress: number | null,
   options: { fps: number, speed: number, skip_inactivity: boolean },
@@ -83,17 +85,16 @@ export async function createSessionReplayRender(options: {
   if (segments.length === 0) {
     throw new StatusError(StatusError.BadRequest, "This session replay has no recorded data to render.");
   }
-  let segment;
+  // No segment means the whole replay, following the active tab like the player.
+  let included = segments;
   if (options.sessionReplaySegmentId != null) {
-    segment = segments.find((s) => s.sessionReplaySegmentId === options.sessionReplaySegmentId);
-    if (segment == null) {
+    included = segments.filter((s) => s.sessionReplaySegmentId === options.sessionReplaySegmentId);
+    if (included.length === 0) {
       throw new StatusError(StatusError.BadRequest, "This session replay has no segment with that session_replay_segment_id.");
     }
-  } else {
-    // Default to the tab where the most happened.
-    segment = segments.reduce((best, s) => (s._sum.eventCount ?? 0) > (best._sum.eventCount ?? 0) ? s : best);
   }
-  if ((segment._sum.byteLength ?? 0) > SESSION_REPLAY_RENDER_LIMITS.maxSegmentBytes) {
+  const includedBytes = included.reduce((sum, s) => sum + (s._sum.byteLength ?? 0), 0);
+  if (includedBytes > SESSION_REPLAY_RENDER_LIMITS.maxRecordingBytes) {
     throw new StatusError(StatusError.BadRequest, "This session replay is too large to render.");
   }
 
@@ -108,7 +109,7 @@ export async function createSessionReplayRender(options: {
     data: {
       tenancyId,
       sessionReplayId,
-      sessionReplaySegmentId: segment.sessionReplaySegmentId,
+      sessionReplaySegmentId: options.sessionReplaySegmentId,
       options: options.renderOptions,
     },
   });
@@ -171,19 +172,43 @@ async function startRender(prisma: TenancyPrisma, render: SessionReplayRender): 
   const key = outputKey(render.tenancyId, render.id);
   let handle: ReplayRenderHandle;
   try {
+    // Every chunk of the replay: "Tab N" labels are numbered across all tabs,
+    // even when only one of them is rendered.
     const chunks = await prisma.sessionReplayChunk.findMany({
-      where: { tenancyId: render.tenancyId, sessionReplayId: render.sessionReplayId, sessionReplaySegmentId: render.sessionReplaySegmentId },
+      where: { tenancyId: render.tenancyId, sessionReplayId: render.sessionReplayId },
       orderBy: [{ firstEventAt: "asc" }, { createdAt: "asc" }],
-      select: { s3Key: true },
+      select: { s3Key: true, sessionReplaySegmentId: true, firstEventAt: true, lastEventAt: true },
     });
-    if (chunks.length === 0 || chunks.some((c) => c.s3Key.startsWith("preview://"))) {
+    const included = chunks.filter((c) => render.sessionReplaySegmentId == null || c.sessionReplaySegmentId === render.sessionReplaySegmentId);
+    if (included.length === 0 || included.some((c) => c.s3Key.startsWith("preview://"))) {
       return await failRender(prisma, render, "This session replay has no stored recording data to render.");
     }
+    const chunksByTab = new Map<string, typeof chunks>();
+    for (const chunk of chunks) {
+      chunksByTab.set(chunk.sessionReplaySegmentId, [...(chunksByTab.get(chunk.sessionReplaySegmentId) ?? []), chunk]);
+    }
+    const labelIndex = computeReplayTabLabelIndex([...chunksByTab].map(([tabKey, tabChunks]) => ({
+      tabKey,
+      firstEventAtMs: Math.min(...tabChunks.map((c) => c.firstEventAt.getTime())),
+    })));
     // URLs outlive the render budget so a slow render never loses access mid-way.
     const urlTtlSeconds = Math.ceil(SESSION_REPLAY_RENDER_LIMITS.maxRenderMs / 1000) + 5 * 60;
     const options = readOptions(render);
+    const tabs: ReplayRenderJobParams["tabs"] = [];
+    for (const [tabKey, tabChunks] of chunksByTab) {
+      if (render.sessionReplaySegmentId != null && tabKey !== render.sessionReplaySegmentId) continue;
+      tabs.push({
+        tab_key: tabKey,
+        label_index: labelIndex.get(tabKey) ?? tabs.length + 1,
+        chunks: await Promise.all(tabChunks.map(async (c) => ({
+          url: await createPresignedDownloadUrl({ key: c.s3Key, private: true, expiresInSeconds: urlTtlSeconds }),
+          first_event_at_ms: c.firstEventAt.getTime(),
+          last_event_at_ms: c.lastEventAt.getTime(),
+        }))),
+      });
+    }
     const params: ReplayRenderJobParams = {
-      events_urls: await Promise.all(chunks.map((c) => createPresignedDownloadUrl({ key: c.s3Key, private: true, expiresInSeconds: urlTtlSeconds }))),
+      tabs,
       upload_url: await createPresignedUploadUrl({ key, private: true, contentType: "video/mp4", expiresInSeconds: urlTtlSeconds }),
       fps: options.fps,
       speed: options.speed,

@@ -715,15 +715,17 @@ enum SessionReplayRenderStatus {
   FAILED
 }
 
-// A request to render one segment (browser tab) of a session replay to an MP4.
+// A request to render a session replay — all of its tabs, or one — to an MP4.
 // Advanced by src/lib/session-replay-renders: the create request starts it, and
 // status polls plus the session-replay-renders-step cron move it along.
 model SessionReplayRender {
   id String @default(uuid()) @db.Uuid
 
-  tenancyId              String @db.Uuid
-  sessionReplayId        String @db.Uuid
-  sessionReplaySegmentId String
+  tenancyId       String  @db.Uuid
+  sessionReplayId String  @db.Uuid
+  // The one tab (segment) rendered, or null for the whole replay following the
+  // active tab across tabs (see packages/shared/src/utils/session-replay-timeline.ts).
+  sessionReplaySegmentId String?
 
   status  SessionReplayRenderStatus @default(QUEUED)
   // { fps, speed, skipInactivity }

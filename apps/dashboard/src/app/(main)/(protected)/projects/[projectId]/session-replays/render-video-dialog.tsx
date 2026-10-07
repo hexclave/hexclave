@@ -27,6 +27,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useServerApp } from "../use-admin-app";
 
 const POLL_INTERVAL_MS = 2000;
+const ALL_TABS = "__all_tabs__";
 
 export type RenderableTab = {
   sessionReplaySegmentId: string,
@@ -49,11 +50,9 @@ function progressPercent(render: AdminSessionReplayRender) {
 export function RenderVideoButton({
   sessionReplayId,
   tabs,
-  activeSegmentId,
 }: {
   sessionReplayId: string,
   tabs: RenderableTab[],
-  activeSegmentId: string | null,
 }) {
   const serverApp = useServerApp();
   const [open, setOpen] = useState(false);
@@ -109,13 +108,12 @@ export function RenderVideoButton({
           <DialogHeader>
             <DialogTitle>Render replay to video</DialogTitle>
             <DialogDescription>
-              Renders one tab of this replay to an MP4 in the background. You can close this dialog while it renders.
+              Renders this replay to an MP4 in the background, cutting between tabs like the player. You can close this dialog while it renders.
             </DialogDescription>
           </DialogHeader>
           <RenderForm
             sessionReplayId={sessionReplayId}
             tabs={tabs}
-            activeSegmentId={activeSegmentId}
             disabled={activeRender != null}
             onStarted={(render) => setRenders((prev) => [render, ...(prev ?? [])])}
           />
@@ -142,21 +140,17 @@ export function RenderVideoButton({
 function RenderForm({
   sessionReplayId,
   tabs,
-  activeSegmentId,
   disabled,
   onStarted,
 }: {
   sessionReplayId: string,
   tabs: RenderableTab[],
-  activeSegmentId: string | null,
   disabled: boolean,
   onStarted: (render: AdminSessionReplayRender) => void,
 }) {
   const serverApp = useServerApp();
-  // Defaults to the tab being watched when the dialog opened (the dialog's
-  // content remounts on every open); playback continues behind the dialog, so
-  // following activeSegmentId afterwards would change the user's choice.
-  const [segmentId, setSegmentId] = useState<string | null>(activeSegmentId);
+  // All tabs by default: the video then cuts between tabs exactly like this player.
+  const [segmentId, setSegmentId] = useState<string>(ALL_TABS);
   const [speed, setSpeed] = useState("1");
   const [fps, setFps] = useState("15");
   const [skipInactivity, setSkipInactivity] = useState(true);
@@ -166,7 +160,7 @@ function RenderForm({
     setError(null);
     try {
       const render = await serverApp.renderSessionReplay(sessionReplayId, {
-        sessionReplaySegmentId: segmentId ?? undefined,
+        sessionReplaySegmentId: segmentId === ALL_TABS ? undefined : segmentId,
         speed: Number(speed),
         fps: Number(fps),
         skipInactivity,
@@ -182,11 +176,12 @@ function RenderForm({
     <div className="space-y-4 pt-2">
       <div className="grid grid-cols-3 gap-3">
         <Field label="Tab">
-          <Select value={segmentId ?? ""} onValueChange={setSegmentId} disabled={tabs.length <= 1}>
+          <Select value={segmentId} onValueChange={setSegmentId} disabled={tabs.length <= 1}>
             <SelectTrigger className="h-8 text-xs" aria-label="Tab to render">
-              <SelectValue placeholder="Most active" />
+              <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={ALL_TABS}>All tabs</SelectItem>
               {tabs.map((tab) => (
                 <SelectItem key={tab.sessionReplaySegmentId} value={tab.sessionReplaySegmentId}>{tab.label}</SelectItem>
               ))}
@@ -242,7 +237,9 @@ function Field({ label, children }: { label: string, children: React.ReactNode }
 
 function RenderRow({ render, tabs, showPreview }: { render: AdminSessionReplayRender, tabs: RenderableTab[], showPreview: boolean }) {
   const createdFromNow = useFromNow(render.createdAt);
-  const tabLabel = tabs.find((t) => t.sessionReplaySegmentId === render.sessionReplaySegmentId)?.label ?? "Tab";
+  const tabLabel = render.sessionReplaySegmentId == null
+    ? "All tabs"
+    : tabs.find((t) => t.sessionReplaySegmentId === render.sessionReplaySegmentId)?.label ?? "Tab";
   const summary = `${tabLabel} · ${render.options.speed}x · ${render.options.fps} fps${render.options.skipInactivity ? " · skip idle" : ""}`;
 
   return (

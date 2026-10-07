@@ -285,6 +285,8 @@ services:
       HOST_ON_HOST: host.docker.internal
     volumes:
       - ../../apps/backend/scripts/replay-render/render.mjs:/app/render.mjs:ro
+      # Imported by render.mjs; the tab-following rule shared with the dashboard player.
+      - ../../packages/shared/src/utils/session-replay-timeline.ts:/app/session-replay-timeline.ts:ro
     tmpfs:
       - /tmp:size=1g,mode=1777
     cap_drop:

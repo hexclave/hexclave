@@ -72,8 +72,8 @@ export type SessionReplayAllEventsResult = {
 export type AdminSessionReplayRender = {
   id: string,
   sessionReplayId: string,
-  /** The tab (segment) of the replay that is rendered. */
-  sessionReplaySegmentId: string,
+  /** The one tab (segment) rendered, or null for the whole replay, following the active tab like the dashboard player. */
+  sessionReplaySegmentId: string | null,
   status: "queued" | "rendering" | "succeeded" | "failed",
   /** Fraction of frames rendered so far (0 to 1), or null before rendering starts. */
   progress: number | null,
@@ -99,7 +99,7 @@ export type AdminSessionReplayRender = {
 };
 
 export type RenderSessionReplayOptions = {
-  /** Which tab of the replay to render. Defaults to the tab with the most activity. */
+  /** Render only this tab of the replay. By default every tab is rendered, cutting to whichever is active like the dashboard player. */
   sessionReplaySegmentId?: string,
   /** Frames per second, 1–30. Defaults to 15. */
   fps?: number,

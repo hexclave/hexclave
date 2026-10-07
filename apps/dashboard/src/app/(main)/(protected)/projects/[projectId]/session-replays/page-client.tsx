@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { ArrowLeftIcon, ArrowsClockwiseIcon, CheckIcon, CursorClickIcon, FastForwardIcon, FunnelSimpleIcon, GearIcon, LinkIcon, MonitorPlayIcon, PauseIcon, PlayIcon, XIcon } from "@phosphor-icons/react";
 import { runAsynchronously, runAsynchronouslyWithAlert, wait } from "@hexclave/shared/dist/utils/promises";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
+import { computeReplayTabLabelIndex, mergeReplayChunkRanges } from "@hexclave/shared/dist/utils/session-replay-timeline";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { AppEnabledGuard } from "../app-enabled-guard";
@@ -1179,39 +1180,19 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
 
       const { globalStartTs, globalTotalMs } = computeGlobalTimeline(allStreams);
 
-      // Build chunk ranges from full metadata.
+      // Ranges and "Tab N" labels come from the shared replay timeline, which the
+      // server-side video renderer uses too.
       const rangesByTab = new Map<TabKey, ChunkRange[]>();
       for (const s of allStreams) {
-        const ranges = s.chunks
-          .map((c) => ({ startTs: c.firstEventAt.getTime(), endTs: c.lastEventAt.getTime() }))
-          .filter(r => Number.isFinite(r.startTs) && Number.isFinite(r.endTs) && r.endTs >= r.startTs)
-          .sort((a, b) => a.startTs - b.startTs);
-
-        const merged: ChunkRange[] = [];
-        for (const r of ranges) {
-          const last = merged[merged.length - 1] as ChunkRange | undefined;
-          if (!last) {
-            merged.push({ ...r });
-            continue;
-          }
-          if (r.startTs <= last.endTs) {
-            last.endTs = Math.max(last.endTs, r.endTs);
-          } else {
-            merged.push({ ...r });
-          }
-        }
-        rangesByTab.set(s.tabKey, merged);
+        rangesByTab.set(s.tabKey, mergeReplayChunkRanges(s.chunks.map((c) => ({
+          firstEventAtMs: c.firstEventAt.getTime(),
+          lastEventAtMs: c.lastEventAt.getTime(),
+        }))));
       }
-
-      // Stable tab labels.
-      const labelOrder = allStreams
-        .slice()
-        .sort((a, b) => {
-          const first = a.firstEventAt.getTime() - b.firstEventAt.getTime();
-          if (first !== 0) return first;
-          return stringCompare(a.tabKey, b.tabKey);
-        });
-      const tabLabelIndex = new Map(labelOrder.map((s, i) => [s.tabKey, i + 1]));
+      const tabLabelIndex = computeReplayTabLabelIndex(allStreams.map((s) => ({
+        tabKey: s.tabKey,
+        firstEventAtMs: s.firstEventAt.getTime(),
+      })));
 
       const streamInfos: StreamInfo[] = allStreams.map(s => ({
         tabKey: s.tabKey,
@@ -1944,7 +1925,6 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                       <RenderVideoButton
                         sessionReplayId={selectedRecordingId}
                         tabs={renderableTabs}
-                        activeSegmentId={activeStream?.sessionReplaySegmentId ?? null}
                       />
                     )}
                     {selectedRecordingId && (

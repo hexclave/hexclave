@@ -7557,8 +7557,14 @@
                             "type": "string"
                           },
                           "session_replay_segment_id": {
-                            "type": "string",
-                            "description": "The tab (segment) of the replay that was rendered."
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              null
+                            ],
+                            "description": "The one tab (segment) rendered, or null when the whole replay is rendered, following the active tab like the dashboard player."
                           },
                           "status": {
                             "type": "string",
@@ -7658,7 +7664,6 @@
                         "required": [
                           "id",
                           "session_replay_id",
-                          "session_replay_segment_id",
                           "status",
                           "options",
                           "created_at_millis"
@@ -7677,7 +7682,7 @@
       },
       "post": {
         "summary": "Render session replay to video",
-        "description": "Starts rendering one tab (segment) of a session replay to an MP4 video. Rendering runs in the background and usually takes about as long as the replay; poll the returned render until its status is `succeeded` (it then carries a download URL) or `failed`.",
+        "description": "Starts rendering a session replay to an MP4 video. By default the video covers the whole replay and, like the dashboard player, follows whichever tab is active, cutting between tabs; pass `session_replay_segment_id` to render a single tab instead. Rendering runs in the background and usually takes about as long as the replay; poll the returned render until its status is `succeeded` (it then carries a download URL) or `failed`.",
         "parameters": [
           {
             "name": "session_replay_id",
@@ -7697,7 +7702,7 @@
                 "properties": {
                   "session_replay_segment_id": {
                     "type": "string",
-                    "description": "Which tab of the replay to render. Defaults to the tab with the most activity."
+                    "description": "Render only this tab (segment) of the replay. Omit it to render every tab, following the active one."
                   },
                   "fps": {
                     "type": "integer",
@@ -7736,8 +7741,14 @@
                       "type": "string"
                     },
                     "session_replay_segment_id": {
-                      "type": "string",
-                      "description": "The tab (segment) of the replay that was rendered."
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        null
+                      ],
+                      "description": "The one tab (segment) rendered, or null when the whole replay is rendered, following the active tab like the dashboard player."
                     },
                     "status": {
                       "type": "string",
@@ -7837,7 +7848,6 @@
                   "required": [
                     "id",
                     "session_replay_id",
-                    "session_replay_segment_id",
                     "status",
                     "options",
                     "created_at_millis"
@@ -7890,8 +7900,14 @@
                       "type": "string"
                     },
                     "session_replay_segment_id": {
-                      "type": "string",
-                      "description": "The tab (segment) of the replay that was rendered."
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        null
+                      ],
+                      "description": "The one tab (segment) rendered, or null when the whole replay is rendered, following the active tab like the dashboard player."
                     },
                     "status": {
                       "type": "string",
@@ -7991,7 +8007,6 @@
                   "required": [
                     "id",
                     "session_replay_id",
-                    "session_replay_segment_id",
                     "status",
                     "options",
                     "created_at_millis"

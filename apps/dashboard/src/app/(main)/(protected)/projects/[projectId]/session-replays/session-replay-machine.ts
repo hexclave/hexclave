@@ -9,7 +9,13 @@ import {
   globalOffsetToLocalOffset,
   localOffsetToGlobalOffset,
 } from "@/lib/session-replay-streams";
-import { stringCompare } from "@hexclave/shared/dist/utils/strings";
+import {
+  decideReplayActiveTab,
+  findBestReplayTabAt,
+  findNextReplayTabStartAfter,
+  isReplayTabInRangeAt,
+  type ReplayTimelineTab,
+} from "@hexclave/shared/dist/utils/session-replay-timeline";
 
 // ---------------------------------------------------------------------------
 // Shared constants (also used by the component shell)
@@ -225,41 +231,23 @@ export function createInitialState(settings?: ReplaySettings): ReplayState {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
+// Which tab is shown when is decided by the shared session replay timeline, so
+// that videos rendered server-side cut between tabs exactly where this player does.
+function timelineTabs(state: ReplayState): ReplayTimelineTab[] {
+  return state.streams.map((s) => ({
+    tabKey: s.tabKey,
+    labelIndex: state.tabLabelIndex.get(s.tabKey) ?? Number.POSITIVE_INFINITY,
+    ranges: state.chunkRangesByTab.get(s.tabKey) ?? [],
+    hasFullSnapshot: state.hasFullSnapshotByTab.has(s.tabKey),
+  }));
+}
+
 export function findBestTabAtGlobalOffset(
   state: ReplayState,
   globalOffsetMs: number,
   excludeTabKey?: TabKey,
 ): TabKey | null {
-  const ts = state.globalStartTs + globalOffsetMs;
-  const candidates = state.streams.filter((s) => {
-    if (excludeTabKey && s.tabKey === excludeTabKey) return false;
-    if (!state.hasFullSnapshotByTab.has(s.tabKey)) return false;
-    const ranges = state.chunkRangesByTab.get(s.tabKey) ?? [];
-    let lo = 0;
-    let hi = ranges.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      const r = ranges[mid]!;
-      if (ts < r.startTs) {
-        hi = mid - 1;
-      } else if (ts > r.endTs) {
-        lo = mid + 1;
-      } else {
-        return true;
-      }
-    }
-    return false;
-  });
-  if (candidates.length === 0) return null;
-
-  candidates.sort((a, b) => {
-    const aLabel = state.tabLabelIndex.get(a.tabKey) ?? Number.POSITIVE_INFINITY;
-    const bLabel = state.tabLabelIndex.get(b.tabKey) ?? Number.POSITIVE_INFINITY;
-    if (aLabel !== bLabel) return aLabel - bLabel;
-    return stringCompare(a.tabKey, b.tabKey);
-  });
-
-  return candidates[0]!.tabKey;
+  return findBestReplayTabAt(timelineTabs(state), state.globalStartTs + globalOffsetMs, excludeTabKey);
 }
 
 export function isTabInRangeAtGlobalOffset(
@@ -267,50 +255,19 @@ export function isTabInRangeAtGlobalOffset(
   tabKey: TabKey,
   globalOffsetMs: number,
 ): boolean {
-  if (!state.hasFullSnapshotByTab.has(tabKey)) return false;
-  const ts = state.globalStartTs + globalOffsetMs;
-  const ranges = state.chunkRangesByTab.get(tabKey) ?? [];
-  let lo = 0;
-  let hi = ranges.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const r = ranges[mid]!;
-    if (ts < r.startTs) {
-      hi = mid - 1;
-    } else if (ts > r.endTs) {
-      lo = mid + 1;
-    } else {
-      return true;
-    }
-  }
-  return false;
+  const tab = timelineTabs(state).find((t) => t.tabKey === tabKey);
+  return tab != null && isReplayTabInRangeAt(tab, state.globalStartTs + globalOffsetMs);
 }
 
 export function findNextTabStartAfterGlobalOffset(
   state: ReplayState,
   globalOffsetMs: number,
 ): { tabKey: TabKey, globalOffsetMs: number } | null {
-  const ts = state.globalStartTs + globalOffsetMs;
-  let bestStartTs = Infinity;
-  let bestKey: TabKey | null = null;
-
-  for (const s of state.streams) {
-    if (!state.hasFullSnapshotByTab.has(s.tabKey)) continue;
-    const ranges = state.chunkRangesByTab.get(s.tabKey) ?? [];
-    for (const r of ranges) {
-      if (r.startTs <= ts) continue;
-      if (r.startTs < bestStartTs) {
-        bestStartTs = r.startTs;
-        bestKey = s.tabKey;
-      }
-      break; // ranges sorted by start
-    }
-  }
-
-  if (!bestKey || !Number.isFinite(bestStartTs)) return null;
+  const next = findNextReplayTabStartAfter(timelineTabs(state), state.globalStartTs + globalOffsetMs);
+  if (next == null) return null;
   return {
-    tabKey: bestKey,
-    globalOffsetMs: bestStartTs - state.globalStartTs,
+    tabKey: next.tabKey,
+    globalOffsetMs: next.startTs - state.globalStartTs,
   };
 }
 
@@ -1109,23 +1066,21 @@ export function replayReducer(state: ReplayState, action: ReplayAction): Reducer
         && state.streams.length > 1
       ) {
         if (action.nowMs >= state.suppressAutoFollowUntilWallMs) {
-          const activeInRange = state.activeTabKey
-            ? isTabInRangeAtGlobalOffset(state, state.activeTabKey, globalOffset)
-            : false;
-          if (!activeInRange) {
-            const bestKey = findBestTabAtGlobalOffset(state, globalOffset);
-            if (bestKey && bestKey !== state.activeTabKey) {
-              newState = {
-                ...newState,
-                activeTabKey: bestKey,
-                pausedAtGlobalMs: globalOffset,
-                suppressAutoFollowUntilWallMs: action.nowMs + 200,
-              };
-              effects.push(
-                { type: "ensure_replayer", tabKey: bestKey, generation: state.generation },
-                ...playEffectsForAllTabs(newState, globalOffset),
-              );
-            }
+          // Gaps and the end of the replay are handled when the active tab
+          // finishes (TAB_FINISHED); here only a switch to a recording tab applies.
+          const decision = decideReplayActiveTab(timelineTabs(state), state.activeTabKey, state.globalStartTs + globalOffset);
+          if (decision.type === "switch") {
+            const bestKey = decision.tabKey;
+            newState = {
+              ...newState,
+              activeTabKey: bestKey,
+              pausedAtGlobalMs: globalOffset,
+              suppressAutoFollowUntilWallMs: action.nowMs + 200,
+            };
+            effects.push(
+              { type: "ensure_replayer", tabKey: bestKey, generation: state.generation },
+              ...playEffectsForAllTabs(newState, globalOffset),
+            );
           }
         }
       }

@@ -89,7 +89,7 @@ export type AdminGetSessionReplayAllEventsResponse = {
 export type AdminSessionReplayRenderResponse = {
   id: string,
   session_replay_id: string,
-  session_replay_segment_id: string,
+  session_replay_segment_id: string | null,
   status: "queued" | "rendering" | "succeeded" | "failed",
   progress: number | null,
   options: {

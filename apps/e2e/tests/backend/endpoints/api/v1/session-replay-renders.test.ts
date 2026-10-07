@@ -36,17 +36,13 @@ function rrwebEvents(startMs: number, options: { withFullSnapshot: boolean }) {
   return options.withFullSnapshot ? [meta, fullSnapshot, mouseMove, textChange] : [meta, mouseMove];
 }
 
-async function recordReplay(options: { withFullSnapshot: boolean }) {
-  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
-  await Auth.fastSignUp();
-  const startMs = Date.now() - 10_000;
+async function uploadTab(browserSessionId: string, startMs: number, options: { withFullSnapshot: boolean }) {
   const segmentId = randomUUID();
   const upload = await niceBackendFetch("/api/v1/session-replays/batch", {
     method: "POST",
     accessType: "client",
     body: {
-      browser_session_id: randomUUID(),
+      browser_session_id: browserSessionId,
       session_replay_segment_id: segmentId,
       batch_id: randomUUID(),
       started_at_ms: startMs,
@@ -56,6 +52,21 @@ async function recordReplay(options: { withFullSnapshot: boolean }) {
   });
   if (upload.status !== 200) throw new Error(`Batch upload failed: ${JSON.stringify(upload.body)}`);
   return { replayId: upload.body.session_replay_id as string, segmentId };
+}
+
+/** Records a replay with one tab per entry of `tabStartOffsetsMs`, all in the same session. */
+async function recordReplay(options: { withFullSnapshot: boolean, tabStartOffsetsMs?: number[] }) {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+  await Auth.fastSignUp();
+  const startMs = Date.now() - 20_000;
+  const browserSessionId = randomUUID();
+  const tabs = [];
+  for (const offset of options.tabStartOffsetsMs ?? [0]) {
+    tabs.push(await uploadTab(browserSessionId, startMs + offset, options));
+  }
+  if (new Set(tabs.map((t) => t.replayId)).size !== 1) throw new Error("Tabs landed in different replays");
+  return { replayId: tabs[0].replayId, segmentIds: tabs.map((t) => t.segmentId) };
 }
 
 async function waitForRender(replayId: string, renderId: string) {
@@ -70,7 +81,7 @@ async function waitForRender(replayId: string, renderId: string) {
 }
 
 it("renders a session replay to a downloadable MP4", async ({ expect }) => {
-  const { replayId, segmentId } = await recordReplay({ withFullSnapshot: true });
+  const { replayId } = await recordReplay({ withFullSnapshot: true });
 
   const create = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
     method: "POST",
@@ -80,7 +91,8 @@ it("renders a session replay to a downloadable MP4", async ({ expect }) => {
   expect(create.status).toBe(200);
   expect(create.body).toMatchObject({
     session_replay_id: replayId,
-    session_replay_segment_id: segmentId,
+    // All tabs is the default.
+    session_replay_segment_id: null,
     status: "rendering",
     options: { fps: 10, speed: 2, skip_inactivity: true },
     video: null,
@@ -106,6 +118,35 @@ it("renders a session replay to a downloadable MP4", async ({ expect }) => {
   expect(list.status).toBe(200);
   expect(list.body.items.map((r: { id: string }) => r.id)).toEqual([create.body.id]);
 }, RENDER_TIMEOUT_MS);
+
+it("renders every tab by default, and a single tab on request", async ({ expect }) => {
+  // Two tabs with a gap between them: the all-tabs video covers both.
+  const { replayId, segmentIds } = await recordReplay({ withFullSnapshot: true, tabStartOffsetsMs: [0, 4000] });
+
+  const all = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
+    method: "POST",
+    accessType: "server",
+    body: { fps: 10, skip_inactivity: false },
+  });
+  expect(all.status).toBe(200);
+  expect(all.body.session_replay_segment_id).toBe(null);
+  const allDone = await waitForRender(replayId, all.body.id);
+  expect(allDone.body.status).toBe("succeeded");
+
+  const single = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
+    method: "POST",
+    accessType: "server",
+    body: { fps: 10, skip_inactivity: false, session_replay_segment_id: segmentIds[1] },
+  });
+  expect(single.status).toBe(200);
+  expect(single.body.session_replay_segment_id).toBe(segmentIds[1]);
+  const singleDone = await waitForRender(replayId, single.body.id);
+  expect(singleDone.body.status).toBe("succeeded");
+
+  // Each tab records ~1.2s; the all-tabs video adds the other tab plus the
+  // fast-forwarded gap between them, so it is clearly longer.
+  expect(allDone.body.video.duration_ms).toBeGreaterThan(singleDone.body.video.duration_ms + 1000);
+}, RENDER_TIMEOUT_MS * 2);
 
 it("reports a failed render with a readable reason", async ({ expect }) => {
   const { replayId } = await recordReplay({ withFullSnapshot: false });
