@@ -142,8 +142,8 @@ import.meta.vitest?.test("isValidHostnameWithWildcards", ({ expect }) => {
 });
 
 /**
- * Like `isValidHostnameWithWildcards`, but additionally accepts an optional numeric `:<port>` suffix, which is what
- * `wildcardUrlSchema` accepts for trusted domain base URLs (e.g. `*.example.com:4250`).
+ * Like `isValidHostnameWithWildcards`, but additionally accepts a numeric `:<port>` or whole-port `:*` suffix,
+ * matching `wildcardUrlSchema` for trusted domain base URLs (e.g. `*.example.com:4250` or `*.example.com:*`).
  */
 export function isValidHostWithWildcards(host: string) {
   // Bracketed IPv6 literals contain colons themselves; only a colon after the closing bracket separates the port
@@ -155,6 +155,7 @@ export function isValidHostWithWildcards(host: string) {
   }
   const hostname = host.slice(0, portSeparatorIndex);
   const port = host.slice(portSeparatorIndex + 1);
+  if (port === '*') return isValidHostnameWithWildcards(hostname);
   // Leading zeroes are rejected because URL parsing normalizes ports, so a pattern like `:04250` would never match
   const numericPort = Number(port);
   if (!/^\d{1,5}$/.test(port) || numericPort < 1 || numericPort > 65535 || String(numericPort) !== port) return false;
@@ -174,7 +175,7 @@ import.meta.vitest?.test("isValidHostWithWildcards", ({ expect }) => {
   expect(isValidHostWithWildcards("example.com:")).toBe(false);
   expect(isValidHostWithWildcards(":4250")).toBe(false);
   expect(isValidHostWithWildcards("example.com:abc")).toBe(false);
-  expect(isValidHostWithWildcards("example.com:*")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:*")).toBe(true);
   expect(isValidHostWithWildcards("example.com:70000")).toBe(false);
   expect(isValidHostWithWildcards("example.com:04250")).toBe(false);
   expect(isValidHostWithWildcards("example.com:0")).toBe(false);
