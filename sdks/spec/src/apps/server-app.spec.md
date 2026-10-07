@@ -541,6 +541,9 @@ Errors:
   SessionReplayRenderLimitReached
     code: "SESSION_REPLAY_RENDER_LIMIT_REACHED"
     when: the project already has 3 renders queued or rendering
+  SessionReplayRenderingUnavailable
+    code: "SESSION_REPLAY_RENDERING_UNAVAILABLE"
+    when: rendering is at platform-wide capacity; retry in a few minutes
   (HTTP 400, surfaced as a plain request error carrying the message)
     when: the replay has no recorded data, the segment id does not belong to it, or it is too large
 

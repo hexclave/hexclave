@@ -6973,7 +6973,7 @@
       },
       "post": {
         "summary": "Render session replay to video",
-        "description": "Starts rendering a session replay to an MP4 video. By default the video covers the whole replay and, like the dashboard player, follows whichever tab is active, cutting between tabs; pass `session_replay_segment_id` to render a single tab instead. Rendering runs in the background and usually takes about as long as the replay; poll the returned render until its status is `succeeded` (it then carries a download URL) or `failed`. Up to 3 renders can run at once per project, recordings over 48 MB (compressed) can't be rendered, and videos stop at 10 minutes.",
+        "description": "Starts rendering a session replay to an MP4 video. By default the video covers the whole replay and, like the dashboard player, follows whichever tab is active, cutting between tabs; pass `session_replay_segment_id` to render a single tab instead. Rendering runs in the background and usually takes about as long as the replay; poll the returned render until its status is `succeeded` (it then carries a download URL) or `failed`. Up to 3 renders can run at once per project (and a platform-wide cap may briefly reject new renders as unavailable), recordings over 48 MB (compressed) can't be rendered, and videos stop at 10 minutes.",
         "parameters": [
           {
             "name": "session_replay_id",

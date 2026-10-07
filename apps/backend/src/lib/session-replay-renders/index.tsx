@@ -2,7 +2,8 @@ import type { Prisma, SessionReplayRender } from "@/generated/prisma/client";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { createPresignedDownloadUrl, createPresignedUploadUrl, downloadByteRange, headBytes } from "@/s3";
 import { KnownErrors } from "@hexclave/shared";
-import { captureError, StatusError } from "@hexclave/shared/dist/utils/errors";
+import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
+import { captureError, HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { computeReplayTabLabelIndex } from "@hexclave/shared/dist/utils/session-replay-timeline";
 import { getReplayRenderRuntime, getRuntimeByName } from "./runtime";
 import { FREESTYLE_RENDER_VM_TTL_SECONDS } from "./runtime-freestyle";
@@ -33,6 +34,8 @@ export const SESSION_REPLAY_RENDER_LIMITS = {
  */
 const LEASE_MS = 3 * 60_000;
 const DOWNLOAD_URL_TTL_SECONDS = 60 * 60;
+/** Platform-wide default for STACK_SESSION_REPLAY_RENDER_MAX_CONCURRENT. */
+const DEFAULT_MAX_CONCURRENT_RENDERS = 10;
 
 export type SessionReplayRenderOptions = {
   fps: number,
@@ -119,6 +122,7 @@ export async function createSessionReplayRender(options: {
   if (active >= SESSION_REPLAY_RENDER_LIMITS.maxActivePerTenancy) {
     throw new KnownErrors.SessionReplayRenderLimitReached(SESSION_REPLAY_RENDER_LIMITS.maxActivePerTenancy);
   }
+  await assertPlatformCapacity();
 
   const render = await prisma.sessionReplayRender.create({
     data: {
@@ -129,6 +133,41 @@ export async function createSessionReplayRender(options: {
     },
   });
   return await advanceSessionReplayRender(prisma, tenancyId, render.id);
+}
+
+/**
+ * Platform-wide cap on renders running at once (each one is a VM), so no burst
+ * of renders across projects can run up unbounded provider usage. Hitting it
+ * is reported, since it means the cap needs raising or someone is abusing it.
+ *
+ * Counts renders in the global database only; renders of projects with their
+ * own source of truth are not included.
+ */
+async function assertPlatformCapacity() {
+  const maxConcurrent = getMaxConcurrentRenders();
+  const running = await globalPrismaClient.sessionReplayRender.count({
+    where: {
+      status: { in: ["QUEUED", "RENDERING"] },
+      createdAt: { gt: new Date(Date.now() - SESSION_REPLAY_RENDER_LIMITS.maxRenderMs - LEASE_MS) },
+    },
+  });
+  if (running >= maxConcurrent) {
+    captureError("session-replay-render-platform-limit", new HexclaveAssertionError(
+      `Platform-wide session replay render limit reached (${running} of ${maxConcurrent} running); new renders are being rejected. Raise STACK_SESSION_REPLAY_RENDER_MAX_CONCURRENT if this is legitimate load.`,
+      { running, maxConcurrent },
+    ));
+    throw new KnownErrors.SessionReplayRenderingUnavailable();
+  }
+}
+
+function getMaxConcurrentRenders(): number {
+  const raw = getEnvVariable("STACK_SESSION_REPLAY_RENDER_MAX_CONCURRENT", "");
+  if (raw === "") return DEFAULT_MAX_CONCURRENT_RENDERS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new HexclaveAssertionError(`STACK_SESSION_REPLAY_RENDER_MAX_CONCURRENT must be a non-negative integer, got ${JSON.stringify(raw)}`);
+  }
+  return parsed;
 }
 
 async function assertReplayExists(prisma: TenancyPrisma, tenancyId: string, sessionReplayId: string) {
