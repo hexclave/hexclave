@@ -24,7 +24,7 @@ import type { AdminSessionReplayRender } from "@hexclave/next";
 import { DownloadSimpleIcon, FilmStripIcon } from "@phosphor-icons/react";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useServerApp } from "../use-admin-app";
+import { useAdminApp } from "../use-admin-app";
 
 const POLL_INTERVAL_MS = 2000;
 const ALL_TABS = "__all_tabs__";
@@ -55,7 +55,7 @@ export function RenderVideoButton({
   sessionReplayId: string,
   tabs: RenderableTab[],
 }) {
-  const serverApp = useServerApp();
+  const adminApp = useAdminApp();
   const [open, setOpen] = useState(false);
   const [renders, setRenders] = useState<AdminSessionReplayRender[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -67,7 +67,7 @@ export function RenderVideoButton({
   const refresh = useCallback(async () => {
     const requestId = ++latestRequestRef.current;
     try {
-      const items = await serverApp.listSessionReplayRenders(sessionReplayId);
+      const items = await adminApp.listSessionReplayRenders(sessionReplayId);
       if (requestId !== latestRequestRef.current) return;
       setRenders(items);
       setLoadError(null);
@@ -75,7 +75,7 @@ export function RenderVideoButton({
       if (requestId !== latestRequestRef.current) return;
       setLoadError(e instanceof Error ? e.message : "Could not load renders.");
     }
-  }, [serverApp, sessionReplayId]);
+  }, [adminApp, sessionReplayId]);
 
   useEffect(() => {
     runAsynchronously(refresh);
@@ -193,7 +193,7 @@ function RenderForm({
   disabled: boolean,
   onStarted: (render: AdminSessionReplayRender) => void,
 }) {
-  const serverApp = useServerApp();
+  const adminApp = useAdminApp();
   // All tabs by default: the video then cuts between tabs exactly like this player.
   const [segmentId, setSegmentId] = useState<string>(ALL_TABS);
   const [speed, setSpeed] = useState("1");
@@ -209,7 +209,7 @@ function RenderForm({
     startingRef.current = true;
     setError(null);
     try {
-      const render = await serverApp.renderSessionReplay(sessionReplayId, {
+      const render = await adminApp.renderSessionReplay(sessionReplayId, {
         sessionReplaySegmentId: segmentId === ALL_TABS ? undefined : segmentId,
         speed: Number(speed),
         fps: Number(fps),

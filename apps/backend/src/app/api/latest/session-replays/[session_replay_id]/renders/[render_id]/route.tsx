@@ -1,7 +1,7 @@
 import { getSessionReplayRender, sessionReplayRenderToApi } from "@/lib/session-replay-renders";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { adaptSchema, serverOrHigherAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { adaptSchema, adminAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { sessionReplayRenderSchema } from "../render-schema";
 
 export const GET = createSmartRouteHandler({
@@ -12,7 +12,7 @@ export const GET = createSmartRouteHandler({
   },
   request: yupObject({
     auth: yupObject({
-      type: serverOrHigherAuthTypeSchema.defined(),
+      type: adminAuthTypeSchema.defined(),
       tenancy: adaptSchema.defined(),
     }).defined(),
     params: yupObject({

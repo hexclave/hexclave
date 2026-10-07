@@ -17,6 +17,7 @@ CREATE TABLE "SessionReplayRender" (
     "runtimeHandle" JSONB,
     "leaseUntil" TIMESTAMP(3),
     "leaseToken" TEXT,
+    "callbackTokenHash" TEXT,
     "outputS3Key" TEXT,
     "outputByteLength" INTEGER,
     "outputWidth" INTEGER,

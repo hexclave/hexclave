@@ -10,7 +10,17 @@ export type ReplayRenderJobParams = {
     label_index: number,
     chunks: Array<{ url: string, first_event_at_ms: number, last_event_at_ms: number }>,
   }>,
+  /** Presigned PUT for the finished video (Content-Type video/mp4). */
   upload_url: string,
+  /**
+   * Presigned PUT for result.json (Content-Type application/json), uploaded
+   * whether the render succeeded or failed, so the outcome survives the
+   * machine — it powers itself off when the job ends.
+   */
+  result_upload_url: string,
+  /** Called (POST, Bearer callback_token) once the result is uploaded. */
+  callback_url: string,
+  callback_token: string,
   fps: number,
   speed: number,
   skip_inactivity: boolean,

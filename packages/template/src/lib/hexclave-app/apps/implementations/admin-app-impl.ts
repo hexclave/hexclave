@@ -5,12 +5,14 @@ import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClic
 import { EmailTemplateCrud } from "@hexclave/shared/dist/interface/crud/email-templates";
 import { InternalApiKeysCrud } from "@hexclave/shared/dist/interface/crud/internal-api-keys";
 import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
+import type { AdminSessionReplayRenderResponse } from "@hexclave/shared/dist/interface/crud/session-replays";
 import type { Transaction, TransactionType } from "@hexclave/shared/dist/interface/crud/transactions";
 import type { RestrictedReason } from "@hexclave/shared/dist/schema-fields";
 import type { MoneyAmount } from "@hexclave/shared/dist/utils/currency-constants";
 import { HexclaveAssertionError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import type { Json } from "@hexclave/shared/dist/utils/json";
 import { pick, typedEntries, typedValues } from "@hexclave/shared/dist/utils/objects";
+import { wait } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { useMemo } from "react"; // THIS_LINE_PLATFORM react-like
 import { AdminEmailOutbox, AdminSentEmail } from "../..";
@@ -20,6 +22,7 @@ import { InternalApiKey, InternalApiKeyBase, InternalApiKeyBaseCrudRead, Interna
 import { AdminProjectPermission, AdminProjectPermissionDefinition, AdminProjectPermissionDefinitionCreateOptions, AdminProjectPermissionDefinitionUpdateOptions, AdminTeamPermission, AdminTeamPermissionDefinition, AdminTeamPermissionDefinitionCreateOptions, AdminTeamPermissionDefinitionUpdateOptions, adminProjectPermissionDefinitionCreateOptionsToCrud, adminProjectPermissionDefinitionUpdateOptionsToCrud, adminTeamPermissionDefinitionCreateOptionsToCrud, adminTeamPermissionDefinitionUpdateOptionsToCrud } from "../../permissions";
 import type { PlanUsage } from "../../plan-usage";
 import { AdminOwnedProject, AdminProject, AdminProjectUpdateOptions, PushConfigOptions, adminProjectUpdateOptionsToCrud } from "../../projects";
+import type { AdminSessionReplayRender, RenderSessionReplayOptions } from "../../session-replays";
 import { AdminWorkflow, AdminWorkflowRun, AdminWorkflowRunDetails, AdminWorkflowRunsFilter, AdminWorkflowSyncResult, AdminWorkflowUpgradeResult, AdminWorkflowVersion, adminWorkflowFromCrud, adminWorkflowRunDetailsFromCrud, adminWorkflowRunFromCrud, adminWorkflowSyncResultFromCrud, adminWorkflowVersionFromCrud, isWorkflowRunDetailsJson } from "../../workflows";
 import { ManagedEmailProviderListItem, ManagedEmailProviderSetupResult, ManagedEmailProviderStatus, EmailOutboxUpdateOptions, StackAdminApp, StackAdminAppConstructorOptions } from "../interfaces/admin-app";
 import { clientVersion, createCache, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getDefaultSecretServerKey, getDefaultSuperSecretAdminKey, resolveApiUrls, resolveConstructorOptions } from "./common";
@@ -71,6 +74,70 @@ function apiToPushedConfigSource(source: BranchConfigSourceApi): PushedConfigSou
 
 export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, ProjectId extends string> extends _HexclaveServerAppImplIncomplete<HasTokenStore, ProjectId> implements StackAdminApp<HasTokenStore, ProjectId> {
   declare protected _interface: HexclaveAdminInterface;
+
+  private _sessionReplayRenderFromApi(r: AdminSessionReplayRenderResponse): AdminSessionReplayRender {
+    return {
+      id: r.id,
+      sessionReplayId: r.session_replay_id,
+      sessionReplaySegmentId: r.session_replay_segment_id,
+      status: r.status,
+      progress: r.progress,
+      options: {
+        fps: r.options.fps,
+        speed: r.options.speed,
+        skipInactivity: r.options.skip_inactivity,
+      },
+      errorMessage: r.error_message,
+      createdAt: new Date(r.created_at_millis),
+      startedAt: r.started_at_millis == null ? null : new Date(r.started_at_millis),
+      finishedAt: r.finished_at_millis == null ? null : new Date(r.finished_at_millis),
+      video: r.video == null ? null : {
+        url: r.video.url,
+        urlExpiresAt: new Date(r.video.url_expires_at_millis),
+        byteLength: r.video.byte_length,
+        width: r.video.width,
+        height: r.video.height,
+        durationMs: r.video.duration_ms,
+      },
+    };
+  }
+
+  async renderSessionReplay(sessionReplayId: string, options?: RenderSessionReplayOptions): Promise<AdminSessionReplayRender> {
+    const response = await this._interface.createSessionReplayRender(sessionReplayId, {
+      session_replay_segment_id: options?.sessionReplaySegmentId,
+      fps: options?.fps,
+      speed: options?.speed,
+      skip_inactivity: options?.skipInactivity,
+    });
+    return this._sessionReplayRenderFromApi(response);
+  }
+
+  async getSessionReplayRender(sessionReplayId: string, renderId: string): Promise<AdminSessionReplayRender> {
+    return this._sessionReplayRenderFromApi(await this._interface.getSessionReplayRender(sessionReplayId, renderId));
+  }
+
+  async listSessionReplayRenders(sessionReplayId: string): Promise<AdminSessionReplayRender[]> {
+    const response = await this._interface.listSessionReplayRenders(sessionReplayId);
+    return response.items.map((r) => this._sessionReplayRenderFromApi(r));
+  }
+
+  async waitForSessionReplayRender(sessionReplayId: string, renderId: string, options?: { timeoutMs?: number, pollIntervalMs?: number }): Promise<AdminSessionReplayRender> {
+    const deadline = Date.now() + (options?.timeoutMs ?? 30 * 60_000);
+    const pollIntervalMs = Math.max(500, options?.pollIntervalMs ?? 3000);
+    while (true) {
+      const render = await this.getSessionReplayRender(sessionReplayId, renderId);
+      if (render.status === "succeeded") return render;
+      // The render is attached as `cause` so callers can read its status and errorMessage.
+      if (render.status === "failed") {
+        throw new Error(`Session replay render ${renderId} failed: ${render.errorMessage ?? "unknown error"}`, { cause: render });
+      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`Timed out waiting for session replay render ${renderId} (status: ${render.status})`, { cause: render });
+      }
+      await wait(Math.min(pollIntervalMs, remainingMs));
+    }
+  }
 
   private readonly _adminProjectCache = createCache(async () => {
     return await this._interface.getProject();

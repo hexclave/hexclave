@@ -13,6 +13,7 @@ import { InternalEmailsCrud } from "./crud/emails";
 import { InternalApiKeysCrud } from "./crud/internal-api-keys";
 import { ProjectPermissionDefinitionsCrud } from "./crud/project-permissions";
 import { ProjectsCrud } from "./crud/projects";
+import type { AdminCreateSessionReplayRenderOptions, AdminListSessionReplayRendersResponse, AdminSessionReplayRenderResponse } from "./crud/session-replays";
 import { SvixTokenCrud } from "./crud/svix-token";
 import { TeamPermissionDefinitionsCrud } from "./crud/team-permissions";
 import type { Transaction, TransactionType } from "./crud/transactions";
@@ -283,6 +284,37 @@ export class HexclaveAdminInterface extends HexclaveServerInterface {
       }
       throw e;
     }
+  }
+
+  async createSessionReplayRender(sessionReplayId: string, options: AdminCreateSessionReplayRenderOptions): Promise<AdminSessionReplayRenderResponse> {
+    const response = await this.sendAdminRequest(
+      `/session-replays/${encodeURIComponent(sessionReplayId)}/renders`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(options),
+      },
+      null,
+    );
+    return await response.json();
+  }
+
+  async listSessionReplayRenders(sessionReplayId: string): Promise<AdminListSessionReplayRendersResponse> {
+    const response = await this.sendAdminRequest(
+      `/session-replays/${encodeURIComponent(sessionReplayId)}/renders`,
+      { method: "GET" },
+      null,
+    );
+    return await response.json();
+  }
+
+  async getSessionReplayRender(sessionReplayId: string, renderId: string): Promise<AdminSessionReplayRenderResponse> {
+    const response = await this.sendAdminRequest(
+      `/session-replays/${encodeURIComponent(sessionReplayId)}/renders/${encodeURIComponent(renderId)}`,
+      { method: "GET" },
+      null,
+    );
+    return await response.json();
   }
 
   async getProject(): Promise<ProjectsCrud["Admin"]["Read"]> {

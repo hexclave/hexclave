@@ -716,8 +716,9 @@ enum SessionReplayRenderStatus {
 }
 
 // A request to render a session replay — all of its tabs, or one — to an MP4.
-// Advanced by src/lib/session-replay-renders: the create request starts it, and
-// status polls plus the session-replay-renders-step cron move it along.
+// Advanced by src/lib/session-replay-renders: the create request starts it, the
+// render machine's completion callback finishes it, and status reads cover a
+// callback that never arrives.
 model SessionReplayRender {
   id String @default(uuid()) @db.Uuid
 
@@ -743,6 +744,10 @@ model SessionReplayRender {
   // changes are conditional on the token, so an expired holder can't clobber.
   leaseUntil DateTime?
   leaseToken String?
+
+  // SHA-256 of the per-render secret the render machine presents when it calls
+  // back on completion (see the internal session-replay-renders callback route).
+  callbackTokenHash String?
 
   outputS3Key      String?
   outputByteLength Int?

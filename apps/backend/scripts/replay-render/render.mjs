@@ -10,10 +10,16 @@
 //   tabs: [{ tab_key, label_index, chunks: [{ url, first_event_at_ms, last_event_at_ms }] }]
 //     the replay's tabs (segments) to render, each chunk as a presigned GET
 //   upload_url           presigned PUT for the finished video (Content-Type video/mp4)
+//   result_upload_url    presigned PUT for result.json (Content-Type application/json)
+//   callback_url, callback_token
+//                        POSTed (Bearer callback_token) once the result is uploaded
 //   fps, speed, skip_inactivity, max_output_seconds
 //
-// Writes <job-dir>/progress.json while rendering and <job-dir>/result.json when
-// done. The VM holds no credentials: everything it can reach is those URLs.
+// Writes <job-dir>/progress.json while rendering. When done — success or
+// failure — it writes result.json, uploads it, and calls back, so the backend
+// learns the outcome right away and still finds it after this machine is gone
+// (it powers itself off when this process exits). The machine holds no
+// credentials: everything it can reach is those URLs.
 //
 // With several tabs the video follows the active tab exactly like the dashboard
 // player does: the rule lives in session-replay-timeline.ts, a verbatim copy of
@@ -56,6 +62,7 @@ const warnings = [];
 
 async function main() {
   const params = JSON.parse(await readFile(`${jobDir}/params.json`, "utf8"));
+  jobParams = params;
   const fps = clamp(params.fps ?? 15, 1, 30);
   const speed = clamp(params.speed ?? 1, 0.25, 8);
   const skipInactivity = params.skip_inactivity !== false;
@@ -265,7 +272,7 @@ async function main() {
     if (!res.ok) throw new RenderError(`Uploading the video failed with HTTP ${res.status}.`);
 
     const { globalTotalMs } = computeReplayGlobalTimeline(tabs);
-    await writeResult({
+    await finishJob(params, {
       status: "ok",
       width,
       height,
@@ -406,15 +413,51 @@ function even(n) {
   return Math.floor(n / 2) * 2;
 }
 
-async function writeResult(result) {
+/**
+ * Records the outcome locally, uploads it, then tells the backend to look.
+ * Upload and callback are retried; if the callback still fails, the backend
+ * finds the uploaded result on its next status read instead.
+ */
+async function finishJob(params, result) {
   await writeFile(`${jobDir}/result.json`, JSON.stringify(result));
+  if (params == null) return;
+  await withRetries("result upload", async () => {
+    const res = await fetch(params.result_upload_url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(result),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  });
+  await withRetries("callback", async () => {
+    const res = await fetch(params.callback_url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${params.callback_token}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  });
 }
 
+async function withRetries(label, fn) {
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      await fn();
+      return;
+    } catch (error) {
+      console.error(`${label} failed (attempt ${attempt}/5):`, error?.message ?? error);
+      if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+    }
+  }
+}
+
+let jobParams = null;
 main().catch(async (error) => {
   // Only RenderError messages are shown to users; anything else is an
   // internal failure whose details stay in the log.
   const userMessage = error instanceof RenderError ? error.message : "The renderer failed unexpectedly.";
   console.error(error);
-  await writeResult({ status: "error", error: userMessage, render_ms: Date.now() - startedAt, warnings });
+  await finishJob(jobParams, { status: "error", error: userMessage, render_ms: Date.now() - startedAt, warnings });
   process.exit(1);
 });

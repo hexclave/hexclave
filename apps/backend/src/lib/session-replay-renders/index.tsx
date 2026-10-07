@@ -1,13 +1,14 @@
 import type { Prisma, SessionReplayRender } from "@/generated/prisma/client";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
-import { createPresignedDownloadUrl, createPresignedUploadUrl, downloadByteRange, headBytes } from "@/s3";
+import { createPresignedDownloadUrl, createPresignedUploadUrl, downloadByteRange, downloadBytes, headBytes } from "@/s3";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { KnownErrors } from "@hexclave/shared";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { computeReplayTabLabelIndex } from "@hexclave/shared/dist/utils/session-replay-timeline";
 import { getReplayRenderRuntime, getRuntimeByName } from "./runtime";
 import { FREESTYLE_RENDER_VM_TTL_SECONDS } from "./runtime-freestyle";
-import type { ReplayRenderHandle, ReplayRenderJobParams, ReplayRenderResult } from "./types";
+import { parseResult, type ReplayRenderHandle, type ReplayRenderJobParams, type ReplayRenderResult } from "./types";
 
 type TenancyPrisma = Awaited<ReturnType<typeof getPrismaClientForTenancy>>;
 
@@ -72,6 +73,24 @@ function outputKey(tenancyId: string, renderId: string) {
   return `session-replay-renders/${tenancyId}/${renderId}.mp4`;
 }
 
+/** Where the render machine uploads its result.json (see ReplayRenderJobParams). */
+function resultKey(tenancyId: string, renderId: string) {
+  return `session-replay-renders/${tenancyId}/${renderId}.result.json`;
+}
+
+/**
+ * The URL render machines call back on. They run outside our network, so this
+ * must be publicly reachable; it defaults to the API's own public URL.
+ */
+function getCallbackUrl(tenancyId: string, renderId: string) {
+  const base = getEnvVariable("STACK_SESSION_REPLAY_RENDER_CALLBACK_API_URL", "") || getEnvVariable("NEXT_PUBLIC_STACK_API_URL");
+  return `${base.replace(/\/+$/, "")}/api/latest/internal/session-replay-renders/${encodeURIComponent(tenancyId)}/${encodeURIComponent(renderId)}/callback`;
+}
+
+function hashCallbackToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
 /**
  * Validates the request, records a QUEUED render and starts it before returning,
  * so callers see RENDERING (or FAILED) straight away.
@@ -108,8 +127,8 @@ export async function createSessionReplayRender(options: {
   }
 
   // Renders older than the render budget are counted as abandoned rather than
-  // active: a render nobody polls (and the cron doesn't reach, see
-  // advanceStaleSessionReplayRenders) must not block new ones forever.
+  // active: a render whose callback never arrived and that nobody reads again
+  // must not block new ones forever.
   // TODO: count + create is not atomic, so concurrent requests can exceed the
   // limit by a few; a per-tenancy advisory lock would make it exact.
   const active = await prisma.sessionReplayRender.count({
@@ -280,7 +299,10 @@ async function startRender(lease: Lease, render: SessionReplayRender): Promise<S
   if (render.startedAt != null) {
     return await failRender(lease, "The renderer could not be started. Please try again.");
   }
-  if (!await transition(lease, { startedAt: new Date() })) {
+  // The callback secret is recorded before the machine exists, so it can never
+  // call back before we can verify it.
+  const callbackToken = randomBytes(32).toString("hex");
+  if (!await transition(lease, { startedAt: new Date(), callbackTokenHash: hashCallbackToken(callbackToken) })) {
     return await getRenderOrThrow(prisma, lease.tenancyId, lease.renderId);
   }
 
@@ -326,6 +348,9 @@ async function startRender(lease: Lease, render: SessionReplayRender): Promise<S
     const params: ReplayRenderJobParams = {
       tabs,
       upload_url: await createPresignedUploadUrl({ key, private: true, contentType: "video/mp4", expiresInSeconds: urlTtlSeconds }),
+      result_upload_url: await createPresignedUploadUrl({ key: resultKey(render.tenancyId, render.id), private: true, contentType: "application/json", expiresInSeconds: urlTtlSeconds }),
+      callback_url: getCallbackUrl(render.tenancyId, render.id),
+      callback_token: callbackToken,
       fps: options.fps,
       speed: options.speed,
       skip_inactivity: options.skipInactivity,
@@ -353,6 +378,12 @@ async function startRender(lease: Lease, render: SessionReplayRender): Promise<S
   return await getRenderOrThrow(prisma, lease.tenancyId, lease.renderId);
 }
 
+/**
+ * Checks on a running render. The outcome is read from the result.json the
+ * machine uploads before calling back and powering itself off, so it is found
+ * whether the check comes from that callback or from a later status read (if
+ * the callback never arrived). The machine itself is only asked for progress.
+ */
 async function checkRender(lease: Lease, render: SessionReplayRender): Promise<SessionReplayRender> {
   const { prisma } = lease;
   let runtime;
@@ -372,36 +403,44 @@ async function checkRender(lease: Lease, render: SessionReplayRender): Promise<S
     return await failRender(lease, "Rendering took too long and was stopped.");
   };
 
-  let poll;
+  let result: ReplayRenderResult | null;
   try {
-    poll = await runtime.poll(handle);
+    result = await readUploadedResult(render);
   } catch (error) {
-    // Transient (network, provider hiccup): the next poll or cron tick retries,
-    // bounded by the time budget.
-    captureError("session-replay-render-poll", error);
+    // Transient S3 trouble: the next read retries, bounded by the time budget.
+    captureError("session-replay-render-read-result", error);
     return overBudget ? await stopForTime() : render;
   }
 
-  if (poll.state === "running") {
-    // Checked after polling, so a render that finished just before an overdue
-    // poll still counts.
-    if (overBudget) return await stopForTime();
-    if (poll.progress == null || poll.progress === render.progress) return render;
-    await transition(lease, { progress: poll.progress });
-    return await getRenderOrThrow(prisma, lease.tenancyId, lease.renderId);
-  }
-
-  const result = poll.result;
-  if (result?.status !== "ok") {
-    if (result?.status !== "error" || result.error === "The renderer failed unexpectedly.") {
-      captureError("session-replay-render-failed", new Error(`Replay renderer exited with code ${poll.exitCode}`, { cause: { renderId: render.id, log: poll.log } }));
+  if (result == null) {
+    let poll;
+    try {
+      poll = await runtime.poll(handle);
+    } catch (error) {
+      captureError("session-replay-render-poll", error);
+      return overBudget ? await stopForTime() : render;
     }
+    if (poll.state === "running") {
+      if (overBudget) return await stopForTime();
+      if (poll.progress == null || poll.progress === render.progress) return render;
+      await transition(lease, { progress: poll.progress });
+      return await getRenderOrThrow(prisma, lease.tenancyId, lease.renderId);
+    }
+    // The machine is gone (or its job ended) without uploading a result: the
+    // renderer crashed, or was killed before it could report.
+    captureError("session-replay-render-failed", new Error(`Replay renderer ended without a result (exit code ${poll.exitCode})`, { cause: { renderId: render.id, log: poll.log } }));
     await disposeQuietly(runtime.dispose(handle));
-    return await failRender(lease, result?.status === "error" ? result.error : "The renderer stopped unexpectedly.");
+    return await failRender(lease, "The renderer stopped unexpectedly.");
   }
 
-  // Verify before disposing: if S3 hiccups, the machine (and its result) is
-  // still there for the next poll to try again.
+  if (result.status !== "ok") {
+    await disposeQuietly(runtime.dispose(handle));
+    if (result.error === "The renderer failed unexpectedly.") {
+      captureError("session-replay-render-failed", new Error("Replay renderer reported an internal failure", { cause: { renderId: render.id } }));
+    }
+    return await failRender(lease, result.error);
+  }
+
   let verification;
   try {
     verification = await verifyOutput(render, result);
@@ -424,6 +463,51 @@ async function checkRender(lease: Lease, render: SessionReplayRender): Promise<S
     finishedAt: new Date(),
   });
   return await getRenderOrThrow(prisma, lease.tenancyId, lease.renderId);
+}
+
+/**
+ * The machine's result.json, or null if it hasn't uploaded one. It came in
+ * through a URL handed to the machine, so only well-formed, bounded values are
+ * accepted; the video itself is verified separately.
+ */
+async function readUploadedResult(render: SessionReplayRender): Promise<ReplayRenderResult | null> {
+  const key = resultKey(render.tenancyId, render.id);
+  const head = await headBytes({ key, private: true });
+  if (head == null) return null;
+  if (head.byteLength > 64 * 1024) {
+    return { status: "error", error: "The renderer reported an unreadable result." };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(await downloadBytes({ key, private: true })));
+  } catch {
+    return { status: "error", error: "The renderer reported an unreadable result." };
+  }
+  const result = parseResult(parsed);
+  if (result == null) return { status: "error", error: "The renderer reported an unreadable result." };
+  if (result.status === "error") {
+    return { status: "error", error: result.error.slice(0, 300) };
+  }
+  const isCount = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n >= 0 && n < 1e9;
+  if (![result.width, result.height, result.output_duration_ms, result.output_bytes].every(isCount)) {
+    return { status: "error", error: "The renderer reported an unreadable result." };
+  }
+  return result;
+}
+
+/**
+ * The render machine's completion callback. The token is the per-render secret
+ * handed to that machine; the callback carries no data of its own — it only
+ * says "look now", and the outcome is read from storage like any status check.
+ */
+export async function handleSessionReplayRenderCallback(prisma: TenancyPrisma, tenancyId: string, renderId: string, token: string): Promise<SessionReplayRender> {
+  const render = await prisma.sessionReplayRender.findUnique({ where: { tenancyId_id: { tenancyId, id: renderId } } });
+  const expected = render?.callbackTokenHash;
+  const presented = Buffer.from(hashCallbackToken(token), "hex");
+  if (render == null || expected == null || !timingSafeEqual(Buffer.from(expected, "hex"), presented)) {
+    throw new KnownErrors.ItemNotFound(renderId);
+  }
+  return await advanceSessionReplayRender(prisma, tenancyId, renderId);
 }
 
 /**
@@ -475,49 +559,6 @@ export async function getSessionReplayRender(prisma: TenancyPrisma, tenancyId: s
     throw new KnownErrors.ItemNotFound(renderId);
   }
   return await advanceForRead(prisma, render);
-}
-
-const CRON_DEADLINE_MS = 40_000;
-const CRON_CONCURRENCY = 4;
-
-/**
- * Cron fallback for renders nobody is polling, worked through a few at a time
- * until a deadline so the invocation never runs into the function time limit
- * (an advancer killed mid-start is exactly what the lease guards against, but
- * it still costs that render).
- *
- * TODO: only renders stored in the global database are seen here. Renders of
- * projects with their own source of truth advance only while polled; abandoned
- * ones stop counting toward the active limit after the render budget (see
- * createSessionReplayRender), but their machines run until the VM TTL.
- */
-export async function advanceStaleSessionReplayRenders(): Promise<{ advanced: number }> {
-  const started = Date.now();
-  const now = new Date();
-  const stale = await globalPrismaClient.sessionReplayRender.findMany({
-    where: {
-      status: { in: ["QUEUED", "RENDERING"] },
-      OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
-      updatedAt: { lt: new Date(now.getTime() - 10_000) },
-    },
-    orderBy: { updatedAt: "asc" },
-    take: 25,
-    select: { tenancyId: true, id: true },
-  });
-  let advanced = 0;
-  const queue = [...stale];
-  await Promise.all(Array.from({ length: CRON_CONCURRENCY }, async () => {
-    while (queue.length > 0 && Date.now() - started < CRON_DEADLINE_MS) {
-      const render = queue.shift()!;
-      try {
-        await advanceSessionReplayRender(globalPrismaClient, render.tenancyId, render.id);
-        advanced++;
-      } catch (error) {
-        captureError("session-replay-render-cron", error);
-      }
-    }
-  }));
-  return { advanced };
 }
 
 export async function sessionReplayRenderToApi(render: SessionReplayRender): Promise<SessionReplayRenderApi> {

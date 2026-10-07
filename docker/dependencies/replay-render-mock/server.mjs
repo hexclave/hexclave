@@ -25,8 +25,8 @@ const JOBS_DIR = "/tmp/jobs";
 /** @type {Map<string, { dir: string, child: import("node:child_process").ChildProcess, exitCode: number | null, createdAt: number, log: string }>} */
 const jobs = new Map();
 
-// Presigned URLs from the local S3 mock point at the host's localhost, which
-// inside this container is the container itself.
+// Presigned URLs from the local S3 mock, and the backend's callback URL, point
+// at the host's localhost, which inside this container is the container itself.
 function rewriteHostUrl(value) {
   const url = new URL(value);
   if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) url.hostname = HOST_ON_HOST;
@@ -43,8 +43,9 @@ async function readJson(path) {
 
 async function startJob(params) {
   const validTabs = Array.isArray(params?.tabs) && params.tabs.every((tab) => Array.isArray(tab?.chunks) && tab.chunks.every((c) => typeof c?.url === "string"));
-  if (!validTabs || typeof params.upload_url !== "string") {
-    throw Object.assign(new Error("params.tabs[].chunks[].url and params.upload_url are required"), { statusCode: 400 });
+  const urlFields = ["upload_url", "result_upload_url", "callback_url"];
+  if (!validTabs || urlFields.some((field) => typeof params[field] !== "string")) {
+    throw Object.assign(new Error(`params.tabs[].chunks[].url and params.${urlFields.join("/")} are required`), { statusCode: 400 });
   }
   const running = [...jobs.values()].filter((job) => job.exitCode == null).length;
   if (running >= MAX_JOBS) {
@@ -57,6 +58,9 @@ async function startJob(params) {
     ...params,
     tabs: params.tabs.map((tab) => ({ ...tab, chunks: tab.chunks.map((c) => ({ ...c, url: rewriteHostUrl(c.url) })) })),
     upload_url: rewriteHostUrl(params.upload_url),
+    result_upload_url: rewriteHostUrl(params.result_upload_url),
+    // The backend's own callback URL is localhost too when it runs on the host.
+    callback_url: rewriteHostUrl(params.callback_url),
   }));
   const child = spawn("node", ["/app/render.mjs", dir], { cwd: "/app", stdio: ["ignore", "pipe", "pipe"] });
   const job = { dir, child, exitCode: null, createdAt: Date.now(), log: "" };
@@ -76,27 +80,35 @@ async function startJob(params) {
   return id;
 }
 
-async function deleteJob(id) {
+/**
+ * Stops a job and removes its files without waiting for it: the backend
+ * disposes a job while finishing it from that job's own callback, which the
+ * job is still waiting on.
+ */
+function deleteJob(id) {
   const job = jobs.get(id);
   if (!job) return;
   jobs.delete(id);
-  if (job.exitCode == null) {
-    // Puppeteer starts Chrome in its own process group and closes it on
-    // SIGTERM (handleSIGTERM); SIGKILL right away would orphan Chrome.
-    job.child.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolve) => job.child.once("close", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 5000)),
-    ]);
-    if (job.exitCode == null) job.child.kill("SIGKILL");
+  const cleanup = () => {
+    rm(job.dir, { recursive: true, force: true }).catch((error) => console.error("cleanup failed", id, error));
+  };
+  if (job.exitCode != null) {
+    cleanup();
+    return;
   }
-  await rm(job.dir, { recursive: true, force: true });
+  // Puppeteer starts Chrome in its own process group and closes it on
+  // SIGTERM (handleSIGTERM); SIGKILL right away would orphan Chrome.
+  job.child.once("close", cleanup);
+  job.child.kill("SIGTERM");
+  setTimeout(() => {
+    if (job.exitCode == null) job.child.kill("SIGKILL");
+  }, 5000).unref();
 }
 
 setInterval(() => {
   for (const [id, job] of jobs) {
     if (Date.now() - job.createdAt > JOB_TTL_MS) {
-      deleteJob(id).catch((error) => console.error("cleanup failed", id, error));
+      deleteJob(id);
     }
   }
 }, 60_000).unref();
@@ -135,7 +147,7 @@ createServer(async (request, response) => {
       });
     }
     if (jobMatch && request.method === "DELETE") {
-      await deleteJob(jobMatch[1]);
+      deleteJob(jobMatch[1]);
       return send(response, 204);
     }
     return send(response, 404, { error: "Not found" });

@@ -13,16 +13,13 @@ import {
 } from "./client-interface";
 import type { AnalyticsQueryOptions, AnalyticsQueryResponse } from "./crud/analytics";
 import type {
-  AdminCreateSessionReplayRenderOptions,
   AdminGetSessionReplayAllEventsResponse,
   AdminGetSessionReplayChunkEventsResponse,
   AdminGetSessionReplayResponse,
   AdminListSessionReplayChunksOptions,
   AdminListSessionReplayChunksResponse,
-  AdminListSessionReplayRendersResponse,
   AdminListSessionReplaysOptions,
-  AdminListSessionReplaysResponse,
-  AdminSessionReplayRenderResponse
+  AdminListSessionReplaysResponse
 } from "./crud/session-replays";
 import { ConnectedAccountAccessTokenCrud, ConnectedAccountCrud } from "./crud/connected-accounts";
 import { ContactChannelsCrud } from "./crud/contact-channels";
@@ -1237,37 +1234,6 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
     if (typeof options?.limit === "number") qs.set("limit", String(options.limit));
     const response = await this.sendServerRequest(
       `/session-replays/${encodeURIComponent(sessionReplayId)}/events${qs.size ? `?${qs.toString()}` : ""}`,
-      { method: "GET" },
-      null,
-    );
-    return await response.json();
-  }
-
-  async createSessionReplayRender(sessionReplayId: string, options: AdminCreateSessionReplayRenderOptions): Promise<AdminSessionReplayRenderResponse> {
-    const response = await this.sendServerRequest(
-      `/session-replays/${encodeURIComponent(sessionReplayId)}/renders`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(options),
-      },
-      null,
-    );
-    return await response.json();
-  }
-
-  async listSessionReplayRenders(sessionReplayId: string): Promise<AdminListSessionReplayRendersResponse> {
-    const response = await this.sendServerRequest(
-      `/session-replays/${encodeURIComponent(sessionReplayId)}/renders`,
-      { method: "GET" },
-      null,
-    );
-    return await response.json();
-  }
-
-  async getSessionReplayRender(sessionReplayId: string, renderId: string): Promise<AdminSessionReplayRenderResponse> {
-    const response = await this.sendServerRequest(
-      `/session-replays/${encodeURIComponent(sessionReplayId)}/renders/${encodeURIComponent(renderId)}`,
       { method: "GET" },
       null,
     );

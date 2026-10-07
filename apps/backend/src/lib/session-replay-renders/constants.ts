@@ -1,4 +1,4 @@
-export const DEFAULT_REPLAY_RENDER_SNAPSHOT_ID = "hexclave-replay-render-v3";
+export const DEFAULT_REPLAY_RENDER_SNAPSHOT_ID = "hexclave-replay-render-v4";
 
 // The renderer's own paths inside a VM booted from the snapshot; see
 // scripts/replay-render/snapshot-bootstrap.sh.

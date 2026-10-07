@@ -7,7 +7,7 @@ import {
   REPLAY_RENDER_LINUX_USER,
   REPLAY_RENDER_RUNTIME_DIR,
 } from "./constants";
-import { parseProgress, parseResult, type ReplayRenderRuntime } from "./types";
+import { parseProgress, type ReplayRenderRuntime } from "./types";
 
 /** A render VM is deleted by Freestyle itself this long after creation, whatever happens to us. */
 export const FREESTYLE_RENDER_VM_TTL_SECONDS = 30 * 60;
@@ -71,11 +71,13 @@ export function createFreestyleReplayRenderRuntime(apiKey: string): ReplayRender
 
         // exec() is capped at five minutes and kills anything it started in
         // the background; a PTY session belongs to the guest agent and keeps
-        // running after we detach. Its exit code lands in EXIT_FILE.
+        // running after we detach. When the renderer exits — done, failed or
+        // crashed — the machine powers itself off, and autoDeleteSeconds: 0
+        // makes Freestyle delete it right away, so no machine outlives its job.
         const session = await vm.pty.open({
           slug: "render",
           linuxUser: "root",
-          exec: `/bin/sh -c 'cd ${REPLAY_RENDER_RUNTIME_DIR} && runuser -u ${REPLAY_RENDER_LINUX_USER} -- env HOME=/home/${REPLAY_RENDER_LINUX_USER} node render.mjs ${jobDir} > ${LOG_FILE} 2>&1; echo $? > ${EXIT_FILE}'`,
+          exec: `/bin/sh -c 'cd ${REPLAY_RENDER_RUNTIME_DIR} && runuser -u ${REPLAY_RENDER_LINUX_USER} -- env HOME=/home/${REPLAY_RENDER_LINUX_USER} node render.mjs ${jobDir} > ${LOG_FILE} 2>&1; echo $? > ${EXIT_FILE}; poweroff'`,
         });
         session.detach();
         return { vmId, jobDir };
@@ -87,19 +89,21 @@ export function createFreestyleReplayRenderRuntime(apiKey: string): ReplayRender
 
     async poll(handle) {
       const { vmId, jobDir } = handle;
-      const status = await rootExec(vmId, `cat ${EXIT_FILE} 2>/dev/null; printf '${SECTION_SEPARATOR}'; cat ${jobDir}/progress.json 2>/dev/null; true`);
-      const [exitText, progressText] = status.split(SECTION_SEPARATOR);
+      let status;
+      try {
+        status = await rootExec(vmId, `cat ${EXIT_FILE} 2>/dev/null; printf '${SECTION_SEPARATOR}'; cat ${jobDir}/progress.json 2>/dev/null; printf '${SECTION_SEPARATOR}'; tail -c 4000 ${LOG_FILE} 2>/dev/null; true`);
+      } catch (error) {
+        // The machine powers itself off (and is deleted) when its job ends.
+        if (error instanceof FreestyleApiError && error.status === 404) {
+          return { state: "exited", exitCode: -1, result: null, log: "The render machine no longer exists." };
+        }
+        throw error;
+      }
+      const [exitText, progressText, log] = status.split(SECTION_SEPARATOR);
       if (exitText.trim() === "") {
         return { state: "running", progress: parseProgress(tryParseJson(progressText)) };
       }
-      const output = await rootExec(vmId, `cat ${jobDir}/result.json 2>/dev/null; printf '${SECTION_SEPARATOR}'; tail -c 4000 ${LOG_FILE} 2>/dev/null; true`);
-      const [resultText, log] = output.split(SECTION_SEPARATOR);
-      return {
-        state: "exited",
-        exitCode: Number(exitText.trim()),
-        result: parseResult(tryParseJson(resultText)),
-        log: log,
-      };
+      return { state: "exited", exitCode: Number(exitText.trim()), result: null, log };
     },
 
     async dispose(handle) {

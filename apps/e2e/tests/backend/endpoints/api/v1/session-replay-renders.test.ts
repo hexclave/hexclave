@@ -77,7 +77,7 @@ async function recordReplay(options: { withFullSnapshot: boolean, tabStartOffset
 async function waitForRender(replayId: string, renderId: string) {
   const deadline = Date.now() + RENDER_TIMEOUT_MS - 10_000;
   while (true) {
-    const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${renderId}`, { accessType: "server" });
+    const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${renderId}`, { accessType: "admin" });
     if (res.status !== 200) throw new Error(`Polling render failed: ${JSON.stringify(res.body)}`);
     if (res.body.status === "succeeded" || res.body.status === "failed") return res;
     if (Date.now() > deadline) throw new Error(`Render still ${res.body.status} after waiting`);
@@ -90,7 +90,7 @@ it("renders a session replay to a downloadable MP4", async ({ expect }) => {
 
   const create = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
     method: "POST",
-    accessType: "server",
+    accessType: "admin",
     body: { fps: 10, speed: 2 },
   });
   expect(create.status).toBe(200);
@@ -119,7 +119,7 @@ it("renders a session replay to a downloadable MP4", async ({ expect }) => {
   expect(bytes.byteLength).toBe(done.body.video.byte_length);
   expect(Buffer.from(bytes.subarray(4, 8)).toString("latin1")).toBe("ftyp");
 
-  const list = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType: "server" });
+  const list = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType: "admin" });
   expect(list.status).toBe(200);
   expect(list.body.items.map((r: { id: string }) => r.id)).toEqual([create.body.id]);
 }, RENDER_TIMEOUT_MS);
@@ -130,7 +130,7 @@ it("renders every tab by default, and a single tab on request", async ({ expect 
 
   const all = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
     method: "POST",
-    accessType: "server",
+    accessType: "admin",
     body: { fps: 10, skip_inactivity: false },
   });
   expect(all.status).toBe(200);
@@ -140,7 +140,7 @@ it("renders every tab by default, and a single tab on request", async ({ expect 
 
   const single = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
     method: "POST",
-    accessType: "server",
+    accessType: "admin",
     body: { fps: 10, skip_inactivity: false, session_replay_segment_id: segmentIds[1] },
   });
   expect(single.status).toBe(200);
@@ -158,7 +158,7 @@ it("reports a failed render with a readable reason", async ({ expect }) => {
 
   const create = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
     method: "POST",
-    accessType: "server",
+    accessType: "admin",
     body: {},
   });
   expect(create.status).toBe(200);
@@ -176,14 +176,14 @@ it("validates the replay, segment and options", async ({ expect }) => {
 
   const unknownReplay = await niceBackendFetch(`/api/v1/session-replays/${randomUUID()}/renders`, {
     method: "POST",
-    accessType: "server",
+    accessType: "admin",
     body: {},
   });
   expect(unknownReplay.status).toBe(404);
 
   const unknownSegment = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
     method: "POST",
-    accessType: "server",
+    accessType: "admin",
     body: { session_replay_segment_id: randomUUID() },
   });
   expect(unknownSegment.status).toBe(400);
@@ -191,24 +191,26 @@ it("validates the replay, segment and options", async ({ expect }) => {
 
   const badFps = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
     method: "POST",
-    accessType: "server",
+    accessType: "admin",
     body: { fps: 120 },
   });
   expect(badFps.status).toBe(400);
 
-  const unknownRender = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${randomUUID()}`, { accessType: "server" });
+  const unknownRender = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${randomUUID()}`, { accessType: "admin" });
   expect(unknownRender.status).toBe(404);
 });
 
-it("is not available to client access", async ({ expect }) => {
+it("can only be started with admin access", async ({ expect }) => {
   const { replayId } = await recordReplay({ withFullSnapshot: true });
-  const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
-    method: "POST",
-    accessType: "client",
-    body: {},
-  });
-  expect(res.status).toBe(401);
-  expect(res.body.code).toBe("INSUFFICIENT_ACCESS_TYPE");
+  for (const accessType of ["client", "server"] as const) {
+    const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
+      method: "POST",
+      accessType,
+      body: {},
+    });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("INSUFFICIENT_ACCESS_TYPE");
+  }
 });
 
 it("limits concurrent renders per project with a known error", async ({ expect }) => {
@@ -219,7 +221,7 @@ it("limits concurrent renders per project with a known error", async ({ expect }
   for (let i = 0; i < 4; i++) {
     const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
       method: "POST",
-      accessType: "server",
+      accessType: "admin",
       body: { fps: 30, skip_inactivity: false },
     });
     statuses.push(res.status);
@@ -231,7 +233,7 @@ it("limits concurrent renders per project with a known error", async ({ expect }
 
 it("only exposes a render under its own replay and project", async ({ expect }) => {
   const { replayId } = await recordReplay({ withFullSnapshot: true });
-  const render = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { method: "POST", accessType: "server", body: {} });
+  const render = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { method: "POST", accessType: "admin", body: {} });
   expect(render.status).toBe(200);
 
   // Same project, different replay id in the path (a second user, so a second replay).
@@ -254,24 +256,49 @@ it("only exposes a render under its own replay and project", async ({ expect }) 
     return { replayId: upload.body.session_replay_id as string };
   })();
   expect(otherReplayId).not.toBe(replayId);
-  const wrongReplay = await niceBackendFetch(`/api/v1/session-replays/${otherReplayId}/renders/${render.body.id}`, { accessType: "server" });
+  const wrongReplay = await niceBackendFetch(`/api/v1/session-replays/${otherReplayId}/renders/${render.body.id}`, { accessType: "admin" });
   expect(wrongReplay.status).toBe(404);
 
-  // Client access can't read renders.
-  const client = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType: "client" });
-  expect(client.status).toBe(401);
+  // Rendering is admin-only: neither client nor server access can read renders.
+  for (const accessType of ["client", "server"] as const) {
+    const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("INSUFFICIENT_ACCESS_TYPE");
+  }
 
   // Another project's server key sees neither the replay nor the render.
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  const otherProjectList = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType: "server" });
+  const otherProjectList = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType: "admin" });
   expect(otherProjectList.status).toBe(404);
-  const otherProjectGet = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${render.body.id}`, { accessType: "server" });
+  const otherProjectGet = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${render.body.id}`, { accessType: "admin" });
   expect(otherProjectGet.status).toBe(404);
 });
 
 it("returns 404 when listing renders of an unknown replay", async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
-  const res = await niceBackendFetch(`/api/v1/session-replays/${randomUUID()}/renders`, { accessType: "server" });
+  const res = await niceBackendFetch(`/api/v1/session-replays/${randomUUID()}/renders`, { accessType: "admin" });
   expect(res.status).toBe(404);
   expect(res.body.code).toBe("ITEM_NOT_FOUND");
+});
+
+it("finishes renders through the render machine's callback, without anyone polling", async ({ expect }) => {
+  const { replayId } = await recordReplay({ withFullSnapshot: true });
+  const create = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { method: "POST", accessType: "admin", body: { fps: 10 } });
+  expect(create.status).toBe(200);
+
+  // No reads in between: only the machine's callback can finish the render.
+  await wait(45_000);
+  const readAt = Date.now();
+  const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${create.body.id}`, { accessType: "admin" });
+  expect(res.body.status).toBe("succeeded");
+  // Had this read finished it, finished_at would be about now.
+  expect(res.body.finished_at_millis).toBeLessThan(readAt - 2000);
+}, RENDER_TIMEOUT_MS);
+
+it("rejects render callbacks without a valid token", async ({ expect }) => {
+  const path = `/api/v1/internal/session-replay-renders/${randomUUID()}/${randomUUID()}/callback`;
+  const withToken = await niceBackendFetch(path, { method: "POST", headers: { authorization: "Bearer not-a-real-token" } });
+  expect(withToken.status).toBe(404);
+  const withoutBearer = await niceBackendFetch(path, { method: "POST", headers: { authorization: "Basic abc" } });
+  expect(withoutBearer.status).toBe(404);
 });
