@@ -3,7 +3,7 @@ import { Badge, Button, Calendar, Checkbox, FormControl, FormField, FormItem, Fo
 import { cn } from "@/lib/utils";
 import { CalendarIcon, X } from "@phosphor-icons/react";
 import { Control, FieldValues, Path } from "react-hook-form";
-import { useState, useCallback, KeyboardEvent } from "react";
+import { useState, useCallback, useId, KeyboardEvent } from "react";
 
 
 import type { JSX } from "react";
@@ -282,6 +282,9 @@ export function CheckboxField<F extends FieldValues>(props: {
   description?: string,
   disabled?: boolean,
 }) {
+  // FormLabel renders a <span>, not a <label>, so nothing ties it to the
+  // checkbox on its own; without this the checkbox has no accessible name.
+  const labelId = useId();
   return (
     <FormField
       control={props.control}
@@ -293,10 +296,11 @@ export function CheckboxField<F extends FieldValues>(props: {
               checked={field.value}
               onCheckedChange={field.onChange}
               disabled={props.disabled}
+              aria-labelledby={labelId}
             />
           </FormControl>
           <div className="space-y-1 leading-none">
-            <FormLabel className={cn(props.disabled && "text-muted-foreground")}>
+            <FormLabel id={labelId} className={cn(props.disabled && "text-muted-foreground")}>
               {props.label}
             </FormLabel>
             {props.description && (
