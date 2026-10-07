@@ -9,6 +9,7 @@ import { InternalApiKey, InternalApiKeyCreateOptions, InternalApiKeyFirstView } 
 import { AdminProjectPermission, AdminProjectPermissionDefinition, AdminProjectPermissionDefinitionCreateOptions, AdminProjectPermissionDefinitionUpdateOptions, AdminTeamPermission, AdminTeamPermissionDefinition, AdminTeamPermissionDefinitionCreateOptions, AdminTeamPermissionDefinitionUpdateOptions } from "../../permissions";
 import type { PlanUsage } from "../../plan-usage";
 import { AdminProject } from "../../projects";
+import type { AdminSessionReplayRender, RenderSessionReplayOptions } from "../../session-replays";
 import type { AdminWorkflow, AdminWorkflowRun, AdminWorkflowRunDetails, AdminWorkflowRunsFilter, AdminWorkflowSyncResult, AdminWorkflowUpgradeResult, AdminWorkflowVersion } from "../../workflows";
 import { _HexclaveAdminAppImpl } from "../implementations";
 import { StackServerApp, StackServerAppConstructorOptions } from "./server-app";
@@ -95,6 +96,18 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
   >
   & {
     createInternalApiKey(options: InternalApiKeyCreateOptions): Promise<InternalApiKeyFirstView>,
+
+    /**
+     * Starts rendering a session replay to an MP4 video. Rendering runs in the
+     * background; poll with `getSessionReplayRender` or wait with
+     * `waitForSessionReplayRender`, then download `render.video.url`.
+     */
+    renderSessionReplay(sessionReplayId: string, options?: RenderSessionReplayOptions): Promise<AdminSessionReplayRender>,
+    getSessionReplayRender(sessionReplayId: string, renderId: string): Promise<AdminSessionReplayRender>,
+    /** The 20 most recent renders of a replay, newest first. */
+    listSessionReplayRenders(sessionReplayId: string): Promise<AdminSessionReplayRender[]>,
+    /** Polls a render until it succeeds (resolves) or fails or times out (throws an Error whose `cause` is the render). */
+    waitForSessionReplayRender(sessionReplayId: string, renderId: string, options?: { timeoutMs?: number, pollIntervalMs?: number }): Promise<AdminSessionReplayRender>,
 
     createTeamPermissionDefinition(data: AdminTeamPermissionDefinitionCreateOptions): Promise<AdminTeamPermission>,
     updateTeamPermissionDefinition(permissionId: string, data: AdminTeamPermissionDefinitionUpdateOptions): Promise<void>,

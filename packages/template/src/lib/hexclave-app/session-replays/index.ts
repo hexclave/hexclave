@@ -68,3 +68,43 @@ export type SessionReplayAllEventsResult = {
     events: unknown[],
   }>,
 };
+
+export type AdminSessionReplayRender = {
+  id: string,
+  sessionReplayId: string,
+  /** The one tab (segment) rendered, or null for the whole replay, following the active tab like the dashboard player. */
+  sessionReplaySegmentId: string | null,
+  status: "queued" | "rendering" | "succeeded" | "failed",
+  /** Fraction of frames rendered so far (0 to 1), or null before rendering starts. */
+  progress: number | null,
+  options: {
+    fps: number,
+    speed: number,
+    skipInactivity: boolean,
+  },
+  errorMessage: string | null,
+  createdAt: Date,
+  startedAt: Date | null,
+  finishedAt: Date | null,
+  /** Set once `status` is `"succeeded"`. */
+  video: {
+    /** Short-lived download URL for the MP4; fetch the render again for a fresh one. */
+    url: string,
+    urlExpiresAt: Date,
+    byteLength: number,
+    width: number,
+    height: number,
+    durationMs: number,
+  } | null,
+};
+
+export type RenderSessionReplayOptions = {
+  /** Render only this tab of the replay. By default every tab is rendered, cutting to whichever is active like the dashboard player. */
+  sessionReplaySegmentId?: string,
+  /** Frames per second, 1–30. Defaults to 15. */
+  fps?: number,
+  /** Playback speed multiplier, 0.25–8. Defaults to 1. */
+  speed?: number,
+  /** Cut idle stretches longer than two seconds down to about one second. Defaults to true. */
+  skipInactivity?: boolean,
+};

@@ -85,3 +85,39 @@ export type AdminGetSessionReplayAllEventsResponse = {
     events: unknown[],
   }>,
 };
+
+export type AdminSessionReplayRenderResponse = {
+  id: string,
+  session_replay_id: string,
+  session_replay_segment_id: string | null,
+  status: "queued" | "rendering" | "succeeded" | "failed",
+  progress: number | null,
+  options: {
+    fps: number,
+    speed: number,
+    skip_inactivity: boolean,
+  },
+  error_message: string | null,
+  created_at_millis: number,
+  started_at_millis: number | null,
+  finished_at_millis: number | null,
+  video: {
+    url: string,
+    url_expires_at_millis: number,
+    byte_length: number,
+    width: number,
+    height: number,
+    duration_ms: number,
+  } | null,
+};
+
+export type AdminCreateSessionReplayRenderOptions = {
+  session_replay_segment_id?: string,
+  fps?: number,
+  speed?: number,
+  skip_inactivity?: boolean,
+};
+
+export type AdminListSessionReplayRendersResponse = {
+  items: AdminSessionReplayRenderResponse[],
+};

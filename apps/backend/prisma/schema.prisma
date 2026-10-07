@@ -69,8 +69,9 @@ model Tenancy {
   organizationId      String?              @db.Uuid
   hasNoOrganization   BooleanTrue?
   emailOutboxes       EmailOutbox[]
-  sessionReplays      SessionReplay[]
-  sessionReplayChunks SessionReplayChunk[]
+  sessionReplays       SessionReplay[]
+  sessionReplayChunks  SessionReplayChunk[]
+  sessionReplayRenders SessionReplayRender[]
   managedEmailDomains ManagedEmailDomain[]
   conversations       Conversation[]
   conversationEntryPoints ConversationEntryPoint[]
@@ -661,7 +662,8 @@ model SessionReplay {
   projectUser ProjectUser @relation(fields: [tenancyId, projectUserId], references: [tenancyId, projectUserId], onDelete: Cascade)
   tenancy     Tenancy     @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
 
-  chunks SessionReplayChunk[]
+  chunks  SessionReplayChunk[]
+  renders SessionReplayRender[]
 
   @@id([tenancyId, id])
   @@index([tenancyId, projectUserId, startedAt])
@@ -704,6 +706,70 @@ model SessionReplayChunk {
   @@unique([tenancyId, sessionReplayId, batchId])
   @@index([tenancyId, sessionReplayId, createdAt])
   @@map("SessionReplayChunk")
+}
+
+enum SessionReplayRenderStatus {
+  QUEUED
+  RENDERING
+  SUCCEEDED
+  FAILED
+}
+
+// A request to render a session replay — all of its tabs, or one — to an MP4.
+// Advanced by src/lib/session-replay-renders: the create request starts it, the
+// render machine's completion callback finishes it, and status reads cover a
+// callback that never arrives.
+model SessionReplayRender {
+  id String @default(uuid()) @db.Uuid
+
+  tenancyId       String  @db.Uuid
+  sessionReplayId String  @db.Uuid
+  // The one tab (segment) rendered, or null for the whole replay following the
+  // active tab across tabs (see packages/shared/src/utils/session-replay-timeline.ts).
+  sessionReplaySegmentId String?
+
+  status  SessionReplayRenderStatus @default(QUEUED)
+  // { fps, speed, skipInactivity }
+  options Json
+  // 0..1 while rendering
+  progress Float?
+
+  // "freestyle" or "mock", and that runtime's opaque handle for the running job
+  // (e.g. the Freestyle VM id). Null until the render has been started.
+  runtime       String?
+  runtimeHandle Json?
+
+  // Lease held by whichever request is currently advancing this render, so that
+  // concurrent polls and the cron never act on the same render at once. State
+  // changes are conditional on the token, so an expired holder can't clobber.
+  leaseUntil DateTime?
+  leaseToken String?
+
+  // SHA-256 of the per-render secret the render machine presents when it calls
+  // back on completion (see the internal session-replay-renders callback route).
+  callbackTokenHash String?
+
+  outputS3Key      String?
+  outputByteLength Int?
+  outputWidth      Int?
+  outputHeight     Int?
+  outputDurationMs Int?
+
+  // User-facing failure reason; internal details go to error capture.
+  errorMessage String?
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  sessionReplay SessionReplay @relation(fields: [tenancyId, sessionReplayId], references: [tenancyId, id], onDelete: Cascade)
+  tenancy       Tenancy       @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  @@id([tenancyId, id])
+  @@index([tenancyId, sessionReplayId, createdAt])
+  @@index([status, updatedAt])
+  @@map("SessionReplayRender")
 }
 
 enum ContactChannelType {
