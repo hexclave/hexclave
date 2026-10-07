@@ -1905,6 +1905,19 @@ const AnalyticsNotEnabled = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const SessionReplayRenderLimitReached = createKnownErrorConstructor(
+  KnownError,
+  "SESSION_REPLAY_RENDER_LIMIT_REACHED",
+  (limit: number) => [
+    409,
+    `Only ${limit} session replay renders can run at once per project. Wait for one to finish and try again.`,
+    {
+      limit,
+    },
+  ] as const,
+  (json) => [json.limit] as const,
+);
+
 const DefaultPaymentMethodRequired = createKnownErrorConstructor(
   KnownError,
   "DEFAULT_PAYMENT_METHOD_REQUIRED",
@@ -2107,6 +2120,7 @@ export const KnownErrors = {
   AnalyticsQueryTimeout,
   AnalyticsQueryError,
   AnalyticsNotEnabled,
+  SessionReplayRenderLimitReached,
   TooManyImageAttachments,
   ImageAttachmentTooLarge,
 } satisfies Record<string, KnownErrorConstructor<any, any>>;

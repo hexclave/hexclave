@@ -133,7 +133,7 @@ export type StackServerApp<HasTokenStore extends boolean = boolean, ProjectId ex
     getSessionReplayRender(sessionReplayId: string, renderId: string): Promise<AdminSessionReplayRender>,
     /** The 20 most recent renders of a replay, newest first. */
     listSessionReplayRenders(sessionReplayId: string): Promise<AdminSessionReplayRender[]>,
-    /** Polls a render until it succeeds (resolves) or fails (throws). */
+    /** Polls a render until it succeeds (resolves) or fails or times out (throws an Error whose `cause` is the render). */
     waitForSessionReplayRender(sessionReplayId: string, renderId: string, options?: { timeoutMs?: number, pollIntervalMs?: number }): Promise<AdminSessionReplayRender>,
   }
   & AsyncStoreProperty<"user", [id: string], ServerUser | null, false>

@@ -1825,16 +1825,19 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
 
   async waitForSessionReplayRender(sessionReplayId: string, renderId: string, options?: { timeoutMs?: number, pollIntervalMs?: number }): Promise<AdminSessionReplayRender> {
     const deadline = Date.now() + (options?.timeoutMs ?? 30 * 60_000);
+    const pollIntervalMs = Math.max(500, options?.pollIntervalMs ?? 3000);
     while (true) {
       const render = await this.getSessionReplayRender(sessionReplayId, renderId);
       if (render.status === "succeeded") return render;
+      // The render is attached as `cause` so callers can read its status and errorMessage.
       if (render.status === "failed") {
-        throw new Error(`Session replay render ${renderId} failed: ${render.errorMessage ?? "unknown error"}`);
+        throw new Error(`Session replay render ${renderId} failed: ${render.errorMessage ?? "unknown error"}`, { cause: render });
       }
-      if (Date.now() > deadline) {
-        throw new Error(`Timed out waiting for session replay render ${renderId} (status: ${render.status})`);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`Timed out waiting for session replay render ${renderId} (status: ${render.status})`, { cause: render });
       }
-      await wait(options?.pollIntervalMs ?? 3000);
+      await wait(Math.min(pollIntervalMs, remainingMs));
     }
   }
 

@@ -49,5 +49,8 @@ mkdir -p /jobs
 chmod 711 /jobs
 
 chrome-headless-shell --version
+# Renders run Chrome with its own sandbox, as the unprivileged user; fail the
+# snapshot build now if that can't work on this image.
+cd /tmp && runuser -u renderer -- chrome-headless-shell --headless --disable-gpu --dump-dom about:blank > /dev/null
 ffmpeg -version | head -1
 node --version

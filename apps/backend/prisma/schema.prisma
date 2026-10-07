@@ -739,8 +739,10 @@ model SessionReplayRender {
   runtimeHandle Json?
 
   // Lease held by whichever request is currently advancing this render, so that
-  // concurrent polls and the cron never act on the same render at once.
+  // concurrent polls and the cron never act on the same render at once. State
+  // changes are conditional on the token, so an expired holder can't clobber.
   leaseUntil DateTime?
+  leaseToken String?
 
   outputS3Key      String?
   outputByteLength Int?

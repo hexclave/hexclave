@@ -33,7 +33,7 @@ export function createFreestyleReplayRenderRuntime(apiKey: string): ReplayRender
 
   // vm.fs and exec() act as the image's `ubuntu` user unless told otherwise.
   async function rootExec(vmId: string, command: string) {
-    const result = await freestyle.vms.ref(vmId).exec({ command, linuxUser: "root", timeoutMs: 60_000 });
+    const result = await freestyle.vms.ref(vmId).exec({ command, linuxUser: "root", timeoutMs: 30_000 });
     if (result.statusCode !== 0) {
       throw new HexclaveAssertionError("Command in replay render VM failed", { vmId, statusCode: result.statusCode, stderr: result.stderr });
     }

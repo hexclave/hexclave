@@ -80,7 +80,16 @@ async function deleteJob(id) {
   const job = jobs.get(id);
   if (!job) return;
   jobs.delete(id);
-  if (job.exitCode == null) job.child.kill("SIGKILL");
+  if (job.exitCode == null) {
+    // Puppeteer starts Chrome in its own process group and closes it on
+    // SIGTERM (handleSIGTERM); SIGKILL right away would orphan Chrome.
+    job.child.kill("SIGTERM");
+    await Promise.race([
+      new Promise((resolve) => job.child.once("close", resolve)),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ]);
+    if (job.exitCode == null) job.child.kill("SIGKILL");
+  }
   await rm(job.dir, { recursive: true, force: true });
 }
 

@@ -1923,6 +1923,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                   <div className="flex items-center gap-1">
                     {selectedRecordingId && (
                       <RenderVideoButton
+                        key={selectedRecordingId}
                         sessionReplayId={selectedRecordingId}
                         tabs={renderableTabs}
                       />

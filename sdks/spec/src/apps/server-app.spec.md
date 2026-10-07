@@ -491,7 +491,7 @@ Arguments:
   options.speed: number? - playback speed multiplier, 0.25-8, default 1
   options.skipInactivity: boolean? - cut idle stretches longer than 2s to about 1s, default true
 
-Returns: SessionReplayRender
+Returns: AdminSessionReplayRender
   {
     id: string,
     sessionReplayId: string,
@@ -531,12 +531,18 @@ does (sessionReplaySegmentId is then null in the result). Rendering runs in the 
 takes roughly as long as the replay. Map the response with the same snake_case → camelCase rules
 as the other replay methods (millis → Date).
 
+Limits: up to 3 renders queued or rendering per project; recordings over 48 MB (compressed)
+are rejected; videos stop at 10 minutes of output.
+
 Errors:
   ItemNotFound
     code: "ITEM_NOT_FOUND"
     when: no replay with that id exists in this project
-  400: the replay has no recorded data, the segment id does not belong to it, or it is too large to render
-  429: the project already has 3 renders queued or rendering
+  SessionReplayRenderLimitReached
+    code: "SESSION_REPLAY_RENDER_LIMIT_REACHED"
+    when: the project already has 3 renders queued or rendering
+  (HTTP 400, surfaced as a plain request error carrying the message)
+    when: the replay has no recorded data, the segment id does not belong to it, or it is too large
 
 
 ## getSessionReplayRender(sessionReplayId, renderId)
@@ -545,7 +551,7 @@ Arguments:
   sessionReplayId: string - the replay's id
   renderId: string - the render's id
 
-Returns: SessionReplayRender (see renderSessionReplay)
+Returns: AdminSessionReplayRender (see renderSessionReplay)
 
 Request:
   GET /api/v1/session-replays/{session_replay_id}/renders/{render_id} [server-only]
@@ -565,15 +571,21 @@ Errors:
 Arguments:
   sessionReplayId: string - the replay's id
 
-Returns: SessionReplayRender[] (see renderSessionReplay)
+Returns: AdminSessionReplayRender[] (see renderSessionReplay)
 
 Request:
   GET /api/v1/session-replays/{session_replay_id}/renders [server-only]
 
 Response:
-  { items: [SessionReplayRender response, as in renderSessionReplay] }
+  { items: [render response, as in renderSessionReplay] }
 
-Returns the 20 most recent renders of the replay, newest first.
+Returns the 20 most recent renders of the replay, newest first. Listing also moves in-flight
+renders along, like polling each one.
+
+Errors:
+  ItemNotFound
+    code: "ITEM_NOT_FOUND"
+    when: no replay with that id exists in this project
 
 
 ## waitForSessionReplayRender(sessionReplayId, renderId, options?)
@@ -584,10 +596,11 @@ Arguments:
   options.timeoutMs: number? - give up after this long, default 30 minutes
   options.pollIntervalMs: number? - delay between polls, default 3000
 
-Returns: SessionReplayRender (see renderSessionReplay), with status "succeeded"
+Returns: AdminSessionReplayRender (see renderSessionReplay), with status "succeeded"
 
-Calls getSessionReplayRender until the render succeeds. Throws if it fails (with its
-errorMessage) or the timeout passes. No request of its own.
+Calls getSessionReplayRender until the render succeeds, waiting at least 500ms between polls.
+Throws an Error if the render fails (message includes its errorMessage) or the timeout passes;
+the error's `cause` is the last AdminSessionReplayRender seen. No request of its own.
 
 
 ## sendEmail(options)

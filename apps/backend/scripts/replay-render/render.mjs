@@ -39,7 +39,13 @@ const require = createRequire(import.meta.url);
 const RRWEB_JS = require.resolve("rrweb/dist/rrweb.min.js");
 const RRWEB_CSS = require.resolve("rrweb/dist/rrweb.min.css");
 
-const MAX_EVENTS_BYTES = 256 * 1024 * 1024;
+// Decompressed event JSON (fetch() inflates gzip-encoded chunks). Keep in line
+// with maxRecordingBytes in apps/backend/src/lib/session-replay-renders, which
+// caps the compressed size at admission; replay JSON compresses ~5-10x.
+const MAX_EVENTS_BYTES = 512 * 1024 * 1024;
+const EVENTS_PER_TRANSFER = 2000;
+const CHUNK_FETCH_TIMEOUT_MS = 60_000;
+const UPLOAD_TIMEOUT_MS = 5 * 60_000;
 const IDLE_THRESHOLD_MS = 2000;
 const MAX_WIDTH = 1920;
 const MAX_HEIGHT = 1200;
@@ -130,6 +136,9 @@ async function main() {
         const info = tabsByKey.get(tabKey);
         const container = document.createElement("div");
         container.className = "tab";
+        // TODO: sized from the tab's first Meta event only. A window resized
+        // mid-recording resizes rrweb's iframe but not this stage, so later
+        // frames of that tab come out cropped or bordered.
         const stage = document.createElement("div");
         stage.className = "stage";
         stage.style.width = `${info.width}px`;
@@ -158,13 +167,14 @@ async function main() {
       window.__render = async (tabKey, ts) => {
         const player = await getPlayer(tabKey);
         const before = player.next;
-        while (player.next < player.events.length && player.events[player.next].timestamp <= ts) {
-          player.replayer.getCastFn(player.events[player.next], true)();
-          player.next++;
+        while (player.next < player.events.length && player.events[player.next].timestamp <= ts) player.next++;
+        if (player.next !== before) {
+          // Exactly rrweb's own seek path: cast the new events synchronously
+          // (which also moves the cursor to its last position), then "flush"
+          // to apply the queued DOM mutations.
+          player.replayer.applyEventsSynchronously(player.events.slice(before, player.next));
+          player.replayer.emitter.emit("flush");
         }
-        // Synchronous casts queue DOM mutations; rrweb applies them on "flush",
-        // which its own seek path emits after each synchronous batch.
-        if (player.next !== before) player.replayer.emitter.emit("flush");
         if (shownKey !== tabKey) {
           players.get(shownKey)?.container.classList.remove("active");
           player.container.classList.add("active");
@@ -176,12 +186,17 @@ async function main() {
         }
       };
     }, { width, height }, shownTabs.map((t) => ({ tabKey: t.tabKey, labelIndex: t.labelIndex, width: t.width, height: t.height })), shownTabs.length > 1);
-    // Events go in separately: one evaluate argument per tab keeps each message small.
+    // Events go in separately and in batches, keeping each DevTools message
+    // small; Node's copy is dropped once the page has them.
     await page.evaluate(() => {
       window.__events = new Map();
     });
     for (const tab of shownTabs) {
-      await page.evaluate((key, evs) => window.__events.set(key, evs), tab.tabKey, tab.events);
+      await page.evaluate((key) => window.__events.set(key, []), tab.tabKey);
+      for (let i = 0; i < tab.events.length; i += EVENTS_PER_TRANSFER) {
+        await page.evaluate((key, batch) => window.__events.get(key).push(...batch), tab.tabKey, tab.events.slice(i, i + EVENTS_PER_TRANSFER));
+      }
+      tab.events = null;
     }
 
     const outPath = `${jobDir}/out.mp4`;
@@ -196,10 +211,23 @@ async function main() {
     ffmpeg.stderr.on("data", (d) => {
       ffmpegStderr = (ffmpegStderr + d).slice(-4000);
     });
+    let ffmpegExited = false;
     const ffmpegDone = new Promise((resolve, reject) => {
-      ffmpeg.on("error", reject);
-      ffmpeg.on("close", (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg exited with code ${code}: ${ffmpegStderr}`)));
+      ffmpeg.on("error", (error) => {
+        ffmpegExited = true;
+        reject(error);
+      });
+      ffmpeg.on("close", (code) => {
+        ffmpegExited = true;
+        if (code === 0) resolve();
+        else reject(new Error(`ffmpeg exited with code ${code}: ${ffmpegStderr}`));
+      });
     });
+    // Observed below; this only keeps an early ffmpeg failure from being an
+    // unhandled rejection that kills the process before result.json is written.
+    ffmpegDone.catch(() => {});
+    // Writing to a dead ffmpeg emits EPIPE on stdin; the close handler above reports it.
+    ffmpeg.stdin.on("error", () => {});
 
     let lastProgressWrite = 0;
     let previousTabKey = null;
@@ -214,7 +242,10 @@ async function main() {
         await page.waitForNetworkIdle({ idleTime: 300, timeout: 5000 }).catch(() => warnings.push("Some page assets were still loading after 5s."));
       }
       const jpeg = await page.screenshot({ type: "jpeg", quality: 85, optimizeForSpeed: true });
-      if (!ffmpeg.stdin.write(jpeg)) await new Promise((resolve) => ffmpeg.stdin.once("drain", resolve));
+      if (ffmpegExited) await ffmpegDone; // throws ffmpeg's error
+      if (!ffmpeg.stdin.write(jpeg)) {
+        await Promise.race([new Promise((resolve) => ffmpeg.stdin.once("drain", resolve)), ffmpegDone]);
+      }
       if (Date.now() - lastProgressWrite > 1000) {
         lastProgressWrite = Date.now();
         await writeFile(`${jobDir}/progress.json`, JSON.stringify({ frame: i + 1, total: plan.length }));
@@ -229,6 +260,7 @@ async function main() {
       method: "PUT",
       headers: { "content-type": "video/mp4" },
       body: video,
+      signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
     });
     if (!res.ok) throw new RenderError(`Uploading the video failed with HTTP ${res.status}.`);
 
@@ -270,6 +302,13 @@ function buildFramePlan(tabs, timeline, { step, skipInactivity, maxFrames, holdF
     if (decision.type === "end") break;
     if (decision.type === "switch") {
       active = decision.tabKey;
+    } else if (decision.type === "gap" && decision.tabKey === active) {
+      // A pause in the shown tab's own recording with nothing else recording:
+      // the player just keeps playing this tab, so the video does too.
+      plan.push({ ts, tabKey: active });
+      ts += step;
+      if (skipInactivity) ts = Math.max(ts, decision.startTs);
+      continue;
     } else if (decision.type === "gap") {
       if (skipInactivity || active == null) {
         ts = decision.startTs;
@@ -323,7 +362,7 @@ async function loadTabs(paramTabs) {
   for (const paramTab of paramTabs) {
     const events = [];
     for (const chunk of paramTab.chunks) {
-      const res = await fetch(chunk.url);
+      const res = await fetch(chunk.url, { signal: AbortSignal.timeout(CHUNK_FETCH_TIMEOUT_MS) });
       if (!res.ok) throw new RenderError(`Downloading a replay chunk failed with HTTP ${res.status}.`);
       const raw = Buffer.from(await res.arrayBuffer());
       totalBytes += raw.byteLength;

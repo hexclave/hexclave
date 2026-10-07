@@ -7,7 +7,7 @@ import { Auth, Project, niceBackendFetch } from "../../../backend-helpers";
 // which actually launches Chrome and ffmpeg, so these tests wait for real work.
 const RENDER_TIMEOUT_MS = 150_000;
 
-function rrwebEvents(startMs: number, options: { withFullSnapshot: boolean }) {
+function rrwebEvents(startMs: number, options: { withFullSnapshot: boolean, durationMs?: number }) {
   const meta = { type: 4, timestamp: startMs, data: { href: "https://example.com/", width: 640, height: 480 } };
   const fullSnapshot = {
     type: 2,
@@ -33,10 +33,15 @@ function rrwebEvents(startMs: number, options: { withFullSnapshot: boolean }) {
   };
   const mouseMove = { type: 3, timestamp: startMs + 600, data: { source: 1, positions: [{ x: 100, y: 100, id: 5, timeOffset: 0 }] } };
   const textChange = { type: 3, timestamp: startMs + 1200, data: { source: 0, texts: [{ id: 7, value: "Rendered" }], attributes: [], removes: [], adds: [] } };
-  return options.withFullSnapshot ? [meta, fullSnapshot, mouseMove, textChange] : [meta, mouseMove];
+  // Optional extra activity so a render takes a while (e.g. to test the concurrency limit).
+  const extra = [];
+  for (let t = 1500; t < (options.durationMs ?? 0); t += 500) {
+    extra.push({ type: 3, timestamp: startMs + t, data: { source: 1, positions: [{ x: 100 + (t % 300), y: 100, id: 5, timeOffset: 0 }] } });
+  }
+  return options.withFullSnapshot ? [meta, fullSnapshot, mouseMove, textChange, ...extra] : [meta, mouseMove];
 }
 
-async function uploadTab(browserSessionId: string, startMs: number, options: { withFullSnapshot: boolean }) {
+async function uploadTab(browserSessionId: string, startMs: number, options: { withFullSnapshot: boolean, durationMs?: number }) {
   const segmentId = randomUUID();
   const upload = await niceBackendFetch("/api/v1/session-replays/batch", {
     method: "POST",
@@ -46,7 +51,7 @@ async function uploadTab(browserSessionId: string, startMs: number, options: { w
       session_replay_segment_id: segmentId,
       batch_id: randomUUID(),
       started_at_ms: startMs,
-      sent_at_ms: startMs + 2000,
+      sent_at_ms: startMs + Math.max(2000, options.durationMs ?? 0),
       events: rrwebEvents(startMs, options),
     },
   });
@@ -55,11 +60,11 @@ async function uploadTab(browserSessionId: string, startMs: number, options: { w
 }
 
 /** Records a replay with one tab per entry of `tabStartOffsetsMs`, all in the same session. */
-async function recordReplay(options: { withFullSnapshot: boolean, tabStartOffsetsMs?: number[] }) {
+async function recordReplay(options: { withFullSnapshot: boolean, tabStartOffsetsMs?: number[], durationMs?: number }) {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
   await Auth.fastSignUp();
-  const startMs = Date.now() - 20_000;
+  const startMs = Date.now() - 20_000 - (options.durationMs ?? 0);
   const browserSessionId = randomUUID();
   const tabs = [];
   for (const offset of options.tabStartOffsetsMs ?? [0]) {
@@ -204,4 +209,69 @@ it("is not available to client access", async ({ expect }) => {
   });
   expect(res.status).toBe(401);
   expect(res.body.code).toBe("INSUFFICIENT_ACCESS_TYPE");
+});
+
+it("limits concurrent renders per project with a known error", async ({ expect }) => {
+  // Long enough (30fps, no idle skipping) that the first renders are still running.
+  const { replayId } = await recordReplay({ withFullSnapshot: true, durationMs: 15_000 });
+  const statuses: number[] = [];
+  let lastBody: unknown = null;
+  for (let i = 0; i < 4; i++) {
+    const res = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, {
+      method: "POST",
+      accessType: "server",
+      body: { fps: 30, skip_inactivity: false },
+    });
+    statuses.push(res.status);
+    lastBody = res.body;
+  }
+  expect(statuses).toEqual([200, 200, 200, 409]);
+  expect(lastBody).toMatchObject({ code: "SESSION_REPLAY_RENDER_LIMIT_REACHED", details: { limit: 3 } });
+}, RENDER_TIMEOUT_MS);
+
+it("only exposes a render under its own replay and project", async ({ expect }) => {
+  const { replayId } = await recordReplay({ withFullSnapshot: true });
+  const render = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { method: "POST", accessType: "server", body: {} });
+  expect(render.status).toBe(200);
+
+  // Same project, different replay id in the path (a second user, so a second replay).
+  await Auth.fastSignUp();
+  const { replayId: otherReplayId } = await (async () => {
+    const browserSessionId = randomUUID();
+    const startMs = Date.now() - 5_000;
+    const upload = await niceBackendFetch("/api/v1/session-replays/batch", {
+      method: "POST",
+      accessType: "client",
+      body: {
+        browser_session_id: browserSessionId,
+        session_replay_segment_id: randomUUID(),
+        batch_id: randomUUID(),
+        started_at_ms: startMs,
+        sent_at_ms: startMs + 2000,
+        events: rrwebEvents(startMs, { withFullSnapshot: true }),
+      },
+    });
+    return { replayId: upload.body.session_replay_id as string };
+  })();
+  expect(otherReplayId).not.toBe(replayId);
+  const wrongReplay = await niceBackendFetch(`/api/v1/session-replays/${otherReplayId}/renders/${render.body.id}`, { accessType: "server" });
+  expect(wrongReplay.status).toBe(404);
+
+  // Client access can't read renders.
+  const client = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType: "client" });
+  expect(client.status).toBe(401);
+
+  // Another project's server key sees neither the replay nor the render.
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  const otherProjectList = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders`, { accessType: "server" });
+  expect(otherProjectList.status).toBe(404);
+  const otherProjectGet = await niceBackendFetch(`/api/v1/session-replays/${replayId}/renders/${render.body.id}`, { accessType: "server" });
+  expect(otherProjectGet.status).toBe(404);
+});
+
+it("returns 404 when listing renders of an unknown replay", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  const res = await niceBackendFetch(`/api/v1/session-replays/${randomUUID()}/renders`, { accessType: "server" });
+  expect(res.status).toBe(404);
+  expect(res.body.code).toBe("ITEM_NOT_FOUND");
 });
