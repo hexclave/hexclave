@@ -14,7 +14,7 @@ import { isUuid } from "@hexclave/shared/dist/utils/uuids";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
-const CLICK_FILTER_ID_CAP = 1000;
+const CLICKHOUSE_FILTER_ID_CAP = 1000;
 
 function parseCsvIds(raw: string | undefined): string[] {
   if (!raw) return [];
@@ -29,6 +29,16 @@ function parseCsvUuids(name: string, raw: string | undefined): string[] {
     }
   }
   return values;
+}
+
+function parseCsvCountryCodes(name: string, raw: string | undefined): string[] {
+  const values = parseCsvIds(raw).map(s => s.toUpperCase());
+  for (const value of values) {
+    if (!/^[A-Za-z]{2}$/.test(value)) {
+      throw new StatusError(StatusError.BadRequest, `${name} must contain valid ISO 3166-1 alpha-2 country codes`);
+    }
+  }
+  return [...new Set(values)];
 }
 
 function parseNonNegativeInt(name: string, raw: string | undefined): number | null {
@@ -70,7 +80,7 @@ async function loadClickQualifiedReplayIds(options: {
       projectId: options.projectId,
       branchId: options.branchId,
       clickCountMin: options.clickCountMin,
-      cap: CLICK_FILTER_ID_CAP,
+      cap: CLICKHOUSE_FILTER_ID_CAP,
     },
     clickhouse_settings: {
       SQL_project_id: options.projectId,
@@ -83,10 +93,49 @@ async function loadClickQualifiedReplayIds(options: {
   return rows.map((row) => row.session_replay_id);
 }
 
+// Geo info is only attached to `$token-refresh` events (see SESSION_GEO_QUERY in
+// the dashboard), keyed by refresh token — not by user. Matching on refresh
+// token keeps a user's other sessions from lending their location to this one.
+// The cap mirrors the click filter: more qualifying IDs would make the
+// resulting `IN (...)` clause on the Postgres side unwieldy anyway.
+async function loadLocationQualifiedRefreshTokenIds(options: {
+  projectId: string,
+  branchId: string,
+  countryCodes: string[],
+}): Promise<string[]> {
+  const clickhouseClient = getClickhouseExternalClient();
+  const result = await clickhouseClient.query({
+    query: `
+      SELECT DISTINCT refresh_token_id
+      FROM default.events
+      WHERE project_id = {projectId:String}
+        AND branch_id = {branchId:String}
+        AND event_type = '$token-refresh'
+        AND refresh_token_id IS NOT NULL
+        AND upper(CAST(data.ip_info.country_code, 'Nullable(String)')) IN {countryCodes:Array(String)}
+      LIMIT {cap:UInt64}
+    `,
+    query_params: {
+      projectId: options.projectId,
+      branchId: options.branchId,
+      countryCodes: options.countryCodes,
+      cap: CLICKHOUSE_FILTER_ID_CAP,
+    },
+    clickhouse_settings: {
+      SQL_project_id: options.projectId,
+      SQL_branch_id: options.branchId,
+    },
+    format: "JSONEachRow",
+  });
+
+  const rows = await result.json() as Array<{ refresh_token_id: string | null }>;
+  return rows.map((row) => row.refresh_token_id).filter((id): id is string => id !== null);
+}
+
 export const GET = createSmartRouteHandler({
   metadata: {
     summary: "List session replays",
-    description: "Lists session replays for the project, most recently active first. Supports filtering by user, team, duration, last-event time, and click count, and cursor-based pagination.",
+    description: "Lists session replays for the project, most recently active first. Supports filtering by user, team, duration, last-event time, click count, and session location (country), and cursor-based pagination.",
     tags: ["Session Replays"],
   },
   request: yupObject({
@@ -104,6 +153,7 @@ export const GET = createSmartRouteHandler({
       last_event_at_from_millis: yupString().optional(),
       last_event_at_to_millis: yupString().optional(),
       click_count_min: yupString().optional(),
+      country_codes: yupString().optional(),
     }).optional(),
   }),
   response: yupObject({
@@ -141,6 +191,7 @@ export const GET = createSmartRouteHandler({
     const durationMsMin = parseNonNegativeInt("duration_ms_min", query.duration_ms_min);
     const durationMsMax = parseNonNegativeInt("duration_ms_max", query.duration_ms_max);
     const clickCountMin = parseNonNegativeInt("click_count_min", query.click_count_min);
+    const countryCodesFilter = parseCsvCountryCodes("country_codes", query.country_codes);
     const lastEventAtFrom = parseMillis("last_event_at_from_millis", query.last_event_at_from_millis);
     const lastEventAtTo = parseMillis("last_event_at_to_millis", query.last_event_at_to_millis);
 
@@ -160,7 +211,15 @@ export const GET = createSmartRouteHandler({
       })
       : null;
 
-    if (clickQualifiedIds && clickQualifiedIds.length === 0) {
+    const locationQualifiedRefreshTokenIds = countryCodesFilter.length > 0
+      ? await loadLocationQualifiedRefreshTokenIds({
+        projectId: auth.tenancy.project.id,
+        branchId: auth.tenancy.branchId,
+        countryCodes: countryCodesFilter,
+      })
+      : null;
+
+    if ((clickQualifiedIds && clickQualifiedIds.length === 0) || (locationQualifiedRefreshTokenIds && locationQualifiedRefreshTokenIds.length === 0)) {
       return {
         statusCode: 200,
         bodyType: "json",
@@ -195,9 +254,12 @@ export const GET = createSmartRouteHandler({
             },
           } : {},
         },
-        select: { id: true, lastEventAt: true, startedAt: true },
+        select: { id: true, lastEventAt: true, startedAt: true, refreshTokenId: true },
       });
       if (!row) {
+        throw new KnownErrors.ItemNotFound(cursorId);
+      }
+      if (locationQualifiedRefreshTokenIds && !locationQualifiedRefreshTokenIds.includes(row.refreshTokenId)) {
         throw new KnownErrors.ItemNotFound(cursorId);
       }
       const durationMs = row.lastEventAt.getTime() - row.startedAt.getTime();
@@ -221,6 +283,7 @@ export const GET = createSmartRouteHandler({
             AND tm."teamId" IN (${Prisma.join(teamIdsFilter)})
         )` : Prisma.empty}
         ${clickQualifiedIds ? Prisma.sql`AND sr."id" IN (${Prisma.join(clickQualifiedIds)})` : Prisma.empty}
+        ${locationQualifiedRefreshTokenIds ? Prisma.sql`AND sr."refreshTokenId" IN (${Prisma.join(locationQualifiedRefreshTokenIds)})` : Prisma.empty}
         ${durationMsMin !== null ? Prisma.sql`AND EXTRACT(EPOCH FROM (sr."lastEventAt" - sr."startedAt")) * 1000 >= ${durationMsMin}` : Prisma.empty}
         ${durationMsMax !== null ? Prisma.sql`AND EXTRACT(EPOCH FROM (sr."lastEventAt" - sr."startedAt")) * 1000 <= ${durationMsMax}` : Prisma.empty}
         ${cursorPivot ? Prisma.sql`AND (
