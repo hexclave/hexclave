@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as lmdb from "lmdb";
 import { wait } from "@hexclave/shared/dist/utils/promises";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { declareLmdbLowLevelDatabase } from "./lmdb.js";
 
 const textEncoder = new TextEncoder();
@@ -481,6 +481,156 @@ describe("LMDB low-level database", () => {
       // close() drains pending commits, so a failed assertion above must not leave the first one held.
       firstTransaction.release();
       await db.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+});
+
+// lmdb-js's patched LMDB occasionally aborts a commit with this in production; it can't be triggered on
+// demand, so these tests make `root.transaction` fail the way lmdb-js does (a rejected commit whose
+// unwrapped error carries the native status code).
+const mdbBadTxnError = () => Object.assign(new Error("MDB_BAD_TXN: Transaction must abort, has a child, or is invalid: reserved freelist had a data entry with zero-size, last id 1"), { code: -30782 });
+
+function failRootTransactions(db: ReturnType<typeof declareLmdbLowLevelDatabase>, nextFailure: () => Error | null) {
+  const root = db.getDebugInfo().root;
+  const originalTransaction = root.transaction.bind(root);
+  let attempts = 0;
+  vi.spyOn(root, "transaction").mockImplementation((...args: unknown[]) => {
+    attempts++;
+    const failure = nextFailure();
+    return failure === null ? originalTransaction(...args) : Promise.reject(failure);
+  });
+  return { attempts: () => attempts };
+}
+
+describe("LMDB low-level database commit failures", () => {
+  it("retries a commit that lmdb-js aborted with MDB_BAD_TXN", async () => {
+    const path = await tempLmdbPath();
+    try {
+      const db = declareLmdbLowLevelDatabase({ path, dbId: "retry-bad-txn" });
+      const store = db.declareKvStore("store");
+      let failuresLeft = 2;
+      const transactions = failRootTransactions(db, () => failuresLeft-- > 0 ? mdbBadTxnError() : null);
+
+      const { seq } = await store.setAll([{ key: buffer("key"), value: buffer("value") }]);
+      await db.waitUntilDurable(seq);
+
+      expect(transactions.attempts()).toBe(3);
+      expect(text((await store.get(buffer("key"))).buffer)).toBe("value");
+      await db.close();
+    } finally {
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("gives up and surfaces the native error when MDB_BAD_TXN keeps happening", async () => {
+    const path = await tempLmdbPath();
+    try {
+      const db = declareLmdbLowLevelDatabase({ path, dbId: "retry-exhausted" });
+      const store = db.declareKvStore("store");
+      const transactions = failRootTransactions(db, mdbBadTxnError);
+
+      const { seq } = await store.setAll([{ key: buffer("key"), value: buffer("value") }]);
+      await expect(db.waitUntilAvailable(seq)).rejects.toMatchObject({ code: -30782 });
+
+      expect(transactions.attempts()).toBe(5);
+      expect((await store.get(buffer("key"))).buffer).toBeNull();
+    } finally {
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retry commit failures other than MDB_BAD_TXN", async () => {
+    const path = await tempLmdbPath();
+    try {
+      const db = declareLmdbLowLevelDatabase({ path, dbId: "no-retry" });
+      const store = db.declareKvStore("store");
+      const transactions = failRootTransactions(db, () => new Error("some other commit failure"));
+
+      const { seq } = await store.setAll([{ key: buffer("key"), value: buffer("value") }]);
+      await expect(db.waitUntilAvailable(seq)).rejects.toThrow("some other commit failure");
+      expect(transactions.attempts()).toBe(1);
+    } finally {
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps rejecting writes that depend on a failed commit without poisoning unrelated work", async () => {
+    const path = await tempLmdbPath();
+    try {
+      const db = declareLmdbLowLevelDatabase({ path, dbId: "failed-commit-isolation" });
+      const failedStore = db.declareKvStore("failed");
+      const otherStore = db.declareKvStore("other");
+      let failNext = true;
+      failRootTransactions(db, () => {
+        if (!failNext) return null;
+        failNext = false;
+        return new Error("simulated non-retryable commit failure");
+      });
+
+      const failed = await failedStore.setAll([{ key: buffer("a"), value: buffer("lost") }]);
+      await expect(db.waitUntilAvailable(failed.seq)).rejects.toThrow("simulated non-retryable commit failure");
+      await expect(db.waitUntilDurable(failed.seq)).rejects.toThrow("simulated non-retryable commit failure");
+
+      // A write that requires the failed one must not land as if the failed write had happened...
+      const independent = await otherStore.setAll([{ key: buffer("b"), value: buffer("independent") }]);
+      const dependent = await failedStore.setAll([{ key: buffer("c"), value: buffer("dependent") }], { requiresSeq: db.combineSeqs(independent.seq, failed.seq) });
+      await expect(db.waitUntilAvailable(dependent.seq)).rejects.toThrow("simulated non-retryable commit failure");
+      await db.waitUntilAvailable(independent.seq);
+
+      // ...but the old failure must not leak into unrelated compare-and-sets or close().
+      const cas = await otherStore.compareAndSetAll([{ key: buffer("d"), compare: null, value: buffer("cas") }]);
+      expect(cas.results).toMatchObject([{ wasSet: true }]);
+      await db.waitUntilAvailable(cas.seq);
+
+      const debugInfo = db.getDebugInfo();
+      expect(debugInfo.seqToAvailability.pending.size).toBe(0);
+      expect(debugInfo.combinedSeqToAvailability.pending.size).toBe(0);
+      expect(debugInfo.combinedSeqDependencies.size).toBe(0);
+      expect(text((await failedStore.get(buffer("a"))).buffer)).toBeNull();
+      expect(text((await failedStore.get(buffer("c"))).buffer)).toBeNull();
+      expect(text((await otherStore.get(buffer("b"))).buffer)).toBe("independent");
+      expect(text((await otherStore.get(buffer("d"))).buffer)).toBe("cas");
+      await db.close();
+    } finally {
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("waits on very deep chains of pending combined seqs without overflowing the stack", async () => {
+    const path = await tempLmdbPath();
+    try {
+      const db = declareLmdbLowLevelDatabase({ path, dbId: "deep-combined-chain" });
+      const store = db.declareKvStore("store");
+      // Hold the first commit open so every combined seq below stays pending (and in the dependency graph).
+      let releaseFirstCommit: () => void = () => {
+        throw new Error("releaseFirstCommit called before the first commit started");
+      };
+      const firstCommitGate = new Promise<void>(resolve => {
+        releaseFirstCommit = resolve;
+      });
+      const root = db.getDebugInfo().root;
+      const originalTransaction = root.transaction.bind(root);
+      let isFirstTransaction = true;
+      vi.spyOn(root, "transaction").mockImplementation(async (...args: unknown[]) => {
+        if (isFirstTransaction) {
+          isFirstTransaction = false;
+          await firstCommitGate;
+        }
+        return await originalTransaction(...args);
+      });
+
+      const first = await store.setAll([{ key: buffer("first"), value: buffer("1") }]);
+      // Every link also points back at `first`, so the graph is both deep and full of shared nodes.
+      let chained = db.combineSeqs(first.seq, first.seq);
+      for (let i = 0; i < 50_000; i++) chained = db.combineSeqs(chained, first.seq);
+      const last = await store.setAll([{ key: buffer("last"), value: buffer("2") }], { requiresSeq: chained });
+
+      releaseFirstCommit();
+      await db.waitUntilAvailable(last.seq);
+      expect(text((await store.get(buffer("last"))).buffer)).toBe("2");
+      await db.close();
+    } finally {
       await rm(path, { recursive: true, force: true });
     }
   });

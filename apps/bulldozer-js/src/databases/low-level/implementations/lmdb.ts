@@ -1,5 +1,5 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
-import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { createUuidV7Generator } from "@hexclave/shared/dist/utils/uuids";
 import * as lmdb from "lmdb";
@@ -91,6 +91,79 @@ function createVoidDeferred() {
   return { promise, resolve: resolveOperation, reject: rejectOperation };
 }
 
+// lmdb-js bundles its own patched LMDB, whose free-space bookkeeping (`mdb_freelist_save` in
+// dependencies/lmdb/libraries/liblmdb/mdb.c) occasionally fails a commit with MDB_BAD_TXN
+// ("reserved freelist had a data entry with zero-size, last id N"). It's rare (a single failed commit
+// per occurrence) and we couldn't reproduce it with lmdb-js's own free-space stress test, so we treat
+// it as an upstream bug we can't fix from here. A failed commit is
+// aborted atomically, and on abort lmdb-js throws away its in-memory free-space list so the next
+// transaction reloads it from disk, which makes the same writes safe to retry. Before this retry, one
+// occurrence failed the write, and because every later write to a store is chained onto the previous
+// one (see `getChainedRequiresSeq` in instant-availability.ts), all writes failed until a restart.
+const MDB_BAD_TXN = -30782;
+const lmdbCommitRetryDelaysMs = [10, 50, 200, 1_000];
+
+function isAbortedLmdbTransactionError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === MDB_BAD_TXN;
+}
+
+async function retryAbortedLmdbCommit<T>(description: string, attempt: () => Promise<T>): Promise<T> {
+  for (let attemptIndex = 0; ; attemptIndex++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      const unwrapped = await unwrapLmdbCommitError(error);
+      const retryDelayMs = lmdbCommitRetryDelaysMs.at(attemptIndex);
+      if (!isAbortedLmdbTransactionError(unwrapped) || retryDelayMs === undefined) throw unwrapped;
+      // Still report every occurrence: the retry hides the outage, not the upstream bug.
+      captureError("bulldozer-js:lmdb-commit-retry", new HexclaveAssertionError(`LMDB ${description} commit was aborted with MDB_BAD_TXN; retrying`, {
+        cause: unwrapped,
+        attempt: attemptIndex + 1,
+        retryDelayMs,
+      }));
+      await wait(retryDelayMs);
+    }
+  }
+}
+
+/**
+ * Tracks the availability or durability promise of each seq until it settles.
+ *
+ * Settled seqs are dropped from `pending` either way, so `pending` only ever holds in-flight
+ * work (what `waitUntilAllAvailable` and `close` wait on). Seqs that succeeded are forgotten (an
+ * unknown seq counts as done); seqs that failed move to `failed`, so anything that later waits on
+ * or requires them still rejects with the original error. Previously a failed seq's rejected
+ * promise stayed in the pending map forever, which made every later compareAndSetAll and close()
+ * reject with that old error and let combined-seq dependency chains grow without bound.
+ */
+function createSeqSettlementTracker() {
+  const pending = new Map<string, Promise<void>>();
+  // Never pruned: forgetting a failure would let a write that requires the failed seq go through
+  // as if it had landed. One small entry per failed seq, and failures are rare after the retry above.
+  const failed = new Map<string, unknown>();
+  return {
+    pending,
+    failed,
+    track(seqId: string, settlement: Promise<void>, onSettled?: () => void) {
+      pending.set(seqId, settlement);
+      settlement.then(() => {
+        pending.delete(seqId);
+        onSettled?.();
+      }, (error: unknown) => {
+        pending.delete(seqId);
+        failed.set(seqId, error);
+        onSettled?.();
+      });
+    },
+    get(seqId: string): Promise<void> | undefined {
+      const pendingSettlement = pending.get(seqId);
+      if (pendingSettlement !== undefined) return pendingSettlement;
+      if (failed.has(seqId)) return Promise.reject(failed.get(seqId));
+      return undefined;
+    },
+  };
+}
+
 type LmdbActivityStats = {
   puts: number,
   putBytes: number,
@@ -142,6 +215,7 @@ export type LmdbDiagnostics = {
     combinedSeqToAvailability: number,
     combinedSeqToDurability: number,
     combinedSeqDependencies: number,
+    failedSeqs: number,
     debugEntriesByStoreId: number,
   },
   currentVersion: number,
@@ -238,10 +312,11 @@ export function declareLmdbLowLevelDatabase(options: {
   let currentVersion = meta.get("seq") ?? 0;
   const initialSeqId = "initial";
   const debugEntriesByStoreId = new Map<`${"store" | "dump"}-${string}`, () => Promise<LowLevelDatabaseDebugEntry[]>>();
-  const seqToAvailability = new Map<string, Promise<void>>();
-  const seqToDurability = new Map<string, Promise<void>>();
-  const combinedSeqToAvailability = new Map<string, Promise<void>>();
-  const combinedSeqToDurability = new Map<string, Promise<void>>();
+  const seqToAvailability = createSeqSettlementTracker();
+  const seqToDurability = createSeqSettlementTracker();
+  const combinedSeqToAvailability = createSeqSettlementTracker();
+  const combinedSeqToDurability = createSeqSettlementTracker();
+  // Only holds combined seqs whose availability hasn't settled yet; see `collectOutsideBatchRequirements`.
   const combinedSeqDependencies = new Map<string, string[]>();
   let pendingCommitOperations: PendingCommitOperation[] = [];
   let pendingCommitFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -314,11 +389,12 @@ export function declareLmdbLowLevelDatabase(options: {
       averageCombinedSeqAvailabilityResolveMs: activityStats.combinedSeqAvailabilityResolves === 0 ? 0 : activityStats.combinedSeqAvailabilityResolveTotalMs / activityStats.combinedSeqAvailabilityResolves,
       averageCombinedSeqDurabilityResolveMs: activityStats.combinedSeqDurabilityResolves === 0 ? 0 : activityStats.combinedSeqDurabilityResolveTotalMs / activityStats.combinedSeqDurabilityResolves,
       mapSizes: {
-        seqToAvailability: seqToAvailability.size,
-        seqToDurability: seqToDurability.size,
-        combinedSeqToAvailability: combinedSeqToAvailability.size,
-        combinedSeqToDurability: combinedSeqToDurability.size,
+        seqToAvailability: seqToAvailability.pending.size,
+        seqToDurability: seqToDurability.pending.size,
+        combinedSeqToAvailability: combinedSeqToAvailability.pending.size,
+        combinedSeqToDurability: combinedSeqToDurability.pending.size,
         combinedSeqDependencies: combinedSeqDependencies.size,
+        failedSeqs: seqToAvailability.failed.size + seqToDurability.failed.size + combinedSeqToAvailability.failed.size + combinedSeqToDurability.failed.size,
         debugEntriesByStoreId: debugEntriesByStoreId.size,
       },
       currentVersion,
@@ -341,10 +417,10 @@ export function declareLmdbLowLevelDatabase(options: {
     if (seq[0] !== dbId || typeof seq[1] !== "string") throw new Error("LMDB sequence does not belong to this database");
     return seq[1];
   };
-  const getAvailabilityPromise = (seqId: string) => {
+  const getAvailabilityPromise = (seqId: string): Promise<void> => {
     return seqToAvailability.get(seqId) ?? combinedSeqToAvailability.get(seqId) ?? Promise.resolve();
   };
-  const getDurabilityPromise = (seqId: string) => {
+  const getDurabilityPromise = (seqId: string): Promise<void> => {
     return seqToDurability.get(seqId) ?? combinedSeqToDurability.get(seqId) ?? Promise.resolve();
   };
   const combineSeqsForStore = (...seqs: DatabaseSeq[]) => {
@@ -368,10 +444,8 @@ export function declareLmdbLowLevelDatabase(options: {
       await awaitLmdbPromise(promise);
       activityStats.waitUntilAvailableResolveTotalMs += performance.now() - insertedAt;
       activityStats.waitUntilAvailableResolves++;
-      seqToAvailability.delete(seqId);
     });
-    availability.catch(() => {});
-    seqToAvailability.set(seqId, availability);
+    seqToAvailability.track(seqId, availability);
   };
   const rememberDurability = (seqId: string, promise: PromiseLike<unknown>) => {
     const insertedAt = performance.now();
@@ -380,10 +454,8 @@ export function declareLmdbLowLevelDatabase(options: {
       await root.flushed;
       activityStats.waitUntilDurableResolveTotalMs += performance.now() - insertedAt;
       activityStats.waitUntilDurableResolves++;
-      seqToDurability.delete(seqId);
     });
-    durability.catch(() => {});
-    seqToDurability.set(seqId, durability);
+    seqToDurability.track(seqId, durability);
   };
   const rememberCombinedAvailability = (seqId: string, promise: PromiseLike<unknown>) => {
     const insertedAt = performance.now();
@@ -391,11 +463,10 @@ export function declareLmdbLowLevelDatabase(options: {
       await awaitLmdbPromise(promise);
       activityStats.combinedSeqAvailabilityResolveTotalMs += performance.now() - insertedAt;
       activityStats.combinedSeqAvailabilityResolves++;
-      combinedSeqToAvailability.delete(seqId);
-      combinedSeqDependencies.delete(seqId);
     });
-    availability.catch(() => {});
-    combinedSeqToAvailability.set(seqId, availability);
+    // Drop the dependency list on failure too: a failed combined seq is then a leaf that rejects,
+    // instead of staying in the graph that later combined seqs get chained onto.
+    combinedSeqToAvailability.track(seqId, availability, () => combinedSeqDependencies.delete(seqId));
   };
   const rememberCombinedDurability = (seqId: string, promise: PromiseLike<unknown>) => {
     const insertedAt = performance.now();
@@ -403,10 +474,8 @@ export function declareLmdbLowLevelDatabase(options: {
       await awaitLmdbPromise(promise);
       activityStats.combinedSeqDurabilityResolveTotalMs += performance.now() - insertedAt;
       activityStats.combinedSeqDurabilityResolves++;
-      combinedSeqToDurability.delete(seqId);
     });
-    durability.catch(() => {});
-    combinedSeqToDurability.set(seqId, durability);
+    combinedSeqToDurability.track(seqId, durability);
   };
   const trackCommit = (seqId: string, promise: PromiseLike<unknown>) => {
     rememberAvailability(seqId, promise);
@@ -415,41 +484,104 @@ export function declareLmdbLowLevelDatabase(options: {
   };
   const commitBatch = async (operations: PendingCommitOperation[]) => {
     if (operations.length === 0) return;
+    let committableOperations = operations;
     try {
-      const version = nextVersion();
       await traceSpanHot({ description: "bulldozer-js.low-level.lmdb.commit", attributes: { "bulldozer.low_level.backend": "lmdb", "bulldozer.low_level.operation_count": operations.length } }, async () => {
         const requiredSeqWaitStartedAt = performance.now();
-        const batchSeqIds = new Set(operations.map(operation => operation.seqId));
-        await waitUntilAllAvailableOutsideBatch(operations.map(operation => operation.requiresSeq), batchSeqIds);
+        const failedOperationErrors = await waitForBatchRequirements(operations);
         activityStats.requiredSeqWaits++;
         activityStats.requiredSeqWaitTotalMs += performance.now() - requiredSeqWaitStartedAt;
-        const transactionStartedAt = performance.now();
-        let transactionCallbackFinishedAt: number | null = null;
-        await root.transaction(() => {
-          activityStats.transactionQueueWaitTotalMs += performance.now() - transactionStartedAt;
-          activityStats.transactions++;
-          return (async () => {
-            const actionStartedAt = performance.now();
-            for (const operation of operations) await operation.action(version);
-            activityStats.transactionActionTotalMs += performance.now() - actionStartedAt;
-            const metaPutStartedAt = performance.now();
-            await meta.put("seq", version);
-            activityStats.metaPutTotalMs += performance.now() - metaPutStartedAt;
-          })().finally(() => {
-            transactionCallbackFinishedAt = performance.now();
-          });
-        }).finally(() => {
-          const transactionFinishedAt = performance.now();
-          activityStats.transactionTotalMs += transactionFinishedAt - transactionStartedAt;
-          if (transactionCallbackFinishedAt !== null) activityStats.transactionCommitTailTotalMs += transactionFinishedAt - transactionCallbackFinishedAt;
-        });
+        // An operation whose requirement failed must not land, but it shouldn't take the unrelated
+        // operations that happen to share its batch down with it.
+        for (const operation of operations) {
+          if (failedOperationErrors.has(operation.seqId)) operation.reject(failedOperationErrors.get(operation.seqId));
+        }
+        committableOperations = operations.filter(operation => !failedOperationErrors.has(operation.seqId));
+        if (committableOperations.length === 0) return;
+        // Each attempt is a fresh LMDB transaction (an aborted one applied nothing), so it re-runs every
+        // action and takes a fresh version, like any other new commit would.
+        await retryAbortedLmdbCommit("batch", async () => await runBatchTransaction(committableOperations, nextVersion()));
       });
-      for (const operation of operations) operation.resolve();
+      for (const operation of committableOperations) operation.resolve();
     } catch (error) {
       const unwrapped = await unwrapLmdbCommitError(error);
-      for (const operation of operations) operation.reject(unwrapped);
+      for (const operation of committableOperations) operation.reject(unwrapped);
       throw unwrapped;
     }
+  };
+  // Waits until every operation's `requiresSeq` is available, and returns the operations that can't be
+  // committed (by seq id, with the error to reject them with): those that require a failed seq, directly
+  // or through another operation of this same batch that requires one.
+  const waitForBatchRequirements = async (operations: PendingCommitOperation[]) => {
+    const operationsBySeqId = new Map(operations.map(operation => [operation.seqId, operation]));
+    const { outsideBatchSeqIds, combinedSeqExpansions } = collectOutsideBatchRequirements(
+      operations.map(operation => getSeqId(operation.requiresSeq)),
+      new Set(operationsBySeqId.keys()),
+    );
+    const outsideBatchResults = await Promise.allSettled(outsideBatchSeqIds.map(async seqId => await getAvailabilityPromise(seqId)));
+    // Each seq's failure, or null if it didn't fail. Starts out with the outside-batch seqs we just waited on.
+    const failureBySeqId = new Map<string, { error: unknown } | null>();
+    outsideBatchSeqIds.forEach((seqId, index) => {
+      const result = outsideBatchResults[index];
+      failureBySeqId.set(seqId, result.status === "rejected" ? { error: result.reason } : null);
+    });
+    const failedOperationErrors = new Map<string, unknown>();
+    // The common case: nothing failed, so there's nothing to attribute and no need for a second pass.
+    if ([...failureBySeqId.values()].every(failure => failure === null)) return failedOperationErrors;
+
+    // Otherwise, find which operations those failures reach: through combined seqs (as expanded by the walk
+    // above), and through other operations of this batch (an in-batch seq fails if its operation's
+    // requirement does). Iterative and memoized across operations for the same reasons as that walk.
+    const getRequiredSeqIds = (seqId: string): string[] => {
+      if (seqId === initialSeqId) return [];
+      const operation = operationsBySeqId.get(seqId);
+      if (operation !== undefined) return [getSeqId(operation.requiresSeq)];
+      return combinedSeqExpansions.get(seqId) ?? throwErr(`Seq ${seqId} is reachable from the batch, so collectOutsideBatchRequirements must have either waited on it or expanded it`);
+    };
+    for (const operation of operations) {
+      const seqIdsToResolve = [operation.seqId];
+      while (seqIdsToResolve.length > 0) {
+        const seqId = seqIdsToResolve.at(-1) ?? throwErr("seqIdsToResolve is non-empty inside the loop");
+        if (failureBySeqId.has(seqId)) {
+          seqIdsToResolve.pop();
+          continue;
+        }
+        const requiredSeqIds = getRequiredSeqIds(seqId);
+        const unresolvedSeqIds = requiredSeqIds.filter(requiredSeqId => !failureBySeqId.has(requiredSeqId));
+        if (unresolvedSeqIds.length > 0) {
+          for (const unresolvedSeqId of unresolvedSeqIds) seqIdsToResolve.push(unresolvedSeqId);
+          continue;
+        }
+        seqIdsToResolve.pop();
+        failureBySeqId.set(seqId, requiredSeqIds.map(requiredSeqId => failureBySeqId.get(requiredSeqId) ?? null).find(failure => failure !== null) ?? null);
+      }
+      const failure = failureBySeqId.get(operation.seqId);
+      if (failure === undefined) throw new HexclaveAssertionError("Operation's failure state was not resolved by the loop above", { seqId: operation.seqId });
+      if (failure !== null) failedOperationErrors.set(operation.seqId, failure.error);
+    }
+    return failedOperationErrors;
+  };
+  const runBatchTransaction = async (operations: PendingCommitOperation[], version: number) => {
+    const transactionStartedAt = performance.now();
+    let transactionCallbackFinishedAt: number | null = null;
+    await root.transaction(() => {
+      activityStats.transactionQueueWaitTotalMs += performance.now() - transactionStartedAt;
+      activityStats.transactions++;
+      return (async () => {
+        const actionStartedAt = performance.now();
+        for (const operation of operations) await operation.action(version);
+        activityStats.transactionActionTotalMs += performance.now() - actionStartedAt;
+        const metaPutStartedAt = performance.now();
+        await meta.put("seq", version);
+        activityStats.metaPutTotalMs += performance.now() - metaPutStartedAt;
+      })().finally(() => {
+        transactionCallbackFinishedAt = performance.now();
+      });
+    }).finally(() => {
+      const transactionFinishedAt = performance.now();
+      activityStats.transactionTotalMs += transactionFinishedAt - transactionStartedAt;
+      if (transactionCallbackFinishedAt !== null) activityStats.transactionCommitTailTotalMs += transactionFinishedAt - transactionCallbackFinishedAt;
+    });
   };
   const flushPendingCommits = async () => {
     if (pendingCommitFlushTimer !== null) {
@@ -489,9 +621,11 @@ export function declareLmdbLowLevelDatabase(options: {
         await meta.put("seq", nextVersionRef.value);
       })();
     };
-    const wasSet = expectedVersion === null
+    // Retrying re-evaluates the condition in a new transaction, so a retried compare-and-set can still
+    // correctly report `false` if another write got in between.
+    const wasSet = await retryAbortedLmdbCommit("compare-and-set", async () => expectedVersion === null
       ? await db.ifNoExists(key, write)
-      : await db.ifVersion(key, expectedVersion, write);
+      : await db.ifVersion(key, expectedVersion, write));
     if (!wasSet) return null;
     if (nextVersionRef.value === null) throw new Error("Assertion error: LMDB compare-and-set succeeded without assigning a version");
     rememberAvailability(seqId, root.committed);
@@ -520,25 +654,33 @@ export function declareLmdbLowLevelDatabase(options: {
   // deep that all operations in a batch share, so this must be iterative (recursion overflowed the
   // stack) and visit each combined seq once per batch (per-operation walks cost operations × depth).
   // The answer depends on which seqs are in the batch, so the visited set can't outlive the batch.
-  const waitUntilAllAvailableOutsideBatch = async (seqs: DatabaseSeq[], batchSeqIds: Set<string>) => {
+  // Besides the outside-batch seqs to wait on, this returns how it expanded each combined seq it walked
+  // through: a combined seq is dropped from `combinedSeqDependencies` once it settles, which can happen
+  // while the batch waits, so `waitForBatchRequirements` needs this snapshot to attribute failures.
+  const collectOutsideBatchRequirements = (seqIds: string[], batchSeqIds: Set<string>) => {
     const visited = new Set<string>();
-    const outsideBatchAvailability: Promise<void>[] = [];
-    const toVisit = seqs.map(seq => getSeqId(seq));
+    const outsideBatchSeqIds: string[] = [];
+    const combinedSeqExpansions = new Map<string, string[]>();
+    const toVisit = [...seqIds];
     while (toVisit.length > 0) {
       const seqId = toVisit.pop() ?? throwErr("toVisit was checked to be non-empty");
       if (seqId === initialSeqId || batchSeqIds.has(seqId) || visited.has(seqId)) continue;
       visited.add(seqId);
       const dependencies = combinedSeqDependencies.get(seqId);
       if (dependencies === undefined) {
-        outsideBatchAvailability.push(getAvailabilityPromise(seqId));
+        outsideBatchSeqIds.push(seqId);
       } else {
+        combinedSeqExpansions.set(seqId, dependencies);
         for (const dependencySeqId of dependencies) toVisit.push(dependencySeqId);
       }
     }
-    await Promise.all(outsideBatchAvailability);
+    return { outsideBatchSeqIds, combinedSeqExpansions };
   };
+  // Used by compareAndSetAll so its read sees every earlier commit. It only needs those commits to have
+  // finished, not to have succeeded: a failed commit changed nothing on disk, and that failure is
+  // reported to whoever made that write, not to an unrelated compare-and-set.
   const waitUntilAllAvailable = async () => {
-    await Promise.all(seqToAvailability.values());
+    await Promise.allSettled(seqToAvailability.pending.values());
   };
 
   const declareLmdbLowLevelKvStoreOrDump = (storeOrDump: "store" | "dump", id: string): LowLevelKvStore & LowLevelKvDump => {
@@ -747,8 +889,8 @@ export function declareLmdbLowLevelDatabase(options: {
             await flushPendingCommits();
             if (pendingCommitFlushPromise !== null) await pendingCommitFlushPromise;
             await Promise.all([
-              ...seqToDurability.values(),
-              ...combinedSeqToDurability.values(),
+              ...seqToDurability.pending.values(),
+              ...combinedSeqToDurability.pending.values(),
             ]);
           } finally {
             try {
