@@ -7,6 +7,7 @@
   },
   "include": [
     "src/databases/piledriver/implementations/breezy/**/*.ts",
+    "src/databases/piledriver/implementations/breezy-lmdb/**/*.ts",
     "src/databases/piledriver/implementations/breezylite/**/*.ts",
     "src/databases/bulldozer/performance.test.ts",
     "src/payments/schema/performance.test.ts",

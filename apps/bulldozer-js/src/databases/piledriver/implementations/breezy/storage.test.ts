@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { asHeapObject, isPiledriverHeapObjectSymbol } from "../../index.js";
 import { declareBreezyDatabaseWithStorage } from "./core.js";
-import { openBreezyLmdbStorage } from "./storage-lmdb.js";
+import { openBreezyLMDBStorage } from "../breezy-lmdb/storage.js";
 import { openBreezyliteStorage } from "../breezylite/index.js";
 
 for (const [name, open] of [
-  ["Breezy", openBreezyLmdbStorage],
+  ["BreezyLMDB", openBreezyLMDBStorage],
   ["Breezylite", openBreezyliteStorage],
 ] as const) {
   describe(name, () => {
@@ -38,8 +38,8 @@ for (const [name, open] of [
     });
 
     // lmdb-js transaction() commits callback writes even when the callback throws. Keep
-    // this expected failure visible instead of changing the existing Breezy benchmark baseline.
-    (name === "Breezy" ? it.fails : it)("rolls back partial writes across stores when the callback throws", async () => {
+    // this expected failure visible instead of changing the existing BreezyLMDB benchmark baseline.
+    (name === "BreezyLMDB" ? it.fails : it)("rolls back partial writes across stores when the callback throws", async () => {
       const path = mkdtempSync(join(tmpdir(), "breezy-rollback-"));
       const storage = open({ path });
       try {

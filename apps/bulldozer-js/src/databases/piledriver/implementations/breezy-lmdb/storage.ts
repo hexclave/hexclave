@@ -1,10 +1,10 @@
 import * as lmdb from "lmdb";
-import type { BreezyStorage } from "./storage.js";
+import type { BreezyStorage } from "../breezy/storage.js";
 
-export function openBreezyLmdbStorage(options: { path: string, compression?: boolean }): BreezyStorage {
+export function openBreezyLMDBStorage(options: { path: string, compression?: boolean }): BreezyStorage {
   const root = lmdb.open({ path: options.path, maxDbs: 1024, compression: options.compression === true, separateFlushed: true });
   return {
-    backend: "piledriver-breezy",
+    backend: "piledriver-breezy-lmdb",
     openStore(name) {
       const db = root.openDB<Buffer, Uint8Array>({ name, encoding: "binary", keyEncoding: "binary", useVersions: true });
       return {

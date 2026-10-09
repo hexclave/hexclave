@@ -7,7 +7,7 @@ import { declareInstantAvailabilityLowLevelDatabase } from "../low-level/impleme
 import { declareLmdbLowLevelDatabase } from "../low-level/implementations/lmdb.js";
 import { ConcatTreeList } from "../piledriver/data-structures/concat-tree-list.js";
 import { declareBasePiledriverDatabase } from "../piledriver/implementations/base.js";
-import { declareBreezyPiledriverDatabase } from "../piledriver/implementations/breezy/index.js";
+import { declareBreezyLMDBPiledriverDatabase } from "../piledriver/implementations/breezy-lmdb/index.js";
 import { declareBreezylitePiledriverDatabase } from "../piledriver/implementations/breezylite/index.js";
 import type { PiledriverDatabase, PiledriverObject } from "../piledriver/index.js";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
@@ -66,7 +66,7 @@ const databases = new Map<PiledriverDatabase, PerfDatabase>();
 const perfBackend = process.env.BULLDOZER_PERF_BACKEND ?? "lmdb-instant";
 const perfSnapshotMode = process.env.BULLDOZER_PERF_SNAPSHOT_MODE ?? "plain";
 const piledriverImplementation = process.env.STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION ?? "base";
-if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy" && piledriverImplementation !== "breezylite") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base, breezy or breezylite");
+if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy-lmdb" && piledriverImplementation !== "breezylite") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base, breezy-lmdb or breezylite");
 const emptyChanges = (): TableChanges => ({ addedRows: [], modifiedRows: [], deletedRows: [], addedGroups: [], deletedGroups: [] });
 const trackDatabase = (piledriver: PiledriverDatabase, migrations: Migration) => {
   const db = declareBulldozerDatabase(piledriver, { migrations });
@@ -99,7 +99,7 @@ const newPiledriverDb = () => {
   if (perfBackend !== requiredBackend) throw new Error(`${piledriverImplementation} requires the ${requiredBackend} performance backend`);
   const path = mkdtempSync(join(tmpdir(), "bulldozer-perf-lmdb-"));
   lmdbTempPaths.push(path);
-  return (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyPiledriverDatabase)({ path, dbId: crypto.randomUUID() });
+  return (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyLMDBPiledriverDatabase)({ path, dbId: crypto.randomUUID() });
 };
 afterAll(async () => {
   // An unclosed LMDB environment keeps native handles alive, preventing Vitest's worker and main process from exiting; remove its mapped directory only after closing it.
