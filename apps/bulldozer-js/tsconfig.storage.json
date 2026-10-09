@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["es2022", "es2023.array", "dom", "dom.iterable"],
+    "paths": { "@hexclave/shared/dist/*": ["../../packages/shared/src/*"] }
+  },
+  "include": [
+    "src/databases/piledriver/implementations/breezy/**/*.ts",
+    "src/databases/piledriver/implementations/breezylite/**/*.ts",
+    "src/databases/bulldozer/performance.test.ts",
+    "src/payments/schema/performance.test.ts",
+    "src/create-piledriver*.ts",
+    "vitest.storage.config.ts"
+  ]
+}

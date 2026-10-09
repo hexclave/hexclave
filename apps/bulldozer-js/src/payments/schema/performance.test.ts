@@ -5,6 +5,7 @@ import { declareLmdbLowLevelDatabase } from "../../databases/low-level/implement
 import { declareBulldozerDatabase } from "../../databases/bulldozer/index.js";
 import { declareBasePiledriverDatabase } from "../../databases/piledriver/implementations/base.js";
 import { declareBreezyPiledriverDatabase } from "../../databases/piledriver/implementations/breezy/index.js";
+import { declareBreezylitePiledriverDatabase } from "../../databases/piledriver/implementations/breezylite/index.js";
 import { declareBufferedPiledriverDatabase } from "../../databases/piledriver/implementations/buffered.js";
 import { declareInMemoryPiledriverDatabase } from "../../databases/piledriver/implementations/in-memory.js";
 import type { PiledriverObject } from "../../databases/piledriver/index.js";
@@ -56,7 +57,7 @@ const databases: Array<ReturnType<typeof declareBulldozerDatabase>> = [];
 const perfBackend = process.env.BULLDOZER_PAYMENTS_PERF_BACKEND ?? "lmdb-instant";
 const piledriverImplementation = process.env.STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION ?? "base";
 const bufferedPiledriver = process.env.BULLDOZER_PAYMENTS_PERF_BUFFERED_PILEDRIVER === "1";
-if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base or breezy");
+if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy" && piledriverImplementation !== "breezylite") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base, breezy or breezylite");
 const effectivePiledriverImplementation = perfBackend.includes("piledriver-in-memory") ? "in-memory" : piledriverImplementation;
 
 const product = (includedItems: ProductSnapshot["includedItems"]): ProductSnapshot => ({
@@ -160,11 +161,12 @@ const newPiledriverDb = () => {
   if (perfBackend === "buffered-piledriver-in-memory") {
     return declareBufferedPiledriverDatabase(declareInMemoryPiledriverDatabase(crypto.randomUUID()));
   }
-  if (piledriverImplementation === "breezy") {
-    if (perfBackend !== "lmdb") throw new Error("Breezy requires the lmdb performance backend");
+  if (piledriverImplementation !== "base") {
+    const requiredBackend = piledriverImplementation === "breezylite" ? "sqlite" : "lmdb";
+    if (perfBackend !== requiredBackend) throw new Error(`${piledriverImplementation} requires the ${requiredBackend} performance backend`);
     const path = mkdtempSync(join(tmpdir(), "bulldozer-payments-schema-perf-"));
     tempPaths.push(path);
-    const breezy = declareBreezyPiledriverDatabase({ path, dbId: crypto.randomUUID() });
+    const breezy = (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyPiledriverDatabase)({ path, dbId: crypto.randomUUID() });
     return bufferedPiledriver ? declareBufferedPiledriverDatabase(breezy) : breezy;
   }
   if (perfBackend === "lmdb" || perfBackend === "lmdb-instant") {

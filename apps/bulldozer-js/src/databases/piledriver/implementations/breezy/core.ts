@@ -1,0 +1,576 @@
+import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { wait } from "@hexclave/shared/dist/utils/promises";
+import { createUuidV7Generator } from "@hexclave/shared/dist/utils/uuids";
+import type { BreezyStorage, BreezyStore } from "./storage.js";
+import { createDatabaseSeq, DatabaseSeq } from "../../../index.js";
+import { aggregateSerializedReferences, zeroPiledriverGarbageCollectionResult } from "../../gc.js";
+import { heapObjectsByObject, PiledriverDatabase, PiledriverObject } from "../../index.js";
+import { decodePiledriverObject, encodePiledriverObject, plannedHeapReferenceKeys, PlannedPiledriverObject } from "./codec.js";
+import { createPiledriverHeapCache } from "./heap-cache.js";
+import { planHeapObjects } from "./heap-plan.js";
+
+const breezyPiledriverProcessStartedAtMillis = Date.now();
+const gcSchemaVersion = 3;
+/**
+ * How many garbage objects GC deletes per LMDB transaction.
+ *
+ * GC waits for each commit before starting the next, and a commit takes ~4 ms, so deleting one
+ * object per transaction capped GC at ~200 objects/s (base, which lets its writes share commits,
+ * did ~1,500/s). Each transaction holds LMDB's single write lock, so a bigger batch also delays
+ * normal writes that arrive during GC; 256 per transaction raised write p50 from ~18 to ~78 ms.
+ */
+const gcDeletionsPerTransaction = 64;
+/**
+ * How many child refcount updates one GC transaction may make before it stops taking more objects.
+ *
+ * The object limit alone doesn't bound the work: each deleted object decrements every child it
+ * references. Bulldozer's trees have at most 32 children per node, so a normal batch stays far below
+ * this, but a caller-made heap object can reference thousands of children. 64 objects with 5,000
+ * children each held the write lock for ~1.9 s in one transaction, stalling every write behind it.
+ */
+const gcReferenceUpdatesPerTransaction = 4096;
+
+/**
+ * Returns `items` sorted by their LMDB key, for writing in that order.
+ *
+ * LMDB keeps keys sorted in fixed-size pages. A key that belongs in the middle of a full page splits
+ * it into two half-empty pages, while keys arriving in ascending order just fill the last page. The
+ * planner reserves keys parents-first but saves children first, so unsorted writes left heap pages
+ * about half empty. Write order inside one transaction doesn't change what is committed.
+ */
+const ascendingByKey = <T>(items: T[], keyOf: (item: T) => Uint8Array) => {
+  return [...items].sort((a, b) => Buffer.compare(keyOf(a), keyOf(b)));
+};
+
+export type BreezyPiledriverDatabaseOptions = { disableHeapReadCache?: boolean, garbageCollectionProcessStartedAtMillis?: number };
+
+/** Shared codec, heap cache, publication and GC logic for all Breezy storage engines. */
+export function declareBreezyDatabaseWithStorage(
+  storage: BreezyStorage,
+  dbId = "default",
+  options: BreezyPiledriverDatabaseOptions = {},
+): PiledriverDatabase {
+  const processStartedAtMillis = options.garbageCollectionProcessStartedAtMillis ?? breezyPiledriverProcessStartedAtMillis;
+  if (!Number.isSafeInteger(processStartedAtMillis) || processStartedAtMillis < 0) throw new Error("Piledriver garbageCollectionProcessStartedAtMillis must be a non-negative safe integer");
+  const heapStore = storage.openStore(`${dbId}:dump:heap`);
+  const rootsStore = storage.openStore(`${dbId}:store:root`);
+  const metadataStore = storage.openStore(`${dbId}:store:piledriver-gc-reference-metadata-v3`);
+  const candidatesStore = storage.openStore(`${dbId}:store:piledriver-gc-zero-reference-candidates-v3`);
+  const gcStateStore = storage.openStore(`${dbId}:store:piledriver-gc-state-v3`);
+  const generateHeapUuid = createUuidV7Generator();
+  const initialSeq = createDatabaseSeq(dbId, 0);
+  const toSeq = (transactionId: number) => createDatabaseSeq(dbId, transactionId);
+  const transactionId = (seq: DatabaseSeq) => {
+    const value = seq[1];
+    if (seq[0] !== dbId || seq.length !== 2 || typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("Invalid Breezy sequence");
+    return value;
+  };
+  const waitUntilAvailable = async (seq: DatabaseSeq) => {
+    const required = transactionId(seq);
+    while (storage.lastTransactionId() < required) await wait(1);
+    storage.refreshReads();
+  };
+  const arrayBuffer = (value: Uint8Array) => Uint8Array.from(value).buffer;
+  const reserveHeapKey = () => {
+    const key = new Uint8Array(17);
+    key[0] = 1;
+    key.set(generateHeapUuid(), 1);
+    return key.buffer;
+  };
+  const read = (database: BreezyStore, key: ArrayBuffer) => {
+    const entry = database.getEntry(Buffer.from(key));
+    if (entry === undefined) return { buffer: null, seq: initialSeq };
+    return { buffer: arrayBuffer(entry.value), seq: toSeq(entry.version) };
+  };
+  // Node runs one piece of JavaScript at a time. LMDB reads are synchronous (they never wait on IO),
+  // so a read that loads thousands of heap objects would otherwise keep running until it's done,
+  // and every other request would wait behind it. So every 1,000 loads, counted across all reads,
+  // the read that hits the count pauses: it goes to the back of the queue, the requests already
+  // waiting run, then it continues exactly where it stopped. Heap objects never change once saved,
+  // so the pause can't make a read see different data. 1,000 loads take a few milliseconds.
+  const heapLoadsBetweenPauses = 1000;
+  let heapLoadsSinceLastPause = 0;
+  const letWaitingRequestsRun = () => new Promise<void>(resolve => setImmediate(resolve));
+  const readHeapObject = (key: ArrayBuffer, keyBase64: string) => {
+    const stored = read(heapStore, key);
+    if (stored.buffer === null) throw new Error(`Assertion error: Heap object with base64 key "${keyBase64}" not found`);
+    return decodePiledriverObject(stored.buffer, childKey => heapCache.resolve(childKey, stored.seq), `heap object ${keyBase64}`);
+  };
+  // close() waits for these, so a paused load never resumes after storage is closed. A load that
+  // doesn't pause runs start to finish without letting anything else run, so close() can't happen during it.
+  const pausedHeapLoads = new Set<Promise<PiledriverObject>>();
+  const loadHeapObject = async (key: ArrayBuffer, keyBase64: string) => {
+    throwIfClosing();
+    if (++heapLoadsSinceLastPause < heapLoadsBetweenPauses) return readHeapObject(key, keyBase64);
+    heapLoadsSinceLastPause = 0;
+    const pausedLoad = letWaitingRequestsRun().then(() => readHeapObject(key, keyBase64));
+    pausedHeapLoads.add(pausedLoad);
+    try {
+      return await pausedLoad;
+    } finally {
+      pausedHeapLoads.delete(pausedLoad);
+    }
+  };
+  const heapCache = createPiledriverHeapCache({ disabled: options.disableHeapReadCache === true, load: loadHeapObject });
+  let lastRootWriteSeq = initialSeq;
+  let mutations: Promise<unknown> = Promise.resolve();
+  let gcGeneration: string | null = null;
+
+  type ReferenceMetadata = {
+    schemaVersion: typeof gcSchemaVersion,
+    generation: string,
+    referenceCount: number,
+    createdAtMillis: number,
+    lastDereferencedAtMillis: number | null,
+    deletion: null,
+  };
+
+  const nonNegativeInteger = (value: unknown, name: string) => {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid Piledriver GC ${name}`);
+    }
+    return value;
+  };
+  const parseMetadata = (value: Uint8Array): ReferenceMetadata => {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(value));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Invalid Piledriver GC reference metadata");
+    const generation = Reflect.get(parsed, "generation");
+    const lastDereferencedAtMillis = Reflect.get(parsed, "lastDereferencedAtMillis");
+    const deletion = Reflect.get(parsed, "deletion");
+    if (Reflect.get(parsed, "schemaVersion") !== gcSchemaVersion || typeof generation !== "string" || deletion !== null) {
+      throw new Error("Cannot reference invalid or deleting Piledriver GC metadata");
+    }
+    return {
+      schemaVersion: gcSchemaVersion,
+      generation,
+      referenceCount: nonNegativeInteger(Reflect.get(parsed, "referenceCount"), "referenceCount"),
+      createdAtMillis: nonNegativeInteger(Reflect.get(parsed, "createdAtMillis"), "createdAtMillis"),
+      lastDereferencedAtMillis: lastDereferencedAtMillis === null
+        ? null
+        : nonNegativeInteger(lastDereferencedAtMillis, "lastDereferencedAtMillis"),
+      deletion,
+    };
+  };
+  const activeGcGeneration = () => {
+    if (gcGeneration !== null) return gcGeneration;
+    const value = gcStateStore.get(Buffer.from("state"));
+    if (value === undefined) throw new Error("Piledriver GC must be initialized before heap publication");
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(value));
+    if (typeof parsed !== "object" || parsed === null || Reflect.get(parsed, "schemaVersion") !== gcSchemaVersion || Reflect.get(parsed, "status") !== "ready") {
+      throw new Error("Invalid Piledriver GC state");
+    }
+    const generation = Reflect.get(parsed, "generation");
+    if (typeof generation !== "string") throw new Error("Invalid Piledriver GC generation");
+    gcGeneration = generation;
+    return generation;
+  };
+  const candidateKey = (key: ArrayBuffer, eligibleAtMillis: number) => {
+    if (key.byteLength + 8 > 64) throw new Error("Piledriver heap key is too large for the GC candidate index");
+    const result = Buffer.allocUnsafe(key.byteLength + 8);
+    result.writeBigUInt64BE(BigInt(eligibleAtMillis));
+    Buffer.from(key).copy(result, 8);
+    return result;
+  };
+  type ReferenceDelta = { key: ArrayBuffer, count: number };
+  const noHeapKeysCreated: ReadonlySet<string> = new Set();
+  const addReferenceDelta = (deltas: Map<string, ReferenceDelta>, key: ArrayBuffer, count: number) => {
+    const id = encodeBase64(new Uint8Array(key));
+    const existing = deltas.get(id);
+    if (existing === undefined) deltas.set(id, { key, count });
+    else existing.count += count;
+  };
+  /**
+   * Runs `action` as one all-or-nothing storage transaction.
+   *
+   * Every storage engine must roll back all of the callback's writes when it throws (see
+   * storage.test.ts). Otherwise an error after a refcount write but before the root write would
+   * leave refcounts that disagree with the root, and GC could later delete live data.
+   */
+  const transact = async (action: (version: number, writes: Promise<boolean>[]) => void) => {
+    const transaction = await storage.transaction(version => {
+      const pending: Promise<boolean>[] = [];
+      action(version, pending);
+      return { version, pending };
+    });
+    await Promise.all(transaction.pending);
+    return transaction.version;
+  };
+  let gcInitialization: Promise<void> | null = null;
+  const initializeGc = async () => {
+    if (gcGeneration !== null) return;
+    gcInitialization ??= (async () => {
+      if (gcStateStore.get(Buffer.from("state")) === undefined) {
+        await transact((version, writes) => writes.push(gcStateStore.put(Buffer.from("state"), Buffer.from(JSON.stringify({
+          schemaVersion: gcSchemaVersion,
+          generation: `schema-v${gcSchemaVersion}`,
+          status: "ready",
+          repairCursorBase64: null,
+        })), version)));
+        await storage.flush();
+      }
+      activeGcGeneration();
+    })();
+    try {
+      await gcInitialization;
+    } catch (error) {
+      gcInitialization = null;
+      throw error;
+    }
+  };
+  const changeReferenceDeltas = (
+    deltas: Iterable<ReferenceDelta>,
+    dereferencedAtMillis: number | null,
+    version: number,
+    writes: Promise<boolean>[],
+    heapKeysCreatedByThisWrite: ReadonlySet<string>,
+  ) => {
+    const createdAtMillis = Math.max(Date.now(), processStartedAtMillis);
+    let becameZero = 0;
+    const changes: Array<{ key: Buffer, value: Buffer, candidateToAdd: Buffer | null, candidateToRemove: Buffer | null }> = [];
+    for (const { key, count } of deltas) {
+      const isCreatedByThisWrite = heapKeysCreatedByThisWrite.has(encodeBase64(new Uint8Array(key)));
+      // A zero delta changes nothing, except for a new object: it still needs its record.
+      if (count === 0 && !isCreatedByThisWrite) continue;
+      const metadataKey = Buffer.from(key);
+      const stored = metadataStore.get(metadataKey);
+      const previous = stored === undefined ? null : parseMetadata(stored);
+      // Breezy creates a record in the same transaction that saves a new object, so a missing record
+      // is expected only for objects this write created. Any other object without a record (or with
+      // one from an older GC generation) was saved before refcount GC existed and its true count is
+      // unknown. Like base's "legacy-immortal" rule, skip it so it's never deleted: a count started
+      // here could reach zero while older parents still point at it.
+      const isLegacyObject = previous === null
+        ? !isCreatedByThisWrite
+        : previous.generation !== activeGcGeneration();
+      if (isLegacyObject) continue;
+      if (previous === null && count < 0) throw new Error("Assertion error: Piledriver GC cannot decrement a heap object created by the same write");
+      const referenceCount = (previous?.referenceCount ?? 0) + count;
+      if (!Number.isSafeInteger(referenceCount) || referenceCount < 0) throw new Error("Piledriver GC reference count would become invalid");
+      const lastDereferencedAtMillis = count < 0
+        ? Math.max(previous?.lastDereferencedAtMillis ?? 0, dereferencedAtMillis ?? throwErr("Missing Piledriver GC dereference timestamp"))
+        : previous?.lastDereferencedAtMillis ?? null;
+      const replacement: ReferenceMetadata = previous === null
+        ? { schemaVersion: gcSchemaVersion, generation: activeGcGeneration(), referenceCount, createdAtMillis, lastDereferencedAtMillis, deletion: null }
+        : { ...previous, referenceCount, lastDereferencedAtMillis };
+      // A new object that starts at zero is one only the root will point at. It becomes a GC
+      // candidate right away, so if the root write fails it's collected like any other garbage.
+      const becomesCandidate = referenceCount === 0 && (previous === null || previous.referenceCount !== 0);
+      changes.push({
+        key: metadataKey,
+        value: Buffer.from(JSON.stringify(replacement)),
+        candidateToAdd: becomesCandidate ? candidateKey(key, lastDereferencedAtMillis ?? replacement.createdAtMillis) : null,
+        candidateToRemove: previous?.referenceCount === 0 && referenceCount !== 0 ? candidateKey(key, previous.lastDereferencedAtMillis ?? previous.createdAtMillis) : null,
+      });
+      if (previous !== null && previous.referenceCount !== 0 && referenceCount === 0) becameZero++;
+    }
+    for (const change of ascendingByKey(changes, change => change.key)) {
+      writes.push(metadataStore.put(change.key, change.value, version));
+      if (change.candidateToAdd !== null) writes.push(candidatesStore.put(change.candidateToAdd, Buffer.alloc(0), version));
+      if (change.candidateToRemove !== null) writes.push(candidatesStore.remove(change.candidateToRemove));
+    }
+    return becameZero;
+  };
+  const publishHeapObjects = async (objects: Array<{ key: ArrayBuffer, buffer: ArrayBuffer, referenceKeys: ArrayBuffer[] }>) => {
+    if (objects.length === 0) return initialSeq;
+    const deltas = new Map<string, ReferenceDelta>();
+    // Every new object gets its record here, in the same transaction that saves it. A zero delta
+    // creates the record for objects nothing new points at; the root write then adds its reference.
+    for (const object of objects) addReferenceDelta(deltas, object.key, 0);
+    for (const object of objects) for (const key of object.referenceKeys) addReferenceDelta(deltas, key, 1);
+    const version = await transact((transactionVersion, writes) => {
+      const heapKeys = new Set<string>();
+      for (const object of objects) {
+        const heapKeyBase64 = encodeBase64(new Uint8Array(object.key));
+        if (heapKeys.has(heapKeyBase64)) throw new Error("Duplicate reserved Piledriver heap key");
+        heapKeys.add(heapKeyBase64);
+        if (heapStore.doesExist(Buffer.from(object.key))) throw new Error("Reserved Piledriver heap key already exists");
+      }
+      changeReferenceDeltas(deltas.values(), null, transactionVersion, writes, heapKeys);
+      for (const object of ascendingByKey(objects, object => new Uint8Array(object.key))) {
+        writes.push(heapStore.put(Buffer.from(object.key), Buffer.from(object.buffer), transactionVersion));
+      }
+    });
+    return toSeq(version);
+  };
+  const mutateRoot = async (key: ArrayBuffer, next: ArrayBuffer | null, previous: ArrayBuffer | null, dereferencedAtMillis: number) => {
+    const deltas = new Map<string, ReferenceDelta>();
+    for (const [id, reference] of aggregateSerializedReferences(next)) deltas.set(id, { ...reference });
+    for (const reference of aggregateSerializedReferences(previous).values()) addReferenceDelta(deltas, reference.key, -reference.count);
+    const version = await transact((transactionVersion, writes) => {
+      changeReferenceDeltas(deltas.values(), dereferencedAtMillis, transactionVersion, writes, noHeapKeysCreated);
+      writes.push(next === null ? rootsStore.remove(Buffer.from(key)) : rootsStore.put(Buffer.from(key), Buffer.from(next), transactionVersion));
+    });
+    return { seq: toSeq(version) };
+  };
+
+  const combineSeqs = (seqs: Iterable<DatabaseSeq>) => {
+    let combined = 0;
+    for (const seq of seqs) combined = Math.max(combined, transactionId(seq));
+    return toSeq(combined);
+  };
+  const withMutationLock = async <T>(operation: () => Promise<T>) => {
+    const current = mutations.then(operation, operation);
+    mutations = current;
+    return await current;
+  };
+
+  const serializeKnown = (value: PlannedPiledriverObject) => encodePiledriverObject(value);
+
+  /**
+   * Plans the complete graph, then publishes every newly created heap object atomically.
+   *
+   * Planning replaces heap objects with key-only references, so serialization performs no cache
+   * lookups or IO. If the root write then fails, the new objects are already GC candidates, so the
+   * next GC after a restart collects them.
+   */
+  const serializeAndPublish = async (value: PiledriverObject) => {
+    const plan = planHeapObjects(
+      value,
+      object => {
+        const location = heapCache.getLocation(object);
+        return location === undefined ? undefined : { key: location.key, dependency: location.seq };
+      },
+      reserveHeapKey,
+    );
+    const publications = [];
+    for (const item of plan.heapObjects) {
+      const buffer = serializeKnown(item.value);
+      publications.push({ key: item.key, buffer, referenceKeys: plannedHeapReferenceKeys(item.value) });
+    }
+    const publicationSeq = await publishHeapObjects(publications);
+
+    const publishedSeq = combineSeqs([publicationSeq, ...plan.dependencies]);
+    for (const item of plan.heapObjects) {
+      heapCache.remember(item.object, { key: item.key, seq: publishedSeq });
+    }
+    return serializeKnown(plan.root);
+  };
+
+  const readPreviousRoot = async (key: ArrayBuffer) => {
+    const pendingWrite = lastRootWriteSeq;
+    try {
+      await waitUntilAvailable(pendingWrite);
+    } catch (error) {
+      if (lastRootWriteSeq === pendingWrite) lastRootWriteSeq = initialSeq;
+      throw error;
+    }
+    return read(rootsStore, key);
+  };
+  let garbageCollectionRunning = false;
+  const garbageCollectionsInProgress = new Set<Promise<unknown>>();
+  let closing: Promise<void> | null = null;
+  const throwIfClosing = () => {
+    if (closing !== null) throw new Error("Breezy Piledriver database is closed");
+  };
+  const collectGarbageUntracked = async (cutoffTimestampMillis: number, maxObjects = 1000) => {
+    const startedAtMillis = Date.now();
+    const startedAt = performance.now();
+    const initializationStartedAt = performance.now();
+    await initializeGc();
+    const initializationMillis = performance.now() - initializationStartedAt;
+    const result = zeroPiledriverGarbageCollectionResult(cutoffTimestampMillis, processStartedAtMillis, maxObjects, startedAtMillis);
+    if (cutoffTimestampMillis >= processStartedAtMillis) throw new Error("Piledriver GC cutoff must be older than this process; restart the Bulldozer service after recording the cutoff");
+    if (garbageCollectionRunning) throw new Error("Piledriver garbage collection is already running");
+    garbageCollectionRunning = true;
+
+    const rangeEnd = Buffer.alloc(8);
+    rangeEnd.writeBigUInt64BE(BigInt(cutoffTimestampMillis));
+    const readCandidates = (limit: number) => {
+      storage.refreshReads();
+      const candidates: Buffer[] = [];
+      for (const { key } of candidatesStore.getRange({ end: rangeEnd, limit })) candidates.push(Buffer.from(key));
+      return candidates;
+    };
+
+    /**
+     * Deletes one zero-reference heap object and decrements its children. Must run inside `transact`.
+     * Returns how many child refcounts it updated.
+     */
+    const deleteCandidate = (indexedCandidate: Buffer, version: number, writes: Promise<boolean>[]) => {
+      const heapKeyBuffer = Buffer.from(indexedCandidate.subarray(8));
+      const heapKey = arrayBuffer(heapKeyBuffer);
+      if (!candidatesStore.doesExist(indexedCandidate)) {
+        result.objects.candidatesSkipped++;
+        return 0;
+      }
+      const storedMetadata = metadataStore.get(heapKeyBuffer) ?? throwErr("Piledriver GC candidate has no reference metadata");
+      const metadata = parseMetadata(storedMetadata);
+      const eligibleAtMillis = metadata.lastDereferencedAtMillis ?? metadata.createdAtMillis;
+      const expectedCandidate = candidateKey(heapKey, eligibleAtMillis);
+      if (metadata.generation !== activeGcGeneration()) throw new Error("Piledriver GC candidate belongs to an inactive generation");
+      if (metadata.referenceCount !== 0) throw new Error("Piledriver GC candidate still has live references");
+      if (!indexedCandidate.equals(expectedCandidate)) throw new Error("Piledriver GC candidate index is inconsistent with its metadata");
+
+      const heapValue = heapStore.get(heapKeyBuffer) ?? throwErr("Piledriver GC found metadata for a missing heap object");
+      const references = [...aggregateSerializedReferences(arrayBuffer(heapValue)).values()];
+      const deltas = references.map(reference => ({ key: reference.key, count: -reference.count }));
+      result.objects.childObjectsBecameUnreferenced += changeReferenceDeltas(deltas, eligibleAtMillis, version, writes, noHeapKeysCreated);
+      result.references.outgoingEdgesProcessed += references.reduce((sum, reference) => sum + reference.count, 0);
+      writes.push(heapStore.remove(heapKeyBuffer), metadataStore.remove(heapKeyBuffer), candidatesStore.remove(indexedCandidate));
+
+      result.objects.deleted++;
+      result.reclaimed.heapPayloadBytes += heapValue.byteLength;
+      result.reclaimed.heapKeyBytes += heapKeyBuffer.byteLength;
+      result.reclaimed.metadataValueBytes += storedMetadata.byteLength;
+      result.reclaimed.metadataKeyBytes += heapKeyBuffer.byteLength;
+      result.reclaimed.candidateKeyBytes += indexedCandidate.byteLength;
+      if (result.samples.deletedObjectKeysBase64.length < result.samples.limitPerCategory) result.samples.deletedObjectKeysBase64.push(encodeBase64(heapKeyBuffer));
+      result.reclaimed.smallestHeapPayloadBytes = Math.min(result.reclaimed.smallestHeapPayloadBytes ?? Infinity, heapValue.byteLength);
+      result.reclaimed.largestHeapPayloadBytes = Math.max(result.reclaimed.largestHeapPayloadBytes ?? 0, heapValue.byteLength);
+      return references.length;
+    };
+
+    try {
+      while (result.objects.deleted < maxObjects) {
+        const batch = readCandidates(Math.min(gcDeletionsPerTransaction, maxObjects - result.objects.deleted));
+        if (batch.length === 0) break;
+        for (const candidate of batch) {
+          if (candidate.byteLength <= 8) throw new Error("Invalid Piledriver GC candidate key");
+        }
+        // Counted when read, not when processed: candidates the budget leaves out are read again by
+        // the next batch, and that rereading is real scan work.
+        result.scanning.candidateIndexEntriesRead += batch.length;
+
+        // Two objects in one batch can point at the same child. That's safe because reads inside a
+        // transaction see its own earlier writes, so the second decrement starts from the first's
+        // result. A child that reaches zero becomes a candidate here and is deleted by a later batch.
+        await transact((version, writes) => {
+          let referenceUpdates = 0;
+          for (const candidate of batch) {
+            // Checked before each object rather than after, so one object over the budget is still
+            // deleted on its own. Candidates left out stay in the index for the next batch.
+            if (referenceUpdates >= gcReferenceUpdatesPerTransaction) break;
+            result.objects.candidatesExamined++;
+            referenceUpdates += deleteCandidate(candidate, version, writes);
+          }
+        });
+        result.objects.candidatesQueuedFromIndex = result.objects.candidatesExamined;
+      }
+
+      const moreEligibleWorkMayRemain = readCandidates(1).length > 0;
+      result.limits.limitReached = result.objects.deleted === maxObjects;
+      result.limits.moreEligibleWorkMayRemain = moreEligibleWorkMayRemain;
+      result.scanning.candidateIndexPagesRead = result.objects.candidatesExamined === 0 ? 0 : 1;
+      result.scanning.candidateIndexReachedCutoff = !moreEligibleWorkMayRemain;
+      result.scanning.candidateIndexScanComplete = !moreEligibleWorkMayRemain;
+
+      const durabilityStartedAt = performance.now();
+      await storage.flush();
+      result.timing.durabilityWaitMillis = performance.now() - durabilityStartedAt;
+      result.reclaimed.knownLogicalBytes = result.reclaimed.heapPayloadBytes + result.reclaimed.heapKeyBytes + result.reclaimed.metadataValueBytes + result.reclaimed.metadataKeyBytes + result.reclaimed.candidateKeyBytes;
+      result.reclaimed.heapPayloadMiB = result.reclaimed.heapPayloadBytes / 1024 / 1024;
+      result.reclaimed.knownLogicalMiB = result.reclaimed.knownLogicalBytes / 1024 / 1024;
+      result.reclaimed.averageHeapPayloadBytes = result.objects.deleted === 0 ? null : result.reclaimed.heapPayloadBytes / result.objects.deleted;
+
+      result.timing.initializationMillis = initializationMillis;
+      result.timing.completedAtMillis = Date.now();
+      result.timing.elapsedMillis = performance.now() - startedAt;
+      result.timing.activeCollectionMillis = result.timing.elapsedMillis - result.timing.initializationMillis - result.timing.durabilityWaitMillis;
+      result.timing.deletedObjectsPerSecond = result.timing.activeCollectionMillis === 0 ? 0 : result.objects.deleted * 1000 / result.timing.activeCollectionMillis;
+      result.timing.reclaimedHeapMiBPerSecond = result.timing.activeCollectionMillis === 0 ? 0 : result.reclaimed.heapPayloadMiB * 1000 / result.timing.activeCollectionMillis;
+      result.gcGeneration = activeGcGeneration();
+      return result;
+    } finally {
+      garbageCollectionRunning = false;
+    }
+  };
+
+  const collectGarbage = async (cutoffTimestampMillis: number, maxObjects?: number) => {
+    throwIfClosing();
+    const collection = collectGarbageUntracked(cutoffTimestampMillis, maxObjects);
+    garbageCollectionsInProgress.add(collection);
+    try {
+      return await collection;
+    } finally {
+      garbageCollectionsInProgress.delete(collection);
+    }
+  };
+  /**
+   * Waits for writes, garbage collections and heap reads already in progress, then closes storage.
+   * Closing storage under them made them fail midway. New operations started after this is called
+   * throw, so nothing new can start while this waits.
+   */
+  const close = async () => {
+    closing ??= withMutationLock(async () => {
+      // Each operation's own caller gets its result or error; here we only wait for it to stop.
+      await Promise.allSettled([...garbageCollectionsInProgress, ...pausedHeapLoads]);
+      await storage.close();
+    });
+    await closing;
+  };
+
+  return {
+    getDebugInfo: () => ({ backend: storage.backend, storage, heapStore, rootsStore, metadataStore, candidatesStore, gcStateStore, options, processStartedAtMillis, heapObjectsByObject, heapObjectsByHeapKeyBase64: heapCache.objectsByKey, heapKeysAndSeqByHeapObjects: heapCache.locations, heapReadCacheDisabled: options.disableHeapReadCache === true }),
+    async getRootObject(key) {
+      throwIfClosing();
+      const stored = read(rootsStore, key);
+      if (stored.buffer === null) throw new Error("Root object not found");
+      return { object: decodePiledriverObject(stored.buffer, heapKey => heapCache.resolve(heapKey, stored.seq), `root ${encodeBase64(new Uint8Array(key))}`), seq: stored.seq };
+    },
+    async setRootObject(key, value) {
+      throwIfClosing();
+      return await withMutationLock(async () => {
+        await initializeGc();
+        const previous = await readPreviousRoot(key);
+        const serializedRoot = await serializeAndPublish(value);
+        const written = await mutateRoot(
+          key,
+          serializedRoot,
+          previous.buffer,
+          Math.max(Date.now(), processStartedAtMillis),
+        );
+        lastRootWriteSeq = written.seq;
+        return written;
+      });
+    },
+    async deleteRootObject(key) {
+      throwIfClosing();
+      return await withMutationLock(async () => {
+        await initializeGc();
+        const previous = await readPreviousRoot(key);
+        const deleted = await mutateRoot(
+          key,
+          null,
+          previous.buffer,
+          Math.max(Date.now(), processStartedAtMillis),
+        );
+        lastRootWriteSeq = deleted.seq;
+        return deleted;
+      });
+    },
+    getGarbageCollectionProcessStartedAtMillis: () => processStartedAtMillis,
+    collectGarbage,
+    combineSeqs: (...seqs) => combineSeqs(seqs),
+    close,
+    waitUntilAvailable,
+    async waitUntilDurable(seq) {
+      await waitUntilAvailable(seq);
+      await storage.flush();
+    },
+    waitUntilReplicated: waitUntilAvailable,
+    async waitUntilConsistent(seq) {
+      await Promise.all([this.waitUntilReplicated(seq), this.waitUntilDurable(seq)]);
+    },
+    async debugSnapshot() {
+      const entries = (database: BreezyStore) => [...database.getRange()].map(({ key, value }) => {
+        const keyBuffer = Buffer.from(key);
+        let keyUtf8: string | null;
+        try {
+          keyUtf8 = new TextDecoder("utf8", { fatal: true }).decode(keyBuffer);
+        } catch {
+          keyUtf8 = null;
+        }
+        return {
+          keyBase64: encodeBase64(keyBuffer),
+          keyUtf8,
+          keyHex: keyBuffer.toString("hex"),
+          serializedJson: JSON.parse(new TextDecoder().decode(value)),
+          valueByteLength: value.byteLength,
+        };
+      });
+      return { roots: entries(rootsStore), heap: entries(heapStore) };
+    },
+    initialSeq,
+  };
+}
