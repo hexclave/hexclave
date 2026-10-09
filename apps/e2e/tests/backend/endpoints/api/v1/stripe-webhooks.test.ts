@@ -105,6 +105,19 @@ it("acks unknown webhook types with 200 (errors handled in background)", async (
   expect(res.body).toEqual({ received: true });
 });
 
+it("acks ignored webhook types like customer.deleted with 200", async ({ expect }) => {
+  const payload = {
+    id: uniqueEventId("customer_deleted"),
+    type: "customer.deleted",
+    account: "acct_test123",
+    data: { object: { id: "cus_test123", deleted: true } },
+  };
+
+  const res = await Payments.sendStripeWebhook(payload);
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({ received: true });
+});
+
 it("returns 400 when signature header is missing (schema validation)", async ({ expect }) => {
   const payload = {
     id: "evt_test_no_sig",
