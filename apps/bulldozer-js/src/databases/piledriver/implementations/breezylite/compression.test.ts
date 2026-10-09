@@ -17,7 +17,7 @@ it("migrates raw databases and reads mixed codecs regardless of the write compre
   legacy.exec("CREATE TABLE entries (store TEXT NOT NULL, key BLOB NOT NULL, value BLOB NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(store,key)) WITHOUT ROWID");
   legacy.prepare("INSERT INTO entries VALUES (?, ?, ?, ?)").run("test", key, repeated, 1);
   legacy.close();
-  let db = openBreezyliteStorage({ path, compression: true });
+  let db = openBreezyliteStorage({ path });
   try {
     let store = db.openStore("test");
     expect(store.get(key)).toEqual(repeated);

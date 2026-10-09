@@ -22,7 +22,7 @@ it("opens SQLite without the default backend and persists through the service's 
   const createDefault = vi.fn(() => {
     throw new Error("Default backend should not open");
   });
-  const options = { implementation: "breezylite", sqlitePath: path, sqliteCompression: true };
+  const options = { implementation: "breezylite", sqlitePath: path };
   const key = Uint8Array.from([1]).buffer;
   const writer = declareBufferedPiledriverDatabase(await createServicePiledriver(options, createDefault));
   try {
@@ -31,7 +31,7 @@ it("opens SQLite without the default backend and persists through the service's 
   } finally {
     await writer.close();
   }
-  const reader = await createServicePiledriver({ ...options, sqliteCompression: false }, createDefault);
+  const reader = await createServicePiledriver(options, createDefault);
   try {
     expect((await reader.getRootObject(key)).object).toEqual({ value: "persisted".repeat(512) });
     expect(createDefault).not.toHaveBeenCalled();

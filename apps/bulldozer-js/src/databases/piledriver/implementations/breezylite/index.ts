@@ -69,7 +69,7 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
       put(key, value, version) {
         requireWrite();
         // Skip tiny values and retain raw bytes whenever compression would increase size.
-        const compressed = options.compression === true && value.length >= 256 ? deflateRawSync(value, { level: 1 }) : undefined;
+        const compressed = options.compression !== false && value.length >= 256 ? deflateRawSync(value, { level: 1 }) : undefined;
         const useCompressed = compressed !== undefined && compressed.length < value.length;
         put.run(store, key, useCompressed ? compressed : value, version, useCompressed ? 1 : 0);
         return Promise.resolve(true);
