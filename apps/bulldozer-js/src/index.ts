@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getHeapStatistics } from "node:v8";
+import { createServicePiledriver } from "./create-piledriver.js";
 import { isBulldozerRequestAuthorized } from "./auth.js";
 import { declareBulldozerDatabase, type BulldozerDatabase } from "./databases/bulldozer/index.js";
 import { declareInMemoryLowLevelDatabase } from "./databases/low-level/implementations/in-memory.js";
@@ -78,9 +79,14 @@ function createLowLevelDatabase(): LowLevelDatabase {
   }));
 }
 
-const basePiledriver = declareBasePiledriverDatabase(createLowLevelDatabase(), {
+const piledriverImplementation = process.env.HEXCLAVE_BULLDOZER_JS_PILEDRIVER_IMPLEMENTATION ?? "base";
+const basePiledriver = await createServicePiledriver({
+  implementation: piledriverImplementation,
+  sqlitePath: process.env.HEXCLAVE_BULLDOZER_JS_SQLITE_PATH,
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
-});
+}, () => declareBasePiledriverDatabase(createLowLevelDatabase(), {
+  disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
+}));
 // Buffering keeps availability instant while durability/replication waits for the wrapped root write;
 // it is worthwhile for write-lock occupancy and throughput, not per-call latency.
 const bufferedPiledriverEnabled = process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_BUFFERED_PILEDRIVER !== "1";
@@ -1158,7 +1164,8 @@ const startupFields = {
   pid: process.pid,
   nodeVersion: process.version,
   sentryEnvironment: resolveBulldozerSentryEnvironment(),
-  lowLevelBackend: process.env.HEXCLAVE_BULLDOZER_JS_LOW_LEVEL_BACKEND ?? "lmdb",
+  piledriverImplementation,
+  lowLevelBackend: piledriverImplementation === "breezylite" ? "sqlite" : process.env.HEXCLAVE_BULLDOZER_JS_LOW_LEVEL_BACKEND ?? "lmdb",
   usingTmpLmdb: process.env.HEXCLAVE_BULLDOZER_JS_USE_TMP_LMDB === "1",
   lmdbCompression: process.env.HEXCLAVE_BULLDOZER_JS_LMDB_COMPRESSION === "1",
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
