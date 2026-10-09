@@ -10,7 +10,7 @@ const output = resolve(root, process.env.HEXCLAVE_BREEZY_BENCH_OUTPUT ?? "storag
 const repetitions = Number(process.env.HEXCLAVE_BREEZY_BENCH_REPETITIONS ?? 3);
 if (!Number.isSafeInteger(repetitions) || repetitions < 1) throw new Error("Invalid repetition count");
 mkdirSync(output, { recursive: true });
-const variants = [["breezy-lmdb", "lmdb", "0"], ["breezy-lmdb", "lmdb", "1"], ["breezylite", "sqlite", "0"]];
+const variants = [["breezy-lmdb", "lmdb", "0"], ["breezy-lmdb", "lmdb", "1"], ["breezylite", "sqlite", "0"], ["breezylite", "sqlite", "1"]];
 const runs = [];
 for (let repetition = 0; repetition < repetitions; repetition++) {
   for (let offset = 0; offset < variants.length; offset++) {
@@ -26,7 +26,8 @@ for (let repetition = 0; repetition < repetitions; repetition++) {
     const log = result.stdout + result.stderr;
     writeFileSync(resolve(output, `${name}.log`), log);
     if (result.error || result.status !== 0) throw new Error(`${name} failed: ${result.error ?? log.slice(-5000)}`);
-    runs.push({ repetition: repetition + 1, ...JSON.parse(readFileSync(sizeFile, "utf8")) });
+    const payments = JSON.parse(readFileSync(resolve(root, "../../bulldozer-payments-schema-perf-js.untracked.json"), "utf8"));
+    runs.push({ payments, repetition: repetition + 1, ...JSON.parse(readFileSync(sizeFile, "utf8")) });
     writeFileSync(resolve(output, "results.json"), JSON.stringify({ node: process.version, runs }, null, 2));
   }
 }

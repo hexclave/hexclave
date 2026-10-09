@@ -10,6 +10,7 @@ import { openBreezyliteStorage } from "../breezylite/index.js";
 for (const [name, open] of [
   ["BreezyLMDB", openBreezyLMDBStorage],
   ["Breezylite", openBreezyliteStorage],
+  ["Breezylite compressed", (options: { path: string }) => openBreezyliteStorage({ ...options, compression: true })],
 ] as const) {
   describe(name, () => {
     it("preserves binary ordering, versions and data across reopen", async () => {

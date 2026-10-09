@@ -99,7 +99,7 @@ const newPiledriverDb = () => {
   if (perfBackend !== requiredBackend) throw new Error(`${piledriverImplementation} requires the ${requiredBackend} performance backend`);
   const path = mkdtempSync(join(tmpdir(), "bulldozer-perf-lmdb-"));
   lmdbTempPaths.push(path);
-  return (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyLMDBPiledriverDatabase)({ path, dbId: crypto.randomUUID() });
+  return (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyLMDBPiledriverDatabase)({ path, dbId: crypto.randomUUID(), compression: process.env.HEXCLAVE_BREEZY_BENCH_COMPRESSION === "1" });
 };
 afterAll(async () => {
   // An unclosed LMDB environment keeps native handles alive, preventing Vitest's worker and main process from exiting; remove its mapped directory only after closing it.

@@ -8,6 +8,7 @@ Use Node >=22.13 (tested on 24.21.0) and the normal Bulldozer environment/depend
 
 ```sh
 HEXCLAVE_BULLDOZER_JS_PILEDRIVER_IMPLEMENTATION=breezylite \
+HEXCLAVE_BULLDOZER_JS_SQLITE_COMPRESSION=1 \
 HEXCLAVE_BULLDOZER_JS_SQLITE_PATH=/absolute/path/to/separate-poc-directory \
 pnpm -C apps/bulldozer-js start
 ```
@@ -66,11 +67,11 @@ This PoC includes no data migration, production rollout, power-loss certificatio
 
 ## Database file size
 
-Run `node scripts/benchmark-breezy-size.mjs` from `apps/bulldozer-js`. This repeats the comparable payments workload three times for BreezyLMDB with compression off/on and Breezylite without compression, rotating execution order. Each run uses a fresh database, 1,200 prefill source facts and 792 measured writes, with buffering disabled. All variants run the same workload assertions.
+Run `node scripts/benchmark-breezy-size.mjs` from `apps/bulldozer-js`. This repeats the comparable payments workload three times for BreezyLMDB and Breezylite with compression off/on, rotating execution order. Each run uses a fresh database, 1,200 prefill source facts and 792 measured writes, with buffering disabled. All variants run the same workload assertions.
 
 The benchmark records every database file's logical length and filesystem-allocated bytes immediately before and after close. Open SQLite totals include its WAL and shared-memory files; clean close checkpoints and removes those files. These are end-of-workload measurements, not peak usage or compacted live-data sizes: no VACUUM, compact-copy or additional GC pass is performed. LMDB's preallocated extents can make allocated disk space larger than file length while open.
 
-Results and raw logs are written to `storage-size-benchmark.untracked`; use `HEXCLAVE_BREEZY_BENCH_REPETITIONS` and `HEXCLAVE_BREEZY_BENCH_OUTPUT` to override the repetition count and destination. Breezylite does not yet implement compression; LMDB's compression result establishes compressibility, not SQLite's eventual size or performance with compression.
+Results and raw logs are written to `storage-size-benchmark.untracked`; use `HEXCLAVE_BREEZY_BENCH_REPETITIONS` and `HEXCLAVE_BREEZY_BENCH_OUTPUT` to override the repetition count and destination. The runner now includes compression on/off for both backends and captures payments timing metrics alongside file sizes. The table below records the earlier uncompressed-SQLite comparison.
 
 October 9, 2026 sandbox results (Node 24.21.0), median of three runs; MiB = 1,048,576 bytes:
 
@@ -81,3 +82,26 @@ October 9, 2026 sandbox results (Node 24.21.0), median of three runs; MiB = 1,04
 | Breezylite, no compression | 427.85 MiB | 433.79 MiB | 435.87 MiB |
 
 Compression reduced BreezyLMDB’s database file by about 57%. Uncompressed Breezylite was about 1% larger than uncompressed BreezyLMDB. The closed LMDB lock file adds 8,272 logical bytes (4,096 allocated bytes); closed data-file allocation matched file length for both engines. All nine workload runs passed.
+
+## Breezylite compression
+
+Set `HEXCLAVE_BULLDOZER_JS_SQLITE_COMPRESSION=1` to compress new SQLite values. It is off by default. Compression uses Node zlib raw DEFLATE at level 1, attempts values of at least 256 bytes and keeps the original bytes when compression is not smaller. Keys remain uncompressed and retain their ordering. Compression and decompression are synchronous.
+
+Each row has a codec column (0 = raw, 1 = DEFLATE). Existing PoC databases receive this column transactionally with raw as the default; existing values are not rewritten. The updated reader handles both codecs regardless of the write setting, so disabling compression remains safe. Unknown codecs and corrupt compressed payloads fail reads. Older PoC binaries do not understand this format: do not reopen the upgraded database using an older binary. This is not an LMDB-to-SQLite migration.
+
+Run `node scripts/benchmark-breezy-size.mjs` for three repetitions of size and payments throughput for all four variants. For complete performance suites with compressed SQLite, add `HEXCLAVE_BREEZY_BENCH_COMPRESSION=1` to the performance command above.
+
+### Compression measurements (October 9, 2026)
+
+Fresh four-variant comparison, three repetitions each, Node 24.21.0; same 1,200 prefill facts and 792 measured payments writes, durable completion, buffering off. Medians:
+
+| Backend | Compression | Closed DB | Open files including WAL | Payments writes |
+|---|---|---:|---:|---:|
+| breezy-lmdb | off | 423.73 MiB | 423.74 MiB | 51.87 ops/s |
+| breezy-lmdb | on | 180.22 MiB | 180.23 MiB | 49.73 ops/s |
+| breezylite | off | 429.29 MiB | 434.82 MiB | 40.88 ops/s |
+| breezylite | on | 144.54 MiB | 150.23 MiB | 38.52 ops/s |
+
+Breezylite compression reduced median database size by 66% and median payments throughput by about 6%. SQLite size varied from 144.21–147.64 MiB with compression; uncompressed was 429.29 MiB in all runs. Compressed throughput ranged 37.38–38.84 ops/s versus 38.81–41.32 uncompressed. These are small sandbox samples, not production tail-latency measurements. The new codec column slightly increases uncompressed SQLite size versus the earlier 427.85 MiB format.
+
+LMDB uses lmdb-js native LZ4 (including its defaults); SQLite uses synchronous DEFLATE level 1. This compares adapter configurations, not equal compression algorithms. All twelve benchmark workloads passed. File sizes are after the workload without compaction or an additional garbage-collection pass.
