@@ -31,20 +31,9 @@ const RETRYABLE_OAUTH_PROVIDER_ERROR_CODES = new Set([
 // openid-client defaults to a 3.5s HTTP timeout. OAuth providers can be slow
 // enough that this causes avoidable refresh failures, so give token/userinfo
 // requests a little more room while still bounding backend request latency.
-export function parseOAuthProviderResponse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new StatusError(502, `OAuth provider returned a non-JSON response: ${text.slice(0, 500)}`);
-  }
-}
-
 custom.setHttpOptionsDefaults({
   timeout: OAUTH_HTTP_TIMEOUT_MS,
   lookup: safeOAuthDnsLookup,
-  // openid-client's JSON response parser receives the raw response text here. Preserve
-  // provider error bodies in a bounded, client-safe error instead of leaking SyntaxError.
-  parseJson: parseOAuthProviderResponse,
 });
 
 export type TokenSet = {
@@ -67,6 +56,26 @@ function getUnknownProperty(obj: unknown, key: string): unknown {
     return undefined;
   }
   return Reflect.get(obj, key);
+}
+
+// openid-client parses provider responses as JSON lazily, so a plain-text provider answer surfaces as a SyntaxError
+// that carries the raw response. Turn it into a bounded, client-safe error instead of an unexpected server error.
+export function getOAuthNonJsonResponseError(error: unknown): StatusError | undefined {
+  if (!(error instanceof SyntaxError)) {
+    return undefined;
+  }
+  const response = getUnknownProperty(error, "response");
+  if (typeof response !== "object" || response === null) {
+    return undefined;
+  }
+  let body: unknown;
+  try {
+    body = getUnknownProperty(response, "body");
+  } catch {
+    return undefined;
+  }
+  const text = Buffer.isBuffer(body) ? body.toString("utf8") : typeof body === "string" ? body : "";
+  return new StatusError(502, `OAuth provider returned a non-JSON response: ${text.slice(0, 500)}`);
 }
 
 function getNestedStatusError(error: unknown): StatusError | undefined {
@@ -501,7 +510,7 @@ export abstract class OAuthBaseProvider {
         captureError("inner-oauth-callback", { error, params });
         throw new StatusError(400, "Inner OAuth callback failed due to invalid grant. Please try again.");
       }
-      const statusError = getNestedStatusError(error);
+      const statusError = getNestedStatusError(error) ?? getOAuthNonJsonResponseError(error);
       if (statusError) {
         throw statusError;
       }

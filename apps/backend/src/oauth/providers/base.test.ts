@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
-import { parseOAuthProviderResponse, getOAuthAccessTokenRefreshError, getOAuthAccessTokenRefreshErrorDisposition, getOAuthCallbackExtraParams, isRetryableOAuthUserInfoError, resolveOAuthAccessTokenExpiredAt } from "./base";
+import { getOAuthNonJsonResponseError, getOAuthAccessTokenRefreshError, getOAuthAccessTokenRefreshErrorDisposition, getOAuthCallbackExtraParams, isRetryableOAuthUserInfoError, resolveOAuthAccessTokenExpiredAt } from "./base";
 
 describe("isRetryableOAuthUserInfoError", () => {
   it("returns true for openid-client timeout errors", () => {
@@ -154,21 +154,20 @@ describe("resolveOAuthAccessTokenExpiredAt", () => {
   });
 });
 
-describe("parseOAuthProviderResponse", () => {
-  it("parses valid provider JSON", () => {
-    expect(parseOAuthProviderResponse('{"error":"invalid_grant"}')).toEqual({ error: "invalid_grant" });
+describe("getOAuthNonJsonResponseError", () => {
+  it("turns a plain-text provider response into a bounded StatusError", () => {
+    const text = `The user is not authorized. ${"x".repeat(600)}`;
+    const parseError = Object.assign(new SyntaxError("Unexpected token T in JSON at position 0"), {
+      response: { body: Buffer.from(text) },
+    });
+    const error = getOAuthNonJsonResponseError(parseError);
+    expect(error).toBeInstanceOf(StatusError);
+    expect(error?.message).toContain("The user is not authorized.");
+    expect(error?.message.length).toBeLessThan(600);
   });
 
-  it("returns a bounded StatusError containing a non-JSON provider response", () => {
-    const responseText = `The user is not authorized. ${"x".repeat(600)}`;
-    let thrown: unknown;
-    try {
-      parseOAuthProviderResponse(responseText);
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toBeInstanceOf(StatusError);
-    expect((thrown as Error).message).toContain("The user is not authorized.");
-    expect((thrown as Error).message.length).toBeLessThan(600);
+  it("ignores errors that are not JSON parse failures from a provider response", () => {
+    expect(getOAuthNonJsonResponseError(new Error("socket hang up"))).toBeUndefined();
+    expect(getOAuthNonJsonResponseError(new SyntaxError("no response attached"))).toBeUndefined();
   });
 });
