@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { asHeapObject, isPiledriverHeapObjectSymbol } from "../../index.js";
 import { declareBreezyDatabaseWithStorage } from "./core.js";
-import { openBreezyLmdbStorage } from "./storage-lmdb.js";
+import { openBreezyLMDBStorage } from "../breezy-lmdb/storage.js";
 import { openBreezyliteStorage } from "../breezylite/index.js";
 
 for (const [name, open] of [
-  ["Breezy", openBreezyLmdbStorage],
+  ["BreezyLMDB", openBreezyLMDBStorage],
   ["Breezylite", openBreezyliteStorage],
 ] as const) {
   describe(name, () => {

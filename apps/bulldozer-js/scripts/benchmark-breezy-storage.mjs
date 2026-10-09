@@ -11,7 +11,7 @@ const repetitions = Number(process.env.HEXCLAVE_BREEZY_BENCH_REPETITIONS ?? 3);
 if (!Number.isSafeInteger(repetitions) || repetitions < 1) throw new Error("Invalid repetition count");
 const output = resolve(root, process.env.HEXCLAVE_BREEZY_BENCH_OUTPUT ?? "storage-benchmark.untracked");
 mkdirSync(output, { recursive: true });
-const engines = [ ["breezy", "lmdb"], ["breezylite", "sqlite"] ];
+const engines = [ ["breezy-lmdb", "lmdb"], ["breezylite", "sqlite"] ];
 const runs = [];
 const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
 const metadata = { revision: revision.stdout.trim(), node: process.version, platform: platform(), release: release(), cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), repetitions, startedAt: new Date().toISOString() };

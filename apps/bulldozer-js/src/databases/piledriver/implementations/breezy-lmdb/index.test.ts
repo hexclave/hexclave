@@ -9,7 +9,7 @@ import { declareLmdbLowLevelDatabase } from "../../../low-level/implementations/
 import type { LowLevelKvStore } from "../../../low-level/index.js";
 import { ConcatTreeList } from "../../data-structures/concat-tree-list.js";
 import { asHeapObject, isPiledriverHeapObjectSymbol, type PiledriverDatabase, type PiledriverObject } from "../../index.js";
-import { declareBreezyPiledriverDatabase } from "./index.js";
+import { declareBreezyLMDBPiledriverDatabase } from "./index.js";
 
 const parseJson = (value: ArrayBuffer) => JSON.parse(new TextDecoder().decode(value));
 const listEntries = async (store: LowLevelKvStore) => (await store.listEntries()).entries;
@@ -18,11 +18,11 @@ const debugSnapshot = async (database: PiledriverDatabase) => {
   return await database.debugSnapshot();
 };
 
-describe("Breezy Piledriver", () => {
+describe("BreezyLMDB Piledriver", () => {
   it("atomically publishes shared references and revives zero-reference metadata", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
-    const database = declareBreezyPiledriverDatabase(lmdbOptions);
+    const database = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
     try {
       const rootKey = new TextEncoder().encode("root").buffer;
@@ -62,7 +62,7 @@ describe("Breezy Piledriver", () => {
   it("rolls back the heap insert when referenced metadata cannot be incremented", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
-    const database = declareBreezyPiledriverDatabase(lmdbOptions);
+    const database = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
     try {
       const rootKey = new TextEncoder().encode("root").buffer;
@@ -107,7 +107,7 @@ describe("Breezy Piledriver", () => {
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
     const otherRootKey = new TextEncoder().encode("other").buffer;
-    const database = declareBreezyPiledriverDatabase(lmdbOptions);
+    const database = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
     const metadata = inspector.declareKvStore("piledriver-gc-reference-metadata-v3");
     let legacyKeyBase64: string;
@@ -133,7 +133,7 @@ describe("Breezy Piledriver", () => {
     }
 
     const cutoff = Date.now() + 1;
-    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    const collector = declareBreezyLMDBPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
     try {
       // The new parent is normal garbage and gets collected; deleting it skips the legacy child's
       // (missing) count, so the legacy object is all that remains.
@@ -155,7 +155,7 @@ describe("Breezy Piledriver", () => {
     // the write has already bumped `child`'s reference count. If that bump survived the failure,
     // `child` would look referenced forever (or, in the mirror case, unreferenced while still live).
     const tooLongRootKey = new Uint8Array(2000).fill(1).buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const child = asHeapObject({ value: "child" });
     await writer.setRootObject(rootKey, { child });
     // Matching LMDB's message makes sure the write got as far as the root put; an earlier
@@ -166,7 +166,7 @@ describe("Breezy Piledriver", () => {
 
     // GC only collects garbage from before the current process started, so "restart" first.
     const cutoff = Date.now() + 1;
-    const collector = declareBreezyPiledriverDatabase(lmdbOptions, {
+    const collector = declareBreezyLMDBPiledriverDatabase(lmdbOptions, {
       garbageCollectionProcessStartedAtMillis: cutoff + 1,
     });
     try {
@@ -187,7 +187,7 @@ describe("Breezy Piledriver", () => {
     const wideArray = new Array<number>(width).fill(0);
     const wideObject = Object.fromEntries(wideArray.map((value, index) => [`k${index}`, value]));
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
-    const database = declareBreezyPiledriverDatabase({ path, dbId: crypto.randomUUID() });
+    const database = declareBreezyLMDBPiledriverDatabase({ path, dbId: crypto.randomUUID() });
     try {
       for (const wide of [wideArray, wideObject]) {
         const rootKey = new TextEncoder().encode("root").buffer;
@@ -212,12 +212,12 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey, chain);
     await writer.close();
 
     // Read back from a fresh instance so the values come from LMDB, not the writer's heap cache.
-    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    const reader = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       let node = (await reader.getRootObject(rootKey)).object;
       let levels = 0;
@@ -246,11 +246,11 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey, { deep: asHeapObject(value) });
     await writer.close();
 
-    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    const reader = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       const root = (await reader.getRootObject(rootKey)).object;
       if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected a plain root");
@@ -279,7 +279,7 @@ describe("Breezy Piledriver", () => {
     const tree = (depth: number): PiledriverObject => asHeapObject(depth === 0
       ? { leaf: "x".repeat(40) }
       : { children: Array.from({ length: 4 }, () => tree(depth - 1)) });
-    const writer = declareBreezyPiledriverDatabase({ path, dbId });
+    const writer = declareBreezyLMDBPiledriverDatabase({ path, dbId });
     await writer.setRootObject(rootKey, tree(6));
     await writer.close();
 
@@ -307,7 +307,7 @@ describe("Breezy Piledriver", () => {
 
   it("rejects values that can't be saved as JSON instead of silently changing them", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
-    const database = declareBreezyPiledriverDatabase({ path, dbId: crypto.randomUUID() });
+    const database = declareBreezyLMDBPiledriverDatabase({ path, dbId: crypto.randomUUID() });
     const rootKey = new TextEncoder().encode("root").buffer;
     // Callers can pass these despite the types (e.g. through a cast or untyped JSON handling). Each
     // one used to be silently dropped, saved as `{}`, or fail later with a confusing TypeError.
@@ -349,7 +349,7 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       const written = await writer.setRootObject(rootKey, asHeapObject({ value: "persisted" }));
       await writer.waitUntilConsistent(written.seq);
@@ -357,7 +357,7 @@ describe("Breezy Piledriver", () => {
       await writer.close();
     }
 
-    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    const reader = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       const { object } = await reader.getRootObject(rootKey);
       if (typeof object !== "object" || object === null || !(isPiledriverHeapObjectSymbol in object)) {
@@ -377,7 +377,7 @@ describe("Breezy Piledriver", () => {
     const reusedRootKey = new TextEncoder().encode("reused").buffer;
     // Too long for LMDB, so the write fails only at the root put, after its new heap objects are saved.
     const tooLongRootKey = new Uint8Array(2000).fill(1).buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(keptRootKey, { kept: asHeapObject({ value: "kept" }) });
     const orphan = asHeapObject({ child: asHeapObject({ value: "orphaned child" }) });
     await expect(writer.setRootObject(tooLongRootKey, { orphan })).rejects.toThrow("maximum key size");
@@ -388,7 +388,7 @@ describe("Breezy Piledriver", () => {
     await writer.close();
 
     const cutoff = Date.now() + 1;
-    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    const collector = declareBreezyLMDBPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
     try {
       const result = await collector.collectGarbage(cutoff);
       expect(result.objects.deleted).toBe(2);
@@ -407,13 +407,13 @@ describe("Breezy Piledriver", () => {
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
     const garbageRootKey = new TextEncoder().encode("garbage").buffer;
-    const setup = declareBreezyPiledriverDatabase(lmdbOptions);
+    const setup = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await setup.setRootObject(garbageRootKey, { garbage: asHeapObject({ value: "garbage" }) });
     await setup.deleteRootObject(garbageRootKey);
     await setup.close();
 
     const cutoff = Date.now() + 1;
-    const database = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    const database = declareBreezyLMDBPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
     const write = database.setRootObject(rootKey, { child: asHeapObject({ value: "written while closing" }) });
     const garbageCollection = database.collectGarbage(cutoff);
     // Not awaited before closing: close() itself must wait for both. Closing twice is allowed.
@@ -421,7 +421,7 @@ describe("Breezy Piledriver", () => {
     await write;
     expect((await garbageCollection).objects.deleted).toBe(1);
 
-    const reopened = declareBreezyPiledriverDatabase(lmdbOptions);
+    const reopened = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       expect((await debugSnapshot(reopened)).heap.map(entry => entry.serializedJson)).toEqual([{ value: "written while closing" }]);
     } finally {
@@ -437,11 +437,11 @@ describe("Breezy Piledriver", () => {
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
     const valueCount = 2_500;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey, { items: Array.from({ length: valueCount + 1 }, (_, i) => asHeapObject({ i })) });
     await writer.close();
 
-    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    const reader = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       const root = (await reader.getRootObject(rootKey)).object;
       if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root || !Array.isArray(root.items)) throw new Error("Expected the root to hold the items");
@@ -467,12 +467,12 @@ describe("Breezy Piledriver", () => {
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
     const valueCount = 20_000;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const list = ConcatTreeList.concat(Array.from({ length: valueCount }, (_, i) => ConcatTreeList.fromEntries<PiledriverObject>([[`id${i}`, { i }]])), { arity: 2 });
     await writer.setRootObject(rootKey, { list: list.toPiledriverObject() });
     await writer.close();
 
-    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    const reader = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       const root = (await reader.getRootObject(rootKey)).object;
       if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected the root to be a plain object");
@@ -499,7 +499,7 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const dbId = crypto.randomUUID();
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase({ path, dbId });
+    const writer = declareBreezyLMDBPiledriverDatabase({ path, dbId });
     await writer.setRootObject(rootKey, { value: asHeapObject({ secret: "SECRET-VALUE", name: "café" }) });
     await writer.close();
 
@@ -523,7 +523,7 @@ describe("Breezy Piledriver", () => {
       reports.push({ location, error });
     };
     registerErrorSink(recordReport);
-    const reader = declareBreezyPiledriverDatabase({ path, dbId });
+    const reader = declareBreezyLMDBPiledriverDatabase({ path, dbId });
     try {
       const root = (await reader.getRootObject(rootKey)).object;
       if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected a plain root");
@@ -547,12 +547,12 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase({ ...lmdbOptions, compression: true });
+    const writer = declareBreezyLMDBPiledriverDatabase({ ...lmdbOptions, compression: true });
     // lmdb-js only compresses values over 1,000 bytes.
     await writer.setRootObject(rootKey, { value: asHeapObject({ metadata: "plan-".repeat(400) }) });
     await writer.close();
 
-    const reader = declareBreezyPiledriverDatabase({ ...lmdbOptions, compression: false });
+    const reader = declareBreezyLMDBPiledriverDatabase({ ...lmdbOptions, compression: false });
     try {
       const root = (await reader.getRootObject(rootKey)).object;
       if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected a plain root");
@@ -569,13 +569,13 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey, asHeapObject({ child: asHeapObject({ value: "child" }) }));
     await writer.deleteRootObject(rootKey);
     await writer.close();
 
     const cutoff = Date.now() + 1;
-    const collector = declareBreezyPiledriverDatabase(lmdbOptions, {
+    const collector = declareBreezyLMDBPiledriverDatabase(lmdbOptions, {
       garbageCollectionProcessStartedAtMillis: cutoff + 1,
     });
     try {
@@ -602,7 +602,7 @@ describe("Breezy Piledriver", () => {
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const firstRootKey = new TextEncoder().encode("first").buffer;
     const secondRootKey = new TextEncoder().encode("second").buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const sharedChild = asHeapObject({ value: "shared" });
     await writer.setRootObject(firstRootKey, asHeapObject({ child: sharedChild }));
     await writer.setRootObject(secondRootKey, asHeapObject({ child: sharedChild }));
@@ -612,7 +612,7 @@ describe("Breezy Piledriver", () => {
     await writer.close();
 
     const cutoff = Date.now() + 1;
-    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    const collector = declareBreezyLMDBPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
     try {
       // A limit of 2 makes exactly the two parents one batch.
@@ -640,7 +640,7 @@ describe("Breezy Piledriver", () => {
     // More than one transaction's worth of deletions (64), so the limit lands mid-batch.
     const garbageCount = 150;
     const rootKeys = Array.from({ length: garbageCount }, (_, index) => new TextEncoder().encode(`root-${index}`).buffer);
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     for (const [index, rootKey] of rootKeys.entries()) await writer.setRootObject(rootKey, asHeapObject({ index }));
     const keptRootKey = new TextEncoder().encode("kept").buffer;
     await writer.setRootObject(keptRootKey, asHeapObject({ kept: true }));
@@ -648,7 +648,7 @@ describe("Breezy Piledriver", () => {
     await writer.close();
 
     const cutoff = Date.now() + 1;
-    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    const collector = declareBreezyLMDBPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
     try {
       const first = await collector.collectGarbage(cutoff, 100);
       expect(first.objects.deleted).toBe(100);
@@ -682,7 +682,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
   // a second database whose process start is after everything written so far.
   const openCollector = (lmdbOptions: { path: string, dbId: string }) => {
     const cutoff = Date.now() + 1;
-    return { cutoff, collector: declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 }) };
+    return { cutoff, collector: declareBreezyLMDBPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 }) };
   };
   /** Writes `count` roots, each pointing at its own heap object, then deletes them all. */
   const writeGarbage = async (database: PiledriverDatabase, count: number, valueOf: (index: number) => PiledriverObject = index => asHeapObject({ index })) => {
@@ -719,7 +719,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
   // The batch size is 64, so these sit on either side of one and two full batches.
   it.each([1, 63, 64, 65, 128, 129])("collects all of %i garbage objects in one call", async (garbageCount) => {
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey("kept"), asHeapObject({ kept: true }));
     await writeGarbage(writer, garbageCount);
     await writer.close();
@@ -745,7 +745,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     { garbageCount: 0, maxObjects: 10, expectedDeleted: 0, limitReached: false, moreEligibleWorkMayRemain: false },
   ])("stops at maxObjects $maxObjects with $garbageCount garbage objects", async ({ garbageCount, maxObjects, expectedDeleted, limitReached, moreEligibleWorkMayRemain }) => {
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey("kept"), asHeapObject({ kept: true }));
     await writeGarbage(writer, garbageCount);
     await writer.close();
@@ -767,7 +767,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     // 65 parents fill one batch and spill one into the next, so the shared child's count is
     // decremented by two different transactions and only reaches zero in the second.
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const sharedChild = asHeapObject({ value: "shared" });
     await writer.setRootObject(rootKey("kept"), asHeapObject({ kept: true }));
     await writeGarbage(writer, 65, index => asHeapObject({ index, child: sharedChild }));
@@ -791,7 +791,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
 
   it("collects a child that one parent references several times alongside another parent in the same batch", async () => {
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const child = asHeapObject({ value: "child" });
     await writeGarbage(writer, 2, index => asHeapObject(index === 0 ? { a: child, b: child, list: [child, child] } : { child }));
     await writer.close();
@@ -815,7 +815,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     const depth = 150;
     let chain = asHeapObject({ leaf: true });
     for (let index = 0; index < depth; index++) chain = asHeapObject({ index, next: chain });
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey("chain"), chain);
     await writer.deleteRootObject(rootKey("chain"));
     await writer.close();
@@ -839,7 +839,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     // If a batch were applied object by object, the objects before the bad one would stay deleted
     // while the error reported that the GC call failed. The batch must be all-or-nothing.
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writeGarbage(writer, 40);
     await writer.close();
     await giveCandidateALiveReferenceCount(lmdbOptions, { candidateIndex: 19, expectedCandidates: 40 });
@@ -867,7 +867,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     // deleted. In a single transaction, all three would have rolled back.
     const { path, lmdbOptions } = await openTemporary();
     const childrenPerParent = 3000;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writeGarbage(writer, 3, index => asHeapObject({ children: Array.from({ length: childrenPerParent }, (_, child) => asHeapObject({ index, child })) }));
     await writer.close();
     await giveCandidateALiveReferenceCount(lmdbOptions, { candidateIndex: 2, expectedCandidates: 3 });
@@ -888,7 +888,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     // read again by a later batch. Children reference nothing, so nothing else is read twice.
     const { path, lmdbOptions } = await openTemporary();
     const childrenPerParent = 3000;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writeGarbage(writer, 3, index => asHeapObject({ children: Array.from({ length: childrenPerParent }, (_, child) => asHeapObject({ index, child })) }));
     await writer.close();
 
@@ -907,7 +907,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
 
   it("rejects a maxObjects of 0 without deleting anything", async () => {
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writeGarbage(writer, 5);
     await writer.close();
 
@@ -923,7 +923,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
 
   it("runs only one of two GC calls started together, and that one completes", async () => {
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writeGarbage(writer, 200);
     await writer.close();
 
@@ -948,7 +948,7 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     // that kept it alive. Whatever the interleaving, the copies that survive must still read it,
     // and once everything is collected again only those copies and the child may remain.
     const { path, lmdbOptions } = await openTemporary();
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey("live"), asHeapObject({ child: asHeapObject({ value: "shared" }) }));
     const liveParent = expectHeapObject((await writer.getRootObject(rootKey("live"))).object);
     const sharedChild = expectPlainObject(await liveParent.get()).child;

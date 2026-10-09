@@ -22,14 +22,14 @@ From `apps/bulldozer-js` after installing workspace dependencies:
 
 ```sh
 node ../../node_modules/vitest/vitest.mjs run --config vitest.storage.config.ts \
-  src/create-piledriver.test.ts src/databases/piledriver/implementations/breezy
+  src/create-piledriver.test.ts src/databases/piledriver/implementations/breezy src/databases/piledriver/implementations/breezy-lmdb
 node node_modules/typescript/bin/tsc --noEmit -p tsconfig.storage.json
 node scripts/benchmark-breezy-storage.mjs
 ```
 
 The test config resolves shared source without SDK builds. The focused typecheck uses ES2022 plus ES2023 array APIs; the default ESNext library exposes an existing WeakKey/IterableWeakMap incompatibility in shared utilities.
 
-The runner compares Breezy/LMDB and Breezylite/SQLite using separate processes and fresh databases, rotating order across three repetitions. Results and logs go to `storage-benchmark.untracked`. Override `HEXCLAVE_BREEZY_BENCH_REPETITIONS` or `HEXCLAVE_BREEZY_BENCH_OUTPUT` as needed.
+The runner compares BreezyLMDB and Breezylite/SQLite using separate processes and fresh databases, rotating order across three repetitions. Results and logs go to `storage-benchmark.untracked`. Override `HEXCLAVE_BREEZY_BENCH_REPETITIONS` or `HEXCLAVE_BREEZY_BENCH_OUTPUT` as needed.
 
 Repeated workloads: payments with 200 prefill users / 1,200 source facts and bursts of 10 concurrent requests; Bulldozer stored-table and group/map/group workloads with 20 warmup and 80 measured operations. Writes wait for durable completion. Heap caching is enabled, compression and the buffered wrapper are off.
 
@@ -44,13 +44,13 @@ node ../../node_modules/vitest/vitest.mjs run --config vitest.storage.config.ts 
   src/databases/bulldozer/performance.test.ts src/payments/schema/performance.test.ts
 ```
 
-For the LMDB comparison use `breezy` / `lmdb`. Service and benchmark settings are separate.
+For the LMDB comparison use `breezy-lmdb` / `lmdb`. Service and benchmark settings are separate.
 
 ## Measurements and limitations
 
 October 8, 2026 sandbox measurements, three repetitions, Node 24.21.0 / Linux / 8 logical Xeon CPUs. Median operations/second:
 
-| Workload | Breezy (LMDB) | Breezylite (SQLite) |
+| Workload | BreezyLMDB | Breezylite (SQLite) |
 |---|---:|---:|
 | Payments writes, combined six phases | 50.5 | 38.4 |
 | Bulldozer stored table | 786.1 | 882.3 |
