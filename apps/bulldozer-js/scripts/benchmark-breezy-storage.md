@@ -8,7 +8,6 @@ Use Node >=22.13 (tested on 24.21.0) and the normal Bulldozer environment/depend
 
 ```sh
 HEXCLAVE_BULLDOZER_JS_PILEDRIVER_IMPLEMENTATION=breezylite \
-HEXCLAVE_BULLDOZER_JS_SQLITE_COMPRESSION=1 \
 HEXCLAVE_BULLDOZER_JS_SQLITE_PATH=/absolute/path/to/separate-poc-directory \
 pnpm -C apps/bulldozer-js start
 ```
@@ -85,7 +84,7 @@ Compression reduced BreezyLMDB’s database file by about 57%. Uncompressed Bree
 
 ## Breezylite compression
 
-Set `HEXCLAVE_BULLDOZER_JS_SQLITE_COMPRESSION=1` to compress new SQLite values. It is off by default. Compression uses Node zlib raw DEFLATE at level 1, attempts values of at least 256 bytes and keeps the original bytes when compression is not smaller. Keys remain uncompressed and retain their ordering. Compression and decompression are synchronous.
+Breezylite compresses new SQLite values by default; the service has no compression flag. The adapter accepts `compression: false` for controlled benchmarks. Compression uses Node zlib raw DEFLATE at level 1, attempts values of at least 256 bytes and keeps the original bytes when compression is not smaller. Keys remain uncompressed and retain their ordering. Compression and decompression are synchronous.
 
 Each row has a codec column (0 = raw, 1 = DEFLATE). Existing PoC databases receive this column transactionally with raw as the default; existing values are not rewritten. The updated reader handles both codecs regardless of the write setting, so disabling compression remains safe. Unknown codecs and corrupt compressed payloads fail reads. Older PoC binaries do not understand this format: do not reopen the upgraded database using an older binary. This is not an LMDB-to-SQLite migration.
 
