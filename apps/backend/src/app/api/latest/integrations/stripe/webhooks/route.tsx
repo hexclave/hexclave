@@ -51,11 +51,13 @@ const ignoredEvents = [
   "balance.available",
   "customer.updated",
   "customer.created",
+  "customer.deleted",
   "invoice_payment.paid",
   "payout.created",
   "payout.paid",
   "payout.reconciliation_completed",
   "refund.updated",
+  "test_helpers.test_clock.deleted",
 ] as const satisfies Stripe.Event.Type[];
 
 const isSubscriptionChangedEvent = (event: Stripe.Event): event is Stripe.Event & { type: (typeof subscriptionChangedEvents)[number] } => {
