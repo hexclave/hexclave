@@ -53,6 +53,79 @@ function normalizeStoredJson(value: unknown): Exclude<Json, null> {
   return parsed.data;
 }
 
+type AskHexclaveCallRecord = {
+  id: string,
+  createdAt: Date,
+  transport: string,
+  conversationId: string,
+  question: string,
+  response: string,
+  reason: string,
+  userPrompt: string,
+  context: string | null,
+  user: string | null,
+  project: string | null,
+  requestIp: string | null,
+  requestIpSource: string | null,
+  userAgent: string | null,
+  requestHost: string | null,
+  mcpProtocolVersion: string | null,
+  modelId: string,
+  stepCount: number,
+  durationMs: number,
+  innerToolCalls: unknown,
+};
+
+function toHistoryRow(row: AskHexclaveCallRecord): AskHexclaveHistoryRow {
+  return {
+    id: row.id,
+    createdAt: row.createdAt.toISOString(),
+    transport: parseTransport(row.transport),
+    conversationId: row.conversationId,
+    question: row.question,
+    response: row.response,
+    reason: row.reason,
+    userPrompt: row.userPrompt,
+    context: row.context,
+    user: row.user,
+    project: row.project,
+    requestIp: row.requestIp,
+    requestIpSource: row.requestIpSource,
+    userAgent: row.userAgent,
+    requestHost: row.requestHost,
+    mcpProtocolVersion: row.mcpProtocolVersion,
+    modelId: row.modelId,
+    stepCount: row.stepCount,
+    durationMs: row.durationMs,
+    innerToolCalls: normalizeStoredJson(row.innerToolCalls),
+  };
+}
+
+export function toAskHexclaveHistoryApiCall(row: AskHexclaveHistoryRow) {
+  return {
+    id: row.id,
+    created_at: row.createdAt,
+    transport: row.transport,
+    conversation_id: row.conversationId,
+    question: row.question,
+    response: row.response,
+    reason: row.reason,
+    user_prompt: row.userPrompt,
+    context: row.context,
+    user: row.user,
+    project: row.project,
+    request_ip: row.requestIp,
+    request_ip_source: row.requestIpSource,
+    user_agent: row.userAgent,
+    request_host: row.requestHost,
+    mcp_protocol_version: row.mcpProtocolVersion,
+    model_id: row.modelId,
+    step_count: row.stepCount,
+    duration_ms: row.durationMs,
+    inner_tool_calls: row.innerToolCalls,
+  };
+}
+
 export async function logAskHexclaveCall(options: {
   id: string,
   conversationId: string,
@@ -126,28 +199,16 @@ export async function listAskHexclaveCalls(options: {
   });
   const pageRows = rows.slice(0, options.limit);
   return {
-    calls: pageRows.map((row) => ({
-      id: row.id,
-      createdAt: row.createdAt.toISOString(),
-      transport: parseTransport(row.transport),
-      conversationId: row.conversationId,
-      question: row.question,
-      response: row.response,
-      reason: row.reason,
-      userPrompt: row.userPrompt,
-      context: row.context,
-      user: row.user,
-      project: row.project,
-      requestIp: row.requestIp,
-      requestIpSource: row.requestIpSource,
-      userAgent: row.userAgent,
-      requestHost: row.requestHost,
-      mcpProtocolVersion: row.mcpProtocolVersion,
-      modelId: row.modelId,
-      stepCount: row.stepCount,
-      durationMs: row.durationMs,
-      innerToolCalls: normalizeStoredJson(row.innerToolCalls),
-    })),
+    calls: pageRows.map(toHistoryRow),
     nextCursor: rows.length > options.limit ? pageRows.at(-1)?.id ?? null : null,
   };
+}
+
+// Primary, not the replica. Discord posts the link in parallel with the insert,
+// and people open it immediately. A replica read can miss a row that was just written.
+export async function getAskHexclaveCall(id: string): Promise<AskHexclaveHistoryRow | null> {
+  const row = await globalPrismaClient.askHexclaveCall.findUnique({
+    where: { id },
+  });
+  return row == null ? null : toHistoryRow(row);
 }
