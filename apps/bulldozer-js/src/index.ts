@@ -83,6 +83,7 @@ const piledriverImplementation = process.env.HEXCLAVE_BULLDOZER_JS_PILEDRIVER_IM
 const basePiledriver = await createServicePiledriver({
   implementation: piledriverImplementation,
   sqlitePath: process.env.HEXCLAVE_BULLDOZER_JS_SQLITE_PATH,
+  sqliteCompression: process.env.HEXCLAVE_BULLDOZER_JS_SQLITE_COMPRESSION === "1",
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
 }, () => declareBasePiledriverDatabase(createLowLevelDatabase(), {
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
