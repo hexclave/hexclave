@@ -63,3 +63,21 @@ SQLite uses WAL with `synchronous=FULL`; data and its monotonic sequence commit 
 The suite records an expected LMDB failure: throwing after issuing writes in its current async `transaction()` callback can leave them committed. SQLite passes that rollback test. The baseline behavior is unchanged.
 
 This PoC includes no data migration, production rollout, power-loss certification, multi-process load test, or large-store/cold-cache qualification. Inherited Breezy integrity-audit limitations remain: the base-Piledriver serialization-audit hooks are not implemented here. SQLite calls are synchronous and can block the event loop; Node's SQLite API is experimental in the tested runtime.
+
+## Database file size
+
+Run `node scripts/benchmark-breezy-size.mjs` from `apps/bulldozer-js`. This repeats the comparable payments workload three times for BreezyLMDB with compression off/on and Breezylite without compression, rotating execution order. Each run uses a fresh database, 1,200 prefill source facts and 792 measured writes, with buffering disabled. All variants run the same workload assertions.
+
+The benchmark records every database file's logical length and filesystem-allocated bytes immediately before and after close. Open SQLite totals include its WAL and shared-memory files; clean close checkpoints and removes those files. These are end-of-workload measurements, not peak usage or compacted live-data sizes: no VACUUM, compact-copy or additional GC pass is performed. LMDB's preallocated extents can make allocated disk space larger than file length while open.
+
+Results and raw logs are written to `storage-size-benchmark.untracked`; use `HEXCLAVE_BREEZY_BENCH_REPETITIONS` and `HEXCLAVE_BREEZY_BENCH_OUTPUT` to override the repetition count and destination. Breezylite does not yet implement compression; LMDB's compression result establishes compressibility, not SQLite's eventual size or performance with compression.
+
+October 9, 2026 sandbox results (Node 24.21.0), median of three runs; MiB = 1,048,576 bytes:
+
+| Backend | Closed DB file | Open total file lengths | Open allocated disk space |
+|---|---:|---:|---:|
+| BreezyLMDB, no compression | 423.73 MiB | 423.74 MiB | 512.50 MiB |
+| BreezyLMDB, compression | 180.32 MiB | 180.32 MiB | 256.50 MiB |
+| Breezylite, no compression | 427.85 MiB | 433.79 MiB | 435.87 MiB |
+
+Compression reduced BreezyLMDB’s database file by about 57%. Uncompressed Breezylite was about 1% larger than uncompressed BreezyLMDB. The closed LMDB lock file adds 8,272 logical bytes (4,096 allocated bytes); closed data-file allocation matched file length for both engines. All nine workload runs passed.

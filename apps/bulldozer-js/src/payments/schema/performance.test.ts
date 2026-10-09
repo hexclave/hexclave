@@ -11,7 +11,7 @@ import { declareInMemoryPiledriverDatabase } from "../../databases/piledriver/im
 import type { PiledriverObject } from "../../databases/piledriver/index.js";
 import { createPaymentsSchema } from "./index.js";
 import type { ProductSnapshot, SubscriptionRow } from "./types.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, statSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -166,7 +166,7 @@ const newPiledriverDb = () => {
     if (perfBackend !== requiredBackend) throw new Error(`${piledriverImplementation} requires the ${requiredBackend} performance backend`);
     const path = mkdtempSync(join(tmpdir(), "bulldozer-payments-schema-perf-"));
     tempPaths.push(path);
-    const breezy = (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyLMDBPiledriverDatabase)({ path, dbId: crypto.randomUUID() });
+    const breezy = (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyLMDBPiledriverDatabase)({ path, dbId: crypto.randomUUID(), compression: process.env.HEXCLAVE_BREEZY_BENCH_COMPRESSION === "1" });
     return bufferedPiledriver ? declareBufferedPiledriverDatabase(breezy) : breezy;
   }
   if (perfBackend === "lmdb" || perfBackend === "lmdb-instant") {
@@ -364,7 +364,17 @@ describe("transactions listing performance", () => {
 });
 
 afterAll(async () => {
+  const sizeOutput = process.env.HEXCLAVE_BREEZY_BENCH_SIZE_OUTPUT;
+  const measureFiles = () => tempPaths.flatMap((path, database) => readdirSync(path).map(name => {
+    const stat = statSync(join(path, name));
+    return { database, name, bytes: stat.size, allocatedBytes: stat.blocks * 512 };
+  }));
+  const openFiles = sizeOutput === undefined ? undefined : measureFiles();
   // An unclosed LMDB environment keeps native handles alive, preventing Vitest's worker and main process from exiting; remove its mapped directory only after closing it.
   for (const db of databases.reverse()) await db.close();
+  if (sizeOutput !== undefined) writeFileSync(sizeOutput, JSON.stringify({
+    piledriverImplementation, compression: process.env.HEXCLAVE_BREEZY_BENCH_COMPRESSION === "1",
+    openFiles, closedFiles: measureFiles(),
+  }, null, 2));
   for (const path of tempPaths) rmSync(path, { recursive: true, force: true });
 });
