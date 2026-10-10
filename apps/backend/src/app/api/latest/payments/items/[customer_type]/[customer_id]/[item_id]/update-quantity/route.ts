@@ -50,7 +50,9 @@ export const POST = createSmartRouteHandler({
       }),
     }).defined(),
     body: yupObject({
-      delta: yupNumber().integer().defined().meta({
+      // The quantity change is stored in an integer column (Postgres int4), so
+      // bound the delta to its range; larger values used to fail as a 500 in Prisma.
+      delta: yupNumber().integer().min(-2147483648).max(2147483647).defined().meta({
         openapiField: {
           description: "The amount to change the quantity by (positive to increase, negative to decrease)",
           exampleValue: 100
