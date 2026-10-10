@@ -7,8 +7,9 @@ import { declareInstantAvailabilityLowLevelDatabase } from "../low-level/impleme
 import { declareLmdbLowLevelDatabase } from "../low-level/implementations/lmdb.js";
 import { ConcatTreeList } from "../piledriver/data-structures/concat-tree-list.js";
 import { declareBasePiledriverDatabase } from "../piledriver/implementations/base.js";
-import { declareBreezyPiledriverDatabase } from "../piledriver/implementations/breezy/index.js";
-import type { PiledriverObject } from "../piledriver/index.js";
+import { declareBreezyLMDBPiledriverDatabase } from "../piledriver/implementations/breezy-lmdb/index.js";
+import { declareBreezylitePiledriverDatabase } from "../piledriver/implementations/breezylite/index.js";
+import type { PiledriverDatabase, PiledriverObject } from "../piledriver/index.js";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import {
   declareBulldozerDatabase,
@@ -61,14 +62,17 @@ const oldCompatibleRowCounts = (process.env.BULLDOZER_OLD_COMPAT_ROW_COUNTS ?? "
 const oldCompatibleWarmupOps = 20;
 const oldCompatibleMeasuredOps = 80;
 const lmdbTempPaths: string[] = [];
-const databases: PerfDatabase[] = [];
+const databases = new Map<PiledriverDatabase, PerfDatabase>();
 const perfBackend = process.env.BULLDOZER_PERF_BACKEND ?? "lmdb-instant";
 const perfSnapshotMode = process.env.BULLDOZER_PERF_SNAPSHOT_MODE ?? "plain";
 const piledriverImplementation = process.env.STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION ?? "base";
-if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base or breezy");
+if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy-lmdb" && piledriverImplementation !== "breezylite") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base, breezy-lmdb or breezylite");
 const emptyChanges = (): TableChanges => ({ addedRows: [], modifiedRows: [], deletedRows: [], addedGroups: [], deletedGroups: [] });
-const trackDatabase = (db: PerfDatabase) => {
-  databases.push(db);
+const trackDatabase = (piledriver: PiledriverDatabase, migrations: Migration) => {
+  const db = declareBulldozerDatabase(piledriver, { migrations });
+  // Migration scenarios construct several wrappers over one store. Only the latest wrapper
+  // should close it; closing every wrapper reads transaction stats after the store is closed.
+  databases.set(piledriver, db);
   return db;
 };
 const changedRowCount = (changes: Pick<TableChanges, "addedRows" | "modifiedRows" | "deletedRows">) =>
@@ -91,18 +95,19 @@ const newLowLevelDb = () => {
 };
 const newPiledriverDb = () => {
   if (piledriverImplementation === "base") return declareBasePiledriverDatabase(newLowLevelDb());
-  if (perfBackend !== "lmdb") throw new Error("Breezy requires the lmdb performance backend");
+  const requiredBackend = piledriverImplementation === "breezylite" ? "sqlite" : "lmdb";
+  if (perfBackend !== requiredBackend) throw new Error(`${piledriverImplementation} requires the ${requiredBackend} performance backend`);
   const path = mkdtempSync(join(tmpdir(), "bulldozer-perf-lmdb-"));
   lmdbTempPaths.push(path);
-  return declareBreezyPiledriverDatabase({ path, dbId: crypto.randomUUID() });
+  return (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyLMDBPiledriverDatabase)({ path, dbId: crypto.randomUUID(), compression: process.env.HEXCLAVE_BREEZY_BENCH_COMPRESSION === "1" });
 };
 afterAll(async () => {
   // An unclosed LMDB environment keeps native handles alive, preventing Vitest's worker and main process from exiting; remove its mapped directory only after closing it.
-  for (const db of databases.reverse()) await db.close();
+  for (const db of [...databases.values()].reverse()) await db.close();
   for (const path of lmdbTempPaths) rmSync(path, { recursive: true, force: true });
 });
 const newDb = (migrations: Migration) =>
-  trackDatabase(declareBulldozerDatabase(newPiledriverDb(), { migrations }));
+  trackDatabase(newPiledriverDb(), migrations);
 const writeSnapshot = async (db: PerfDatabase, updateSnapshot: SnapshotUpdater) =>
   perfSnapshotMode === "plain"
     ? await db.withSnapshot(updateSnapshot)
@@ -209,7 +214,7 @@ async function createPrefilledOldCompatibleBase(rowCount: number) {
     { type: "initTable", tableId: "rules", table: defineStoredTable(), inputTables: {} },
   ];
   const migrations: Migration = [baseMigration];
-  const db = trackDatabase(declareBulldozerDatabase(piledriver, { migrations }));
+  const db = trackDatabase(piledriver, migrations);
   await db.applyRemainingMigrations();
   const { durationMs } = await timed(async () => {
     await writeSnapshot(db, async snapshot => {
@@ -887,7 +892,7 @@ describe("Bulldozer old-compatible performance", () => {
       { type: "initTable", tableId: "usersA", table: defineStoredTable(), inputTables: {} },
       { type: "initTable", tableId: "usersB", table: defineStoredTable(), inputTables: {} },
     ];
-    const dbV1 = trackDatabase(declareBulldozerDatabase(piledriver, { migrations: [baseMigration] }));
+    const dbV1 = trackDatabase(piledriver, [baseMigration]);
     await dbV1.applyRemainingMigrations();
     await writeSnapshot(dbV1, async snapshot => {
       for (let i = 0; i < rowCount; i++) {
@@ -910,7 +915,7 @@ describe("Bulldozer old-compatible performance", () => {
       { type: "initTable", tableId: "concatenated", table: defineConcatTable(), inputTables: { a: "groupedA", b: "groupedB" } },
       { type: "initTable", tableId: "concatenatedReadModel", table: defineMaterializeTable(), inputTables: { input: "concatenated" } },
     ];
-    const dbV2 = trackDatabase(declareBulldozerDatabase(piledriver, { migrations: [baseMigration, derivedMigration] }));
+    const dbV2 = trackDatabase(piledriver, [baseMigration, derivedMigration]);
     const init = await timed(async () => await dbV2.applyRemainingMigrations());
     logOldCompatibleMetric("virtual concat init equivalent", init.durationMs);
     const snapshot = (await dbV2.getSnapshot()).snapshot;
@@ -923,7 +928,7 @@ describe("Bulldozer old-compatible performance", () => {
 
   it.each(oldCompatibleRowCounts)("load test: prefilled stored table and derived views stay comparable (%i rows)", async rowCount => {
     const fixture = await createPrefilledOldCompatibleBase(rowCount);
-    let db = trackDatabase(declareBulldozerDatabase(fixture.piledriver, { migrations: fixture.migrations }));
+    let db = trackDatabase(fixture.piledriver, fixture.migrations);
     let snapshot = (await db.getSnapshot()).snapshot;
 
     const storedCount = await timed(async () => await countRows(snapshot, "users"));
@@ -967,7 +972,7 @@ describe("Bulldozer old-compatible performance", () => {
     let migrations = fixture.migrations;
     for (const derived of oldCompatibleDerivedSteps()) {
       migrations = [...migrations, derived.steps];
-      db = trackDatabase(declareBulldozerDatabase(fixture.piledriver, { migrations }));
+      db = trackDatabase(fixture.piledriver, migrations);
       const init = await timed(async () => await db.applyRemainingMigrations());
       logOldCompatibleMetric(derived.label, init.durationMs);
     }
@@ -986,7 +991,7 @@ describe("Bulldozer old-compatible performance", () => {
       table: defineMaterializeTable(),
       inputTables: { input: tableId },
     }))];
-    db = declareBulldozerDatabase(fixture.piledriver, { migrations });
+    db = trackDatabase(fixture.piledriver, migrations);
     const readModelInit = await timed(async () => await db.applyRemainingMigrations());
     logOldCompatibleMetric("load init explicit read models", readModelInit.durationMs);
 
