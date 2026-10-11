@@ -1,5 +1,5 @@
 import { getHexclaveServerApp } from "@/hexclave";
-import { getClickhouseExternalClient } from "@/lib/clickhouse";
+import { withAnalyticsQueryClient } from "@/lib/analytics-query-client";
 import { getSafeClickhouseErrorMessage } from "@/lib/clickhouse-errors";
 import { arePlanLimitsEnforced, getBillingTeamId } from "@/lib/plan-entitlements";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -68,39 +68,40 @@ export const POST = createSmartRouteHandler({
       effectiveTimeoutMs = Math.min(body.timeout_ms, maxAllowedMs);
     }
 
-    const client = getClickhouseExternalClient();
     const queryId = `${auth.tenancy.project.id}:${auth.tenancy.branchId}:${randomUUID()}`;
-    const resultSet = await Result.fromPromise(client.query({
-      query: body.query,
-      query_id: queryId,
-      query_params: body.params,
-      clickhouse_settings: {
-        SQL_project_id: auth.tenancy.project.id,
-        SQL_branch_id: auth.tenancy.branchId,
-        max_execution_time: effectiveTimeoutMs / 1000,
-        readonly: "1",
-        allow_ddl: 0,
-        max_result_rows: MAX_RESULT_ROWS.toString(),
-        max_result_bytes: MAX_RESULT_BYTES.toString(),
-        result_overflow_mode: "throw",
-      },
-      format: "JSONEachRow",
-    }));
+    const rowsResult = await withAnalyticsQueryClient(auth.tenancy, async (client, analyticsSettings) => {
+      const queryResult = await Result.fromPromise(client.query({
+        query: body.query,
+        query_id: queryId,
+        query_params: body.params,
+        clickhouse_settings: {
+          ...analyticsSettings,
+          max_execution_time: effectiveTimeoutMs / 1000,
+          max_result_rows: MAX_RESULT_ROWS.toString(),
+          max_result_bytes: MAX_RESULT_BYTES.toString(),
+          result_overflow_mode: "throw",
+        },
+        format: "JSONEachRow",
+      }));
+      if (queryResult.status === "error") {
+        return queryResult;
+      }
+      // Read the rows before the helper closes a per-request warehouse client.
+      return Result.ok(await queryResult.data.json<Record<string, Json>>());
+    });
 
-    if (resultSet.status === "error") {
-      const message = getSafeClickhouseErrorMessage(resultSet.error, body.query);
+    if (rowsResult.status === "error") {
+      const message = getSafeClickhouseErrorMessage(rowsResult.error, body.query);
       throw new KnownErrors.AnalyticsQueryError(message);
     }
 
-    const rows = await resultSet.data.json<Record<string, Json>>();
     return {
       statusCode: 200,
       bodyType: "json",
       body: {
-        result: rows,
+        result: rowsResult.data,
         query_id: queryId,
       },
     };
   },
 });
-

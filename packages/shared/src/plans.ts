@@ -18,6 +18,8 @@ export const ITEM_IDS = {
   analyticsEvents: "analytics_events",
   sessionReplays: "session_replays",
   onboardingCall: "onboarding_call",
+  // A flag, not a limit: quantity >= 1 means the project may provision a warehouse.
+  dataWarehouse: "data_warehouse",
 } as const;
 
 export type ItemId = typeof ITEM_IDS[keyof typeof ITEM_IDS];
