@@ -41,6 +41,9 @@ minimumReleaseAgeExclude:
   - '@tanstack/start-server-core@1.169.39'
   - '@tanstack/start-storage-context@1.167.36'
   - '@tanstack/store@0.11.2'
+  # One-time bypass so the backend can use freestyle 0.2.17 before it passes the 7-day window.
+  # Keep this version-pinned so future releases still go through minimumReleaseAge.
+  - freestyle@0.2.17
 
 blockExoticSubdeps: true
 
