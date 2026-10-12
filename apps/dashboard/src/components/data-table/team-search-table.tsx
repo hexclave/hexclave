@@ -7,18 +7,21 @@ import {
   DataGrid,
   useDataSource,
   type DataGridColumnDef,
+  type DataGridDataSource,
   type DataGridState,
 } from "@hexclave/dashboard-ui-components";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useDebounce } from "use-debounce";
 
 const PAGE_SIZE = 25;
+const SEARCH_DEBOUNCE_MS = 300;
 
 export function TeamSearchTable(props: {
   action: (team: ServerTeam) => ReactNode,
 }) {
-  const { action } = props;
   const adminApp = useAdminApp();
-  const teams = adminApp.useTeams();
+  const actionRef = useRef(props.action);
+  actionRef.current = props.action;
 
   const columns = useMemo<DataGridColumnDef<ServerTeam>[]>(
     () => [
@@ -50,56 +53,73 @@ export function TeamSearchTable(props: {
         resizable: false,
         width: 96,
         align: "right",
-        renderCell: ({ row }) => action(row),
+        renderCell: ({ row }) => actionRef.current(row),
       },
     ],
-    [action],
+    [],
   );
 
   const [gridState, setGridState] = useState<DataGridState>(() =>
     createDefaultDataGridState(columns),
   );
-  const [loadedCount, setLoadedCount] = useState(PAGE_SIZE);
 
-  // Reset visible window whenever the search/sort changes so the user
-  // doesn't have to scroll back through stale rows.
-  useEffect(() => {
-    setLoadedCount(PAGE_SIZE);
-  }, [gridState.quickSearch, gridState.sorting]);
+  const [debouncedQuickSearch] = useDebounce(gridState.quickSearch.trim(), SEARCH_DEBOUNCE_MS);
 
-  // Pull the full filtered+sorted result, then slice locally for infinite scroll.
-  const gridData = useDataSource({
-    data: teams,
-    columns,
-    getRowId: (row) => row.id,
-    sorting: gridState.sorting,
-    quickSearch: gridState.quickSearch,
-    pagination: { pageIndex: 0, pageSize: Number.MAX_SAFE_INTEGER },
-    paginationMode: "client",
-  });
-
-  const visibleRows = useMemo(
-    () => gridData.rows.slice(0, loadedCount),
-    [gridData.rows, loadedCount],
+  const dataSource = useMemo<DataGridDataSource<ServerTeam>>(
+    () => async function* (params) {
+      const query = typeof params.quickSearch === "string" && params.quickSearch.trim().length > 0
+        ? params.quickSearch.trim()
+        : undefined;
+      const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
+      const result = await adminApp.listTeams({
+        limit: PAGE_SIZE,
+        orderBy: "createdAt",
+        desc: true,
+        query,
+        cursor,
+      });
+      yield {
+        rows: result,
+        hasMore: result.nextCursor != null,
+        nextCursor: result.nextCursor ?? undefined,
+      };
+    },
+    [adminApp],
   );
-  const hasMore = loadedCount < gridData.rows.length;
-  const loadMore = useCallback(() => {
-    setLoadedCount((c) => c + PAGE_SIZE);
-  }, []);
+
+  const getRowId = useCallback((row: ServerTeam) => row.id, []);
+
+  const gridData = useDataSource({
+    dataSource,
+    columns,
+    getRowId,
+    sorting: gridState.sorting,
+    quickSearch: debouncedQuickSearch,
+    pagination: gridState.pagination,
+    paginationMode: "infinite",
+  });
 
   return (
     <DataGrid
       columns={columns}
-      rows={visibleRows}
-      getRowId={(row) => row.id}
-      totalRowCount={gridData.totalRowCount}
+      rows={gridData.rows}
+      getRowId={getRowId}
+      isLoading={gridData.isLoading}
+      isRefetching={gridData.isRefetching}
       state={gridState}
       onChange={setGridState}
+      paginationMode="infinite"
+      hasMore={gridData.hasMore}
+      isLoadingMore={gridData.isLoadingMore}
+      onLoadMore={gridData.loadMore}
       fillHeight={false}
       maxHeight={420}
-      paginationMode="infinite"
-      hasMore={hasMore}
-      onLoadMore={loadMore}
+      footer={false}
+      emptyState={
+        <div className="text-center py-8">
+          <p className="text-sm text-muted-foreground">No teams found</p>
+        </div>
+      }
     />
   );
 }

@@ -12,7 +12,7 @@ import { ALL_APPS_FRONTEND } from "@/lib/apps-frontend";
 import { isAppEnabled } from "@/lib/apps-utils";
 import { yupResolver } from '@hookform/resolvers/yup';
 import { DatabaseIcon, PlusIcon } from "@phosphor-icons/react";
-import { ServerTeam, hexclaveAppInternalsSymbol } from '@hexclave/next';
+import { ServerTeam, ServerUser, hexclaveAppInternalsSymbol } from '@hexclave/next';
 import { AppId } from "@hexclave/shared/dist/apps/apps-config";
 import { strictEmailSchema, yupObject } from '@hexclave/shared/dist/schema-fields';
 import { HexclaveAssertionError, throwErr } from '@hexclave/shared/dist/utils/errors';
@@ -41,7 +41,6 @@ export function AddUserDialog(props: {
 }) {
   const adminApp = useAdminApp();
   const project = adminApp.useProject();
-  const teamUsers = props.team.useUsers();
   const inviteForm = useForm({
     resolver: yupResolver(inviteFormSchema),
   });
@@ -96,20 +95,34 @@ export function AddUserDialog(props: {
       <h3 className="font-semibold leading-none">Add an existing user</h3>
       <UserPickerTable
         action={(user) => (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={teamUsers.find(u => u.id === user.id) !== undefined}
-            onClick={() => {
-            runAsynchronouslyWithAlert(props.team.addUser(user.id));
-            }}
-          >
-            {teamUsers.find(u => u.id === user.id) ? 'Added' : 'Add'}
-          </Button>
+          <Suspense fallback={<Button size="sm" variant="outline" loading>Add</Button>}>
+            <AddExistingUserButton team={props.team} user={user} />
+          </Suspense>
         )}
       />
     </div>
   </ActionDialog>;
+}
+
+function AddExistingUserButton(props: { team: ServerTeam, user: ServerUser }) {
+  const adminApp = useAdminApp();
+  // Per-row membership lookup (exact user-ID match within the team) instead of
+  // `team.useUsers()`, which loads the team's entire member list.
+  const membership = adminApp.useUsers({ teamId: props.team.id, query: props.user.id, limit: 1 });
+  const isMember = membership.some((u) => u.id === props.user.id);
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={isMember}
+      onClick={async () => {
+        await props.team.addUser(props.user.id);
+      }}
+    >
+      {isMember ? 'Added' : 'Add'}
+    </Button>
+  );
 }
 
 export default function PageClient(props: { teamId: string }) {

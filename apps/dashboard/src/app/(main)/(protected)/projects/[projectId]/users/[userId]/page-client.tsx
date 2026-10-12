@@ -1013,6 +1013,7 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
 }
 
 const MEMBER_AVATAR_LIMIT = 3;
+const MEMBER_COUNT_PREVIEW_LIMIT = 100;
 
 function TeamMembersAvatarsFallback() {
   return (
@@ -1029,7 +1030,15 @@ function TeamMembersAvatarsFallback() {
 }
 
 function TeamMembersAvatars({ team, onMemberClick }: { team: ServerTeam, onMemberClick: (userId: string) => void }) {
-  const members = team.useUsers();
+  const hexclaveAdminApp = useAdminApp();
+  // Bounded fetch: `team.useUsers()` would load every member of every team row
+  // just to render a few avatars and a "+N" badge.
+  const members = hexclaveAdminApp.useUsers({
+    teamId: team.id,
+    limit: MEMBER_COUNT_PREVIEW_LIMIT,
+    includeAnonymous: true,
+    includeRestricted: true,
+  });
 
   if (members.length === 0) {
     return <span className="text-xs text-muted-foreground">No members</span>;
@@ -1037,6 +1046,7 @@ function TeamMembersAvatars({ team, onMemberClick }: { team: ServerTeam, onMembe
 
   const visible = members.slice(0, MEMBER_AVATAR_LIMIT);
   const remaining = members.length - visible.length;
+  const remainingLabel = members.nextCursor != null ? `${remaining}+` : `${remaining}`;
 
   return (
     <div
@@ -1076,9 +1086,9 @@ function TeamMembersAvatars({ team, onMemberClick }: { team: ServerTeam, onMembe
       {remaining > 0 && (
         <div
           className="-ml-2.5 group-hover/avatars:ml-1 transition-[margin] duration-200 ease-out flex h-7 min-w-7 items-center justify-center rounded-full border-2 border-background bg-muted px-1.5 text-[10px] font-medium text-muted-foreground"
-          aria-label={`${remaining} more members`}
+          aria-label={`${remainingLabel} more members`}
         >
-          +{remaining}
+          +{remainingLabel}
         </div>
       )}
     </div>
