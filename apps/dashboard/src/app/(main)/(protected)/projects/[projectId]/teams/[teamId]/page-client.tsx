@@ -105,11 +105,8 @@ export function AddUserDialog(props: {
 }
 
 function AddExistingUserButton(props: { team: ServerTeam, user: ServerUser }) {
-  const adminApp = useAdminApp();
-  // Per-row membership lookup (exact user-ID match within the team) instead of
-  // `team.useUsers()`, which loads the team's entire member list.
-  const membership = adminApp.useUsers({ teamId: props.team.id, query: props.user.id, limit: 1 });
-  const isMember = membership.some((u) => u.id === props.user.id);
+  // Checks this user's own teams instead of loading the team's entire member list.
+  const isMember = props.user.useTeam(props.team.id) != null;
 
   return (
     <Button

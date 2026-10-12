@@ -1,6 +1,7 @@
 "use client";
 
 import { useAdminApp } from "@/app/(main)/(protected)/projects/[projectId]/use-admin-app";
+import { Button } from "@/components/ui";
 import { ServerTeam } from "@hexclave/next";
 import {
   createDefaultDataGridState,
@@ -98,6 +99,15 @@ export function TeamSearchTable(props: {
     pagination: gridState.pagination,
     paginationMode: "infinite",
   });
+
+  if (gridData.error) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-8 text-center">
+        <p className="text-sm text-muted-foreground">Failed to load teams</p>
+        <Button size="sm" variant="outline" onClick={gridData.reload}>Retry</Button>
+      </div>
+    );
+  }
 
   return (
     <DataGrid
