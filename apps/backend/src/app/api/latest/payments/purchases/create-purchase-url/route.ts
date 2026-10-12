@@ -1,5 +1,6 @@
 import { CustomerType } from "@/generated/prisma/client";
 import { customerOwnsProduct, ensureClientCanAccessCustomer, ensureProductIdOrInlineProduct } from "@/lib/payments";
+import { makeStripeCustomerCreateIdempotencyKey } from "@/lib/payments/stripe-customer-idempotency";
 import { getOwnedProductsForCustomer } from "@/lib/payments/customer-data";
 import { validateRedirectUrl } from "@/lib/redirect-urls";
 import { getHexclaveStripe, getStripeForAccount } from "@/lib/stripe";
@@ -114,11 +115,18 @@ export const POST = createSmartRouteHandler({
       });
       let stripeCustomer = stripeCustomerSearch.data.length ? stripeCustomerSearch.data[0] : undefined;
       if (!stripeCustomer) {
+        const stripeCustomerType = customerType === "user" ? CustomerType.USER : CustomerType.TEAM;
         stripeCustomer = await stripe.customers.create({
           metadata: {
             customerId: req.body.customer_id,
-            customerType: customerType === "user" ? CustomerType.USER : CustomerType.TEAM,
+            customerType: stripeCustomerType,
           }
+        }, {
+          idempotencyKey: makeStripeCustomerCreateIdempotencyKey({
+            tenancyId: tenancy.id,
+            stripeCustomerType,
+            customerId: req.body.customer_id,
+          }),
         });
       }
 
