@@ -52,6 +52,7 @@ const ignoredEvents = [
   "customer.updated",
   "customer.created",
   "customer.deleted",
+  "person.deleted",
   "invoice_payment.paid",
   "payout.created",
   "payout.paid",
