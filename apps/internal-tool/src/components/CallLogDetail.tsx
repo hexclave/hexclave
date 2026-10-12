@@ -1,10 +1,12 @@
+import { captureError } from "@hexclave/shared/dist/utils/errors";
+import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { clsx } from "clsx";
 import { format, formatDistanceToNow } from "date-fns";
 import { useState, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { McpCallLogRow } from "../types";
-import { toDate } from "../utils";
+import type { McpCallLogRow, QaEntriesRow } from "../types";
+import { QA_REVIEW_FAILED_THRESHOLD_MS, qaReviewStartedAt, toDate } from "../utils";
 import { ConversationReplay } from "./ConversationReplay";
 import { markdownComponents } from "./markdown-components";
 
@@ -31,15 +33,40 @@ function CopyButton({ text }: { text: string }) {
 
 // ─── Main Component ────────────────────────────────────
 
-export function CallLogDetail({ row, allRows, onClose, onSaveCorrection, onMarkReviewed }: {
+export function CallLogDetail({ row, allRows, qaEntries, onClose, onSaveCorrection, onSetReviewed, onRetryReview }: {
   row: McpCallLogRow;
   allRows: McpCallLogRow[];
+  qaEntries: QaEntriesRow[];
   onClose: () => void;
   onSaveCorrection?: (correlationId: string, correctedQuestion: string, correctedAnswer: string, publish: boolean) => Promise<void> | void;
-  onMarkReviewed?: (correlationId: string) => Promise<void> | void;
+  onSetReviewed?: (correlationId: string, reviewed: boolean) => Promise<void> | void;
+  onRetryReview?: (correlationId: string, payload: { question: string; reason: string; response: string }) => Promise<void> | void;
 }) {
+  const linkedQa = qaEntries.find(q => q.sourceMcpCorrelationId === row.correlationId);
   const [showReplay, setShowReplay] = useState(false);
-  const isReviewed = row.humanReviewedAt != null;
+  // Optimistic override while the reviewed-state roundtrip is in flight. Cleared
+  // once the real subscription update catches up.
+  const [optimisticReviewed, setOptimisticReviewed] = useState<boolean | null>(null);
+  useEffect(() => {
+    const actual = row.humanReviewedAt != null;
+    if (optimisticReviewed != null && optimisticReviewed === actual) {
+      setOptimisticReviewed(null);
+    }
+  }, [row.humanReviewedAt, optimisticReviewed]);
+  const isReviewed = optimisticReviewed ?? (row.humanReviewedAt != null);
+
+  const handleSetReviewed = (reviewed: boolean) => {
+    const previous = optimisticReviewed;
+    setOptimisticReviewed(reviewed);
+    runAsynchronouslyWithAlert(
+      Promise.resolve(onSetReviewed?.(row.correlationId, reviewed)).catch(err => {
+        // Revert the optimistic override so the UI reflects the database's real state.
+        setOptimisticReviewed(previous);
+        captureError("call-log-set-reviewed", err);
+        throw err;
+      })
+    );
+  };
 
   return (
     <div className="p-4 space-y-4">
@@ -54,19 +81,31 @@ export function CallLogDetail({ row, allRows, onClose, onSaveCorrection, onMarkR
           {isReviewed && (
             <span
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800"
-              title={`Reviewed ${row.humanReviewedAt ? format(toDate(row.humanReviewedAt), "PPpp") : ""}${row.humanReviewedBy ? ` by ${row.humanReviewedBy}` : ""}`}
+              title={row.humanReviewedAt ? format(toDate(row.humanReviewedAt), "PPpp") : ""}
             >
-              &#10003; Reviewed{row.humanReviewedBy ? ` by ${row.humanReviewedBy}` : ""}
+              &#10003; Reviewed
+              {row.humanReviewedBy ? ` by ${row.humanReviewedBy}` : ""}
+              {row.humanReviewedAt
+                ? ` · ${formatDistanceToNow(toDate(row.humanReviewedAt), { addSuffix: true })}`
+                : " · just now"}
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
-          {!isReviewed && onMarkReviewed && (
+          {!isReviewed && onSetReviewed && (
             <button
-              onClick={() => void onMarkReviewed(row.correlationId)}
+              onClick={() => handleSetReviewed(true)}
               className="px-2.5 py-1 text-xs font-medium text-green-700 bg-green-50 rounded-md hover:bg-green-100 border border-green-200"
             >
               Mark as reviewed
+            </button>
+          )}
+          {isReviewed && onSetReviewed && (
+            <button
+              onClick={() => handleSetReviewed(false)}
+              className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-50 rounded-md hover:bg-gray-100 border border-gray-200"
+            >
+              Unmark
             </button>
           )}
           <button
@@ -85,10 +124,10 @@ export function CallLogDetail({ row, allRows, onClose, onSaveCorrection, onMarkR
       <MpcCallCard row={row} />
 
       {/* Card 2: AI QA Review */}
-      <QaReviewCard row={row} />
+      <QaReviewCard row={row} onRetryReview={onRetryReview} />
 
       {/* Card 3: Human Correction */}
-      <HumanCorrectionCard row={row} onSave={onSaveCorrection} />
+      <HumanCorrectionCard row={row} qa={linkedQa} onSave={onSaveCorrection} />
     </div>
   );
 }
@@ -220,17 +259,85 @@ function InnerToolCall({ call }: { call: { toolName: string; toolCallId: string;
 
 type QaFlag = { type: string; severity: string; explanation: string };
 
-function QaReviewCard({ row }: { row: McpCallLogRow }) {
+function RetryReviewButton({ row, onRetryReview, label = "Retry review", tone = "indigo" }: {
+  row: McpCallLogRow;
+  onRetryReview: (correlationId: string, payload: { question: string; reason: string; response: string }) => Promise<void> | void;
+  label?: string;
+  tone?: "indigo" | "red";
+}) {
+  const [retrying, setRetrying] = useState(false);
+  const [justTriggered, setJustTriggered] = useState(false);
+
+  const toneClasses = tone === "red"
+    ? "text-red-700 bg-red-100 hover:bg-red-200 border-red-300"
+    : "text-indigo-700 bg-indigo-100 hover:bg-indigo-200 border-indigo-300";
+
+  return (
+    <button
+      disabled={retrying}
+      onClick={() => {
+        setRetrying(true);
+        runAsynchronouslyWithAlert(
+          Promise.resolve(onRetryReview(row.correlationId, { question: row.question, reason: row.reason, response: row.response }))
+            .then(() => {
+              setJustTriggered(true);
+              setTimeout(() => setJustTriggered(false), 3000);
+            })
+            .catch(err => {
+              captureError("call-log-retry-review", err);
+              throw err;
+            })
+            .finally(() => setRetrying(false))
+        );
+      }}
+      className={clsx(
+        "px-2 py-1 text-[11px] font-medium border rounded",
+        retrying ? "text-gray-400 bg-gray-50 border-gray-200" : toneClasses,
+      )}
+    >
+      {retrying ? "Retrying…" : justTriggered ? "Queued" : label}
+    </button>
+  );
+}
+
+function QaReviewCard({ row, onRetryReview }: {
+  row: McpCallLogRow;
+  onRetryReview?: (correlationId: string, payload: { question: string; reason: string; response: string }) => Promise<void> | void;
+}) {
   if (row.qaErrorMessage) {
     return (
-      <div className="bg-red-50/50 border border-red-200 rounded-lg p-4">
-        <h3 className="text-xs font-semibold text-red-800 uppercase tracking-wider mb-2">AI QA Review</h3>
-        <p className="text-sm text-red-700">Error: {row.qaErrorMessage}</p>
+      <div className="bg-red-50/50 border border-red-200 rounded-lg p-4 space-y-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-semibold text-red-800 uppercase tracking-wider">AI QA Review</h3>
+          {onRetryReview && <RetryReviewButton row={row} onRetryReview={onRetryReview} tone="red" />}
+        </div>
+        <p className="text-sm text-red-700 whitespace-pre-wrap">Error: {row.qaErrorMessage}</p>
       </div>
     );
   }
 
   if (row.qaOverallScore == null) {
+    const reviewStartedAt = qaReviewStartedAt(row);
+    const ageMs = Date.now() - reviewStartedAt.getTime();
+    const reviewFailed = ageMs > QA_REVIEW_FAILED_THRESHOLD_MS;
+
+    if (reviewFailed) {
+      return (
+        <div className="bg-amber-50/60 border border-amber-200 rounded-lg p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h3 className="text-xs font-semibold text-amber-800 uppercase tracking-wider">AI QA Review</h3>
+              <span className="text-[10px] font-medium text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">Review failed</span>
+            </div>
+            {onRetryReview && <RetryReviewButton row={row} onRetryReview={onRetryReview} />}
+          </div>
+          <p className="text-xs text-amber-700">
+            No review completed in {formatDistanceToNow(reviewStartedAt)}. The reviewer was likely skipped (missing OpenRouter key) or the background task died — click retry to re-run.
+          </p>
+        </div>
+      );
+    }
+
     return (
       <div className="bg-indigo-50/30 border border-indigo-200 rounded-lg p-4">
         <div className="flex items-center gap-2">
@@ -374,20 +481,26 @@ async function fetchDeepWikiAnswer(questionText: string): Promise<string> {
     .join("\n\n") ?? "(no response)";
 }
 
-function HumanCorrectionCard({ row, onSave }: {
+function HumanCorrectionCard({ row, qa, onSave }: {
   row: McpCallLogRow;
+  qa: QaEntriesRow | undefined;
   onSave?: (correlationId: string, correctedQuestion: string, correctedAnswer: string, publish: boolean) => Promise<void> | void;
 }) {
-  const [question, setQuestion] = useState(row.humanCorrectedQuestion ?? "");
-  const [answer, setAnswer] = useState(row.humanCorrectedAnswer ?? "");
+  const persistedQuestion = qa?.question ?? "";
+  const persistedAnswer = qa?.answer ?? "";
+  const isPublished = qa?.published === true;
+  const hasDraft = qa != null;
+
+  const [question, setQuestion] = useState(persistedQuestion);
+  const [answer, setAnswer] = useState(persistedAnswer);
   const [lastAction, setLastAction] = useState<"published" | "saved" | "deepwiki-error" | "error" | null>(null);
   const [deepWikiLoading, setDeepWikiLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    setQuestion(row.humanCorrectedQuestion ?? "");
-    setAnswer(row.humanCorrectedAnswer ?? "");
-  }, [row.humanCorrectedQuestion, row.humanCorrectedAnswer, row.correlationId]);
+    setQuestion(persistedQuestion);
+    setAnswer(persistedAnswer);
+  }, [persistedQuestion, persistedAnswer, row.correlationId]);
 
   const handleSave = async (publish: boolean) => {
     if (isSaving) return;
@@ -405,12 +518,19 @@ function HumanCorrectionCard({ row, onSave }: {
   };
 
   const hasUnsavedChanges =
-    question !== (row.humanCorrectedQuestion ?? "") ||
-    answer !== (row.humanCorrectedAnswer ?? "");
+    question !== persistedQuestion ||
+    answer !== persistedAnswer;
 
-  const cardStyle = row.publishedToQa
+  const saveAction = (() => {
+    if (isSaving) return { label: "Saving…", isDraft: !isPublished, disabled: true };
+    if (hasUnsavedChanges) return { label: "Save Draft", isDraft: true, disabled: false };
+    if (!hasDraft) return { label: "Save Draft", isDraft: true, disabled: true };
+    return { label: isPublished ? "Update" : "Publish", isDraft: false, disabled: false };
+  })();
+
+  const cardStyle = isPublished
     ? "bg-green-50/50 border-green-200"
-    : row.humanCorrectedAnswer
+    : hasDraft
       ? "bg-amber-50/50 border-amber-200"
       : "bg-white border-gray-200";
 
@@ -420,24 +540,24 @@ function HumanCorrectionCard({ row, onSave }: {
       <div className="px-4 py-2.5 border-b border-inherit flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Human Correction</h3>
-          {row.publishedToQa ? (
+          {isPublished ? (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800">
               &#10003; Published
             </span>
-          ) : row.humanCorrectedAnswer ? (
+          ) : hasDraft ? (
             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-100 text-yellow-800">
               Draft
             </span>
           ) : null}
         </div>
         <div className="flex items-center gap-2 text-[10px] text-gray-400">
-          {row.publishedAt && (
-            <span>{format(toDate(row.publishedAt), "MMM d, yyyy")}</span>
+          {qa?.lastPublishedAt && (
+            <span>{format(toDate(qa.lastPublishedAt), "MMM d, yyyy")}</span>
           )}
-          {row.humanReviewedBy && (
-            <span>by {row.humanReviewedBy}</span>
+          {qa?.lastEditedBy && (
+            <span>by {qa.lastEditedBy}</span>
           )}
-          {row.publishedToQa && (
+          {isPublished && (
             <button
               onClick={() => void handleSave(false)}
               className="text-red-500 hover:text-red-700"
@@ -496,7 +616,7 @@ function HumanCorrectionCard({ row, onSave }: {
             }}
             className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 border border-gray-300 rounded bg-white"
           >
-            Pre-fill from AI
+            Pre-fill from call
           </button>
           <button
             disabled={deepWikiLoading}
@@ -525,16 +645,18 @@ function HumanCorrectionCard({ row, onSave }: {
           )}
           <div className="ml-auto flex items-center gap-2">
             <button
-              onClick={() => void handleSave(false)}
-              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+              onClick={() => void handleSave(!hasUnsavedChanges)}
+              disabled={saveAction.disabled}
+              className={clsx(
+                "px-3 py-1.5 text-xs font-medium rounded-md transition-colors hover:transition-none",
+                saveAction.disabled
+                  ? "text-gray-400 bg-gray-50 cursor-not-allowed"
+                  : saveAction.isDraft
+                    ? "text-gray-700 bg-gray-100 hover:bg-gray-200"
+                    : "text-white bg-blue-600 hover:bg-blue-700",
+              )}
             >
-              Save Draft
-            </button>
-            <button
-              onClick={() => void handleSave(true)}
-              className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
-            >
-              {row.publishedToQa ? "Update & Publish" : "Save & Publish"}
+              {saveAction.label}
             </button>
           </div>
         </div>

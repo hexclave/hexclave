@@ -2,7 +2,7 @@ import { Tenancy } from "@/lib/tenancies";
 import type { PrismaTransaction } from "@/lib/types";
 import { getPrismaClientForTenancy, PrismaClientWithReplica } from "@/prisma-client";
 import { Prisma } from "@/generated/prisma/client";
-import { getClickhouseAdminClient } from "@/lib/clickhouse";
+import { getClickhouseAdminClient, withClickhousePreConnectionRetries } from "@/lib/clickhouse";
 import { getSafeExternalPostgresClientOptions } from "@/lib/ssrf-protection/external-db-sync";
 import { DEFAULT_DB_SYNC_MAPPINGS } from "@hexclave/shared/dist/config/db-sync-mappings";
 import type { CompleteConfig } from "@hexclave/shared/dist/config/schema";
@@ -1229,14 +1229,14 @@ async function pushRowsToClickhouse(
     return normalized;
   });
 
-  await client.insert({
+  await withClickhousePreConnectionRetries(() => client.insert({
     table: tableName,
     values: normalizedRows,
     format: "JSONEachRow",
     clickhouse_settings: {
       date_time_input_format: "best_effort",
     },
-  });
+  }));
 }
 
 async function getClickhouseLastSyncedSequenceId(
@@ -1246,7 +1246,7 @@ async function getClickhouseLastSyncedSequenceId(
 ): Promise<number> {
   assertUuid(tenancyId, "tenancyId");
   assertNonEmptyString(mappingId, "mappingId");
-  const resultSet = await client.query({
+  const resultSet = await withClickhousePreConnectionRetries(() => client.query({
     query: `
       SELECT last_synced_sequence_id
       FROM analytics_internal._stack_sync_metadata
@@ -1260,7 +1260,7 @@ async function getClickhouseLastSyncedSequenceId(
       mapping_name: mappingId,
     },
     format: "JSONEachRow",
-  });
+  }));
 
   const result = await resultSet.json<{ last_synced_sequence_id: string }>();
   if (result.length === 0) {
@@ -1286,7 +1286,7 @@ async function updateClickhouseSyncMetadata(
   if (!Number.isFinite(lastSequenceId)) {
     throw new HexclaveAssertionError(`lastSequenceId must be a finite number for mapping ${mappingId}.`);
   }
-  await client.insert({
+  await withClickhousePreConnectionRetries(() => client.insert({
     table: "analytics_internal._stack_sync_metadata",
     values: [{
       tenancy_id: tenancyId,
@@ -1297,7 +1297,7 @@ async function updateClickhouseSyncMetadata(
     clickhouse_settings: {
       date_time_input_format: "best_effort",
     },
-  });
+  }));
 }
 
 

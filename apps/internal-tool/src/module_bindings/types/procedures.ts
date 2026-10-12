@@ -6,5 +6,14 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all procedure arg schemas
+import * as PageAiQueryLogProcedure from "../page_ai_query_log_procedure";
+import * as PageFeedbackLogProcedure from "../page_feedback_log_procedure";
+import * as PageMcpCallLogProcedure from "../page_mcp_call_log_procedure";
 
+export type PageAiQueryLogArgs = __Infer<typeof PageAiQueryLogProcedure.params>;
+export type PageAiQueryLogResult = __Infer<typeof PageAiQueryLogProcedure.returnType>;
+export type PageFeedbackLogArgs = __Infer<typeof PageFeedbackLogProcedure.params>;
+export type PageFeedbackLogResult = __Infer<typeof PageFeedbackLogProcedure.returnType>;
+export type PageMcpCallLogArgs = __Infer<typeof PageMcpCallLogProcedure.params>;
+export type PageMcpCallLogResult = __Infer<typeof PageMcpCallLogProcedure.returnType>;
 

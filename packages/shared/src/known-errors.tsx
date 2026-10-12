@@ -1428,6 +1428,63 @@ const InvalidAppleCredentials = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const externalAuthProviderConfigurationReasons = [
+  "provider_disabled",
+  "required_setting_missing",
+  "invalid_authorized_party",
+  "unknown",
+] as const;
+type ExternalAuthProviderConfigurationReason = typeof externalAuthProviderConfigurationReasons[number];
+const externalAuthTokenReasons = [
+  "malformed_token",
+  "signature_mismatch",
+  "expired",
+  "issuer_mismatch",
+  "audience_mismatch",
+  "authorized_party_mismatch",
+  "client_id_mismatch",
+  "missing_claim",
+  "unsupported_token_type",
+  "unknown",
+] as const;
+type ExternalAuthTokenReason = typeof externalAuthTokenReasons[number];
+
+function parseExternalAuthReason<T extends readonly string[]>(
+  value: unknown,
+  reasons: T,
+  fallback: T[number],
+): T[number] {
+  return typeof value === "string"
+    ? reasons.find(reason => reason === value) ?? fallback
+    : fallback;
+}
+
+const ExternalAuthProviderNotConfigured = createKnownErrorConstructor(
+  KnownError,
+  "EXTERNAL_AUTH_PROVIDER_NOT_CONFIGURED",
+  (reason: ExternalAuthProviderConfigurationReason) => [
+    400,
+    `The external authentication provider is not configured or enabled for this project (${reason}).`,
+    { reason },
+  ] as const,
+  (json) => [
+    parseExternalAuthReason(json.reason, externalAuthProviderConfigurationReasons, "unknown"),
+  ] as const,
+);
+
+const InvalidExternalAuthToken = createKnownErrorConstructor(
+  KnownError,
+  "INVALID_EXTERNAL_AUTH_TOKEN",
+  (reason: ExternalAuthTokenReason) => [
+    401,
+    `The external authentication token could not be verified (${reason}). Please sign in again.`,
+    { reason },
+  ] as const,
+  (json) => [
+    parseExternalAuthReason(json.reason, externalAuthTokenReasons, "unknown"),
+  ] as const,
+);
+
 const OAuthProviderAccessDenied = createKnownErrorConstructor(
   KnownError,
   "OAUTH_PROVIDER_ACCESS_DENIED",
@@ -1872,6 +1929,33 @@ const NewPurchasesBlocked = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const TooManyImageAttachments = createKnownErrorConstructor(
+  KnownError,
+  "TOO_MANY_IMAGE_ATTACHMENTS",
+  (maxImages: number) => [
+    400,
+    `Maximum ${maxImages} images per message.`,
+    {
+      max_images: maxImages,
+    },
+  ] as const,
+  (json) => [json.max_images] as const,
+);
+
+const ImageAttachmentTooLarge = createKnownErrorConstructor(
+  KnownError,
+  "IMAGE_ATTACHMENT_TOO_LARGE",
+  (maxBytes: number, actualBytes: number) => [
+    400,
+    `Image exceeds ${maxBytes / (1024 * 1024)}MB limit (${(actualBytes / 1024 / 1024).toFixed(2)}MB).`,
+    {
+      max_bytes: maxBytes,
+      actual_bytes: actualBytes,
+    },
+  ] as const,
+  (json) => [json.max_bytes, json.actual_bytes] as const,
+);
+
 export type KnownErrors = {
   [K in keyof typeof KnownErrors]: InstanceType<typeof KnownErrors[K]>;
 };
@@ -1987,6 +2071,8 @@ export const KnownErrors = {
   InvalidStandardOAuthProviderId,
   InvalidAuthorizationCode,
   InvalidAppleCredentials,
+  ExternalAuthProviderNotConfigured,
+  InvalidExternalAuthToken,
   TeamPermissionNotFound,
   OAuthProviderAccessDenied,
   OAuthProviderTemporarilyUnavailable,
@@ -2021,6 +2107,8 @@ export const KnownErrors = {
   AnalyticsQueryTimeout,
   AnalyticsQueryError,
   AnalyticsNotEnabled,
+  TooManyImageAttachments,
+  ImageAttachmentTooLarge,
 } satisfies Record<string, KnownErrorConstructor<any, any>>;
 
 

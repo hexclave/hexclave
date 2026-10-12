@@ -18,6 +18,7 @@ import { TeamsCrud } from "@hexclave/shared/dist/interface/crud/teams";
 import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
 import type { RestrictedReason } from "@hexclave/shared/dist/schema-fields";
 import { InternalSession } from "@hexclave/shared/dist/sessions";
+import { BROWSER_ACTION_QUERY_PARAM } from "@hexclave/shared/dist/utils/browser-action-snippets";
 import { decodeBase32, decodeBase64, encodeBase32, encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { scrambleDuringCompileTime } from "@hexclave/shared/dist/utils/compile-time";
 import { isBrowserLike } from "@hexclave/shared/dist/utils/env";
@@ -35,7 +36,6 @@ import { deindent, mergeScopeStrings } from "@hexclave/shared/dist/utils/strings
 import type { TurnstileAction } from "@hexclave/shared/dist/utils/turnstile";
 import { BotChallengeExecutionFailedError, BotChallengeUserCancelledError, withBotChallengeFlow } from "@hexclave/shared/dist/utils/turnstile-flow";
 import { createUrlIfValid, getRelativePart, isRelative } from "@hexclave/shared/dist/utils/urls";
-import { BROWSER_ACTION_QUERY_PARAM } from "@hexclave/shared/dist/utils/browser-action-snippets";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import * as tanstackStartServerContext from "@hexclave/tanstack-start/tanstack-start-server-context"; // THIS_LINE_PLATFORM tanstack-start
 import { WebAuthnError, startAuthentication, startRegistration } from "@simplewebauthn/browser";
@@ -55,18 +55,19 @@ import { DeprecatedOAuthConnection, OAuthConnection } from "../../connected-acco
 import { ContactChannel, ContactChannelCreateOptions, ContactChannelUpdateOptions, contactChannelCreateOptionsToCrud, contactChannelUpdateOptionsToCrud } from "../../contact-channels";
 import { Customer, CustomerBilling, CustomerDefaultPaymentMethod, CustomerInvoiceStatus, CustomerInvoicesList, CustomerInvoicesListOptions, CustomerInvoicesRequestOptions, CustomerPaymentMethodSetupIntent, CustomerProductsList, CustomerProductsListOptions, CustomerProductsRequestOptions, Item } from "../../customers";
 import { NotificationCategory } from "../../notification-categories";
+import { scopePasskeyAuthenticationToHostname, scopePasskeyRegistrationToHostname } from "../../passkey-rp-id";
 import { TeamPermission } from "../../permissions";
 import { AdminOwnedProject, AdminProjectUpdateOptions, Project, adminProjectCreateOptionsToCrud } from "../../projects";
 import { EditableTeamMemberProfile, ReceivedTeamInvitation, SentTeamInvitation, Team, TeamCreateOptions, TeamUpdateOptions, TeamUser, teamCreateOptionsToCrud, teamUpdateOptionsToCrud } from "../../teams";
 import { buildCliAuthConfirmUrl, getHostedHandlerUrl, isHostedHandlerUrlForProject, resolveHandlerUrls } from "../../url-targets";
-import { augmentUrlWithPersistedRedirectBackState, getRawAfterAuthReturnTo, saveRedirectBackStateFromUrl } from "./redirect-back-state";
-import { recordRedirectAndThrowIfLoopDetected } from "./redirect-loop-breaker";
-import { scopePasskeyAuthenticationToHostname, scopePasskeyRegistrationToHostname } from "../../passkey-rp-id";
 import { ActiveSession, Auth, BaseUser, CurrentUser, InternalUserExtra, OAuthProvider, ProjectCurrentUser, SyncedPartialUser, TokenPartialUser, UserExtra, UserUpdateOptions, userUpdateOptionsToCrud, withUserDestructureGuard } from "../../users";
 import { StackClientApp, StackClientAppConstructorOptions, StackClientAppJson } from "../interfaces/client-app";
 import { _HexclaveAdminAppImplIncomplete } from "./admin-app-impl";
 import { TokenObject, clientVersion, createCache, createCacheBySession, createEmptyTokenStore, getAnalyticsBaseUrl, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getUrls, resolveApiUrls, resolveConstructorOptions } from "./common";
 import { EventTracker } from "./event-tracker";
+import { ExternalTokenStoreSessionAdapter, isExternalTokenStore } from "./external-token-store-session-adapter";
+import { augmentUrlWithPersistedRedirectBackState, getRawAfterAuthReturnTo, saveRedirectBackStateFromUrl } from "./redirect-back-state";
+import { recordRedirectAndThrowIfLoopDetected } from "./redirect-loop-breaker";
 import type { CrossDomainHandoffParams } from "./redirect-page-urls";
 import { crossDomainAuthQueryParams, getCrossDomainHandoffParamsFromCurrentUrl, planRedirectToHandler } from "./redirect-page-urls";
 import { subscribeSessionRefresh } from "./session-refresh-subscription";
@@ -146,6 +147,26 @@ function createUntrustedUrlError(options: {
       url: options.url,
       projectId: options.projectId,
       ...options.cause === undefined ? {} : { cause: options.cause },
+    },
+  });
+}
+
+function createServerCrossOriginRedirectError(options: {
+  handlerName: keyof HandlerUrls,
+  url: string,
+  projectId: string,
+}): HexclaveSetupError {
+  return new HexclaveSetupError({
+    title: "Cross-origin authentication redirects must start in the browser",
+    message: `Cannot redirect to the cross-origin ${options.handlerName} page from a server-rendered context.`,
+    howToFix: [
+      "Use useUser({ or: \"redirect\" }) in a Client Component so Hexclave can read the current URL and set the PKCE verifier cookie before redirecting.",
+      "For server-side authorization, call getUser() and handle a null result, or use getUser({ or: \"throw\" }).",
+    ],
+    extraData: {
+      handlerName: options.handlerName,
+      url: options.url,
+      projectId: options.projectId,
     },
   });
 }
@@ -321,16 +342,51 @@ function getTanStackStartRequestHeader(name: string): string | null {
   }
   return getRequestHeader(name) ?? null;
 }
+
+/**
+ * TanStack Start keeps the event of the request it is currently handling in an AsyncLocalStorage stored on a global
+ * symbol (see `request-response.ts` in `@tanstack/start-server-core`), and every one of its request accessors throws
+ * an internal error when there is no such request. It exposes no way to ask whether a request is in flight, so we read
+ * that storage ourselves; otherwise server code that plans a redirect outside a request would surface TanStack's
+ * internal AsyncLocalStorage error instead of our own setup error. If TanStack ever renames the symbol we report "no
+ * request", which is the conservative answer: callers then treat the redirect target as cross-origin.
+ */
+function hasActiveTanStackStartRequest(): boolean {
+  const eventStorage: unknown = Reflect.get(globalThis, Symbol.for("tanstack-start:event-storage"));
+  if (eventStorage == null || typeof eventStorage !== "object") {
+    return false;
+  }
+  const getStore: unknown = Reflect.get(eventStorage, "getStore");
+  if (typeof getStore !== "function") {
+    return false;
+  }
+  return Reflect.apply(getStore, eventStorage, []) != null;
+}
 // END_PLATFORM
 
 async function getServerRequestHost(): Promise<string | null> {
   // IF_PLATFORM next
   return (await sc.headers?.())?.get("host") ?? null;
   // ELSE_IF_PLATFORM tanstack-start
+  if (!hasActiveTanStackStartRequest()) {
+    return null;
+  }
   return getTanStackStartRequestHeader("host");
   // ELSE_PLATFORM
   return null;
   // END_PLATFORM
+}
+
+async function isServerRedirectTargetCrossOrigin(url: string): Promise<boolean> {
+  if (isRelative(url)) {
+    return false;
+  }
+  const host = await getServerRequestHost();
+  if (host == null) {
+    return true;
+  }
+  const protocol = await isSecureCookieContext() ? "https:" : "http:";
+  return new URL(url).origin !== new URL(`${protocol}//${host}`).origin;
 }
 
 type HexclaveClientAppImplConstructorOptionsResolved<HasTokenStore extends boolean, ProjectId extends string> = StackClientAppConstructorOptions<HasTokenStore, ProjectId> & { inheritsFrom?: undefined };
@@ -358,6 +414,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   private _sessionRecorder: SessionRecorder | null = null;
   private _eventTracker: EventTracker | null = null;
   private _pendingSignOut: Promise<void> | null = null;
+  private readonly _externalTokenStoreSessionAdapter: ExternalTokenStoreSessionAdapter;
 
   private __DEMO_ENABLE_SLIGHT_FETCH_DELAY = false;
   private readonly _ownedAdminApps = new DependenciesMap<[InternalSession, string], _HexclaveAdminAppImplIncomplete<false, string>>();
@@ -630,6 +687,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   private readonly _trustedParentDomainCache = createCache<[string], string | null>(
     async ([domain]) => await this._getTrustedParentDomain(domain)
   );
+  // Retain domains across token-store snapshots because a later update can see cookies already deleted by an earlier update.
+  private readonly _knownCustomRefreshCookieDomains = new Set<string>();
 
   private _anonymousSignUpInProgress: Promise<{ accessToken: string, refreshToken: string }> | null = null;
   private _prefetchedCrossDomainHandoffParams: CrossDomainHandoffParams | null = null;
@@ -787,6 +846,13 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
       });
     }
+    this._externalTokenStoreSessionAdapter = new ExternalTokenStoreSessionAdapter(
+      (sessionOptions) => this._interface.createSession(sessionOptions),
+      async (providerId, token) => {
+        const exchange = await this._interface.exchangeExternalAuthToken(providerId, token);
+        return Result.orThrow(exchange).accessToken;
+      },
+    );
 
     this._tokenStoreInit = resolvedOptions.tokenStore;
     this._redirectMethod = resolvedOptions.redirectMethod || (isBrowserLike() ? "window" : "none");
@@ -1521,7 +1587,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       }
     });
   }
-  private _queueCustomRefreshCookieUpdate(refreshToken: string | null, updatedAt: number | null, context: "browser" | "server") {
+  private _queueCustomRefreshCookieUpdate(
+    refreshToken: string | null,
+    updatedAt: number | null,
+    context: "browser" | "server",
+    previousCustomDomains: string[],
+  ) {
     runAsynchronously(async () => {
       this._mostRecentQueuedCookieRefreshIndex++;
       const updateIndex = this._mostRecentQueuedCookieRefreshIndex;
@@ -1531,12 +1602,6 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       } else {
         hostname = await getServerRequestHost();
       }
-      if (!hostname) {
-        console.warn("No hostname found when queueing custom refresh cookie update");
-        return;
-      }
-      const domain = await this._trustedParentDomainCache.getOrWait([hostname], "read-write");
-
       const cookieOptions = { maxAge: 60 * 60 * 24 * 365, noOpIfServerComponent: true };
       const setCookie = async (targetDomain: string, value: string | null) => {
         const name = this._getCustomRefreshCookieName(targetDomain);
@@ -1548,11 +1613,27 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
       };
 
+      const value = refreshToken && updatedAt ? this._formatRefreshCookieValue(refreshToken, updatedAt) : null;
+      if (!hostname) {
+        // Server cookie writes can happen without request headers; use prior custom names to recover
+        // trusted domains, and retain the default cookie because the current host is unknown.
+        const domains = new Set<string>();
+        for (const previousDomain of new Set(previousCustomDomains)) {
+          const domain = await this._trustedParentDomainCache.getOrWait([`_.${previousDomain}`], "read-write");
+          if (updateIndex !== this._mostRecentQueuedCookieRefreshIndex) return;
+          if (domain.status !== "error" && domain.data != null) domains.add(domain.data);
+        }
+        if (updateIndex !== this._mostRecentQueuedCookieRefreshIndex) return;
+        await Promise.all([...domains].map((domain) => setCookie(domain, value)));
+        return;
+      }
+
+      const domain = await this._trustedParentDomainCache.getOrWait([hostname], "read-write");
       if (domain.status === "error" || !domain.data || updateIndex !== this._mostRecentQueuedCookieRefreshIndex) {
         return;
       }
-      const value = refreshToken && updatedAt ? this._formatRefreshCookieValue(refreshToken, updatedAt) : null;
       await setCookie(domain.data, value);
+      this._knownCustomRefreshCookieDomains.add(domain.data);
       const isSecure = await isSecureCookieContext();
       const defaultName = this._getRefreshTokenDefaultCookieNameForSecure(isSecure);
       if (context === "browser") {
@@ -1618,7 +1699,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
             const domain = this._getDomainFromCustomRefreshCookieName(name);
             deleteCookieClient(name, domain ? { domain } : {});
           });
-          this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "browser");
+          const previousCustomDomains = cookieNamesToDelete
+            .map((name) => this._getDomainFromCustomRefreshCookieName(name))
+            .filter((domain): domain is string => domain !== null);
+          previousCustomDomains.forEach((domain) => this._knownCustomRefreshCookieDomains.add(domain));
+          this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "browser", [...this._knownCustomRefreshCookieDomains]);
           hasSucceededInWriting = true;
         } catch (e) {
           if (!isBrowserLike()) {
@@ -1655,8 +1740,20 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         if (isBrowserLike()) {
           return this._getBrowserCookieTokenStore();
         } else {
+          // IF_PLATFORM next
+          const existingStore = this._nextServerCookiesTokenStores.get(cookieHelper.identity);
+          if (existingStore !== undefined) {
+            return existingStore;
+          }
+          // END_PLATFORM
+
           const tokens = this._getTokensFromCookies(cookieHelper.getAll());
           const store = new Store<TokenObject>(tokens);
+          // IF_PLATFORM next
+          // Next returns a stable cookies object for the lifetime of a request. Keying by that identity lets parallel
+          // Server Components share their session and in-flight refresh without leaking state across requests.
+          this._nextServerCookiesTokenStores.set(cookieHelper.identity, store);
+          // END_PLATFORM
           store.onChange((value) => {
             runAsynchronously(async () => {
               // TODO HACK this is a bit of a hack; while the order happens to work in practice (because the only actual
@@ -1691,7 +1788,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
                   }),
                 );
               }
-              this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "server");
+              const previousCustomDomains = cookieNamesToDelete
+                .map((name) => this._getDomainFromCustomRefreshCookieName(name))
+                .filter((domain): domain is string => domain !== null);
+              previousCustomDomains.forEach((domain) => this._knownCustomRefreshCookieDomains.add(domain));
+              this._queueCustomRefreshCookieUpdate(refreshToken, updatedAt, "server", [...this._knownCustomRefreshCookieDomains]);
             });
           });
           return store;
@@ -1703,6 +1804,13 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       default: {
         if (tokenStoreInit === null) {
           return createEmptyTokenStore();
+        } else if (typeof tokenStoreInit === "object" && isExternalTokenStore(tokenStoreInit)) {
+          return this._externalTokenStoreSessionAdapter.getOrCreateTokenStore(tokenStoreInit, (store, previousSessionKey) => {
+            this._sessionsByTokenStoreAndSessionKey
+              .get(store)
+              ?.get(previousSessionKey)
+              ?.suggestAccessTokenExpired();
+          });
         } else if (typeof tokenStoreInit === "object" && "headers" in tokenStoreInit) {
           if (this._requestTokenStores.has(tokenStoreInit)) return this._requestTokenStores.get(tokenStoreInit)!;
 
@@ -1778,28 +1886,29 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
    * - So different token stores are separated and don't leak information between each other, eg. if the same user sends two requests to the same server they should get a different session object
    */
   private _sessionsByTokenStoreAndSessionKey = new WeakMap<Store<TokenObject>, Map<string, InternalSession>>();
+
+  private _getSessionKeyForTokenStore(tokenStore: Store<TokenObject>, tokenObj: TokenObject): string {
+    return this._externalTokenStoreSessionAdapter.getSessionKey(tokenStore, tokenObj);
+  }
   /**
    * @param overrideTokenObj The tokens to build the session for, if they haven't been written to the token store yet
    *                         (so we can warm a sign-in's session before the token store publishes it).
    */
   protected _getSessionFromTokenStore(tokenStore: Store<TokenObject>, overrideTokenObj?: TokenObject): InternalSession {
     const tokenObj = overrideTokenObj ?? tokenStore.get();
-    const sessionKey = InternalSession.calculateSessionKey(tokenObj);
+    const sessionKey = this._getSessionKeyForTokenStore(tokenStore, tokenObj);
     const existing = sessionKey ? this._sessionsByTokenStoreAndSessionKey.get(tokenStore)?.get(sessionKey) : null;
     if (existing) return existing;
 
-    const session = this._interface.createSession({
-      refreshToken: tokenObj.refreshToken,
-      accessToken: tokenObj.accessToken,
-    });
+    const session = this._externalTokenStoreSessionAdapter.createSessionForTokenStore(tokenStore, tokenObj, sessionKey);
     session.onAccessTokenChange((newAccessToken) => {
-      tokenStore.update((old) => InternalSession.calculateSessionKey(old) === sessionKey ? {
+      tokenStore.update((old) => this._getSessionKeyForTokenStore(tokenStore, old) === sessionKey ? {
         ...old,
         accessToken: newAccessToken?.token ?? null
       } : old);
     });
     session.onInvalidate(() => {
-      tokenStore.update((old) => InternalSession.calculateSessionKey(old) === sessionKey ? {
+      tokenStore.update((old) => this._getSessionKeyForTokenStore(tokenStore, old) === sessionKey ? {
         ...old,
         accessToken: null,
         refreshToken: null,
@@ -1842,6 +1951,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   protected async _signInToAccountWithTokens(tokens: { accessToken: string | null, refreshToken: string }) {
     if (!("accessToken" in tokens) || !("refreshToken" in tokens)) {
       throw new HexclaveAssertionError("Invalid tokens object; can't sign in with this", { tokens });
+    }
+    // An external token store keys its session by the provider's session, so Hexclave refresh tokens from a
+    // first-party sign-in would be written into (and then silently replaced by) the provider's session.
+    if (this.isExternalAuthApp()) {
+      throw new Error("This app authenticates through an external provider and cannot sign in with Hexclave tokens. Sign in through the provider instead.");
     }
     const attemptId = ++this._signInAttemptCounter;
     const tokenStore = this._getOrCreateTokenStore(await this._createCookieHelper());
@@ -2370,6 +2484,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       emailAuthEnabled: crud.auth_with_email,
       otpAuthEnabled: crud.otp_auth_enabled,
       oauthProviders: crud.oauth_providers,
+      externalAuthProviders: crud.external_auth_providers,
       passkeyAuthEnabled: crud.passkey_auth_enabled,
       isMultiFactorRequired: crud.requires_totp_mfa,
       isAnonymous: crud.is_anonymous,
@@ -3365,6 +3480,19 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     let currentUrl = isReactServer || typeof window === "undefined"
       ? null
       : new URL(window.location.href);
+    if (
+      currentUrl == null
+      && (
+        isHostedHandlerUrlForProject({ url: rawHandlerUrl, projectId: this.projectId })
+        || await isServerRedirectTargetCrossOrigin(rawHandlerUrl)
+      )
+    ) {
+      throwSetupError(createServerCrossOriginRedirectError({
+        handlerName,
+        url: rawHandlerUrl,
+        projectId: this.projectId,
+      }));
+    }
     const shouldRestorePersistedRedirectBackState = (
       (options?.noRedirectBack !== true && (handlerName === "afterSignIn" || handlerName === "afterSignUp"))
       || handlerName === "forgotPassword"
@@ -3384,10 +3512,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       rawHandlerUrl,
       noRedirectBack: options?.noRedirectBack === true,
       currentUrl,
-      // Hosted callback URLs use the browser's current location. Keep this lazy because Server
-      // Components intentionally plan redirects without a current URL and never need a callback.
       getLocalOAuthCallbackUrl: () => this._getLocalOAuthCallbackHandlerUrl(),
-      rawHomeUrl: rawUrls.home,
+      rawAfterSignInUrl: rawUrls.afterSignIn,
       getCrossDomainHandoffParams: async (href) => await this._getCrossDomainHandoffParamsForRedirect(href),
     });
 
@@ -3421,13 +3547,22 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     return redirectUrl;
   }
 
+  protected _isHandlerRedirectBrowserOnly(handlerName: keyof HandlerUrls): boolean {
+    const rawHandlerUrl = getUrls(this._urlOptions, { projectId: this.projectId })[handlerName];
+    return isHostedHandlerUrlForProject({ url: rawHandlerUrl, projectId: this.projectId })
+      || !isRelative(rawHandlerUrl);
+  }
+
   protected _redirectToHandlerDuringRender(handlerName: keyof HandlerUrls, options?: RedirectToOptions): boolean {
     // IF_PLATFORM tanstack-start
     if (this._redirectMethod === "tanstack-start" && !isBrowserLike()) {
-      const rawUrls = getUrls(this._urlOptions, { projectId: this.projectId });
-      const rawHandlerUrl = rawUrls[handlerName];
-      if (!rawHandlerUrl) {
-        throw new Error(`No URL for handler name ${handlerName}`);
+      const rawHandlerUrl = getUrls(this._urlOptions, { projectId: this.projectId })[handlerName];
+      if (this._isHandlerRedirectBrowserOnly(handlerName)) {
+        throwSetupError(createServerCrossOriginRedirectError({
+          handlerName,
+          url: rawHandlerUrl,
+          projectId: this.projectId,
+        }));
       }
       throw TanStackRouter.redirect({ href: rawHandlerUrl, replace: options?.replace });
     }
@@ -3579,6 +3714,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     return crud && this._currentUserFromCrud(crud, session);
   }
 
+  isExternalAuthApp(): boolean {
+    return typeof this._tokenStoreInit === "object"
+      && this._tokenStoreInit != null
+      && isExternalTokenStore(this._tokenStoreInit);
+  }
+
   // IF_PLATFORM react-like
   useUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'redirect' }): ProjectCurrentUser<ProjectId>;
   useUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'throw' }): ProjectCurrentUser<ProjectId>;
@@ -3607,14 +3748,15 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     if (crud === null || (crud.is_anonymous && !includeAnonymous) || (crud.is_restricted && !includeRestricted)) {
       switch (options?.or) {
         case 'redirect': {
-          if (!crud?.is_anonymous && crud?.is_restricted) {
-            if (!this._redirectToHandlerDuringRender("onboarding", { replace: true })) {
-              runAsynchronously(this.redirectToOnboarding({ replace: true }));
-            }
-          } else {
-            if (!this._redirectToHandlerDuringRender("signIn", { replace: true })) {
-              runAsynchronously(this.redirectToSignIn({ replace: true }));
-            }
+          const handlerName = !crud?.is_anonymous && crud?.is_restricted ? "onboarding" : "signIn";
+          // Cross-origin auth needs window.location and browser cookie storage for redirect-back
+          // state and PKCE. During SSR, bail this subtree out to its Suspense fallback so hydration
+          // retries it and initiates the exact same redirect in the browser.
+          if (!isBrowserLike() && this._isHandlerRedirectBrowserOnly(handlerName)) {
+            suspendIfSsr("useUser({ or: \"redirect\" })");
+          }
+          if (!this._redirectToHandlerDuringRender(handlerName, { replace: true })) {
+            runAsynchronously(this._redirectToHandler(handlerName, { replace: true }));
           }
           suspend();
           throw new HexclaveAssertionError("suspend should never return");
@@ -3663,6 +3805,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       primaryEmail: accessToken.payload.email,
       displayName: accessToken.payload.name,
       primaryEmailVerified: accessToken.payload.email_verified,
+      selectedTeamId: accessToken.payload.selected_team_id,
       isAnonymous,
       isMultiFactorRequired: accessToken.payload.requires_totp_mfa,
       isRestricted: accessToken.payload.is_restricted,
@@ -3675,11 +3818,16 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     if (!auth) {
       return null;
     }
+    const selectedTeamId = auth.selected_team_id ?? null;
+    if (selectedTeamId !== null && typeof selectedTeamId !== "string") {
+      throw new HexclaveAssertionError("Expected the Convex selected_team_id claim to be a string or null.");
+    }
     return {
       id: auth.subject,
       displayName: auth.name ?? null,
       primaryEmail: auth.email ?? null,
       primaryEmailVerified: auth.email_verified as boolean,
+      selectedTeamId,
       isAnonymous: auth.is_anonymous as boolean,
       isMultiFactorRequired: auth.requires_totp_mfa as boolean,
       isRestricted: auth.is_restricted as boolean,
@@ -4256,6 +4404,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     const signOutOperation = (async () => {
       // Preserve the old behavior of serializing concurrent sign-outs without coupling them to unrelated stores.
       await previousSignOut;
+      const externalTokenStore = this._externalTokenStoreSessionAdapter.getExternalTokenStoreForSession(session);
+      if (externalTokenStore != null) {
+        throw new HexclaveAssertionError(
+          `Cannot sign out an externally authenticated session through Hexclave. Sign out through the ${externalTokenStore.providerId} provider instead.`,
+        );
+      }
       await this._interface.signOut(session);
       if (options?.redirectUrl) {
         await this._redirectTo({ url: options.redirectUrl, replace: true });
@@ -4487,6 +4641,9 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       toClientJson: (): StackClientAppJson<HasTokenStore, ProjectId> => {
         if (typeof this._redirectMethod !== "string") {
           throw new HexclaveAssertionError("Cannot serialize to JSON from an application with a non-string redirect method");
+        }
+        if (typeof this._tokenStoreInit === "object" && this._tokenStoreInit != null && isExternalTokenStore(this._tokenStoreInit)) {
+          throw new HexclaveAssertionError("Cannot serialize an app with an external token store because its callbacks are not serializable. Construct this app in the client runtime instead.");
         }
 
         const publishableClientKey = "publishableClientKey" in this._interface.options

@@ -500,6 +500,7 @@ const handler = createSmartRouteHandler({
                       signUpRuleOptions: buildSignUpRuleOptions({
                         authMethod: 'oauth',
                         oauthProvider: provider.id,
+                        oauthAccountCreatedAtMillis: userInfo.accountCreatedAtMillis,
                         requestContext,
                         turnstileAssessment: reconstructTurnstileAssessment(
                           outerInfo.turnstileResult ?? "invalid",

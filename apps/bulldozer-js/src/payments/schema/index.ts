@@ -892,7 +892,7 @@ export function createPaymentsSchema() {
     }), { input: "payments-manual-item-quantity-changes" }),
 
     table("payments-txn-subscription-renewal", defineMapTable(row => {
-      const event = rowObject<{ invoiceId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, chargedAmount: Record<string, string>, paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
+      const event = rowObject<{ subscriptionId: string, invoiceId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, chargedAmount: Record<string, string>, paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
       return toPiledriverObject({
         txnId: `sub-renewal:${event.invoiceId}`,
         tenancyId: event.tenancyId,
@@ -903,6 +903,7 @@ export function createPaymentsSchema() {
         customerId: event.customerId,
         paymentProvider: event.paymentProvider,
         createdAtMillis: event.createdAtMillis,
+        renewalTargetSubscriptionId: event.subscriptionId,
       });
     }), { input: "payments-subscription-renewal-events" }),
     table("payments-txn-subscription-cancel", defineMapTable(row => {
@@ -917,6 +918,7 @@ export function createPaymentsSchema() {
         customerId: event.customerId,
         paymentProvider: event.paymentProvider,
         createdAtMillis: event.createdAtMillis,
+        renewalTargetSubscriptionId: null,
       });
     }), { input: "payments-subscription-cancel-events" }),
     table("payments-txn-subscription-start", defineMapTable(row => {
@@ -936,7 +938,7 @@ export function createPaymentsSchema() {
       ];
       if (event.wasMoneyBookedOnStart) entries.push({ type: "money-transfer", customerType: event.customerType, customerId: event.customerId, chargedAmount: event.chargedAmount });
       entries.push(...event.itemGrants.map(grant => ({ type: "item-quantity-change" as const, customerType: event.customerType, customerId: event.customerId, itemId: grant.itemId, quantity: grant.quantity, expiresWhen: grant.expiresWhen, stampedExpiresAtMillis: grant.expiresAtMillis })));
-      return toPiledriverObject({ txnId: `sub-start:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-start", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `sub-start:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-start", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-subscription-start-events" }),
     table("payments-subscription-end-events-natural", defineFilterTable(row => rowObject<{ productRevokedAtMillis: number | null }>(row.rowData).productRevokedAtMillis === null), { input: "payments-subscription-end-events" }),
     table("payments-txn-subscription-end", defineMapTable(row => {
@@ -946,7 +948,7 @@ export function createPaymentsSchema() {
         { type: "product-revocation", customerType: event.customerType, customerId: event.customerId, adjustedTransactionId: event.startProductGrantRef.transactionId, adjustedEntryIndex: event.startProductGrantRef.entryIndex, quantity: event.quantity, productId: event.productId, productLineId: event.productLineId },
         ...event.itemQuantityChangesToExpire.map(entry => ({ type: "item-quantity-expire" as const, customerType: event.customerType, customerId: event.customerId, adjustedTransactionId: entry.transactionId, adjustedEntryIndex: entry.entryIndex, quantity: entry.quantity, itemId: entry.itemId })),
       ];
-      return toPiledriverObject({ txnId: `sub-end:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-end", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `sub-end:${event.subscriptionId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "subscription-end", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-subscription-end-events-natural" }),
     table("payments-txn-item-grant-repeat", defineMapTable(row => {
       const event = rowObject<{ sourceId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, previousGrantsToExpire: Array<{ transactionId: string, entryIndex: number, itemId: string, quantity: number }>, itemGrants: ItemGrant[], paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
@@ -954,7 +956,7 @@ export function createPaymentsSchema() {
         ...event.previousGrantsToExpire.map(entry => ({ type: "item-quantity-expire" as const, customerType: event.customerType, customerId: event.customerId, adjustedTransactionId: entry.transactionId, adjustedEntryIndex: entry.entryIndex, quantity: entry.quantity, itemId: entry.itemId })),
         ...event.itemGrants.map(grant => ({ type: "item-quantity-change" as const, customerType: event.customerType, customerId: event.customerId, itemId: grant.itemId, quantity: grant.quantity, expiresWhen: grant.expiresWhen, stampedExpiresAtMillis: grant.expiresAtMillis })),
       ];
-      return toPiledriverObject({ txnId: `igr:${event.sourceId}:${event.effectiveAtMillis}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "item-grant-repeat", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `igr:${event.sourceId}:${event.effectiveAtMillis}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "item-grant-repeat", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-item-grant-repeat-events" }),
     table("payments-txn-one-time-purchase", defineMapTable(row => {
       const event = rowObject<{ purchaseId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, productId: string | null, priceId: string | null, product: ProductSnapshot, productLineId: string | null, quantity: number, chargedAmount: Record<string, string>, itemGrants: ItemGrant[], paymentProvider: PaymentProvider, createdAtMillis: number }>(row.rowData);
@@ -963,11 +965,11 @@ export function createPaymentsSchema() {
       const entries: TransactionEntryData[] = [{ type: "product-grant", customerType: event.customerType, customerId: event.customerId, productId: event.productId, priceId: event.priceId, product: event.product, productLineId: event.productLineId, quantity: event.quantity, oneTimePurchaseId: event.purchaseId }];
       if (event.paymentProvider !== "test_mode" && Object.keys(event.chargedAmount).length > 0) entries.push({ type: "money-transfer", customerType: event.customerType, customerId: event.customerId, chargedAmount: event.chargedAmount });
       entries.push(...event.itemGrants.map(grant => ({ type: "item-quantity-change" as const, customerType: event.customerType, customerId: event.customerId, itemId: grant.itemId, quantity: grant.quantity, expiresWhen: grant.expiresWhen, stampedExpiresAtMillis: grant.expiresAtMillis })));
-      return toPiledriverObject({ txnId: `otp:${event.purchaseId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "one-time-purchase", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `otp:${event.purchaseId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "one-time-purchase", entries, customerType: event.customerType, customerId: event.customerId, paymentProvider: event.paymentProvider, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-one-time-purchase-events" }),
     table("payments-txn-manual-item-quantity-change", defineMapTable(row => {
       const event = rowObject<{ changeId: string, tenancyId: string, effectiveAtMillis: number, customerType: CustomerType, customerId: string, itemId: string, quantity: number, expiresAtMillis: number | null, createdAtMillis: number }>(row.rowData);
-      return toPiledriverObject({ txnId: `miqc:${event.changeId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "manual-item-quantity-change", entries: [{ type: "item-quantity-change", customerType: event.customerType, customerId: event.customerId, itemId: event.itemId, quantity: event.quantity, expiresWhen: event.expiresAtMillis }], customerType: event.customerType, customerId: event.customerId, paymentProvider: null, createdAtMillis: event.createdAtMillis });
+      return toPiledriverObject({ txnId: `miqc:${event.changeId}`, tenancyId: event.tenancyId, effectiveAtMillis: event.effectiveAtMillis, type: "manual-item-quantity-change", entries: [{ type: "item-quantity-change", customerType: event.customerType, customerId: event.customerId, itemId: event.itemId, quantity: event.quantity, expiresWhen: event.expiresAtMillis }], customerType: event.customerType, customerId: event.customerId, paymentProvider: null, createdAtMillis: event.createdAtMillis, renewalTargetSubscriptionId: null });
     }), { input: "payments-manual-item-quantity-change-events" }),
     table("payments-txn-refund", defineFilterTable(row => rowObject<ManualTransactionRow>(row.rowData).type === "refund"), { input: "payments-manual-transactions" }),
     table("payments-transactions", defineConcatTable(), {

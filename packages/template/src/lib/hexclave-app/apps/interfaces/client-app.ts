@@ -79,6 +79,8 @@ export type StackClientApp<HasTokenStore extends boolean = boolean, ProjectId ex
      * `redirectToSignIn()`, `redirectToSignUp()`, `redirectToSignOut()`, or `redirectToAccountSettings()`.
      */
     readonly urls: Readonly<ResolvedHandlerUrls>,
+    /** Whether this app delegates authentication to an external provider token store. */
+    isExternalAuthApp(): boolean,
 
     signInWithOAuth(provider: string, options?: { returnTo?: string }): Promise<void>,
     signInWithCredential(options: { email: string, password: string, noRedirect?: boolean }): Promise<Result<undefined, KnownErrors["EmailPasswordMismatch"] | KnownErrors["InvalidTotpCode"]>>,
@@ -113,6 +115,12 @@ export type StackClientApp<HasTokenStore extends boolean = boolean, ProjectId ex
     useUser(options?: GetCurrentUserOptions<HasTokenStore>): ProjectCurrentUser<ProjectId> | null,
     // END_PLATFORM
 
+    /**
+     * @deprecated Whether an app object has server permissions does not determine whether this
+     * call runs in a browser, so an async read should not implicitly choose a navigation strategy.
+     * In React, use useUser({ or: "redirect" }). Otherwise, call getUser() and explicitly invoke
+     * redirectToSignIn() from browser code when it returns null.
+     */
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'redirect' }): Promise<ProjectCurrentUser<ProjectId>>,
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'throw' }): Promise<ProjectCurrentUser<ProjectId>>,
     getUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'anonymous' }): Promise<ProjectCurrentUser<ProjectId>>,

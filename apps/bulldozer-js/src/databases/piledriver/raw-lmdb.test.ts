@@ -124,12 +124,16 @@ async function expectRootChildren(
   expect(children).toEqual(expected);
 }
 
-async function withDatabase(storeId: string, test: (database: ReturnType<typeof declareBasePiledriverDatabase>, lowLevel: LowLevelDatabase) => Promise<void>) {
+async function withDatabase(
+  declareDatabase: typeof declareBasePiledriverDatabase,
+  storeId: string,
+  test: (database: ReturnType<typeof declareBasePiledriverDatabase>, lowLevel: LowLevelDatabase) => Promise<void>,
+) {
   const path = await mkdtemp(join(tmpdir(), "piledriver-raw-lmdb-"));
   tempPaths.push(path);
   const lowLevel = wrapDelayedStoreVisibility(declareLmdbLowLevelDatabase({ path }), storeId);
   try {
-    await test(declareBasePiledriverDatabase(lowLevel), lowLevel);
+    await test(declareDatabase(lowLevel), lowLevel);
   } finally {
     await lowLevel.close();
   }
@@ -147,9 +151,11 @@ async function countNonZeroReferenceMetadata(lowLevel: LowLevelDatabase) {
   }).length;
 }
 
-describe("Piledriver over raw LMDB", () => {
+describe.each([
+  { name: "base", declareDatabase: declareBasePiledriverDatabase },
+])("Piledriver over raw LMDB ($name)", ({ declareDatabase }) => {
   it("preserves heap references when metadata visibility is delayed", { timeout: 30_000 }, async () => {
-    await withDatabase("piledriver-gc-reference-metadata-v3", async (database, lowLevel) => {
+    await withDatabase(declareDatabase, "piledriver-gc-reference-metadata-v3", async (database, lowLevel) => {
       const rootKey = new TextEncoder().encode("metadata-root").buffer;
       const firstWrite = await database.setRootObject(rootKey, { children: [asHeapObject({ value: "first" })] });
       await lowLevel.waitUntilAvailable(firstWrite.seq);
@@ -160,7 +166,7 @@ describe("Piledriver over raw LMDB", () => {
   });
 
   it("does not leak heap references when the first root write is still pending", { timeout: 30_000 }, async () => {
-    await withDatabase("root", async (database, lowLevel) => {
+    await withDatabase(declareDatabase, "root", async (database, lowLevel) => {
       const rootKey = new TextEncoder().encode("root-first-write").buffer;
       const firstChildren = [asHeapObject({ value: "first-1" }), asHeapObject({ value: "first-2" })];
       const secondChildren = [asHeapObject({ value: "second-1" }), asHeapObject({ value: "second-2" }), asHeapObject({ value: "second-3" })];
@@ -174,7 +180,7 @@ describe("Piledriver over raw LMDB", () => {
   });
 
   it("dereferences heap references when deleting a pending root write", { timeout: 30_000 }, async () => {
-    await withDatabase("root", async (database, lowLevel) => {
+    await withDatabase(declareDatabase, "root", async (database, lowLevel) => {
       const rootKey = new TextEncoder().encode("root-delete-pending").buffer;
       const firstChildren = [asHeapObject({ value: "first-1" }), asHeapObject({ value: "first-2" })];
       const firstWrite = await database.setRootObject(rootKey, { children: firstChildren });

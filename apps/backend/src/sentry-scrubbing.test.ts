@@ -20,6 +20,7 @@ describe("sanitizeBackendSentryEvent", () => {
       },
       tags: {
         project: "project-secret",
+        host: "api2.hexclave.com",
       },
       transaction: "POST /api/latest/users/user-secret",
       extra: {
@@ -31,6 +32,7 @@ describe("sanitizeBackendSentryEvent", () => {
           requestId: "request-123",
           method: "POST",
           route: "/api/latest/users/[user_id]",
+          host: "api2.hexclave.com",
           authorization: "Bearer secret",
         },
         response: {
@@ -57,6 +59,7 @@ describe("sanitizeBackendSentryEvent", () => {
           "db.statement": "SELECT * FROM users WHERE email = 'user@example.com'",
           "http.request.method": "POST",
           "http.route": "/api/latest/users/{user_id}",
+          "stack.request.host": "api2.hexclave.com",
           "stack.request.path": "/api/latest/users",
           "stack.smart-request.user.primary-email": "user@example.com",
         },
@@ -81,6 +84,7 @@ describe("sanitizeBackendSentryEvent", () => {
         ],
         "contexts": {
           "stack-request": {
+            "host": "api2.hexclave.com",
             "method": "POST",
             "requestId": "request-123",
             "route": "/api/latest/users/[user_id]",
@@ -104,6 +108,7 @@ describe("sanitizeBackendSentryEvent", () => {
             "data": {
               "http.request.method": "POST",
               "http.route": "/api/latest/users/{user_id}",
+              "stack.request.host": "api2.hexclave.com",
             },
             "description": "POST /api/latest/users/{user_id}",
             "span_id": "0123456789abcdef",
@@ -111,7 +116,9 @@ describe("sanitizeBackendSentryEvent", () => {
             "trace_id": "0123456789abcdef0123456789abcdef",
           },
         ],
-        "tags": undefined,
+        "tags": {
+          "host": "api2.hexclave.com",
+        },
         "transaction": "POST /api/latest/users/[user_id]",
         "user": undefined,
       }
@@ -231,6 +238,78 @@ describe("sanitizeBackendSentryEvent", () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain("customer-secret");
+  });
+
+  it("keeps a safe inbound host on stack-request and tags, including when requestId is absent", () => {
+    const result = sanitizeBackendSentryEvent({
+      tags: {
+        host: "api2.hexclave.com",
+        project: "project-secret",
+      },
+      contexts: {
+        "stack-request": {
+          host: "api2.hexclave.com",
+          authorization: "Bearer secret",
+        },
+      },
+    });
+
+    expect(result.tags).toEqual({ host: "api2.hexclave.com" });
+    expect(result.contexts).toEqual({
+      "stack-request": {
+        host: "api2.hexclave.com",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("drops unsafe host values from tags, stack-request, and span data", () => {
+    const result = sanitizeBackendSentryEvent({
+      tags: {
+        host: "https://api.example.com/api/latest/users?token=secret",
+      },
+      contexts: {
+        "stack-request": {
+          requestId: "request-123",
+          host: "https://api.example.com/api/latest/users?token=secret",
+        },
+        trace: {
+          data: {
+            "stack.request.host": "https://api.example.com/api/latest/users?token=secret",
+            "http.request.method": "GET",
+            "http.route": "/api/latest/users/[user_id]",
+          },
+          span_id: "0123456789abcdef",
+          trace_id: "0123456789abcdef0123456789abcdef",
+        },
+      },
+      spans: [{
+        data: {
+          "stack.request.host": "https://api.example.com/api/latest/users?token=secret",
+          "http.request.method": "GET",
+          "http.route": "/api/latest/users/[user_id]",
+        },
+        description: "GET /api/latest/users/[user_id]",
+        span_id: "0123456789abcdef",
+        start_timestamp: 1,
+        trace_id: "0123456789abcdef0123456789abcdef",
+      }],
+    });
+
+    expect(result.tags).toBeUndefined();
+    expect(result.contexts["stack-request"]).toEqual({
+      requestId: "request-123",
+    });
+    expect(result.contexts.trace.data).toEqual({
+      "http.request.method": "GET",
+      "http.route": "/api/latest/users/[user_id]",
+    });
+    expect(result.spans[0].data).toEqual({
+      "http.request.method": "GET",
+      "http.route": "/api/latest/users/[user_id]",
+    });
+    expect(JSON.stringify(result)).not.toContain("token=secret");
+    expect(JSON.stringify(result)).not.toContain("https://");
   });
 
   it("clears all extras, including ones that look like diagnostics", () => {

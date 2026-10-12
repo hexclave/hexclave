@@ -73,6 +73,7 @@ export const POST = createSmartRouteHandler({
       buildSignUpRuleOptions({
         authMethod: 'password',
         oauthProvider: null,
+        oauthAccountCreatedAtMillis: null,
         requestContext,
         turnstileAssessment,
       })

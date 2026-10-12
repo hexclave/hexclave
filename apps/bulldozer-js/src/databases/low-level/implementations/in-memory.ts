@@ -55,7 +55,12 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
 
     const base64KeyToValue = new Map<string, ArrayBuffer>;
     const seqSentinel: DatabaseSeq = [] as unknown as DatabaseSeq;
+    const reserveKeys = (count: number) => {
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error("KV dump reservation count must be a non-negative safe integer");
+      return Array.from({ length: count }, () => crypto.getRandomValues(new Uint8Array(48)).buffer);
+    };
     const result: LowLevelKvStore & LowLevelKvDump = {
+      reserveKeys,
       async get(key: ArrayBuffer) {
         return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.get", attributes }, async () => {
           if (key.byteLength > 64) throw new Error("KV store key must be <= 64 bytes");
@@ -106,12 +111,16 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
           };
         });
       },
-      async insertAll(values: ArrayBuffer[], options: { requiresSeq: DatabaseSeq }) {
+      async insertAll(values, options) {
         return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.insertAll", attributes: { ...attributes, "bulldozer.low_level.value_count": values.length } }, async () => {
           for (const value of values) {
             if (value.byteLength > 2_000_000_000) throw new Error("KV store value must be <= 2GB");
           }
-          const keys = values.map(() => crypto.getRandomValues(new Uint8Array(48)).buffer);
+          const keys = options?.keys ?? reserveKeys(values.length);
+          if (keys.length !== values.length) throw new Error("KV dump insertion must provide exactly one key per value");
+          if (new Set(keys.map(key => encodeBase64(new Uint8Array(key)))).size !== keys.length) {
+            throw new Error("KV dump insertion keys must be unique");
+          }
           return {
             keys,
             ...await result.setAll(keys.map((key, index) => ({ key, value: values[index] })), options),
@@ -122,7 +131,7 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
         return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.compareAndSetAll", attributes: { ...attributes, "bulldozer.low_level.entry_count": entries.length } }, async () => {
           for (const { key, compare, value } of entries) {
             if (key.byteLength > 64) throw new Error("KV store key must be <= 64 bytes");
-            if (compare.byteLength > 2_000_000_000) throw new Error("KV store compare must be <= 2GB");
+            if (compare !== null && compare.byteLength > 2_000_000_000) throw new Error("KV store compare must be <= 2GB");
             if (value.byteLength > 2_000_000_000) throw new Error("KV store value must be <= 2GB");
           }
           const keys = new Set<string>();
@@ -134,7 +143,9 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
           }
           const results = entries.map(({ key, compare }) => {
             const existingValue = base64KeyToValue.get(encodeBase64(new Uint8Array(key)));
-            return existingValue !== undefined && arrayBuffersAreEqual(existingValue, compare);
+            return compare === null
+              ? existingValue === undefined
+              : existingValue !== undefined && arrayBuffersAreEqual(existingValue, compare);
           });
           const matchingEntries = entries.filter((_, index) => results[index]);
           const write = matchingEntries.length === 0
@@ -190,6 +201,9 @@ export function declareInMemoryLowLevelDatabase(dbId: string): LowLevelDatabase 
     },
     async waitUntilReplicated() {
       return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.waitUntilReplicated", attributes: { "bulldozer.low_level.backend": "in-memory" } }, async () => {});
+    },
+    async waitUntilConsistent() {
+      return await traceSpanHot({ description: "bulldozer-js.low-level.in-memory.waitUntilConsistent", attributes: { "bulldozer.low_level.backend": "in-memory" } }, async () => {});
     },
     combineSeqs(...seqs) {
       return this.initialSeq;

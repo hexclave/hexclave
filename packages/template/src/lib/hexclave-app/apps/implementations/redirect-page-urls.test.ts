@@ -13,7 +13,7 @@ async function plan(options: {
     ...options,
     noRedirectBack: options.noRedirectBack === true,
     getLocalOAuthCallbackUrl: () => localOAuthCallbackUrl,
-    rawHomeUrl: "/",
+    rawAfterSignInUrl: "/",
     getCrossDomainHandoffParams: async () => {
       throw new Error("Continuation-only redirects must not mint a new cross-domain handoff");
     },
@@ -38,13 +38,13 @@ describe("server-side redirect planning", () => {
   it("does not resolve a browser-only callback URL without a current URL", async () => {
     const result = await planRedirectToHandler({
       handlerName: "signIn",
-      rawHandlerUrl: "https://hosted.example.test/handler/sign-in",
+      rawHandlerUrl: "/handler/sign-in",
       noRedirectBack: false,
       currentUrl: null,
       getLocalOAuthCallbackUrl: () => {
         throw new Error("Server-side redirect planning must not resolve the browser callback URL");
       },
-      rawHomeUrl: "/",
+      rawAfterSignInUrl: "/",
       getCrossDomainHandoffParams: async () => {
         throw new Error("Server-side redirect planning must not mint cross-domain handoff parameters");
       },
@@ -52,7 +52,7 @@ describe("server-side redirect planning", () => {
 
     expect(result).toEqual({
       type: "redirect",
-      url: "https://hosted.example.test/handler/sign-in",
+      url: "/handler/sign-in",
     });
   });
 });

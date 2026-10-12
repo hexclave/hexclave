@@ -162,7 +162,9 @@ If you're building a client-only app and don't have a `HEXCLAVE_SECRET_SERVER_KE
 
     <ContentSection title="Parameters">
       <ParamField body="options.or" type='"return-null" | "redirect" | "throw"'>
-        What to do if the user is not found.
+        What to do if the user is not found. The `"redirect"` option is deprecated on `getUser`;
+        use `useUser({ or: "redirect" })` in React, or perform an explicit browser redirect after a
+        nullable `getUser()` call.
       </ParamField>
     </ContentSection>
 
@@ -183,9 +185,6 @@ If you're building a client-only app and don't have a `HEXCLAVE_SECRET_SERVER_KE
       ```typescript
       const userOrNull = await hexclaveClientApp.getUser();
       console.log(userOrNull);
-
-      const user = await hexclaveClientApp.getUser({ or: "redirect" });
-      console.log(user);
       ```
     </AsideSection>
 
@@ -638,6 +637,13 @@ Creates a new `HexclaveServerApp` instance.
 
     1. `getUser(id: string): Promise<ServerUser | null>` to get a user by ID.
     2. `getUser(options?: { or?: "return-null" | "redirect" | "throw" }): Promise<CurrentServerUser | null>` to get the current user.
+
+    <Warning>
+      The `or: "redirect"` overload is deprecated on both client and server app objects. The app
+      type controls permissions, not whether the call runs in a browser. Use `getUser()` or
+      `{ or: "throw" }` for server-side authorization, and `useUser({ or: "redirect" })` in a
+      Client Component for navigation.
+    </Warning>
 
   </MethodContent>
 

@@ -1,4 +1,5 @@
 import { httpMethodNames } from "@/generated/route-modules";
+import { isSafeInboundRequestHost } from "@/lib/request-api-url";
 import { sentryBaseConfig } from "@hexclave/shared/dist/utils/sentry";
 import type { Event, EventHint } from "@sentry/node";
 
@@ -16,6 +17,7 @@ const safeSpanAttributeNames = new Set([
   "stack.process.id",
   "stack.request.method",
   "stack.request.request-id",
+  "stack.request.host",
   "stack.smart-request.access-type",
   "stack.smart-request.client-version.platform",
   "stack.smart-request.client-version.sdk",
@@ -38,9 +40,13 @@ const safeApplicationSpanDescriptions = new Set([
 type BackendSentrySpan = NonNullable<Event["spans"]>[number];
 
 function getSafeSpanData(data: BackendSentrySpan["data"]): BackendSentrySpan["data"] {
-  return Object.fromEntries(
+  const filtered = Object.fromEntries(
     Object.entries(data).filter(([attributeName]) => safeSpanAttributeNames.has(attributeName)),
   );
+  if ("stack.request.host" in filtered && !isSafeInboundRequestHost(filtered["stack.request.host"])) {
+    delete filtered["stack.request.host"];
+  }
+  return filtered;
 }
 
 function getSafeRequestDescription(method: unknown, route: unknown): string | undefined {
@@ -212,7 +218,8 @@ export function sanitizeBackendSentryEvent<T extends Event>(event: T): T {
     };
   }
   event.user = undefined;
-  event.tags = undefined;
+  const inboundHostTag = event.tags?.host;
+  event.tags = isSafeInboundRequestHost(inboundHostTag) ? { host: inboundHostTag } : undefined;
   event.extra = undefined;
 
   event.breadcrumbs = event.breadcrumbs?.map((breadcrumb) => ({
@@ -231,6 +238,10 @@ export function sanitizeBackendSentryEvent<T extends Event>(event: T): T {
   // `route` is the matched route pattern (e.g. `/api/latest/users/[user_id]`), never the
   // concrete path — same safety rationale as the http.route span attribute above.
   const requestRoute = requestContext?.route;
+  // Inbound API hostname (api vs api2). Not PII; still default-deny so a crafted
+  // value cannot smuggle a URL or path through `stack-request.host`.
+  const requestHostCandidate = requestContext?.host;
+  const requestHost = isSafeInboundRequestHost(requestHostCandidate) ? requestHostCandidate : undefined;
   const safeRequestDescription = getSafeRequestDescription(requestMethod, requestRoute);
   const safeTraceDescription = getSafeRequestDescription(
     traceContext?.data?.["http.request.method"],
@@ -261,11 +272,14 @@ export function sanitizeBackendSentryEvent<T extends Event>(event: T): T {
   } else if (event.transaction != null) {
     event.transaction = "backend.request";
   }
-  const safeRequestContext = typeof requestId === "string"
+  const safeRequestContext = typeof requestId === "string" || requestHost != null
     ? {
-      requestId,
-      ...(typeof requestMethod === "string" ? { method: requestMethod } : {}),
-      ...(typeof requestRoute === "string" ? { route: requestRoute } : {}),
+      ...(typeof requestId === "string" ? {
+        requestId,
+        ...(typeof requestMethod === "string" ? { method: requestMethod } : {}),
+        ...(typeof requestRoute === "string" ? { route: requestRoute } : {}),
+      } : {}),
+      ...(requestHost == null ? {} : { host: requestHost }),
     }
     : undefined;
   if (traceContext != null) {

@@ -1,3 +1,4 @@
+import { getInboundRequestHost } from "@/lib/request-api-url";
 import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
 
 export type RequestCompletionLog = {
@@ -5,6 +6,7 @@ export type RequestCompletionLog = {
   service: "stack-backend",
   method: string,
   path: string,
+  host: string | null,
   status: number | string | undefined,
   durationMs: number | null,
   requestId: string | null,
@@ -31,6 +33,7 @@ export function createRequestCompletionLog(input: {
     service: "stack-backend",
     method: input.request.method,
     path: input.normalizedPath,
+    host: getInboundRequestHost(input.request) ?? null,
     status,
     durationMs: input.startedAt == null ? null : Number((performance.now() - input.startedAt).toFixed(1)),
     requestId,

@@ -328,7 +328,7 @@ function aggregateKeys(keys: ArrayBuffer[]) {
   return result;
 }
 
-function aggregateSerializedReferences(buffer: ArrayBuffer | null) {
+export function aggregateSerializedReferences(buffer: ArrayBuffer | null) {
   return aggregateKeys(buffer === null ? [] : serializedHeapReferenceKeys(buffer));
 }
 
@@ -363,7 +363,9 @@ export function declarePiledriverGarbageCollector(options: {
   lowLevelDb: LowLevelDatabase,
   heapDump: LowLevelKvDump,
   processStartedAtMillis: number,
+  missingMetadataBehavior?: "legacy-immortal" | "initialize-on-positive-reference",
 }) {
+  const missingMetadataBehavior = options.missingMetadataBehavior ?? "legacy-immortal";
   const metadataStore = options.lowLevelDb.declareKvStore("piledriver-gc-reference-metadata-v3");
   const candidateStore = options.lowLevelDb.declareKvStore("piledriver-gc-zero-reference-candidates-v3");
   const stateStore = options.lowLevelDb.declareKvStore("piledriver-gc-state-v3");
@@ -397,9 +399,8 @@ export function declarePiledriverGarbageCollector(options: {
         return;
       }
 
-      // Objects without metadata predate refcount GC and are deliberately immortal. This makes
-      // rollout O(1) even for very large existing heaps; only objects created after this state
-      // record are tracked and eligible for collection.
+      // The default mode treats objects without metadata as predating reference-counting GC. The
+      // opt-in mode initializes metadata on the first positive reference to a reserved heap key.
       // First-time initialization may race across processes. A deterministic initial generation
       // ensures every contender tags metadata identically even though the state write is
       // last-write-wins; existing databases continue to use their persisted random generation.
@@ -443,8 +444,7 @@ export function declarePiledriverGarbageCollector(options: {
     return options.lowLevelDb.combineSeqs(...unique);
   };
 
-  // get carries no requiresSeq, so on non-instant backends an unbarriered read can make a
-  // freshly created tracked object look legacy-immortal; its matching decrement then goes negative.
+  // get carries no requiresSeq, so wait before deciding whether metadata must be initialized.
   const readReferenceMetadata = async (key: ArrayBuffer, requiresSeq: DatabaseSeq) => {
     await options.lowLevelDb.waitUntilAvailable(requiresSeq);
     return await metadataStore.get(key);
@@ -469,28 +469,31 @@ export function declarePiledriverGarbageCollector(options: {
     while (true) {
       const existing = await readReferenceMetadata(key, requiresSeq);
       if (existing.buffer === null) {
-        // No metadata means the object predates this GC generation. Legacy objects are
-        // intentionally immortal, including when newly tracked objects reference them.
-        return {
-          seq: requiresSeq,
-          becameZero: false,
-          eligibleAtMillis: dereferencedAtMillis ?? 0,
-          legacyImmortal: true,
-          compareAndSetAttempts,
-          compareAndSetConflicts,
-        };
+        if (missingMetadataBehavior === "legacy-immortal") {
+          return {
+            seq: requiresSeq,
+            becameZero: false,
+            eligibleAtMillis: dereferencedAtMillis ?? 0,
+            legacyImmortal: true,
+            compareAndSetAttempts,
+            compareAndSetConflicts,
+          };
+        }
+        throw new Error(`Piledriver GC cannot decrement heap object ${encodeBase64(new Uint8Array(key))} without reference metadata`);
       }
       const metadata = parseReferenceMetadata(existing.buffer);
       if (metadata.generation !== readyGeneration()) {
-        // A partial initialization from an abandoned generation is also fail-safe immortal.
-        return {
-          seq: requiresSeq,
-          becameZero: false,
-          eligibleAtMillis: dereferencedAtMillis ?? metadata.createdAtMillis,
-          legacyImmortal: true,
-          compareAndSetAttempts,
-          compareAndSetConflicts,
-        };
+        if (missingMetadataBehavior === "legacy-immortal") {
+          return {
+            seq: requiresSeq,
+            becameZero: false,
+            eligibleAtMillis: dereferencedAtMillis ?? metadata.createdAtMillis,
+            legacyImmortal: true,
+            compareAndSetAttempts,
+            compareAndSetConflicts,
+          };
+        }
+        throw new Error(`Piledriver GC reference metadata belongs to an inactive generation for heap object ${encodeBase64(new Uint8Array(key))}`);
       }
       // The restart cutoff predates this process, so a claimed object was last dereferenced
       // before any live handle in this process could observe it. Reaching this means that
@@ -558,6 +561,7 @@ export function declarePiledriverGarbageCollector(options: {
     requiresSeq: DatabaseSeq,
   ) => {
     const pending = [...deltas];
+    const createdAtMillis = Math.max(Date.now(), options.processStartedAtMillis);
     const changes: Array<{
       key: ArrayBuffer,
       becameZero: boolean,
@@ -574,6 +578,7 @@ export function declarePiledriverGarbageCollector(options: {
         })),
       );
       const retry: typeof pending = [];
+      const newMetadataEntries: Array<{ key: ArrayBuffer, value: ArrayBuffer, delta: number }> = [];
       const compareAndSetEntries: Array<{
         key: ArrayBuffer,
         compare: ArrayBuffer,
@@ -586,13 +591,33 @@ export function declarePiledriverGarbageCollector(options: {
       }> = [];
       for (const { key, count, existing } of reads) {
         if (existing.buffer === null) {
-          changes.push({ key, becameZero: false, stoppedBeingZero: false, previousEligibleAtMillis: dereferencedAtMillis ?? 0, eligibleAtMillis: dereferencedAtMillis ?? 0 });
+          if (missingMetadataBehavior === "legacy-immortal") {
+            changes.push({ key, becameZero: false, stoppedBeingZero: false, previousEligibleAtMillis: dereferencedAtMillis ?? 0, eligibleAtMillis: dereferencedAtMillis ?? 0 });
+            continue;
+          }
+          if (count < 0) {
+            throw new Error(`Piledriver GC cannot decrement heap object ${encodeBase64(new Uint8Array(key))} without reference metadata`);
+          }
+          // A missing entry can only be a newly inserted object whose reserved key is not yet
+          // reachable. Compare against absence below: concurrent first edges must not overwrite
+          // each other's counts, so every loser retries through the normal increment path.
+          newMetadataEntries.push({
+            key,
+            value: encodeJson({
+              ...newMetadata(readyGeneration(), createdAtMillis),
+              referenceCount: count,
+            }),
+            delta: count,
+          });
           continue;
         }
         const metadata = parseReferenceMetadata(existing.buffer);
         if (metadata.generation !== readyGeneration()) {
-          changes.push({ key, becameZero: false, stoppedBeingZero: false, previousEligibleAtMillis: metadata.createdAtMillis, eligibleAtMillis: dereferencedAtMillis ?? metadata.createdAtMillis });
-          continue;
+          if (missingMetadataBehavior === "legacy-immortal") {
+            changes.push({ key, becameZero: false, stoppedBeingZero: false, previousEligibleAtMillis: metadata.createdAtMillis, eligibleAtMillis: dereferencedAtMillis ?? metadata.createdAtMillis });
+            continue;
+          }
+          throw new Error(`Piledriver GC reference metadata belongs to an inactive generation for heap object ${encodeBase64(new Uint8Array(key))}`);
         }
         if (metadata.deletion !== null) throw new Error("Piledriver GC attempted to reference an object that is being deleted");
         const nextReferenceCount = metadata.referenceCount + count;
@@ -619,17 +644,32 @@ export function declarePiledriverGarbageCollector(options: {
           stoppedBeingZero: metadata.referenceCount === 0 && nextReferenceCount !== 0,
         });
       }
-      if (compareAndSetEntries.length === 0) {
-        pending.length = 0;
+      const newMetadataWrite = newMetadataEntries.length === 0
+        ? null
+        : metadataStore.compareAndSetAll(
+          newMetadataEntries.map(({ key, value }) => ({ key, compare: null, value })),
+          { requiresSeq },
+        );
+      const compareAndSetWrite = compareAndSetEntries.length === 0
+        ? null
+        : metadataStore.compareAndSetAll(
+          compareAndSetEntries.map(({ key, compare, value }) => ({ key, compare, value })),
+          { requiresSeq },
+        );
+      const [newMetadataResult, compareAndSetResult] = await Promise.all([newMetadataWrite, compareAndSetWrite]);
+      if (newMetadataResult !== null) {
+        metadataSequences.push(newMetadataResult.seq);
+        for (const [index, entry] of newMetadataEntries.entries()) {
+          if (newMetadataResult.results[index].wasSet === false) retry.push({ key: entry.key, count: entry.delta });
+        }
+      }
+      pending.length = 0;
+      if (compareAndSetResult === null) {
+        pending.push(...retry);
         continue;
       }
-      const result = await metadataStore.compareAndSetAll(
-        compareAndSetEntries.map(({ key, compare, value }) => ({ key, compare, value })),
-        { requiresSeq },
-      );
-      pending.length = 0;
       for (const [index, entry] of compareAndSetEntries.entries()) {
-        const changed = result.results[index];
+        const changed = compareAndSetResult.results[index];
         if (changed.wasSet === false) {
           retry.push({ key: entry.key, count: entry.delta });
           continue;
@@ -683,9 +723,8 @@ export function declarePiledriverGarbageCollector(options: {
     // that barrier, so a newly created object can never accidentally become eligible.
     const createdAtMillis = Math.max(Date.now(), options.processStartedAtMillis);
     const metadata = newMetadata(readyGeneration(), createdAtMillis);
-    // Creation metadata and zero-reference candidates must be durable before any positive
-    // edge delta is applied. If this batch is interrupted, a payload without metadata is
-    // legacy-immortal (a leak), while an unreferenced zero-count object is safely collectable.
+    // Explicit registration before positive edges leaves a collectable zero-reference candidate
+    // when publication is interrupted, instead of an untracked leak.
     const metadataWrite = await metadataStore.setAll(
       entries.map(({ key }) => ({ key, value: encodeJson(metadata) })),
       { requiresSeq: combineSeqsDeduped(entries.map(entry => entry.requiresSeq)) },

@@ -1,18 +1,30 @@
 import { getClickhouseExternalClient } from "@/lib/clickhouse";
 import { getSafeClickhouseErrorMessage } from "@/lib/clickhouse-errors";
+import { SmartRequestAuth } from "@/route-handlers/smart-request";
 import { ClickHouseError } from "@clickhouse/client";
 import { tool } from "ai";
 import { z } from "zod";
 
 export const SQL_QUERY_RESULT_MAX_CHARS = 50_000;
 
-export function createSqlQueryTool(targetProjectId?: string | null) {
-  if (targetProjectId == null) {
-    return null;
+export function createSqlQueryTool(auth: SmartRequestAuth | null, targetProjectId?: string | null) {
+  if (auth == null) {
+    // Return a stub tool that surfaces the auth requirement to the model as a tool
+    // result, instead of throwing. This way the model can react gracefully (e.g. tell
+    // the user to sign in) rather than the request failing with a 4xx the model never sees.
+    return tool({
+      description: "Run analytics SQL queries. Currently unavailable: this tool requires the user to be signed in. If the user asks an analytics question, explain that they need to sign in first instead of calling this tool.",
+      inputSchema: z.object({
+        query: z.string(),
+      }),
+      execute: async () => ({
+        error: "Authentication required. The user is not signed in, so analytics queries cannot run. Inform the user that they need to sign in to access analytics.",
+      }),
+    });
   }
 
-  const projectId = targetProjectId;
-  const branchId = "main";
+  const projectId = targetProjectId ?? auth.tenancy.project.id;
+  const branchId = targetProjectId ? "main" : auth.tenancy.branchId;
 
   // Max rows returned to the model (backstop if LIMIT is missing).
   const MAX_ROWS_FOR_AI = 50;

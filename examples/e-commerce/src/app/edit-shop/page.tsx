@@ -7,7 +7,7 @@ import { hexclaveServerApp } from '@/hexclave';
 import { Product, Shop } from "@/shop";
 
 export default async function EditShop() {
-  const user = await hexclaveServerApp.getUser({ or: "redirect" });
+  const user = await hexclaveServerApp.getUser({ or: "throw" });
   const shop: Shop | undefined = user.serverMetadata?.eCommerceExample?.shop ?? undefined;
 
   async function createShop(formData: FormData) {

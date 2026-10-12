@@ -356,27 +356,32 @@ hexclave dev --config-file ./hexclave.config.ts -- npm run dev:inner
 **Synopsis**
 
 ```text
-hexclave deploy <service> [options]
+hexclave deploy [options]
 ```
 
 **Description**
 
-Deploy a service defined under `deploy.services` in `hexclave.config.ts`. The CLI uploads the service source, waits for Vercel to accept the deployment, and prints the run ID without waiting for the remote build to finish.
+Deploy the services defined by the `deploy` export of your `hexclave.deploy.ts`. Services live in that file, not in `hexclave.config.ts`. The CLI syncs the service definitions, uploads the deploy file's directory once, builds every service that is built from source in a single remote builder, then rolls them out in dependency order and **waits** — streaming the build output and printing each service's status and final URL. It exits non-zero if the deploy fails, and prints a JSON summary to stdout.
+
+It does **not** publish your project configuration; that is [`hexclave config push`](#hexclave-config-push), a separate command.
 
 **Options**
 
 | Option | Description |
 | --- | --- |
-| `--config <path>` | Config file path. If omitted, the CLI auto-discovers `hexclave.config.ts` in the current directory. |
+| `--service-id <id>` | Deploy only this service. Its connections resolve against already-deployed services. |
+| `--deploy-file <path>` | Deploy file path. If omitted, the CLI auto-discovers `hexclave.deploy.ts` in the current directory. |
 | `--cloud-project-id <id>` | Cloud project ID. Defaults to `HEXCLAVE_PROJECT_ID` or its `STACK_PROJECT_ID` compatibility alias. |
-| `--secret <KEY=VALUE>` | Secret value for a deployment environment variable. Repeatable. |
+| `--no-build-logs` | Don't stream the remote build's output; report service status only. |
 
 **Behavior and authentication**
 
-Authentication uses `HEXCLAVE_SECRET_SERVER_KEY` when set, which is recommended for CI; otherwise it uses the `hexclave login` session. Every secret referenced by the service must be supplied, and unknown secret keys are rejected. Secret values are sent to the deployment target and are not persisted by Hexclave.
+Authentication uses `HEXCLAVE_SECRET_SERVER_KEY` when set, which is recommended for CI; otherwise it uses the `hexclave login` session. Values for `secret()` environment variables are read from the dashboard under Project Settings > Secrets — the deploy fails up front and lists every secret that still needs a value there.
+
+Every remote build sees `CI=true`. When `hexclave deploy` is itself run in CI, the GitLab-style `CI_COMMIT_SHA`, `CI_COMMIT_SHORT_SHA`, `CI_COMMIT_REF_NAME`, `CI_COMMIT_BRANCH`, `CI_COMMIT_TAG` and `CI_REPOSITORY_URL` are passed through to the services built from that commit (GitHub Actions' `GITHUB_*` variables are translated into the same names). A service that declares an environment variable of the same name keeps its own value.
 
 ```sh title="Terminal"
-hexclave deploy web --config ./hexclave.config.ts --secret DATABASE_PASSWORD="$DATABASE_PASSWORD"
+hexclave deploy --service-id web
 ```
 ### `hexclave exec`
 

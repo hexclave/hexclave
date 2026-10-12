@@ -545,6 +545,9 @@ const shouldSetupOnlyIfFitting = deindent`
 const shouldSetupAlways = deindent`
   100%. Always set up the app, there is no reason not to use it.
 `;
+const shouldSetupOnlyIfExistingProvider = (providerName: string) => deindent`
+  0%. Only when the project already uses ${providerName} for sign-in and the user wants to keep it as the source of truth for sessions. Never recommend this together with Hexclave authentication as a replacement for it.
+`;
 const shouldSetupAppPrompt: Record<PublicAppSetupPromptId, string> = {
   "authentication": deindent`
     80%. When there is no authentication in the project already.
@@ -568,6 +571,9 @@ const shouldSetupAppPrompt: Record<PublicAppSetupPromptId, string> = {
   "vercel": shouldSetupOnlyIfFitting,
   "clickmaps": shouldSetupAlways,
   "session-replays": shouldSetupAlways,
+  "clerk-integration": shouldSetupOnlyIfExistingProvider("Clerk"),
+  "better-auth-integration": shouldSetupOnlyIfExistingProvider("Better Auth"),
+  "workos-integration": shouldSetupOnlyIfExistingProvider("WorkOS AuthKit"),
 };
 
 const appSetupPrompt: Record<PublicAppSetupPromptId, string> =
@@ -768,6 +774,14 @@ const appSetupPrompt: Record<PublicAppSetupPromptId, string> =
   `,
   "session-replays": deindent`
     The Session Replays app does not require any additional setup after enabling the Analytics app. See [Analytics](https://docs.hexclave.com/guides/apps/analytics/overview) for more information.
+  `,  "clerk-integration": deindent`
+    This app lets Clerk keep owning the sign-in session while Hexclave exchanges the Clerk token for a Hexclave session, so there is no separate Hexclave sign-in step. Enable it, then configure the provider in the dashboard: set the issuer (your Clerk Frontend API URL) and optionally the authorized parties. In the app, create a \`HexclaveClientApp\` whose \`tokenStore\` reads from the Clerk session and set \`automaticSideEffects: false\` so Hexclave does not redirect to its own pages. The provider token must contain \`sub\`, \`sid\`, and \`exp\`. See [External authentication](https://docs.hexclave.com/guides/integrations/external-auth/overview).
+  `,
+  "better-auth-integration": deindent`
+    This app lets Better Auth keep owning the sign-in session while Hexclave exchanges the Better Auth token for a Hexclave session, so there is no separate Hexclave sign-in step. Enable it, then configure the provider in the dashboard: set the issuer, audience, and JWKS URL. In the app, create a \`HexclaveClientApp\` whose \`tokenStore\` reads from the Better Auth session and set \`automaticSideEffects: false\` so Hexclave does not redirect to its own pages. The provider token must contain \`sub\`, \`sid\`, and \`exp\`. See [External authentication](https://docs.hexclave.com/guides/integrations/external-auth/overview).
+  `,
+  "workos-integration": deindent`
+    This app lets WorkOS AuthKit keep owning the sign-in session while Hexclave exchanges the WorkOS AuthKit token for a Hexclave session, so there is no separate Hexclave sign-in step. Enable it, then configure the provider in the dashboard: set the WorkOS client ID. In the app, create a \`HexclaveClientApp\` whose \`tokenStore\` reads from the WorkOS AuthKit session and set \`automaticSideEffects: false\` so Hexclave does not redirect to its own pages. The provider token must contain \`sub\`, \`sid\`, and \`exp\`. See [External authentication](https://docs.hexclave.com/guides/integrations/external-auth/overview).
   `,
 };
 export const appSetupPrompts = deindent`

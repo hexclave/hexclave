@@ -239,7 +239,7 @@ async function handleApi(runtime: StudioRuntime, request: http.IncomingMessage, 
     const body = requireRecord(await readJsonBody(request));
     const rowIdentifier = String(body.rowIdentifier ?? "");
     if (!rowIdentifier) throw new Error("rowIdentifier is required");
-    await runtime.db.withSnapshotReplicated(async snapshot => {
+    await runtime.db.withSnapshotConsistent(async snapshot => {
       if (action === "set-row") {
         return await snapshot.setOrDeleteRow({ tableId, rowIdentifier, newRowData: body.rowData as PiledriverObject });
       } else if (action === "delete-row") {
@@ -256,14 +256,14 @@ async function handleApi(runtime: StudioRuntime, request: http.IncomingMessage, 
     const rowIdentifier = String(body.rowIdentifier ?? "");
     if (!rowIdentifier) throw new Error("rowIdentifier is required");
     const rowData = body.rowData as PiledriverObject;
-    await runtime.db.withSnapshotReplicated(async snapshot => await snapshot.setOrDeleteRow({ tableId: defaultMutableTableId(runtime), rowIdentifier, newRowData: rowData }));
+    await runtime.db.withSnapshotConsistent(async snapshot => await snapshot.setOrDeleteRow({ tableId: defaultMutableTableId(runtime), rowIdentifier, newRowData: rowData }));
     sendJson(response, { ok: true });
     return;
   }
   if (request.method === "DELETE" && url.pathname === "/api/rows") {
     const rowIdentifier = url.searchParams.get("rowIdentifier");
     if (!rowIdentifier) throw new Error("rowIdentifier is required");
-    await runtime.db.withSnapshotReplicated(async snapshot => await snapshot.setOrDeleteRow({ tableId: defaultMutableTableId(runtime), rowIdentifier, newRowData: undefined }));
+    await runtime.db.withSnapshotConsistent(async snapshot => await snapshot.setOrDeleteRow({ tableId: defaultMutableTableId(runtime), rowIdentifier, newRowData: undefined }));
     sendJson(response, { ok: true });
     return;
   }
@@ -271,7 +271,7 @@ async function handleApi(runtime: StudioRuntime, request: http.IncomingMessage, 
     const body = requireRecord(await readJsonBody(request));
     const now = new Date(String(body.now ?? ""));
     if (!Number.isFinite(now.getTime())) throw new Error("Valid now timestamp is required");
-    await runtime.db.withSnapshotReplicated(async snapshot => await snapshot.tick(now));
+    await runtime.db.withSnapshotConsistent(async snapshot => await snapshot.tick(now));
     sendJson(response, { ok: true, now: now.toISOString() });
     return;
   }

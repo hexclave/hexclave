@@ -478,17 +478,20 @@ export function declareLmdbLowLevelDatabase(options: {
     schedulePendingCommitFlush();
     return trackCommit(seqId, deferred.promise);
   };
-  const commitIfVersion = async (db: BinaryDatabase, key: Buffer, version: number, action: (version: number) => Promise<void>) => {
+  const commitConditionally = async (db: BinaryDatabase, key: Buffer, expectedVersion: number | null, action: (version: number) => Promise<void>) => {
     if (isClosing) throw new Error("LMDB database is closing and cannot accept writes");
     const nextVersionRef: { value: number | null } = { value: null };
     const seqId = nextSeqId();
-    const wasSet = await db.ifVersion(key, version, () => {
+    const write = () => {
       return (async () => {
         nextVersionRef.value = nextVersion();
         await action(nextVersionRef.value);
         await meta.put("seq", nextVersionRef.value);
       })();
-    });
+    };
+    const wasSet = expectedVersion === null
+      ? await db.ifNoExists(key, write)
+      : await db.ifVersion(key, expectedVersion, write);
     if (!wasSet) return null;
     if (nextVersionRef.value === null) throw new Error("Assertion error: LMDB compare-and-set succeeded without assigning a version");
     rememberAvailability(seqId, root.committed);
@@ -539,8 +542,13 @@ export function declareLmdbLowLevelDatabase(options: {
       useVersions: true,
     }) as VersionedBinaryDatabase;
     const dumpKey = createDumpKeyGenerator();
+    const reserveKeys = (count: number) => {
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error("KV dump reservation count must be a non-negative safe integer");
+      return Array.from({ length: count }, dumpKey);
+    };
 
     const result: LowLevelKvStore & LowLevelKvDump = {
+      reserveKeys,
       async get(key) {
         assertReadAllowed();
         return await trackRead(traceSpanHot({ description: "bulldozer-js.low-level.lmdb.get", attributes }, async () => {
@@ -603,8 +611,13 @@ export function declareLmdbLowLevelDatabase(options: {
       async insertAll(values, insertOptions) {
         return await traceSpanHot({ description: "bulldozer-js.low-level.lmdb.insertAll", attributes: { ...attributes, "bulldozer.low_level.value_count": values.length } }, async () => {
           for (const value of values) validateValue("value", value);
+          const keys = insertOptions?.keys ?? reserveKeys(values.length);
+          if (keys.length !== values.length) throw new Error("KV dump insertion must provide exactly one key per value");
+          for (const key of keys) validateKey(key);
+          if (new Set(keys.map(key => encodeBase64(new Uint8Array(key)))).size !== keys.length) {
+            throw new Error("KV dump insertion keys must be unique");
+          }
           if (values.length === 0) return { keys: [], seq: insertOptions?.requiresSeq ?? initialSeq };
-          const keys = values.map(() => dumpKey());
           return {
             keys,
             seq: commit(insertOptions?.requiresSeq ?? initialSeq, async version => {
@@ -618,7 +631,7 @@ export function declareLmdbLowLevelDatabase(options: {
           const keys = new Set<string>();
           for (const { key, compare, value } of entries) {
             validateKey(key);
-            validateValue("compare", compare);
+            if (compare !== null) validateValue("compare", compare);
             validateValue("value", value);
             const keyBase64 = encodeBase64(new Uint8Array(key));
             const previousSize = keys.size;
@@ -630,10 +643,15 @@ export function declareLmdbLowLevelDatabase(options: {
             await waitUntilAllAvailable();
             const keyBuffer = bufferFromArrayBuffer(key);
             const existing = db.getEntry(keyBuffer);
-            if (!existing || existing.version === undefined || !arrayBuffersAreEqual(arrayBufferFromUint8Array(existing.value), compare)) {
+            if (compare === null) {
+              if (existing !== undefined) return { wasSet: false as const, seq: null };
+              const seq = await commitConditionally(db, keyBuffer, null, async version => await putWithVersion(db, keyBuffer, bufferFromArrayBuffer(value), version));
+              return seq === null ? { wasSet: false as const, seq: null } : { wasSet: true as const, seq };
+            }
+            if (existing === undefined || existing.version === undefined || !arrayBuffersAreEqual(arrayBufferFromUint8Array(existing.value), compare)) {
               return { wasSet: false as const, seq: null };
             }
-            const seq = await commitIfVersion(db, keyBuffer, existing.version, async version => await putWithVersion(db, keyBuffer, bufferFromArrayBuffer(value), version));
+            const seq = await commitConditionally(db, keyBuffer, existing.version, async version => await putWithVersion(db, keyBuffer, bufferFromArrayBuffer(value), version));
             return seq === null ? { wasSet: false as const, seq: null } : { wasSet: true as const, seq };
           }));
           const successful = results.filter(result => result.wasSet).map(result => result.seq);
@@ -700,9 +718,11 @@ export function declareLmdbLowLevelDatabase(options: {
       await traceSpanHot({ description: "bulldozer-js.low-level.lmdb.waitUntilDurable", attributes: { "bulldozer.low_level.backend": "lmdb" } }, async () => await waitUntilDurable(seq));
     },
     async waitUntilReplicated(seq) {
-      await traceSpanHot({ description: "bulldozer-js.low-level.lmdb.waitUntilReplicated", attributes: { "bulldozer.low_level.backend": "lmdb" } }, async () => {
-        await this.waitUntilAvailable(seq);
-        await this.waitUntilDurable(seq);
+      await traceSpanHot({ description: "bulldozer-js.low-level.lmdb.waitUntilReplicated", attributes: { "bulldozer.low_level.backend": "lmdb" } }, async () => await this.waitUntilAvailable(seq));
+    },
+    async waitUntilConsistent(seq) {
+      await traceSpanHot({ description: "bulldozer-js.low-level.lmdb.waitUntilConsistent", attributes: { "bulldozer.low_level.backend": "lmdb" } }, async () => {
+        await Promise.all([this.waitUntilReplicated(seq), this.waitUntilDurable(seq)]);
       });
     },
     combineSeqs(...seqs) {

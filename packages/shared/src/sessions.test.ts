@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InternalSession } from "./sessions";
+import { AccessToken, InternalSession } from "./sessions";
 
 /**
  * Builds a decodable (unsigned) access-token JWT with a valid payload. `refreshTokenId` controls the
@@ -33,6 +33,14 @@ function createAccessTokenString(refreshTokenId: string, options?: { iatOffsetSe
     }),
     "",
   ].join(".");
+}
+
+function createAccessToken(refreshTokenId: string, options?: { iatOffsetSeconds?: number, sub?: string }): AccessToken {
+  const accessToken = AccessToken.createIfValid(createAccessTokenString(refreshTokenId, options));
+  if (accessToken === null) {
+    throw new Error("The test access token should satisfy the access token schema");
+  }
+  return accessToken;
 }
 
 function createAccessOnlySession(accessToken: string): InternalSession {
@@ -143,5 +151,137 @@ describe("InternalSession#updateAccessToken", () => {
 
     session.updateAccessToken({ accessToken: createAccessTokenString("rtid-2"), refreshToken: "rt-other" });
     expect(currentToken(session)).toBe(initial);
+  });
+});
+
+describe("InternalSession delegated access-token refresh", () => {
+  it("fetches and caches an access token without a Hexclave refresh token", async () => {
+    const accessToken = createAccessTokenString("external-session");
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => null,
+      refreshAccessTokenWithoutRefreshTokenCallback: async () => {
+        refreshCount += 1;
+        return AccessToken.createIfValid(accessToken);
+      },
+      refreshToken: null,
+      accessToken: null,
+      sessionKey: "external-clerk-session",
+    });
+
+    expect(session.isKnownToBeInvalid()).toBe(false);
+    expect(session.sessionKey).toBe("external-clerk-session");
+    expect((await session.getOrFetchLikelyValidTokens(20_000, null))?.accessToken.token).toBe(accessToken);
+    expect((await session.getOrFetchLikelyValidTokens(20_000, null))?.accessToken.token).toBe(accessToken);
+    expect(refreshCount).toBe(1);
+  });
+
+  it("uses the delegated source again after a refresh is suggested", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => null,
+      refreshAccessTokenWithoutRefreshTokenCallback: async () => {
+        refreshCount += 1;
+        return AccessToken.createIfValid(createAccessTokenString("external-session", {
+          iatOffsetSeconds: refreshCount,
+        }));
+      },
+      refreshToken: null,
+      accessToken: null,
+      sessionKey: "external-clerk-session",
+    });
+
+    await session.getOrFetchLikelyValidTokens(20_000, null);
+    session.suggestAccessTokenExpired();
+    await session.getOrFetchLikelyValidTokens(20_000, null);
+    expect(refreshCount).toBe(2);
+  });
+
+  it("invalidates the session when the delegated source has signed out", async () => {
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => null,
+      refreshAccessTokenWithoutRefreshTokenCallback: async () => null,
+      refreshToken: null,
+      accessToken: null,
+      sessionKey: "external-clerk-session",
+    });
+
+    expect(await session.getOrFetchLikelyValidTokens(20_000, null)).toBeNull();
+    expect(session.isKnownToBeInvalid()).toBe(true);
+  });
+
+  it("retries delegated refresh after a transient failure", async () => {
+    let refreshCount = 0;
+    const accessToken = createAccessTokenString("external-session");
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => null,
+      refreshAccessTokenWithoutRefreshTokenCallback: async () => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          throw new Error("Temporary provider failure");
+        }
+        return AccessToken.createIfValid(accessToken);
+      },
+      refreshToken: null,
+      accessToken: null,
+      sessionKey: "external-clerk-session",
+    });
+
+    await expect(session.getOrFetchLikelyValidTokens(20_000, null)).rejects.toThrow("Temporary provider failure");
+    expect((await session.getOrFetchLikelyValidTokens(20_000, null))?.accessToken.token).toBe(accessToken);
+  });
+});
+
+
+describe("InternalSession#getOrFetchLikelyValidTokens", () => {
+  it("starts a new refresh after an earlier refresh rejects", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          throw new Error("Temporary refresh failure");
+        }
+        return createAccessToken("rtid-1");
+      },
+      refreshToken: "rt-abc",
+    });
+
+    await expect(session.getOrFetchLikelyValidTokens(20_000, null))
+      .rejects.toThrow("Temporary refresh failure");
+    await expect(session.getOrFetchLikelyValidTokens(20_000, null))
+      .resolves.toMatchObject({ accessToken: { token: expect.any(String) } });
+    expect(refreshCount).toBe(2);
+  });
+
+  it("retries once when a newly fetched access token is already too old", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        return createAccessToken("rtid-1", { iatOffsetSeconds: refreshCount === 1 ? -20 : 0 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    const tokens = await session.getOrFetchLikelyValidTokens(20_000, 15_000);
+
+    expect(refreshCount).toBe(2);
+    expect(tokens?.accessToken.issuedMillisAgo).toBeLessThan(15_000);
+  });
+
+  it("throws after one retry when the newly fetched access token is still too old", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        return createAccessToken("rtid-1", { iatOffsetSeconds: -20 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    await expect(session.getOrFetchLikelyValidTokens(20_000, 15_000))
+      .rejects.toThrow("access token issuance is too slow");
+    expect(refreshCount).toBe(2);
   });
 });

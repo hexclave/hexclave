@@ -1,95 +1,124 @@
 import { useUser } from "@hexclave/next";
 import { clsx } from "clsx";
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AddManualQa } from "../components/AddManualQa";
 import { Analytics } from "../components/Analytics";
 import { CallLogDetail } from "../components/CallLogDetail";
 import { CallLogList } from "../components/CallLogList";
+import { FeedbackDetail } from "../components/FeedbackDetail";
+import { FeedbackList } from "../components/FeedbackList";
 import { KnowledgeBase } from "../components/KnowledgeBase";
-import { useMcpCallLogs } from "../hooks/useSpacetimeDB";
-import { makeMcpReviewApi } from "../lib/mcp-review-api";
-import type { McpCallLogRow } from "../types";
+import { Usage } from "../components/Usage";
+import { UsageDetail } from "../components/UsageDetail";
+import { type GetSpacetimeToken, useAiQueryLogs, useFeedbackLog, useMcpCallLogs, useQaEntries } from "../hooks/useSpacetimeDB";
+import { retryReview } from "../lib/mcp-review-api";
+import type { AiQueryLogRow, FeedbackLogRow, McpCallLogRow } from "../types";
 
-type Tab = "calls" | "knowledge" | "analytics";
+type Tab = "calls" | "knowledge" | "usage" | "feedback";
+const TAB_STORAGE_KEY = "internal-tool-active-tab";
+const VALID_TABS: readonly Tab[] = ["calls", "knowledge", "usage", "feedback"];
 
-function resolveInlineRenamedEnvVar(hexclaveName: string, stackName: string, hexclaveValue: string | undefined, stackValue: string | undefined): string | undefined {
-  if (hexclaveValue && stackValue && hexclaveValue !== stackValue) {
-    throw new Error(`Environment variables ${hexclaveName} and ${stackName} are both set to different values. Remove one of them or set them to the same value.`);
+function readInitialTab(): Tab {
+  // sessionStorage is per-tab: reload preserves the active tab, but a brand-new
+  // browser tab gets the default ("calls").
+  if (typeof window === "undefined") return "calls";
+  const saved = window.sessionStorage.getItem(TAB_STORAGE_KEY);
+  if (saved != null && (VALID_TABS as readonly string[]).includes(saved)) {
+    return saved as Tab;
   }
-  return hexclaveValue || stackValue || undefined;
+  return "calls";
 }
 
 export default function App() {
-  const user = useUser({ or: process.env.NODE_ENV === "development" ? "redirect" : "return-null" });
+  const user = useUser({ or: "redirect" });
   const [selectedRow, setSelectedRow] = useState<McpCallLogRow | null>(null);
+  const [selectedUsageRow, setSelectedUsageRow] = useState<AiQueryLogRow | null>(null);
+  const [selectedFeedbackRow, setSelectedFeedbackRow] = useState<FeedbackLogRow | null>(null);
   const [showAddQa, setShowAddQa] = useState(false);
-  const [tab, setTab] = useState<Tab>("calls");
-  const { rows, connectionState } = useMcpCallLogs();
+  const [tab, setTab] = useState<Tab>(readInitialTab);
 
-  if (!user) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-gray-50">
-        <div className="text-center">
-          <h1 className="text-lg font-semibold text-gray-900 mb-2">MCP Review Tool</h1>
-          <p className="text-sm text-gray-500 mb-4">
-            Sign in to the{" "}
-            <a
-              href={resolveInlineRenamedEnvVar("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "NEXT_PUBLIC_STACK_DASHBOARD_URL", process.env.NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL, process.env.NEXT_PUBLIC_STACK_DASHBOARD_URL)}
-              className="text-blue-600 underline"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Hexclave Dashboard
-            </a>
-            {" "}first, then reload this page.
-          </p>
-          <button
-            onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700"
-          >
-            Reload
-          </button>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.setItem(TAB_STORAGE_KEY, tab);
+  }, [tab]);
 
-  if (process.env.NODE_ENV !== "development") {
-    const metadata = user.clientReadOnlyMetadata as Record<string, unknown> | null;
-    if (!metadata?.isAiChatReviewer) {
-      return (
-        <div className="flex items-center justify-center h-screen bg-gray-50">
-          <div className="text-center">
-            <h1 className="text-lg font-semibold text-gray-900 mb-2">Access Denied</h1>
-            <p className="text-sm text-gray-500 mb-1">
-              You are signed in as {user.displayName ?? user.primaryEmail}, but your account is not approved.
-            </p>
-          </div>
-        </div>
-      );
+  // Any signed-in user may use the tool: membership in the Stack Auth project
+  // is the authorization (its sign-up rules restrict membership to the team).
+  // The server verifies the cookie session and mints a short-lived
+  // SpacetimeDB JWT under the tool's own OIDC issuer — Stack Auth session
+  // tokens themselves aren't OIDC-discoverable by SpacetimeDB.
+  const getSpacetimeToken = useCallback<GetSpacetimeToken>(async () => {
+    const res = await fetch("/api/spacetimedb-token", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      throw new Error(`SpacetimeDB token mint failed (${res.status}): ${await res.text()}`);
     }
-  }
+    const { token } = await res.json() as { token?: string };
+    if (typeof token !== "string" || token === "") throw new Error("SpacetimeDB token mint returned no token");
+    return token;
+  }, []);
+
+  const {
+    rows: liveRows,
+    olderRows,
+    hasMoreHistory,
+    isLoadingOlder,
+    loadOlder,
+    connectionState,
+    connectionErrorMessage,
+    callReducer: callMcpReducer,
+  } = useMcpCallLogs(getSpacetimeToken);
+  const rows = useMemo(() => [...liveRows, ...olderRows], [liveRows, olderRows]);
+  const {
+    rows: liveUsageRows,
+    olderRows: olderUsageRows,
+    hasMoreHistory: usageHasMoreHistory,
+    isLoadingOlder: usageIsLoadingOlder,
+    loadOlder: loadOlderUsage,
+    connectionState: usageConnectionState,
+    connectionErrorMessage: usageConnectionErrorMessage,
+  } = useAiQueryLogs(getSpacetimeToken);
+  const usageRows = useMemo(() => [...liveUsageRows, ...olderUsageRows], [liveUsageRows, olderUsageRows]);
+  const {
+    rows: qaRows,
+    connectionState: qaConnectionState,
+    connectionErrorMessage: qaConnectionErrorMessage,
+    callReducer: callQaReducer,
+  } = useQaEntries(getSpacetimeToken);
+
+  const {
+    rows: liveFeedbackRows,
+    olderRows: olderFeedbackRows,
+    hasMoreHistory: feedbackHasMoreHistory,
+    isLoadingOlder: feedbackIsLoadingOlder,
+    loadOlder: loadOlderFeedback,
+    connectionState: feedbackConnectionState,
+    connectionErrorMessage: feedbackConnectionErrorMessage,
+  } = useFeedbackLog(getSpacetimeToken);
+  const feedbackRows = useMemo(() => [...liveFeedbackRows, ...olderFeedbackRows], [liveFeedbackRows, olderFeedbackRows]);
 
   const currentSelectedRow = selectedRow
     ? rows.find(r => r.id === selectedRow.id) ?? selectedRow
     : null;
 
-  const currentUser = user;
+  const currentSelectedFeedbackRow = selectedFeedbackRow
+    ? feedbackRows.find(r => r.id === selectedFeedbackRow.id) ?? selectedFeedbackRow
+    : null;
 
-  async function getApi() {
-    const { accessToken, refreshToken } = await currentUser.getAuthJson();
-    const authHeaders: Record<string, string> = {};
-    if (accessToken) authHeaders["x-stack-access-token"] = accessToken;
-    if (refreshToken) authHeaders["x-stack-refresh-token"] = refreshToken;
-    return makeMcpReviewApi(authHeaders);
-  }
+  const relatedCallForFeedback = currentSelectedFeedbackRow?.conversationId == null
+    ? null
+    : rows.find(r => r.conversationId === currentSelectedFeedbackRow.conversationId) ?? null;
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-4">
+    <div className="h-screen flex flex-col bg-gray-50">
+      <header className="shrink-0 bg-white border-b border-gray-200 px-6 py-3 grid grid-cols-3 items-center">
+        <div className="flex items-center justify-start">
           <h1 className="text-lg font-semibold text-gray-900">MCP Review Tool</h1>
-          {/* Tabs */}
+        </div>
+        {/* Tabs — centered */}
+        <div className="flex justify-center">
           <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
             <button
               onClick={() => {
@@ -101,7 +130,7 @@ export default function App() {
                 tab === "calls" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
               )}
             >
-              Call Logs
+              MCP Review
             </button>
             <button
               onClick={() => {
@@ -117,25 +146,39 @@ export default function App() {
             </button>
             <button
               onClick={() => {
-                setTab("analytics");
+                setTab("usage");
                 setSelectedRow(null);
               }}
               className={clsx(
                 "px-3 py-1 text-xs font-medium rounded-md transition-colors",
-                tab === "analytics" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                tab === "usage" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
               )}
             >
-              Analytics
+              Unified AI Endpoint Analytics
+            </button>
+            <button
+              onClick={() => {
+                setTab("feedback");
+                setSelectedRow(null);
+              }}
+              className={clsx(
+                "px-3 py-1 text-xs font-medium rounded-md transition-colors",
+                tab === "feedback" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Feedback
             </button>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowAddQa(true)}
-            className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
-          >
-            + Add Q&A
-          </button>
+        <div className="flex items-center gap-3 justify-end">
+          {tab === "knowledge" && (
+            <button
+              onClick={() => setShowAddQa(true)}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
+            >
+              + Add Q&A
+            </button>
+          )}
           <span className="text-sm text-gray-500">{user.displayName ?? user.primaryEmail}</span>
         </div>
       </header>
@@ -143,68 +186,147 @@ export default function App() {
       {showAddQa && (
         <AddManualQa
           onClose={() => setShowAddQa(false)}
-          onSave={async (question, answer, publish) => {
-            const api = await getApi();
-            await api.addManual({ question, answer, publish });
+          onSave={async (question, answer, publish, requestId) => {
+            await callQaReducer(conn => conn.reducers.addManualQa({
+              question,
+              answer,
+              publish,
+              requestId,
+            }));
           }}
         />
       )}
 
-      {tab === "calls" && (
-        <div className="flex">
-          <main className="flex-1 p-6">
-            <CallLogList
-              rows={rows}
-              connectionState={connectionState}
-              onSelect={setSelectedRow}
-              selectedId={selectedRow?.id}
-            />
-          </main>
-          {currentSelectedRow && (
-            <aside className="w-[480px] border-l border-gray-200 bg-white overflow-y-auto h-[calc(100vh-57px)]">
-              <CallLogDetail
-                row={currentSelectedRow}
-                allRows={rows}
-                onClose={() => setSelectedRow(null)}
-                onSaveCorrection={(correlationId, correctedQuestion, correctedAnswer, publish) => {
-                  getApi()
-                    .then(api => api.updateCorrection({ correlationId, correctedQuestion, correctedAnswer, publish }))
-                    .catch(() => { /* errors are surfaced by UI state */ });
-                }}
-                onMarkReviewed={(correlationId) => {
-                  getApi()
-                    .then(api => api.markReviewed({ correlationId }))
-                    .catch(() => { /* errors are surfaced by UI state */ });
-                }}
+      <div className="flex-1 overflow-hidden flex">
+        {tab === "calls" && (
+          <>
+            <main className="flex-1 overflow-y-auto p-6 space-y-6">
+              <Analytics rows={rows} qaEntries={qaRows} />
+              <CallLogList
+                rows={rows}
+                connectionState={connectionState}
+                connectionErrorMessage={connectionErrorMessage}
+                onSelect={setSelectedRow}
+                selectedId={selectedRow?.id}
+                hasMoreHistory={hasMoreHistory}
+                isLoadingOlder={isLoadingOlder}
+                onLoadOlder={loadOlder}
               />
-            </aside>
-          )}
-        </div>
-      )}
+            </main>
+            {currentSelectedRow && (
+              <aside className="w-[480px] shrink-0 border-l border-gray-200 bg-white overflow-y-auto">
+                <CallLogDetail
+                  key={String(currentSelectedRow.id)}
+                  row={currentSelectedRow}
+                  allRows={rows}
+                  qaEntries={qaRows}
+                  onClose={() => setSelectedRow(null)}
+                  onSaveCorrection={(correlationId, correctedQuestion, correctedAnswer, publish) =>
+                    callMcpReducer(conn => conn.reducers.upsertQaFromCallAndMarkReviewed({
+                      correlationId,
+                      question: correctedQuestion,
+                      answer: correctedAnswer,
+                      publish,
+                    }))
+                  }
+                  onSetReviewed={(correlationId, reviewed) =>
+                    callMcpReducer(conn => conn.reducers.setHumanReviewed({
+                      correlationId,
+                      reviewed,
+                    }))
+                  }
+                  onRetryReview={(correlationId, payload) =>
+                    retryReview({ correlationId, ...payload })
+                  }
+                />
+              </aside>
+            )}
+          </>
+        )}
 
-      {tab === "knowledge" && (
-        <main className="p-6 max-w-4xl mx-auto">
-          <KnowledgeBase
-            rows={rows}
-            onSave={(correlationId, question, answer, publish) => {
-              getApi()
-                .then(api => api.updateCorrection({ correlationId, correctedQuestion: question, correctedAnswer: answer, publish }))
-                .catch(() => { /* errors are surfaced by UI state */ });
-            }}
-            onDelete={(correlationId) => {
-              getApi()
-                .then(api => api.delete({ correlationId }))
-                .catch(() => { /* errors are surfaced by UI state */ });
-            }}
-          />
-        </main>
-      )}
+        {tab === "knowledge" && (
+          <main className="flex-1 overflow-y-auto">
+            <div className="p-6 max-w-4xl mx-auto">
+              <KnowledgeBase
+                rows={qaRows}
+                connectionState={qaConnectionState}
+                connectionErrorMessage={qaConnectionErrorMessage}
+                onSave={(qaId, question, answer, publish) =>
+                  callQaReducer(conn => conn.reducers.updateQaEntryWithPublish({
+                    qaId,
+                    question,
+                    answer,
+                    publish,
+                  }))
+                }
+                onDelete={(qaId) =>
+                  callQaReducer(conn => conn.reducers.deleteQaEntry({ qaId }))
+                }
+              />
+            </div>
+          </main>
+        )}
 
-      {tab === "analytics" && (
-        <main className="p-6 max-w-6xl mx-auto">
-          <Analytics rows={rows} />
-        </main>
-      )}
+        {tab === "usage" && (
+          <>
+            <main className="flex-1 overflow-y-auto">
+              <div className="p-6 max-w-6xl mx-auto">
+                <Usage
+                  rows={usageRows}
+                  connectionState={usageConnectionState}
+                  connectionErrorMessage={usageConnectionErrorMessage}
+                  onSelect={setSelectedUsageRow}
+                  selectedId={selectedUsageRow?.id}
+                  hasMoreHistory={usageHasMoreHistory}
+                  isLoadingOlder={usageIsLoadingOlder}
+                  onLoadOlder={loadOlderUsage}
+                />
+              </div>
+            </main>
+            {selectedUsageRow && (
+              <aside className="w-[480px] shrink-0 border-l border-gray-200 bg-white overflow-y-auto">
+                <UsageDetail
+                  row={usageRows.find(r => r.id === selectedUsageRow.id) ?? selectedUsageRow}
+                  onClose={() => setSelectedUsageRow(null)}
+                />
+              </aside>
+            )}
+          </>
+        )}
+
+        {tab === "feedback" && (
+          <>
+            <main className="flex-1 overflow-y-auto">
+              <div className="p-6 max-w-4xl mx-auto">
+                <FeedbackList
+                  rows={feedbackRows}
+                  connectionState={feedbackConnectionState}
+                  connectionErrorMessage={feedbackConnectionErrorMessage}
+                  onSelect={setSelectedFeedbackRow}
+                  selectedId={currentSelectedFeedbackRow?.id}
+                  hasMoreHistory={feedbackHasMoreHistory}
+                  isLoadingOlder={feedbackIsLoadingOlder}
+                  onLoadOlder={loadOlderFeedback}
+                />
+              </div>
+            </main>
+            {currentSelectedFeedbackRow && (
+              <aside className="w-[480px] shrink-0 border-l border-gray-200 bg-white overflow-y-auto">
+                <FeedbackDetail
+                  key={String(currentSelectedFeedbackRow.id)}
+                  row={currentSelectedFeedbackRow}
+                  relatedCall={relatedCallForFeedback}
+                  onClose={() => setSelectedFeedbackRow(null)}
+                  onOpenRelatedCall={(call) => {
+                    setSelectedRow(call);
+                    setTab("calls");
+                  }}
+                />
+              </aside>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

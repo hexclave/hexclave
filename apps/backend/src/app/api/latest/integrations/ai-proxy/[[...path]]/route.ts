@@ -1,96 +1,64 @@
-import { ALLOWED_MODEL_IDS } from "@/lib/ai/models";
+import { observeAndLog, sanitizeBody } from "@/lib/ai/ai-proxy-handlers";
 import { PRODUCTION_AI_PROXY_BASE_URL } from "@/lib/ai/proxy-url";
-import { preprocessProxyBody } from "@/private";
 import { handleApiRequest } from "@/route-handlers/smart-route-handler";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
-import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { captureError } from "@hexclave/shared/dist/utils/errors";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
-const OPENROUTER_DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
-
-function sanitizeBody(raw: ArrayBuffer): Uint8Array {
-  const text = new TextDecoder().decode(raw);
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new StatusError(400, "Request body must be valid JSON");
-  }
-
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new StatusError(400, "Request body must be a JSON object");
-  }
-
-  if (!parsed.model || !ALLOWED_MODEL_IDS.has(parsed.model)) {
-    parsed.model = OPENROUTER_DEFAULT_MODEL;
-  }
-
-  // OpenRouter limits metadata.user_id to 128 characters
-  if (parsed.metadata?.user_id && parsed.metadata.user_id.length > 128) {
-    parsed.metadata.user_id = parsed.metadata.user_id.slice(0, 128);
-  }
-
-  parsed = preprocessProxyBody({
-    parsedBody: parsed,
-  });
-
-  return new TextEncoder().encode(JSON.stringify(parsed));
-}
 
 async function proxyToOpenRouter(req: Request, options: { params: Promise<{ path?: string[] }> }) {
   const apiKey = getEnvVariable("STACK_OPENROUTER_API_KEY");
   const params = await options.params;
   const subpath = params.path?.join("/") ?? "";
+  const search = new URL(req.url).search;
 
-  const contentType = req.headers.get("Content-Type");
-  const body = req.method !== "GET" && req.method !== "HEAD"
-    ? Buffer.from(sanitizeBody(await req.arrayBuffer()))
+  const sanitized = req.method !== "GET" && req.method !== "HEAD"
+    ? sanitizeBody(await req.arrayBuffer())
     : undefined;
+  const body = sanitized ? Buffer.from(sanitized.bytes) : undefined;
+  const callerApiKey = req.headers.get("x-api-key");
+  const shouldLog = sanitized != null && callerApiKey != null && callerApiKey.startsWith("stack-auth-");
+  const correlationId = crypto.randomUUID();
+  const startedAt = performance.now();
 
-  if (apiKey === "FORWARD_TO_PRODUCTION") {
-    const targetUrl = `${PRODUCTION_AI_PROXY_BASE_URL}/${subpath}${new URL(req.url).search}`;
-    const headers: Record<string, string> = {};
-    if (contentType) {
-      headers["Content-Type"] = contentType;
-    }
+  const targetUrl = apiKey === "FORWARD_TO_PRODUCTION"
+    ? `${PRODUCTION_AI_PROXY_BASE_URL}/${subpath}${search}`
+    : `${OPENROUTER_BASE_URL}/${subpath}${search}`;
+  const forwardHeaders: Record<string, string> = apiKey === "FORWARD_TO_PRODUCTION"
+    ? {}
+    : {
+      "Authorization": `Bearer ${apiKey}`,
+      "anthropic-version": "2023-06-01",
+    };
+  if (body) forwardHeaders["Content-Type"] = "application/json";
 
-    const response = await fetch(targetUrl, {
-      method: req.method,
-      headers,
-      body,
-    });
+  const response = await fetch(targetUrl, { method: req.method, headers: forwardHeaders, body });
 
-    return new Response(response.body, {
-      status: response.status,
-      headers: {
-        "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-        "Cache-Control": "no-cache",
-      },
-    });
-  }
-
-  const targetUrl = `${OPENROUTER_BASE_URL}/${subpath}${new URL(req.url).search}`;
-  const headers: Record<string, string> = {
-    "Authorization": `Bearer ${apiKey}`,
-    "anthropic-version": "2023-06-01",
+  const responseHeaders: Record<string, string> = {
+    "Content-Type": response.headers.get("Content-Type") ?? "application/json",
+    "Cache-Control": "no-store",
   };
-  if (contentType) {
-    headers["Content-Type"] = contentType;
+  const generationIdHeader = response.headers.get("X-Generation-Id");
+  if (generationIdHeader != null) {
+    responseHeaders["X-Generation-Id"] = generationIdHeader;
   }
 
-  const response = await fetch(targetUrl, {
-    method: req.method,
-    headers,
-    body,
-  });
+  const passthrough = () => new Response(response.body, { status: response.status, headers: responseHeaders });
 
-  return new Response(response.body, {
-    status: response.status,
-    headers: {
-      "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      "Cache-Control": "no-cache",
-    },
-  });
+  if (!shouldLog) return passthrough();
+  try {
+    return await observeAndLog({
+      response,
+      sanitizedBody: sanitized!,
+      callerApiKey,
+      correlationId,
+      startedAt,
+      responseHeaders,
+    });
+  } catch (e) {
+    captureError("ai-proxy-log-pipeline", e);
+    return passthrough();
+  }
 }
 
 export const GET = handleApiRequest(proxyToOpenRouter);

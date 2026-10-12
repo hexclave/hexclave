@@ -117,6 +117,10 @@ describe("access token refresh on user property changes", () => {
       const updatedPayload = decodeAccessToken(updatedToken!);
       expect(updatedPayload.selected_team_id).toBe(team.id);
 
+      // The token partial user exposes the same claim without a network request
+      const partialUser = await clientApp.getPartialUser({ from: "token" });
+      expect(partialUser?.selectedTeamId).toBe(team.id);
+
       // Token should be different if selected team changed
       if (initialTeamId !== team.id) {
         expect(updatedToken).not.toBe(initialToken);

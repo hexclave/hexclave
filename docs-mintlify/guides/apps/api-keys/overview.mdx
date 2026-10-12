@@ -54,7 +54,7 @@ User API keys are associated with individual users and allow them to authenticat
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CreateApiKey() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
 
       const apiKey = await user.createApiKey({
         description: "Admin-provisioned API key",
@@ -490,7 +490,7 @@ When creating a key, pass `isPublic: true` to exempt it from Hexclave's secret s
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function CreateApiKey() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
 
       const apiKey = await user.createApiKey({
         description: "Admin-provisioned API key",
@@ -830,7 +830,7 @@ Requires the `$manage_api_keys` team permission.
     import { hexclaveServerApp } from "@/hexclave/server";
 
     export default async function ApiKeysList() {
-      const user = await hexclaveServerApp.getUser({ or: 'redirect' });
+      const user = await hexclaveServerApp.getUser({ or: 'throw' });
       const apiKeys = await user.listApiKeys();
 
       return (

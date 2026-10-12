@@ -10,8 +10,75 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const AiQueryLog = __t.object("AiQueryLog", {
+  id: __t.u64(),
+  shard: __t.u8(),
+  correlationId: __t.string(),
+  createdAt: __t.timestamp(),
+  mode: __t.string(),
+  systemPromptId: __t.string(),
+  quality: __t.string(),
+  speed: __t.string(),
+  modelId: __t.string(),
+  isAuthenticated: __t.bool(),
+  projectId: __t.option(__t.string()),
+  userId: __t.option(__t.string()),
+  requestedToolsJson: __t.string(),
+  messagesJson: __t.string(),
+  stepsJson: __t.string(),
+  finalText: __t.string(),
+  inputTokens: __t.option(__t.u32()),
+  outputTokens: __t.option(__t.u32()),
+  cachedInputTokens: __t.option(__t.u32()),
+  cacheCreationTokens: __t.option(__t.u32()),
+  costUsd: __t.option(__t.f64()),
+  cacheDiscountUsd: __t.option(__t.f64()),
+  openrouterGenerationId: __t.option(__t.string()),
+  stepCount: __t.u32(),
+  durationMs: __t.u64(),
+  errorMessage: __t.option(__t.string()),
+  conversationId: __t.option(__t.string()),
+});
+export type AiQueryLog = __Infer<typeof AiQueryLog>;
+
+export const AiQueryLogPage = __t.object("AiQueryLogPage", {
+  get rows() {
+    return __t.array(AiQueryLog);
+  },
+  nextBeforeCreatedAtMicros: __t.option(__t.u64()),
+  nextBeforeId: __t.option(__t.u64()),
+});
+export type AiQueryLogPage = __Infer<typeof AiQueryLogPage>;
+
+export const FeedbackLog = __t.object("FeedbackLog", {
+  id: __t.u64(),
+  shard: __t.u8(),
+  correlationId: __t.string(),
+  createdAt: __t.timestamp(),
+  conversationId: __t.option(__t.string()),
+  category: __t.string(),
+  message: __t.string(),
+  transport: __t.string(),
+  requestIp: __t.option(__t.string()),
+  requestIpSource: __t.option(__t.string()),
+  userAgent: __t.option(__t.string()),
+  requestHost: __t.option(__t.string()),
+  mcpProtocolVersion: __t.option(__t.string()),
+});
+export type FeedbackLog = __Infer<typeof FeedbackLog>;
+
+export const FeedbackLogPage = __t.object("FeedbackLogPage", {
+  get rows() {
+    return __t.array(FeedbackLog);
+  },
+  nextBeforeCreatedAtMicros: __t.option(__t.u64()),
+  nextBeforeId: __t.option(__t.u64()),
+});
+export type FeedbackLogPage = __Infer<typeof FeedbackLogPage>;
+
 export const McpCallLog = __t.object("McpCallLog", {
   id: __t.u64(),
+  shard: __t.u8(),
   correlationId: __t.string(),
   conversationId: __t.option(__t.string()),
   createdAt: __t.timestamp(),
@@ -39,8 +106,72 @@ export const McpCallLog = __t.object("McpCallLog", {
   humanReviewedBy: __t.option(__t.string()),
   humanCorrectedQuestion: __t.option(__t.string()),
   humanCorrectedAnswer: __t.option(__t.string()),
-  publishedToQa: __t.option(__t.bool()),
+  publishedToQa: __t.bool(),
   publishedAt: __t.option(__t.timestamp()),
+  qaReviewRequestedAt: __t.timestamp(),
 });
 export type McpCallLog = __Infer<typeof McpCallLog>;
+
+export const McpCallLogPage = __t.object("McpCallLogPage", {
+  get rows() {
+    return __t.array(McpCallLog);
+  },
+  nextBeforeCreatedAtMicros: __t.option(__t.u64()),
+  nextBeforeId: __t.option(__t.u64()),
+});
+export type McpCallLogPage = __Infer<typeof McpCallLogPage>;
+
+export const MyVisibleAiQueryLog = __t.object("MyVisibleAiQueryLog", {});
+export type MyVisibleAiQueryLog = __Infer<typeof MyVisibleAiQueryLog>;
+
+export const MyVisibleFeedbackLog = __t.object("MyVisibleFeedbackLog", {});
+export type MyVisibleFeedbackLog = __Infer<typeof MyVisibleFeedbackLog>;
+
+export const MyVisibleMcpCallLog = __t.object("MyVisibleMcpCallLog", {});
+export type MyVisibleMcpCallLog = __Infer<typeof MyVisibleMcpCallLog>;
+
+export const MyVisibleQaEntries = __t.object("MyVisibleQaEntries", {});
+export type MyVisibleQaEntries = __Infer<typeof MyVisibleQaEntries>;
+
+export const PublishedQa = __t.object("PublishedQa", {});
+export type PublishedQa = __Infer<typeof PublishedQa>;
+
+export const PublishedQaRow = __t.object("PublishedQaRow", {
+  id: __t.u64(),
+  question: __t.string(),
+  answer: __t.string(),
+  publishedAt: __t.option(__t.timestamp()),
+});
+export type PublishedQaRow = __Infer<typeof PublishedQaRow>;
+
+export const QaEntries = __t.object("QaEntries", {
+  id: __t.u64(),
+  shard: __t.u8(),
+  sourceMcpCorrelationId: __t.option(__t.string()),
+  requestId: __t.option(__t.string()),
+  question: __t.string(),
+  answer: __t.string(),
+  createdBy: __t.string(),
+  createdAt: __t.timestamp(),
+  lastEditedBy: __t.string(),
+  lastEditedAt: __t.timestamp(),
+  published: __t.bool(),
+  firstPublishedAt: __t.option(__t.timestamp()),
+  lastPublishedAt: __t.option(__t.timestamp()),
+});
+export type QaEntries = __Infer<typeof QaEntries>;
+
+export const SessionGcSchedule = __t.object("SessionGcSchedule", {
+  id: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type SessionGcSchedule = __Infer<typeof SessionGcSchedule>;
+
+export const Sessions = __t.object("Sessions", {
+  identity: __t.identity(),
+  stackUserId: __t.string(),
+  connectedAt: __t.timestamp(),
+  expiresAt: __t.timestamp(),
+});
+export type Sessions = __Infer<typeof Sessions>;
 

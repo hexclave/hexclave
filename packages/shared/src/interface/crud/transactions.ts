@@ -118,6 +118,10 @@ export const transactionSchema = yupObject({
   // entries (`product_revocation`, or none at all) carry no customer fields.
   customer_type: customerTypeSchema.defined(),
   customer_id: yupString().defined(),
+  // Populated only for subscription-renewal rows (Hexclave subscription id to
+  // pass as refund `id` alongside this row's invoice id). Null elsewhere /
+  // when missing on older materialized index rows.
+  renewal_target_subscription_id: yupString().nullable().optional(),
   entries: yupArray(transactionEntrySchema).defined(),
   adjusted_by: yupArray(
     yupObject({

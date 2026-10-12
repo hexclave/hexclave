@@ -73,7 +73,7 @@ describe("bulldozer whole-database serialization compatibility", () => {
     it(`mutates a database loaded from golden fixture ${version} into valid current-format state`, async () => {
       const fixture = loadFixture(version);
       const db = await restoreBulldozerDatabase(fixture);
-      await db.withSnapshotReplicated(async snapshot =>
+      await db.withSnapshotConsistent(async snapshot =>
         (await snapshot.setOrDeleteRow({
           tableId: "ledgerEntries",
           rowIdentifier: "entry-900",
@@ -90,7 +90,7 @@ describe("bulldozer whole-database serialization compatibility", () => {
 
     it(`removes the final GroupBy rows and their group in golden fixture ${version}`, async () => {
       const db = await restoreBulldozerDatabase(loadFixture(version));
-      await db.withSnapshotReplicated(async snapshot => {
+      await db.withSnapshotConsistent(async snapshot => {
         for (const rowIdentifier of ["entry-001", "entry-002", "entry-006"]) {
           snapshot = (await snapshot.setOrDeleteRow({
             tableId: "ledgerEntries",

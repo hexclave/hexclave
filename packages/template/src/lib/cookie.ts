@@ -105,6 +105,11 @@ function ensureClient() {
 }
 
 export type CookieHelper = {
+  /**
+   * Stable for the browser or server request that owns this helper. Consumers use this to share request-local state
+   * even when multiple helper wrappers are created for the same underlying cookie store.
+   */
+  readonly identity: object,
   get: (name: string) => string | null,
   getAll: () => Record<string, string>,
   set: (name: string, value: string, options: SetCookieOptions) => void,
@@ -118,6 +123,7 @@ export async function createPlaceholderCookieHelper(): Promise<CookieHelper> {
     throw new HexclaveAssertionError("Throwing cookie helper is just a placeholder. This should never be called");
   }
   return {
+    identity: placeholderCookieHelperIdentity,
     get: throwError,
     getAll: throwError,
     set: throwError,
@@ -167,6 +173,7 @@ export function createCookieHelperSync(): CookieHelper {
     throw new HexclaveAssertionError("Synchronous server cookie helpers are not available on this platform");
   }
   return {
+    identity: placeholderCookieHelperIdentity,
     get: throwError,
     getAll: throwError,
     set: throwError,
@@ -197,6 +204,7 @@ function refreshTanStackStartIsHttpsCookie(api: ReturnType<typeof getTanStackSta
 
 function createTanStackStartCookieHelper(api: ReturnType<typeof getTanStackStartServerContext>): CookieHelper {
   const helper: CookieHelper = {
+    identity: api,
     get: (name: string) => {
       const all = helper.getAll();
       return all[name] ?? null;
@@ -234,8 +242,10 @@ function createTanStackStartCookieHelper(api: ReturnType<typeof getTanStackStart
 }
 // END_PLATFORM
 
+const browserCookieHelperIdentity = { "browser cookie helper identity": true };
 export function createBrowserCookieHelper(): CookieHelper {
   return {
+    identity: browserCookieHelperIdentity,
     get: getCookieClient,
     getAll: getAllCookiesClient,
     set: setCookieClient,
@@ -262,6 +272,7 @@ function createNextCookieHelper(
   rscHeadersAwaited: Awaited<ReturnType<typeof rscHeaders>>,
 ): CookieHelper {
   const cookieHelper = {
+    identity: rscCookiesAwaited,
     get: (name: string) => {
       const all = cookieHelper.getAll();
       return all[name] ?? null;

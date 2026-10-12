@@ -59,17 +59,84 @@ const CLOUD_API_HOST_BY_REQUEST_HOST = new Map<string, string>(
     )),
 );
 
-function normalizeRequestHost(host: string | undefined | null): string | undefined {
+/**
+ * DNS hostnames are at most 253 characters. Longer values are junk (or a
+ * spoofed header dumping a blob into logs/Sentry), not a hostname.
+ */
+const MAX_INBOUND_REQUEST_HOST_LENGTH = 253;
+
+/**
+ * Parse a Host / X-Forwarded-Host value into a lowercase hostname with no port.
+ * Does not map failover hosts (`api2`) to the canonical `api` host — callers
+ * that need branding should use `getApiUrlForHost`.
+ *
+ * Rejects URL-like junk before stripping the port so `https://evil.example`
+ * cannot collapse to `https`.
+ */
+export function normalizeRequestHost(host: string | undefined | null): string | undefined {
   if (!host) return undefined;
   const firstHost = host.split(",")[0]?.trim();
   if (!firstHost) return undefined;
+  // URL pieces in a host header are not a hostname. Check before port-stripping
+  // because `https://evil.example` would otherwise become `https`.
+  if (
+    firstHost.includes("://")
+    || firstHost.includes("/")
+    || firstHost.includes("?")
+    || firstHost.includes("#")
+    || firstHost.includes("@")
+    || /\s/.test(firstHost)
+  ) {
+    return undefined;
+  }
+  let hostname: string | undefined;
   if (firstHost.startsWith("[")) {
     const closingBracketIndex = firstHost.indexOf("]");
     if (closingBracketIndex > 1) {
-      return firstHost.slice(1, closingBracketIndex).toLowerCase();
+      hostname = firstHost.slice(1, closingBracketIndex).toLowerCase();
+    }
+  } else if ((firstHost.match(/:/g) ?? []).length > 1) {
+    // Unbracketed IPv6 (what `URL.hostname` returns). A Host header with a port
+    // must use bracket form (`[::1]:8102`); more than one colon here is the
+    // address itself, not `host:port`.
+    hostname = firstHost.toLowerCase();
+  } else {
+    hostname = firstHost.split(":")[0]?.toLowerCase();
+  }
+  if (!hostname || hostname.length > MAX_INBOUND_REQUEST_HOST_LENGTH) {
+    return undefined;
+  }
+  return hostname;
+}
+
+/**
+ * True when `host` is already a normalized inbound hostname we are willing to
+ * put in logs or Sentry. Used by the Sentry scrubber as a default-deny check
+ * so a crafted `stack-request.host` cannot smuggle a URL through.
+ */
+export function isSafeInboundRequestHost(host: unknown): host is string {
+  return typeof host === "string" && normalizeRequestHost(host) === host;
+}
+
+/**
+ * The hostname the client actually targeted (`api2.hexclave.com`, not the
+ * canonical brand host). Prefer `x-forwarded-host` (edge-set on Vercel / Cloud
+ * Run) over `host` over `request.url`, and never collapse failover aliases.
+ */
+export function getInboundRequestHost(request: Request): string | undefined {
+  let urlHostname: string | undefined;
+  try {
+    urlHostname = new URL(request.url).hostname;
+  } catch {
+    urlHostname = undefined;
+  }
+  for (const candidate of [request.headers.get("x-forwarded-host"), request.headers.get("host"), urlHostname]) {
+    const normalized = normalizeRequestHost(candidate);
+    if (isSafeInboundRequestHost(normalized)) {
+      return normalized;
     }
   }
-  return firstHost.split(":")[0].toLowerCase();
+  return undefined;
 }
 
 /**
@@ -124,4 +191,49 @@ import.meta.vitest?.test("getApiUrlForHost falls back for non-cloud hosts withou
   expect(getApiUrlForHost("p93.localhost:9302")).toBe(fallbackApiUrl);
   expect(getApiUrlForHost("[::1]:8102")).toBe(fallbackApiUrl);
   expect(getApiUrlForHost("customer.example.com")).toBe(fallbackApiUrl);
+});
+
+import.meta.vitest?.test("normalizeRequestHost keeps failover hosts and strips ports", ({ expect }) => {
+  expect(normalizeRequestHost("api2.hexclave.com")).toBe("api2.hexclave.com");
+  expect(normalizeRequestHost("API2.hexclave.com:443")).toBe("api2.hexclave.com");
+  expect(normalizeRequestHost("api2.hexclave.com, api.hexclave.com")).toBe("api2.hexclave.com");
+  expect(normalizeRequestHost("[::1]:8102")).toBe("::1");
+  expect(normalizeRequestHost("::1")).toBe("::1");
+});
+
+import.meta.vitest?.test("normalizeRequestHost drops URL-like and oversized junk", ({ expect }) => {
+  expect(normalizeRequestHost("https://evil.example")).toBeUndefined();
+  expect(normalizeRequestHost("api.hexclave.com/users")).toBeUndefined();
+  expect(normalizeRequestHost("api.hexclave.com?x=1")).toBeUndefined();
+  expect(normalizeRequestHost("user@api.hexclave.com")).toBeUndefined();
+  expect(normalizeRequestHost("api.hexclave.com extra")).toBeUndefined();
+  expect(normalizeRequestHost("")).toBeUndefined();
+  expect(normalizeRequestHost("a".repeat(254))).toBeUndefined();
+});
+
+import.meta.vitest?.test("getInboundRequestHost prefers x-forwarded-host and does not collapse api2", ({ expect }) => {
+  const request = new Request("https://api.hexclave.com/api/latest/users/user-secret?secret=do-not-log", {
+    headers: {
+      "x-forwarded-host": "api2.hexclave.com",
+      host: "internal.example:8102",
+    },
+  });
+  expect(getInboundRequestHost(request)).toBe("api2.hexclave.com");
+});
+
+import.meta.vitest?.test("getInboundRequestHost falls back to host then URL hostname", ({ expect }) => {
+  expect(getInboundRequestHost(new Request("https://api.hexclave.com/x", {
+    headers: { host: "api1.hexclave.com:443" },
+  }))).toBe("api1.hexclave.com");
+  expect(getInboundRequestHost(new Request("https://api.hexclave.com/x"))).toBe("api.hexclave.com");
+});
+
+import.meta.vitest?.test("getInboundRequestHost skips malformed forwarded hosts", ({ expect }) => {
+  const request = new Request("https://api.hexclave.com/x", {
+    headers: {
+      "x-forwarded-host": "https://evil.example",
+      host: "api2.hexclave.com",
+    },
+  });
+  expect(getInboundRequestHost(request)).toBe("api2.hexclave.com");
 });

@@ -176,6 +176,39 @@ jobs:
             printf '%s\n' "$combined"
           }
 
+          # docker-server-build-push.yaml is deliberately serialized per ref (it publishes the moving
+          # `dev`/`latest` image tags), and GitHub keeps at most one queued run per concurrency group.
+          # So when several commits land on dev in quick succession, the runs for the middle commits
+          # are cancelled and only the newest commit is built, which is exactly what we want for a
+          # moving tag: the image that gets published is the newest one. A cancelled run is therefore
+          # not a failure of this commit, as long as a newer run of the same workflow exists on the
+          # same branch (i.e. this run was superseded, not cancelled by hand or by a runner problem).
+          # A run cancelled while still queued never started any jobs, so it leaves no check runs
+          # behind and the check-run gate below is unaffected.
+          function is_superseded_run() {
+            local workflow_file=$1
+            local run_id=$2
+            local response
+            if ! response=$(curl -sS --fail-with-body \
+              --retry 3 \
+              --retry-all-errors \
+              --connect-timeout 10 \
+              --max-time 30 \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/actions/workflows/${workflow_file}/runs?event=${EVENT_NAME}&branch=${REF_NAME}&per_page=100"); then
+              echo "Error fetching workflow runs for ${workflow_file} on ${REF_NAME}" >&2
+              return 1
+            fi
+            local newer_count
+            if ! newer_count=$(jq --argjson id "$run_id" '[.workflow_runs[]? | select(.id > $id)] | length' <<< "$response"); then
+              echo "Invalid Actions API response for ${workflow_file}" >&2
+              return 1
+            fi
+            [ "$newer_count" -gt 0 ]
+          }
+
           function count_pending_checks() {
             local response=$1
             echo "$response" | jq '([.check_runs[]? | select(.status != "completed" and .name != "all-good" and .name != "claude-review")] | length) // 0'
@@ -192,6 +225,7 @@ jobs:
             missing_workflows=()
             pending_workflows=()
             failed_workflows=()
+            superseded_workflows=()
 
             for workflow_file in "${expected_workflows[@]}"; do
               workflow_path=".github/workflows/${workflow_file}"
@@ -209,9 +243,19 @@ jobs:
               if [ "$status" != "completed" ]; then
                 pending_workflows+=("${workflow_file} (${status})")
               elif [ "$conclusion" != "success" ] && [ "$conclusion" != "skipped" ] && [ "$conclusion" != "neutral" ]; then
-                failed_workflows+=("${workflow_file} (${conclusion})")
+                run_id=$(jq -r '.id' <<< "$latest")
+                if [ "$workflow_file" = "docker-server-build-push.yaml" ] && [ "$conclusion" = "cancelled" ] && is_superseded_run "$workflow_file" "$run_id"; then
+                  superseded_workflows+=("${workflow_file} (run ${run_id})")
+                else
+                  failed_workflows+=("${workflow_file} (${conclusion})")
+                fi
               fi
             done
+
+            if [ "${#superseded_workflows[@]}" -gt 0 ]; then
+              echo "Expected workflows cancelled because a newer commit on ${REF_NAME} superseded them (not counted as failures):"
+              printf '  - %s\n' "${superseded_workflows[@]}"
+            fi
 
             if [ "${#failed_workflows[@]}" -gt 0 ]; then
               echo "Expected workflow failures:"

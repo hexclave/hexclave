@@ -1,7 +1,7 @@
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { getJwtInfo } from "@hexclave/shared/dist/utils/jwt";
 import { wait } from "@hexclave/shared/dist/utils/promises";
-import { OAuthUserInfo, validateUserInfo } from "../utils";
+import { OAuthUserInfo, parseOAuthAccountCreatedAtMillis, validateUserInfo } from "../utils";
 import { OAuthBaseProvider, TokenSet } from "./base";
 
 const USER_INFO_401_RETRY_DELAYS_MS = [1000, 2000];
@@ -110,6 +110,7 @@ export class GithubProvider extends OAuthBaseProvider {
       profileImageUrl: rawUserInfo.avatar_url as any,
       email: email,
       emailVerified: verified,
+      accountCreatedAtMillis: parseOAuthAccountCreatedAtMillis(rawUserInfo.created_at),
     });
   }
 

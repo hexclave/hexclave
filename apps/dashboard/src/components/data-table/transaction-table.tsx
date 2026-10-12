@@ -39,7 +39,11 @@ type TransactionSummary = {
 type MoneyTransferEntry = Extract<TransactionEntry, { type: 'money_transfer' }>;
 type ProductGrantEntry = Extract<TransactionEntry, { type: 'product_grant' }>;
 type ItemQuantityChangeEntry = Extract<TransactionEntry, { type: 'item_quantity_change' }>;
-type RefundTarget = { type: 'subscription' | 'one-time-purchase', id: string };
+type RefundTarget = {
+  type: 'subscription' | 'one-time-purchase',
+  id: string,
+  invoiceId?: string,
+};
 const USD_CURRENCY = SUPPORTED_CURRENCIES.find((currency) => currency.code === 'USD');
 
 function isMoneyTransferEntry(entry: TransactionEntry): entry is MoneyTransferEntry {
@@ -54,7 +58,18 @@ function isItemQuantityChangeEntry(entry: TransactionEntry): entry is ItemQuanti
   return entry.type === 'item_quantity_change';
 }
 
-function getRefundTarget(transaction: Transaction): RefundTarget | null {
+export function getRefundTarget(transaction: Transaction): RefundTarget | null {
+  if (transaction.type === 'subscription-renewal') {
+    if (transaction.renewal_target_subscription_id == null) {
+      return null;
+    }
+    return {
+      type: 'subscription',
+      id: transaction.renewal_target_subscription_id,
+      // Listed renewal id is the invoice id (sourceId from sub-renewal:<invoiceId>).
+      invoiceId: transaction.id,
+    };
+  }
   if (transaction.type !== 'purchase') {
     return null;
   }
@@ -229,22 +244,22 @@ function RefundActionCell({ transaction, refundTarget, onRefunded }: { transacti
   const [amountUsd, setAmountUsd] = useState<string>('0');
   const [endAction, setEndAction] = useState<EndActionChoice>("now");
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const target = transaction.type === 'purchase' ? refundTarget : null;
+  const target = refundTarget;
   // Don't gate on `adjusted_by.length` here: the backend supports multiple
   // partial refunds (and a separate revoke) until both caps are hit, and
   // computes the actual remaining state from the bulldozer ledger. The button
   // stays available; the backend rejects if there's nothing left to do.
   //
-  // Known UI gap: refund actions are only enabled on `purchase` rows, and the
-  // submit call never passes `invoice_id`. The backend supports refunding a
-  // specific renewal invoice (POST body `invoice_id`), but the dashboard
-  // currently can't reach that path — admins refunding a renewal must use
-  // the API directly. Follow-up: enable the action on `subscription-renewal`
-  // rows and thread `invoice_id` through.
+  // Renewals are refundable when `renewal_target_subscription_id` is present
+  // (post-field renewals). Pre-field materialized renewals keep the field
+  // null and stay disabled until a natural re-cascade.
   const canRefund = !!target;
   const moneyTransferEntry = transaction.entries.find(isMoneyTransferEntry);
   const chargedAmountUsd = moneyTransferEntry ? (moneyTransferEntry.charged_amount.USD ?? null) : null;
   const isSubscription = target?.type === 'subscription';
+  // Backend rejects end_action="now" when invoice_id targets a renewal invoice
+  // (product revocation is sub-wide / start-txn only).
+  const isRenewalRefund = transaction.type === 'subscription-renewal';
 
   const validation = useMemo(() => {
     if (!target || !USD_CURRENCY) {
@@ -288,7 +303,8 @@ function RefundActionCell({ transaction, refundTarget, onRefunded }: { transacti
     // rather than preloading a value that will hit the backend cap.
     const alreadyAdjusted = transaction.adjusted_by.length > 0;
     setAmountUsd(alreadyAdjusted ? '0' : (chargedAmountUsd ?? '0'));
-    setEndAction("now");
+    // Renewals default to money-only; "End now" is not offered for them.
+    setEndAction(isRenewalRefund ? "none" : "now");
     setSubmitError(null);
   };
 
@@ -317,7 +333,9 @@ function RefundActionCell({ transaction, refundTarget, onRefunded }: { transacti
               const apiEndAction = endAction === "none" ? undefined : endAction;
               try {
                 await app.refundTransaction({
-                  ...target,
+                  type: target.type,
+                  id: target.id,
+                  ...(target.invoiceId !== undefined ? { invoiceId: target.invoiceId } : {}),
                   amountUsd: amountUsd as MoneyAmount,
                   ...(apiEndAction !== undefined ? { endAction: apiEndAction } : {}),
                 });
@@ -359,7 +377,7 @@ function RefundActionCell({ transaction, refundTarget, onRefunded }: { transacti
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="now">End now</SelectItem>
+                  {!isRenewalRefund ? <SelectItem value="now">End now</SelectItem> : null}
                   {isSubscription ? <SelectItem value="at-period-end">End at period end</SelectItem> : null}
                   <SelectItem value="none">No change</SelectItem>
                 </SelectContent>
