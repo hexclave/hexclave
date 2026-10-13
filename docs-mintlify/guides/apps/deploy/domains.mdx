@@ -4,7 +4,11 @@ description: "Point your own domain at a deployed service by creating the DNS re
 sidebarTitle: "Custom domains"
 ---
 
-A public HTTP service already has a Hexclave URL. A custom domain is a hostname you own, such as `app.example.com`, used in place of that URL. It is also how a private HTTP service is reached from the internet. A service with only TCP ports cannot take a domain.
+A public HTTP service already has a Hexclave URL. A custom domain is a hostname you own, such as `app.example.com`, that you add alongside it. The Hexclave URL keeps working, and once the custom domain is verified the dashboard shows it as the service's address. A custom domain is also how a private HTTP service is reached from the internet.
+
+You can use a subdomain such as `app.example.com` or a root domain such as `example.com`. Wildcards such as `*.example.com` are not supported, and a hostname can be attached to only one service at a time.
+
+A service needs an HTTP port to take a domain. A private service must declare exactly one port, and it must be HTTP: a domain makes the service reachable from the internet, so any other port it declares would be published along with it. Move extra ports onto a separate private service, or make the service public if the extra ports are HTTP. A public service can have several HTTP ports, but no TCP ports.
 
 ## Add the hostname
 
@@ -13,13 +17,21 @@ A public HTTP service already has a Hexclave URL. A custom domain is a hostname 
 3. Open **Domains**.
 4. Enter the hostname and click **Add**.
 
+To remove a domain later, click the trash icon next to it.
+
 ## Create the DNS records
 
-Expand **DNS** on that domain. Hexclave shows a table with three columns: **Type**, **Name**, and **Value**.
+Click **DNS** on that domain. Hexclave shows a table with three columns: **Type**, **Name**, and **Value**. Name and Value each have a copy button.
 
-Create those records at the DNS provider for the domain (wherever you bought it, or wherever its nameservers point: Cloudflare, your registrar, and so on). Copy each row as-is.
+Create those records at the DNS provider for the domain (wherever you bought it, or wherever its nameservers point: Cloudflare, your registrar, and so on). You will see:
 
-Hexclave checks on its own. The domain moves through three states:
+- A **TXT** record that proves you own the hostname.
+- A **CNAME** record pointing the hostname at the service. A root domain such as `example.com` can't hold a CNAME, so it gets **A** and **AAAA** records instead.
+- A **CNAME** record for `_acme-challenge`, which lets the TLS certificate be issued.
+
+The **Name** column shows full hostnames, such as `_acme-challenge.app.example.com`. Some DNS providers add your domain to the name automatically. If yours does, enter only the part before your domain (`_acme-challenge.app`), or your record ends up as `_acme-challenge.app.example.com.example.com`.
+
+While the domain's DNS details are open, the dashboard checks the records every 10 seconds. The domain moves through three states:
 
 - **Pending verification** — the records are not in place yet, or DNS has not caught up.
 - **Issuing** — the records were found, and the certificate is being created. This usually takes under a minute.
@@ -27,10 +39,12 @@ Hexclave checks on its own. The domain moves through three states:
 
 You can also click **Check now**. Verification usually completes within a few minutes of creating the records.
 
-You can add the records before the service's first deploy. They start working once that deploy finishes.
+You can add the hostname before the service's first deploy, but the **DNS** table stays empty until that deploy finishes. Create the records once they appear.
 
 ## Cloudflare
 
 If the domain is on Cloudflare, either create the records as **DNS only** (proxy off), or set the zone's SSL/TLS mode to **Full (strict)**.
 
 A proxied record with SSL/TLS set to **Flexible** fails with Cloudflare 520 errors.
+
+If you proxy the hostname, keep the TXT record. Cloudflare's proxy hides the service's real address, so the TXT record is how Hexclave confirms you own the hostname.
