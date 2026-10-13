@@ -26,6 +26,10 @@ public actor ServerUser {
     public let restrictedByAdminReason: String?
     public let restrictedByAdminPrivateDetails: String?
     public let oauthProviders: [User.OAuthProviderInfo]
+    /// The user's selected team, constructed as a server team from `selected_team`.
+    /// Nil when the user has no selected team. Replaced from the update response so a
+    /// `selectedTeamId` change is visible without fetching the user again.
+    public private(set) var selectedTeam: ServerTeam?
     
     init(client: APIClient, json: [String: Any]) {
         self.client = client
@@ -71,6 +75,12 @@ public actor ServerUser {
             self.oauthProviders = providers.map { User.OAuthProviderInfo(id: $0["id"] as? String ?? "") }
         } else {
             self.oauthProviders = []
+        }
+
+        if let teamJson = json["selected_team"] as? [String: Any] {
+            self.selectedTeam = ServerTeam(client: client, json: teamJson)
+        } else {
+            self.selectedTeam = nil
         }
     }
     
@@ -120,6 +130,13 @@ public actor ServerUser {
             self.otpAuthEnabled = json["otp_auth_enabled"] as? Bool ?? self.otpAuthEnabled
             self.passkeyAuthEnabled = json["passkey_auth_enabled"] as? Bool ?? self.passkeyAuthEnabled
             self.isMultiFactorRequired = json["requires_totp_mfa"] as? Bool ?? self.isMultiFactorRequired
+            if json["selected_team"] != nil {
+                if let teamJson = json["selected_team"] as? [String: Any] {
+                    self.selectedTeam = ServerTeam(client: client, json: teamJson)
+                } else {
+                    self.selectedTeam = nil
+                }
+            }
         }
     }
     
