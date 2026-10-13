@@ -32,10 +32,10 @@ type HexclaveAppInternals = {
 
 const PROJECT_ONBOARDING_STATUSES = projectOnboardingStatusValues;
 const NEW_DASHBOARD_URL = "https://hexclave.com/projects";
-const NEW_DASHBOARD_BANNER_START = new Date("2026-09-17T00:00:00-07:00");
-
-function isNewDashboardBannerEnabled() {
-  return getPublicEnvVar("NEXT_PUBLIC_HEXCLAVE_NEW_DASHBOARD_BANNER_ENABLED") === "true";
+// Owned projects are exactly the projects owned by the user's teams, so the internal project shows up in them
+// iff the user is a member of a team that owns it. Only those users see the new dashboard banner.
+function shouldShowNewDashboardBanner(ownedProjects: readonly AdminOwnedProject[]) {
+  return ownedProjects.some((project) => project.id === "internal");
 }
 
 function isStackAppInternals(value: unknown): value is HexclaveAppInternals {
@@ -221,7 +221,7 @@ function RdeProjectsListPage() {
 
   return (
     <div className="flex-grow p-4">
-      {isNewDashboardBannerEnabled() && (
+      {shouldShowNewDashboardBanner(rawProjects) && (
         <NewDashboardBanner
           onTryNewDashboard={() => setNewDashboardPreference(
             user.clientMetadata,
@@ -314,25 +314,7 @@ function ProjectsListPage() {
   const [projectDailySignups, setProjectDailySignups] = useState<Map<string, { date: string, activity: number }[]>>(new Map());
   const [loadingProjectMetrics, setLoadingProjectMetrics] = useState(true);
   const [projectMetricsError, setProjectMetricsError] = useState(false);
-  const [showNewDashboardBanner, setShowNewDashboardBanner] = useState(
-    isNewDashboardBannerEnabled() && process.env.NODE_ENV === "development",
-  );
   const router = useRouter();
-
-  useEffect(() => {
-    if (!isNewDashboardBannerEnabled() || process.env.NODE_ENV === "development") {
-      return;
-    }
-
-    const delay = NEW_DASHBOARD_BANNER_START.getTime() - new Date().getTime();
-    if (delay <= 0) {
-      setShowNewDashboardBanner(true);
-      return;
-    }
-
-    const timeout = window.setTimeout(() => setShowNewDashboardBanner(true), delay);
-    return () => window.clearTimeout(timeout);
-  }, []);
 
   const saveNewDashboardPreference = async () => {
     await setNewDashboardPreference(
@@ -497,7 +479,7 @@ function ProjectsListPage() {
 
   return (
     <div className="flex-grow p-4">
-      {showNewDashboardBanner && <NewDashboardBanner onTryNewDashboard={saveNewDashboardPreference} />}
+      {shouldShowNewDashboardBanner(rawProjects) && <NewDashboardBanner onTryNewDashboard={saveNewDashboardPreference} />}
 
       <div className="flex justify-between gap-4 mb-4 flex-col sm:flex-row">
         <SearchBar

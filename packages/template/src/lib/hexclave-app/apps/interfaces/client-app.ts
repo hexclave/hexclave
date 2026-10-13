@@ -79,6 +79,23 @@ export type StackClientApp<HasTokenStore extends boolean = boolean, ProjectId ex
      * `redirectToSignIn()`, `redirectToSignUp()`, `redirectToSignOut()`, or `redirectToAccountSettings()`.
      */
     readonly urls: Readonly<ResolvedHandlerUrls>,
+    /** Whether this app delegates authentication to an external provider token store. */
+    isExternalAuthApp(): boolean,
+
+    /**
+     * Marks the current page as one that should record analytics (page views, clicks, session replays, and clickmaps).
+     *
+     * Analytics capture starts automatically when the client app is constructed in the browser, so this function doesn't
+     * start anything itself. Call it at the top level of a client-side module that is loaded on every page you want to
+     * track (for example, your app's root layout or entry file); the call guarantees that the module creating the client
+     * app is actually imported, and therefore constructed, on that page.
+     *
+     * Throws if this app will never record analytics because of its constructor options (`analytics.enabled: false`,
+     * `automaticSideEffects: false`, or a `null` token store). If the Analytics app turns out to be disabled on the
+     * project, an error is reported as soon as the backend rejects the first upload. Outside the browser (eg. during
+     * server-side rendering), it doesn't throw for that reason alone.
+     */
+    initAnalytics(): void,
 
     signInWithOAuth(provider: string, options?: { returnTo?: string }): Promise<void>,
     signInWithCredential(options: { email: string, password: string, noRedirect?: boolean }): Promise<Result<undefined, KnownErrors["EmailPasswordMismatch"] | KnownErrors["InvalidTotpCode"]>>,

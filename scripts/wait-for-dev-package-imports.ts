@@ -29,11 +29,9 @@ import { setTimeout as sleep } from "timers/promises";
 // needs. It does not hide real runtime errors: we retry missing-module failures
 // while package builds warm up, and fail immediately for other import failures.
 //
-// In addition to workspace packages, the probe checks that the generated Prisma
-// client exists. When `turbo run dev` starts the backend, `codegen-prisma:watch`
-// (`prisma generate --watch`) performs an initial generation that briefly removes
-// and recreates `src/generated/prisma/`. If `codegen-docs` runs during that
-// window it fails with ERR_MODULE_NOT_FOUND for `@/generated/prisma/client`.
+// The generated Prisma client is not probed here: turbo.json makes this task
+// depend on `@hexclave/backend#codegen-prisma`, which finishes before it starts,
+// and the backend's dev watcher no longer regenerates the client at startup.
 const repoRoot = path.resolve(__dirname, "..");
 const backendDir = path.join(repoRoot, "apps/backend");
 const timeoutMs = 60_000;
@@ -43,13 +41,6 @@ const probeScript = `
 (async () => {
   await import('@hexclave/js');
   await import('@hexclave/shared/dist/utils/env');
-  const { existsSync, readdirSync } = await import('node:fs');
-  const { join } = await import('node:path');
-  const generatedDir = join(process.cwd(), 'src', 'generated', 'prisma');
-  if (!existsSync(generatedDir) || readdirSync(generatedDir).length === 0) {
-    const err = new Error('ERR_MODULE_NOT_FOUND: Generated Prisma client not yet available at ' + generatedDir);
-    throw err;
-  }
 })().then(
   () => undefined,
   (error) => {

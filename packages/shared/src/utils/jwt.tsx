@@ -39,17 +39,20 @@ export async function signJWT(options: {
   issuer: string,
   audience: string,
   payload: any,
-  expirationTime?: string,
+  expirationTime?: string | Date,
 }) {
   const privateJwks = await getPrivateJwks({ audience: options.audience });
   const privateKey = await jose.importJWK(privateJwks[0]);
+  const expirationTime = options.expirationTime instanceof Date
+    ? Math.floor(options.expirationTime.getTime() / 1000)
+    : options.expirationTime;
 
   return await new jose.SignJWT(options.payload)
     .setProtectedHeader({ alg: "ES256", kid: privateJwks[0].kid })
     .setIssuer(options.issuer)
     .setIssuedAt()
     .setAudience(options.audience)
-    .setExpirationTime(options.expirationTime || "5m")
+    .setExpirationTime(expirationTime ?? "5m")
     .sign(privateKey);
 }
 

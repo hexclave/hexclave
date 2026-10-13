@@ -9,20 +9,15 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SsrRouteImport } from './routes/ssr'
-import { Route as ProtectedRouteImport } from './routes/protected'
-import { Route as ClientRouteImport } from './routes/client'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ClientRouteImport } from './routes/client'
+import { Route as ProtectedRouteImport } from './routes/protected'
+import { Route as SsrRouteImport } from './routes/ssr'
 import { Route as HandlerSplatRouteImport } from './routes/handler/$'
 
-const SsrRoute = SsrRouteImport.update({
-  id: '/ssr',
-  path: '/ssr',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProtectedRoute = ProtectedRouteImport.update({
-  id: '/protected',
-  path: '/protected',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ClientRoute = ClientRouteImport.update({
@@ -30,9 +25,14 @@ const ClientRoute = ClientRouteImport.update({
   path: '/client',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const ProtectedRoute = ProtectedRouteImport.update({
+  id: '/protected',
+  path: '/protected',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SsrRoute = SsrRouteImport.update({
+  id: '/ssr',
+  path: '/ssr',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HandlerSplatRoute = HandlerSplatRouteImport.update({
@@ -81,18 +81,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/ssr': {
-      id: '/ssr'
-      path: '/ssr'
-      fullPath: '/ssr'
-      preLoaderRoute: typeof SsrRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/protected': {
-      id: '/protected'
-      path: '/protected'
-      fullPath: '/protected'
-      preLoaderRoute: typeof ProtectedRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/client': {
@@ -102,11 +95,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ClientRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/protected': {
+      id: '/protected'
+      path: '/protected'
+      fullPath: '/protected'
+      preLoaderRoute: typeof ProtectedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ssr': {
+      id: '/ssr'
+      path: '/ssr'
+      fullPath: '/ssr'
+      preLoaderRoute: typeof SsrRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/handler/$': {

@@ -65,12 +65,13 @@ import { StackClientApp, StackClientAppConstructorOptions, StackClientAppJson } 
 import { _HexclaveAdminAppImplIncomplete } from "./admin-app-impl";
 import { TokenObject, clientVersion, createCache, createCacheBySession, createEmptyTokenStore, getAnalyticsBaseUrl, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getUrls, resolveApiUrls, resolveConstructorOptions } from "./common";
 import { EventTracker } from "./event-tracker";
+import { ExternalTokenStoreSessionAdapter, isExternalTokenStore } from "./external-token-store-session-adapter";
 import { augmentUrlWithPersistedRedirectBackState, getRawAfterAuthReturnTo, saveRedirectBackStateFromUrl } from "./redirect-back-state";
 import { recordRedirectAndThrowIfLoopDetected } from "./redirect-loop-breaker";
 import type { CrossDomainHandoffParams } from "./redirect-page-urls";
 import { crossDomainAuthQueryParams, getCrossDomainHandoffParamsFromCurrentUrl, planRedirectToHandler } from "./redirect-page-urls";
 import { subscribeSessionRefresh } from "./session-refresh-subscription";
-import { AnalyticsOptions, SessionRecorder, analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions } from "./session-replay";
+import { AnalyticsOptions, SessionRecorder, analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions, isAnalyticsNotEnabledError } from "./session-replay";
 
 export function stripBrowserActionQueryParam() {
   let stripAttemptsRemaining = 20;
@@ -214,6 +215,10 @@ function createMalformedNestedCrossDomainUrlError(options: {
 function throwSetupError(error: HexclaveSetupError): never {
   showSetupErrorOverlay(error); // THIS_LINE_PLATFORM js-like
   throw error;
+}
+
+function createAnalyticsAppDisabledOnProjectError(): Error {
+  return new Error("initAnalytics() was called, but the Analytics app is not enabled on this Hexclave project, so the backend rejects all analytics uploads. Enable the Analytics app in the Hexclave dashboard (or in hexclave.config.ts), or remove the initAnalytics() call if this is intentional.");
 }
 
 function getRedirectHelperInstruction(handlerName: string): string {
@@ -412,7 +417,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   private readonly _analyticsOptions: AnalyticsOptions | undefined;
   private _sessionRecorder: SessionRecorder | null = null;
   private _eventTracker: EventTracker | null = null;
+  private _initAnalyticsCalled = false;
+  private _analyticsAppDisabledOnProject = false;
   private _pendingSignOut: Promise<void> | null = null;
+  private readonly _externalTokenStoreSessionAdapter: ExternalTokenStoreSessionAdapter;
 
   private __DEMO_ENABLE_SLIGHT_FETCH_DELAY = false;
   private readonly _ownedAdminApps = new DependenciesMap<[InternalSession, string], _HexclaveAdminAppImplIncomplete<false, string>>();
@@ -844,6 +852,13 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         }
       });
     }
+    this._externalTokenStoreSessionAdapter = new ExternalTokenStoreSessionAdapter(
+      (sessionOptions) => this._interface.createSession(sessionOptions),
+      async (providerId, token) => {
+        const exchange = await this._interface.exchangeExternalAuthToken(providerId, token);
+        return Result.orThrow(exchange).accessToken;
+      },
+    );
 
     this._tokenStoreInit = resolvedOptions.tokenStore;
     this._redirectMethod = resolvedOptions.redirectMethod || (isBrowserLike() ? "window" : "none");
@@ -887,24 +902,28 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       return anonUser._internalSession;
     };
 
-    const analyticsEnabled = this._analyticsOptions?.enabled !== false;
+    const recordsAnalytics = this._getAnalyticsDisabledReason() == null && isBrowserLike();
 
     const sessionReplayOptions = getSessionReplayOptions(this._analyticsOptions);
-    if (analyticsEnabled && isBrowserLike() && this._hasPersistentTokenStore() && sessionReplayOptions.enabled) {
+    if (recordsAnalytics && sessionReplayOptions.enabled) {
       this._sessionRecorder = new SessionRecorder({
         projectId: this.projectId,
         sendBatch: async (body, opts) => {
-          return await this._interface.sendSessionReplayBatch(body, await getAnalyticsSession(), opts);
+          return this._handleAnalyticsUploadResult(
+            await this._interface.sendSessionReplayBatch(body, await getAnalyticsSession(), opts),
+          );
         },
       }, sessionReplayOptions);
       this._sessionRecorder.start();
     }
 
-    if (analyticsEnabled && isBrowserLike() && this._hasPersistentTokenStore()) {
+    if (recordsAnalytics) {
       this._eventTracker = new EventTracker({
         projectId: this.projectId,
         sendBatch: async (body, opts) => {
-          return await this._interface.sendAnalyticsEventBatch(body, await getAnalyticsSession(), opts);
+          return this._handleAnalyticsUploadResult(
+            await this._interface.sendAnalyticsEventBatch(body, await getAnalyticsSession(), opts),
+          );
         },
       });
       this._eventTracker.start();
@@ -1795,6 +1814,13 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       default: {
         if (tokenStoreInit === null) {
           return createEmptyTokenStore();
+        } else if (typeof tokenStoreInit === "object" && isExternalTokenStore(tokenStoreInit)) {
+          return this._externalTokenStoreSessionAdapter.getOrCreateTokenStore(tokenStoreInit, (store, previousSessionKey) => {
+            this._sessionsByTokenStoreAndSessionKey
+              .get(store)
+              ?.get(previousSessionKey)
+              ?.suggestAccessTokenExpired();
+          });
         } else if (typeof tokenStoreInit === "object" && "headers" in tokenStoreInit) {
           if (this._requestTokenStores.has(tokenStoreInit)) return this._requestTokenStores.get(tokenStoreInit)!;
 
@@ -1870,28 +1896,29 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
    * - So different token stores are separated and don't leak information between each other, eg. if the same user sends two requests to the same server they should get a different session object
    */
   private _sessionsByTokenStoreAndSessionKey = new WeakMap<Store<TokenObject>, Map<string, InternalSession>>();
+
+  private _getSessionKeyForTokenStore(tokenStore: Store<TokenObject>, tokenObj: TokenObject): string {
+    return this._externalTokenStoreSessionAdapter.getSessionKey(tokenStore, tokenObj);
+  }
   /**
    * @param overrideTokenObj The tokens to build the session for, if they haven't been written to the token store yet
    *                         (so we can warm a sign-in's session before the token store publishes it).
    */
   protected _getSessionFromTokenStore(tokenStore: Store<TokenObject>, overrideTokenObj?: TokenObject): InternalSession {
     const tokenObj = overrideTokenObj ?? tokenStore.get();
-    const sessionKey = InternalSession.calculateSessionKey(tokenObj);
+    const sessionKey = this._getSessionKeyForTokenStore(tokenStore, tokenObj);
     const existing = sessionKey ? this._sessionsByTokenStoreAndSessionKey.get(tokenStore)?.get(sessionKey) : null;
     if (existing) return existing;
 
-    const session = this._interface.createSession({
-      refreshToken: tokenObj.refreshToken,
-      accessToken: tokenObj.accessToken,
-    });
+    const session = this._externalTokenStoreSessionAdapter.createSessionForTokenStore(tokenStore, tokenObj, sessionKey);
     session.onAccessTokenChange((newAccessToken) => {
-      tokenStore.update((old) => InternalSession.calculateSessionKey(old) === sessionKey ? {
+      tokenStore.update((old) => this._getSessionKeyForTokenStore(tokenStore, old) === sessionKey ? {
         ...old,
         accessToken: newAccessToken?.token ?? null
       } : old);
     });
     session.onInvalidate(() => {
-      tokenStore.update((old) => InternalSession.calculateSessionKey(old) === sessionKey ? {
+      tokenStore.update((old) => this._getSessionKeyForTokenStore(tokenStore, old) === sessionKey ? {
         ...old,
         accessToken: null,
         refreshToken: null,
@@ -1934,6 +1961,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   protected async _signInToAccountWithTokens(tokens: { accessToken: string | null, refreshToken: string }) {
     if (!("accessToken" in tokens) || !("refreshToken" in tokens)) {
       throw new HexclaveAssertionError("Invalid tokens object; can't sign in with this", { tokens });
+    }
+    // An external token store keys its session by the provider's session, so Hexclave refresh tokens from a
+    // first-party sign-in would be written into (and then silently replaced by) the provider's session.
+    if (this.isExternalAuthApp()) {
+      throw new Error("This app authenticates through an external provider and cannot sign in with Hexclave tokens. Sign in through the provider instead.");
     }
     const attemptId = ++this._signInAttemptCounter;
     const tokenStore = this._getOrCreateTokenStore(await this._createCookieHelper());
@@ -2462,6 +2494,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       emailAuthEnabled: crud.auth_with_email,
       otpAuthEnabled: crud.otp_auth_enabled,
       oauthProviders: crud.oauth_providers,
+      externalAuthProviders: crud.external_auth_providers,
       passkeyAuthEnabled: crud.passkey_auth_enabled,
       isMultiFactorRequired: crud.requires_totp_mfa,
       isAnonymous: crud.is_anonymous,
@@ -3691,6 +3724,69 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     return crud && this._currentUserFromCrud(crud, session);
   }
 
+  isExternalAuthApp(): boolean {
+    return typeof this._tokenStoreInit === "object"
+      && this._tokenStoreInit != null
+      && isExternalTokenStore(this._tokenStoreInit);
+  }
+
+  initAnalytics(): void {
+    // This doesn't start anything: the constructor already starts analytics capture (see
+    // _initializeAutomaticSideEffects). Pages that never import the module constructing the client app record no
+    // analytics, which is easy to miss when the app is only imported where auth is used. Having a dedicated function
+    // to call on every tracked page makes that import explicit, and gives setup docs and AI prompts a concrete step
+    // to point at. Since the caller has thereby declared that they expect analytics, we fail loudly whenever we know
+    // analytics won't be recorded.
+    this._initAnalyticsCalled = true;
+
+    const disabledReason = this._getAnalyticsDisabledReason();
+    if (disabledReason != null) {
+      throw new Error(`initAnalytics() was called, but this Hexclave app will not record analytics because ${disabledReason}. Remove the initAnalytics() call if this is intentional.`);
+    }
+    if (this._analyticsAppDisabledOnProject) {
+      throw createAnalyticsAppDisabledOnProjectError();
+    }
+
+    // Outside the browser (eg. during SSR of a client component), analytics are never recorded, but the same module
+    // runs again in the browser where they are, so this isn't an error.
+    if (isBrowserLike() && this._eventTracker == null) {
+      throw new HexclaveAssertionError("initAnalytics() was called in the browser and _getAnalyticsDisabledReason() returned null, but the constructor did not start the event tracker. The two must agree on when analytics are recorded.");
+    }
+  }
+
+  /**
+   * Returns why this app will never record analytics, or null if it records them whenever it runs in a browser. The
+   * constructor and initAnalytics() both use this, so that the conditions under which analytics start and the
+   * conditions under which initAnalytics() throws can't drift apart.
+   *
+   * Whether the Analytics app is enabled on the project is not part of this, as the client only learns that once the
+   * backend rejects an upload; see _handleAnalyticsUploadResult.
+   */
+  private _getAnalyticsDisabledReason(): string | null {
+    if (this._analyticsOptions?.enabled === false) {
+      return "the `analytics.enabled` constructor option is set to false";
+    }
+    if (this._options.automaticSideEffects === false) {
+      return "the `automaticSideEffects` constructor option is set to false, which also disables analytics";
+    }
+    if (!this._hasPersistentTokenStore()) {
+      return "the `tokenStore` constructor option is null; analytics require a persistent token store such as \"cookie\" (or \"nextjs-cookie\" in Next.js)";
+    }
+    return null;
+  }
+
+  private _handleAnalyticsUploadResult(result: Result<Response, Error>): Result<Response, Error> {
+    if (result.status === "error" && isAnalyticsNotEnabledError(result.error) && !this._analyticsAppDisabledOnProject) {
+      this._analyticsAppDisabledOnProject = true;
+      // initAnalytics() usually runs at module load, long before the first upload, so it can't throw this itself. If
+      // it gets called after this point instead, it throws synchronously (see initAnalytics()).
+      if (this._initAnalyticsCalled) {
+        captureError("initAnalytics", createAnalyticsAppDisabledOnProjectError());
+      }
+    }
+    return result;
+  }
+
   // IF_PLATFORM react-like
   useUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'redirect' }): ProjectCurrentUser<ProjectId>;
   useUser(options: GetCurrentUserOptions<HasTokenStore> & { or: 'throw' }): ProjectCurrentUser<ProjectId>;
@@ -3776,6 +3872,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       primaryEmail: accessToken.payload.email,
       displayName: accessToken.payload.name,
       primaryEmailVerified: accessToken.payload.email_verified,
+      selectedTeamId: accessToken.payload.selected_team_id,
       isAnonymous,
       isMultiFactorRequired: accessToken.payload.requires_totp_mfa,
       isRestricted: accessToken.payload.is_restricted,
@@ -3788,11 +3885,16 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     if (!auth) {
       return null;
     }
+    const selectedTeamId = auth.selected_team_id ?? null;
+    if (selectedTeamId !== null && typeof selectedTeamId !== "string") {
+      throw new HexclaveAssertionError("Expected the Convex selected_team_id claim to be a string or null.");
+    }
     return {
       id: auth.subject,
       displayName: auth.name ?? null,
       primaryEmail: auth.email ?? null,
       primaryEmailVerified: auth.email_verified as boolean,
+      selectedTeamId,
       isAnonymous: auth.is_anonymous as boolean,
       isMultiFactorRequired: auth.requires_totp_mfa as boolean,
       isRestricted: auth.is_restricted as boolean,
@@ -4369,6 +4471,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     const signOutOperation = (async () => {
       // Preserve the old behavior of serializing concurrent sign-outs without coupling them to unrelated stores.
       await previousSignOut;
+      const externalTokenStore = this._externalTokenStoreSessionAdapter.getExternalTokenStoreForSession(session);
+      if (externalTokenStore != null) {
+        throw new HexclaveAssertionError(
+          `Cannot sign out an externally authenticated session through Hexclave. Sign out through the ${externalTokenStore.providerId} provider instead.`,
+        );
+      }
       await this._interface.signOut(session);
       if (options?.redirectUrl) {
         await this._redirectTo({ url: options.redirectUrl, replace: true });
@@ -4600,6 +4708,9 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       toClientJson: (): StackClientAppJson<HasTokenStore, ProjectId> => {
         if (typeof this._redirectMethod !== "string") {
           throw new HexclaveAssertionError("Cannot serialize to JSON from an application with a non-string redirect method");
+        }
+        if (typeof this._tokenStoreInit === "object" && this._tokenStoreInit != null && isExternalTokenStore(this._tokenStoreInit)) {
+          throw new HexclaveAssertionError("Cannot serialize an app with an external token store because its callbacks are not serializable. Construct this app in the client runtime instead.");
         }
 
         const publishableClientKey = "publishableClientKey" in this._interface.options

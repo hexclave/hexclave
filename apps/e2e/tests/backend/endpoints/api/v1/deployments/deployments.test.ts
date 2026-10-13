@@ -1810,6 +1810,13 @@ describe("domains", () => {
     const records = (getPending.body as any).dns_records;
     expect(Array.isArray(records)).toBe(true);
     expect(records.length).toBeGreaterThan(0);
+    // The same records, as an importable zone file: one absolute-named line per record.
+    const zoneFile: string = (getPending.body as any).bind_zone_file;
+    for (const record of records) {
+      expect(zoneFile).toContain(`${record.name}.`);
+    }
+    expect(zoneFile.split("\n").filter((line) => line.includes(" IN "))).toHaveLength(records.length);
+    expect((getResponse.body as any).bind_zone_file).toBeNull();
 
     const deleteResponse = await niceBackendFetch(`/api/v1/deployments/services/${serviceId}/domains/${hostname}`, {
       method: "DELETE",

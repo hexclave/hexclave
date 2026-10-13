@@ -38,6 +38,7 @@ export const userFullInclude = {
       otpAuthMethod: true,
       oauthAuthMethod: true,
       passkeyAuthMethod: true,
+      externalAuthMethod: true,
     }
   },
   contactChannels: true,
@@ -217,6 +218,9 @@ export const userPrismaToCrud = (
       account_id: a.providerAccountId,
       email: a.email,
     })),
+    external_auth_providers: prisma.authMethods
+      .filter((method) => method.externalAuthMethod != null)
+      .map((method) => ({ id: method.externalAuthMethod?.providerConfigId ?? throwErr("External auth method is missing provider configuration") })),
     selected_team_id: selectedTeamMembers[0]?.teamId ?? null,
     selected_team: selectedTeamMembers[0] ? teamPrismaToCrud(selectedTeamMembers[0]?.team) : null,
     last_active_at_millis: lastActiveAtMillis,
@@ -381,6 +385,14 @@ export function getUserQuery(projectId: string, branchId: string, userId: string
                       )
                       FROM ${sqlQuoteIdent(schema)}."OAuthAuthMethod"
                       WHERE "OAuthAuthMethod"."tenancyId" = "ProjectUser"."tenancyId" AND "OAuthAuthMethod"."projectUserId" = "ProjectUser"."projectUserId" AND "OAuthAuthMethod"."authMethodId" = "AuthMethod"."id"
+                    ),
+                    'ExternalAuthMethod', (
+                      SELECT (
+                        to_jsonb("ExternalAuthMethod") ||
+                        jsonb_build_object()
+                      )
+                      FROM ${sqlQuoteIdent(schema)}."ExternalAuthMethod"
+                      WHERE "ExternalAuthMethod"."tenancyId" = "ProjectUser"."tenancyId" AND "ExternalAuthMethod"."projectUserId" = "ProjectUser"."projectUserId" AND "ExternalAuthMethod"."authMethodId" = "AuthMethod"."id"
                     )
                   )
                 ), '{}')
@@ -460,6 +472,9 @@ export function getUserQuery(projectId: string, branchId: string, userId: string
           account_id: a.providerAccountId,
           email: a.email,
         })),
+        external_auth_providers: row.AuthMethods
+          .filter((m: any) => m.ExternalAuthMethod != null)
+          .map((m: any) => ({ id: m.ExternalAuthMethod.providerConfigId })),
         selected_team_id: row.SelectedTeamMember?.teamId ?? null,
         selected_team: row.SelectedTeamMember ? {
           id: row.SelectedTeamMember.Team.teamId,

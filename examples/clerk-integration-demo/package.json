@@ -1,0 +1,25 @@
+{
+  "name": "@hexclave/example-clerk-integration-demo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack --port ${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}15",
+    "build": "next build",
+    "start": "next start --port ${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}15",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@hexclave/next": "workspace:*",
+    "@hexclave/shared": "workspace:*",
+    "next": "15.5.19",
+    "react": "19.0.1",
+    "react-dom": "19.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "19.0.12",
+    "@types/react-dom": "19.0.4",
+    "typescript": "^5.8.3"
+  }
+}

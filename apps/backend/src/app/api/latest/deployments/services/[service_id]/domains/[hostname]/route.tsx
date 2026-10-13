@@ -3,6 +3,7 @@ import { MarshalApiError, getMarshalClientOrThrow, getMarshalDeploymentsConfigOr
 import { Tenancy } from "@/lib/tenancies";
 import { PrismaClientTransaction, getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
+import { deploymentDnsRecordsToZoneFile } from "@hexclave/shared/dist/deployments";
 import { adaptSchema, serverOrHigherAuthTypeSchema, userSpecifiedIdSchema, yupArray, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
 
@@ -74,6 +75,9 @@ export const GET = createSmartRouteHandler({
         name: yupString().defined(),
         value: yupString().defined(),
       }).defined()).defined(),
+      // `dns_records` rendered as a BIND zone file, for importing into a DNS provider instead
+      // of creating each record by hand. Null exactly when there are no records.
+      bind_zone_file: yupString().nullable().defined(),
     }).defined(),
   }),
   handler: async ({ auth, params }) => {
@@ -94,6 +98,7 @@ export const GET = createSmartRouteHandler({
           status: "awaiting_dns",
           pending_first_deploy: true,
           dns_records: [],
+          bind_zone_file: null,
         },
       } as const;
     }
@@ -129,6 +134,7 @@ export const GET = createSmartRouteHandler({
             status: "awaiting_dns",
             pending_first_deploy: true,
             dns_records: [],
+            bind_zone_file: null,
           },
         } as const;
       }
@@ -154,6 +160,7 @@ export const GET = createSmartRouteHandler({
           status: "awaiting_dns",
           pending_first_deploy: true,
           dns_records: [],
+          bind_zone_file: null,
         },
       } as const;
     }
@@ -163,6 +170,9 @@ export const GET = createSmartRouteHandler({
       data: { verified: result.verified },
     });
 
+    // Once verified there is nothing left for the user to create; while pending, the records
+    // include both Hexclave's ownership TXT proof and the shared frontend routing record.
+    const dnsRecords = result.verified ? [] : result.dns_records;
     return {
       statusCode: 200,
       bodyType: "json",
@@ -172,9 +182,8 @@ export const GET = createSmartRouteHandler({
         verified: result.verified,
         status: result.status,
         pending_first_deploy: false,
-        // Once verified there is nothing left for the user to create; while pending, the records
-        // include both Hexclave's ownership TXT proof and the shared frontend routing record.
-        dns_records: result.verified ? [] : result.dns_records,
+        dns_records: dnsRecords,
+        bind_zone_file: deploymentDnsRecordsToZoneFile(params.hostname, dnsRecords),
       },
     };
   },
