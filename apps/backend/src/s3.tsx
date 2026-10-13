@@ -107,6 +107,46 @@ export async function createPresignedUploadUrl(options: {
   );
 }
 
+/**
+ * Grants temporary read access to one exact object key. `downloadFilename`
+ * makes browsers save the object rather than navigate to it.
+ */
+export async function createPresignedDownloadUrl(options: {
+  key: string,
+  expiresInSeconds: number,
+  private?: boolean,
+  downloadFilename?: string,
+}): Promise<string> {
+  const { client, bucket } = getS3Target(options.private === true);
+  return await getSignedUrl(
+    client,
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: options.key,
+      ...(options.downloadFilename ? { ResponseContentDisposition: `attachment; filename="${options.downloadFilename.replace(/["\\]/g, "")}"` } : {}),
+    }),
+    { expiresIn: options.expiresInSeconds },
+  );
+}
+
+/** Reads bytes [start, end] (inclusive) of an object. */
+export async function downloadByteRange(options: { key: string, start: number, end: number, private?: boolean, signal?: AbortSignal }): Promise<Uint8Array> {
+  const { client, bucket } = getS3Target(options.private === true);
+  const signal = options.signal ?? getOptionalRequestAbortSignal();
+  const res = await awaitS3Operation(
+    client.send(new GetObjectCommand({
+      Bucket: bucket,
+      Key: options.key,
+      Range: `bytes=${options.start}-${options.end}`,
+    }), { abortSignal: signal }),
+    signal,
+  );
+  if (!res.Body) {
+    throw new HexclaveAssertionError("S3 getObject returned empty body");
+  }
+  return await readBodyToBytes(res.Body, signal);
+}
+
 export async function headBytes(options: { key: string, private?: boolean, signal?: AbortSignal }): Promise<{
   byteLength: number,
   eTag: string,

@@ -59,10 +59,12 @@ export type {
 export type {
   AdminSessionReplay,
   AdminSessionReplayChunk,
+  AdminSessionReplayRender,
   ListSessionReplayChunksOptions,
   ListSessionReplayChunksResult,
   ListSessionReplaysOptions,
   ListSessionReplaysResult,
+  RenderSessionReplayOptions,
   SessionReplayAllEventsResult
 } from "./session-replays";
 

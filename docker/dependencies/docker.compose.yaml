@@ -267,6 +267,36 @@ services:
     volumes:
       - freestyle-module-cache:/app/module-cache
 
+  # ================= Replay render mock =================
+  # Stands in for the Freestyle VMs that render session replays to video when
+  # the Freestyle key is the mock key. Runs the real renderer, mounted from the repo.
+
+  replay-render-mock:
+    build:
+      context: ./replay-render-mock
+      dockerfile: Dockerfile
+    image: replay-render-mock
+    restart: unless-stopped
+    ports:
+      - "${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}32:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # presigned URLs from the S3 mock point at the host
+    environment:
+      HOST_ON_HOST: host.docker.internal
+    volumes:
+      - ../../apps/backend/scripts/replay-render/render.mjs:/app/render.mjs:ro
+      # Imported by render.mjs; the tab-following rule shared with the dashboard player.
+      - ../../packages/shared/src/utils/session-replay-timeline.ts:/app/session-replay-timeline.ts:ro
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 3g
+    cpus: 4
+    pids_limit: 1024
+
   # ================= Vercel mock =================
 
   vercel-mock:

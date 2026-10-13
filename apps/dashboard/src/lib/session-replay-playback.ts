@@ -1,4 +1,7 @@
-export const INTER_TAB_GAP_FAST_FORWARD_MULTIPLIER = 12;
+import { INTER_TAB_GAP_FAST_FORWARD_MULTIPLIER } from "@hexclave/shared/dist/utils/session-replay-timeline";
+
+// Shared with the server-side video renderer, which must cut between tabs exactly like the player.
+export { INTER_TAB_GAP_FAST_FORWARD_MULTIPLIER };
 
 export type GapFastForwardState = {
   fromGlobalMs: number,

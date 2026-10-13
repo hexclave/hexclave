@@ -1,3 +1,5 @@
+import { computeReplayGlobalTimeline } from "@hexclave/shared/dist/utils/session-replay-timeline";
+
 export const NULL_TAB_KEY = "__null_tab__";
 
 export type TabKey = string;
@@ -99,23 +101,10 @@ export function limitTabStreams<TChunk>(
 }
 
 export function computeGlobalTimeline(streams: Array<{ firstEventAt: Date, lastEventAt: Date }>) {
-  let globalStartTs = Infinity;
-  let globalEndTs = -Infinity;
-
-  for (const s of streams) {
-    globalStartTs = Math.min(globalStartTs, s.firstEventAt.getTime());
-    globalEndTs = Math.max(globalEndTs, s.lastEventAt.getTime());
-  }
-
-  if (!Number.isFinite(globalStartTs) || !Number.isFinite(globalEndTs) || globalEndTs < globalStartTs) {
-    return { globalStartTs: 0, globalEndTs: 0, globalTotalMs: 0 };
-  }
-
-  return {
-    globalStartTs,
-    globalEndTs,
-    globalTotalMs: globalEndTs - globalStartTs,
-  };
+  return computeReplayGlobalTimeline(streams.map((s) => ({
+    firstEventAtMs: s.firstEventAt.getTime(),
+    lastEventAtMs: s.lastEventAt.getTime(),
+  })));
 }
 
 export function globalOffsetToLocalOffset(globalStartTs: number, streamStartTs: number, globalOffsetMs: number) {
