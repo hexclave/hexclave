@@ -87,4 +87,29 @@ struct SelectedTeamTests {
         ])
         #expect(await none.selectedTeam == nil)
     }
+
+    @Test("Should replace the selected team when the server user is updated")
+    func updateReplacesSelectedTeam() async throws {
+        let app = TestConfig.createServerApp()
+        let user = try await app.createUser(email: TestConfig.uniqueEmail())
+        let firstTeam = try await app.createTeam(
+            displayName: TestConfig.uniqueTeamName(),
+            creatorUserId: user.id
+        )
+        let secondName = TestConfig.uniqueTeamName()
+        let secondTeam = try await app.createTeam(displayName: secondName)
+        try await secondTeam.addUser(id: user.id)
+
+        try await user.update(selectedTeamId: firstTeam.id)
+        #expect((await user.selectedTeam)?.id == firstTeam.id)
+
+        try await user.update(selectedTeamId: secondTeam.id)
+        let selected = await user.selectedTeam
+        #expect(selected?.id == secondTeam.id)
+        #expect(await selected?.displayName == secondName)
+
+        try await secondTeam.delete()
+        try await firstTeam.delete()
+        try await user.delete()
+    }
 }
