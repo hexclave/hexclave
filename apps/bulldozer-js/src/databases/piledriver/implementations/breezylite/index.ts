@@ -14,23 +14,26 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
   }
   mkdirSync(options.path, { recursive: true });
   const db = new DatabaseSync(join(options.path, "breezy.sqlite"));
-  // FULL syncs the WAL at each commit, including heap publication before root publication.
-  db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
-    CREATE TABLE IF NOT EXISTS entries (
-      store TEXT NOT NULL, key BLOB NOT NULL, value BLOB NOT NULL, version INTEGER NOT NULL,
-      PRIMARY KEY (store, key)
-    ) WITHOUT ROWID;
-    CREATE TABLE IF NOT EXISTS sequence (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
-    INSERT OR IGNORE INTO sequence VALUES (1, 0);`);
-  // A column distinguishes legacy raw values without reserving bytes in their payload.
-  db.exec("BEGIN IMMEDIATE");
   try {
-    if (!db.prepare("PRAGMA table_info(entries)").all().some(column => column.name === "codec")) {
-      db.exec("ALTER TABLE entries ADD COLUMN codec INTEGER NOT NULL DEFAULT 0");
+    const columns = db.prepare("PRAGMA table_info(entries)").all();
+    if (columns.length > 0 && (
+      columns.find(column => column.name === "store")?.type !== "INTEGER"
+      || !columns.some(column => column.name === "codec")
+      || db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='store_names'").get() === undefined
+    )) {
+      throw new Error("Unsupported older Breezylite PoC format; use a fresh SQLite directory (no migration is provided)");
     }
-    db.exec("COMMIT");
+    db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+      BEGIN IMMEDIATE;
+      CREATE TABLE IF NOT EXISTS store_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+      CREATE TABLE IF NOT EXISTS entries (
+        store INTEGER NOT NULL, key BLOB NOT NULL, value BLOB NOT NULL, version INTEGER NOT NULL,
+        codec INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (store, key)
+      ) WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS sequence (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
+      INSERT OR IGNORE INTO sequence VALUES (1, 0);
+      COMMIT;`);
   } catch (error) {
-    db.exec("ROLLBACK");
     db.close();
     throw error;
   }
@@ -40,6 +43,9 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
     throw new Error(`Unsupported Breezylite value codec: ${String(codec)}`);
   };
   const select = db.prepare("SELECT value, version, codec FROM entries WHERE store = ? AND key = ?");
+  const exists = db.prepare("SELECT 1 FROM entries WHERE store = ? AND key = ?");
+  const findStore = db.prepare("SELECT id FROM store_names WHERE name = ?");
+  const createStore = db.prepare("INSERT INTO store_names(name) VALUES (?) ON CONFLICT(name) DO NOTHING");
   const put = db.prepare("INSERT INTO entries (store, key, value, version, codec) VALUES (?, ?, ?, ?, ?) ON CONFLICT(store, key) DO UPDATE SET value=excluded.value, version=excluded.version, codec=excluded.codec");
   const remove = db.prepare("DELETE FROM entries WHERE store = ? AND key = ?");
   const range = db.prepare("SELECT key, value, codec FROM entries WHERE store = ? ORDER BY key LIMIT ?");
@@ -57,37 +63,46 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
   };
   return {
     backend: "piledriver-breezylite",
-    openStore: store => ({
-      get(key) { return this.getEntry(key)?.value; },
-      getEntry(key) {
-        const row = select.get(store, key);
-        if (row === undefined) return undefined;
-        if (!(row.value instanceof Uint8Array) || typeof row.version !== "number") throw new Error("Invalid SQLite entry");
-        return { value: decode(row.value, row.codec), version: row.version };
-      },
-      doesExist(key) { return select.get(store, key) !== undefined; },
-      put(key, value, version) {
-        requireWrite();
-        // Skip tiny values and retain raw bytes whenever compression would increase size.
-        const compressed = options.compression !== false && value.length >= 256 ? deflateRawSync(value, { level: 1 }) : undefined;
-        const useCompressed = compressed !== undefined && compressed.length < value.length;
-        put.run(store, key, useCompressed ? compressed : value, version, useCompressed ? 1 : 0);
-        return Promise.resolve(true);
-      },
-      remove(key) {
-        requireWrite();
-        return Promise.resolve(Number(remove.run(store, key).changes) > 0);
-      },
-      *getRange(options = {}) {
-        const rows = options.end === undefined
-          ? range.iterate(store, options.limit ?? -1)
-          : rangeEnd.iterate(store, options.end, options.limit ?? -1);
-        for (const row of rows) {
-          if (!(row.key instanceof Uint8Array) || !(row.value instanceof Uint8Array)) throw new Error("Invalid SQLite range entry");
-          yield { key: Buffer.from(row.key), value: decode(row.value, row.codec) };
-        }
-      },
-    }),
+    openStore(name) {
+      let row = findStore.get(name);
+      if (row === undefined) {
+        createStore.run(name);
+        row = findStore.get(name);
+      }
+      const store = row?.id;
+      if (typeof store !== "number" || !Number.isSafeInteger(store) || store <= 0) throw new Error("Invalid SQLite store ID");
+      return {
+        get(key) { return this.getEntry(key)?.value; },
+        getEntry(key) {
+          const row = select.get(store, key);
+          if (row === undefined) return undefined;
+          if (!(row.value instanceof Uint8Array) || typeof row.version !== "number") throw new Error("Invalid SQLite entry");
+          return { value: decode(row.value, row.codec), version: row.version };
+        },
+        doesExist(key) { return exists.get(store, key) !== undefined; },
+        put(key, value, version) {
+          requireWrite();
+          // Skip tiny values and retain raw bytes whenever compression would increase size.
+          const compressed = options.compression !== false && value.length >= 256 ? deflateRawSync(value, { level: 1 }) : undefined;
+          const useCompressed = compressed !== undefined && compressed.length < value.length;
+          put.run(store, key, useCompressed ? compressed : value, version, useCompressed ? 1 : 0);
+          return Promise.resolve(true);
+        },
+        remove(key) {
+          requireWrite();
+          return Promise.resolve(Number(remove.run(store, key).changes) > 0);
+        },
+        *getRange(options = {}) {
+          const rows = options.end === undefined
+            ? range.iterate(store, options.limit ?? -1)
+            : rangeEnd.iterate(store, options.end, options.limit ?? -1);
+          for (const row of rows) {
+            if (!(row.key instanceof Uint8Array) || !(row.value instanceof Uint8Array)) throw new Error("Invalid SQLite range entry");
+            yield { key: Buffer.from(row.key), value: decode(row.value, row.codec) };
+          }
+        },
+      };
+    },
     async transaction(action) {
       if (writing) throw new Error("Nested SQLite transactions are unsupported");
       db.exec("BEGIN IMMEDIATE");
