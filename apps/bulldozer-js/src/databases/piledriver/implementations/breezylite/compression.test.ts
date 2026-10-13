@@ -8,18 +8,18 @@ import { openBreezyliteStorage } from "./index.js";
 
 const { DatabaseSync }: typeof import("node:sqlite") = createRequire(import.meta.url)("node:sqlite");
 
-it("migrates raw databases and reads mixed codecs regardless of the write compression setting", async () => {
+it("reads mixed codecs regardless of the write compression setting", async () => {
   const path = mkdtempSync(join(tmpdir(), "breezylite-compression-"));
   const key = Buffer.from("a");
   const repeated = Buffer.alloc(4096, 97);
   const random = randomBytes(4096);
-  const legacy = new DatabaseSync(join(path, "breezy.sqlite"));
-  legacy.exec("CREATE TABLE entries (store TEXT NOT NULL, key BLOB NOT NULL, value BLOB NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(store,key)) WITHOUT ROWID");
-  legacy.prepare("INSERT INTO entries VALUES (?, ?, ?, ?)").run("test", key, repeated, 1);
-  legacy.close();
-  let db = openBreezyliteStorage({ path });
+  let db = openBreezyliteStorage({ path, compression: false });
   try {
     let store = db.openStore("test");
+    await db.transaction(version => store.put(key, repeated, version));
+    await db.close();
+    db = openBreezyliteStorage({ path });
+    store = db.openStore("test");
     expect(store.get(key)).toEqual(repeated);
     const writes: Promise<boolean>[] = [];
     await db.transaction(version => {
@@ -59,7 +59,10 @@ it("rejects unknown codecs and corrupt compressed bytes", async () => {
   try {
     const store = db.openStore("test");
     const key = Buffer.from("a");
-    raw.prepare("INSERT INTO entries VALUES (?, ?, ?, ?, ?)").run("test", key, Buffer.from([255]), 1, 99);
+    const storeId = raw.prepare("SELECT id FROM store_names WHERE name=?").get("test")?.id;
+    raw.prepare("INSERT INTO entries VALUES (?, ?, ?, ?, ?)").run(storeId!, key, Buffer.from([255]), 1, 99);
+    expect(store.doesExist(key)).toBe(true);
+    expect(store.doesExist(Buffer.from("missing"))).toBe(false);
     expect(() => store.get(key)).toThrow("Unsupported Breezylite value codec");
     raw.exec("UPDATE entries SET codec=1");
     expect(() => store.get(key)).toThrow();
