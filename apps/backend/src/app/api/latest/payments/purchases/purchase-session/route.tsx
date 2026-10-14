@@ -45,7 +45,7 @@ export const POST = createSmartRouteHandler({
           exampleValue: 1
         }
       }),
-    }),
+    }).defined(),
   }),
   response: yupObject({
     statusCode: yupNumber().oneOf([200]).defined(),
