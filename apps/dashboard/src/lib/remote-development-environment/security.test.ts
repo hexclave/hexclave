@@ -3,6 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { applyRemoteDevelopmentEnvironmentConfigUpdate, getPendingRemoteDevelopmentEnvironmentBrowserSecretConfirmationCode } from "./manager";
 
 vi.mock("server-only", () => ({}));
 vi.mock("fs", async () => {
@@ -158,7 +159,6 @@ describe("remote development environment security", () => {
       storeRemoteDevelopmentEnvironmentBrowserSecret,
       submitRemoteDevelopmentEnvironmentBrowserSecretConfirmationCode,
     } = await import("./browser-secret");
-    const { getPendingRemoteDevelopmentEnvironmentBrowserSecretConfirmationCode } = await import("./manager");
     const { assertRemoteDevelopmentEnvironmentBrowserRequest } = await import("./security");
 
     const hostPinnedRequest = request({
@@ -206,7 +206,6 @@ describe("remote development environment security", () => {
       storeRemoteDevelopmentEnvironmentBrowserSecret,
       submitRemoteDevelopmentEnvironmentBrowserSecretConfirmationCode,
     } = await import("./browser-secret");
-    const { getPendingRemoteDevelopmentEnvironmentBrowserSecretConfirmationCode } = await import("./manager");
     const { assertRemoteDevelopmentEnvironmentBrowserRequest } = await import("./security");
 
     const hostPinnedRequest = request({
@@ -296,7 +295,6 @@ describe("remote development environment security", () => {
 
   it("rejects config writes without an active session", async () => {
     useTempStateFile();
-    const { applyRemoteDevelopmentEnvironmentConfigUpdate } = await import("./manager");
     await expect(applyRemoteDevelopmentEnvironmentConfigUpdate({
       sessionId: "missing",
       configUpdate: {},
