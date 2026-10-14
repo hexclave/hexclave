@@ -1,5 +1,5 @@
 // Errors that map to HTTP responses. Anything else thrown from a route is a 500 with a
-// generic message (never Fly/R2 error bodies — they can contain org/app identifiers the
+// generic message (never GCP/R2 error bodies — they can contain project/resource identifiers the
 // backend shouldn't relay to end users).
 export class MarshalError extends Error {
   constructor(

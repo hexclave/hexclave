@@ -1,6 +1,7 @@
 import { isUuid } from "@hexclave/shared/dist/utils/uuids";
 import { KnownErrors } from "@hexclave/shared";
-import { it } from "../helpers";
+import { StackServerApp } from "@hexclave/js";
+import { SDK_BASE_URL, it } from "../helpers";
 import { createApp, scaffoldProject } from "./js-helpers";
 
 
@@ -197,4 +198,34 @@ it("should throw a helpful error when destructuring user", async ({ expect }) =>
   }
   const accessServerUser = () => (serverUser as any).user;
   expect(accessServerUser).toThrowError("Hexclave: useUser() already returns the user object. Use `const user = useUser()` (or `const user = await app.getUser()`) instead of destructuring it like `const { user } = ...`.");
+});
+
+it("should not throw from initAnalytics outside the browser when analytics are configured", async ({ expect }) => {
+  const { clientApp, serverApp } = await createApp();
+  expect(clientApp.initAnalytics()).toBeUndefined();
+  expect(serverApp.initAnalytics()).toBeUndefined();
+  // Calling it repeatedly (eg. once per page module) must stay harmless.
+  expect(clientApp.initAnalytics()).toBeUndefined();
+});
+
+it("should throw from initAnalytics when analytics are disabled with the analytics option", async ({ expect }) => {
+  const { clientApp } = await createApp(undefined, { client: { analytics: { enabled: false } } });
+  expect(() => clientApp.initAnalytics()).toThrowErrorMatchingInlineSnapshot(`[Error: initAnalytics() was called, but this Hexclave app will not record analytics because the \`analytics.enabled\` constructor option is set to false. Remove the initAnalytics() call if this is intentional.]`);
+});
+
+it("should throw from initAnalytics when automatic side effects are disabled", async ({ expect }) => {
+  const { clientApp } = await createApp(undefined, { client: { automaticSideEffects: false } });
+  expect(() => clientApp.initAnalytics()).toThrowErrorMatchingInlineSnapshot(`[Error: initAnalytics() was called, but this Hexclave app will not record analytics because the \`automaticSideEffects\` constructor option is set to false, which also disables analytics. Remove the initAnalytics() call if this is intentional.]`);
+});
+
+it("should throw from initAnalytics when the app has no persistent token store", async ({ expect }) => {
+  const { project, secretServerKey } = await createApp();
+  const serverApp = new StackServerApp({
+    baseUrl: SDK_BASE_URL,
+    projectId: project.id,
+    secretServerKey,
+    tokenStore: null,
+    redirectMethod: "none",
+  });
+  expect(() => serverApp.initAnalytics()).toThrowErrorMatchingInlineSnapshot(`[Error: initAnalytics() was called, but this Hexclave app will not record analytics because the \`tokenStore\` constructor option is null; analytics require a persistent token store such as "cookie" (or "nextjs-cookie" in Next.js). Remove the initAnalytics() call if this is intentional.]`);
 });

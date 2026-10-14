@@ -1421,6 +1421,95 @@ describe.sequential('External DB Sync - Basic Tests', () => {
 
   /**
    * What it does:
+   * - Invites users to two teams in the same project, renames only one team, and checks that the
+   *   other team's invitation was not re-sequenced.
+   *
+   * Why it matters:
+   * - The team -> invitation cascade must only touch invitations of teams that actually changed;
+   *   otherwise one team rename re-syncs every invitation in the tenancy.
+   */
+  test('TeamInvitation cascade only re-sequences invitations of the renamed team (Postgres)', async () => {
+    const dbName = 'team_invitation_cascade_scope_test';
+    const connectionString = await dbManager.createDatabase(dbName);
+
+    await createProjectWithExternalDb({
+      main: {
+        type: 'postgres',
+        connectionString,
+      }
+    }, { display_name: 'Invitation Cascade Scope Test Project' });
+
+    const client = dbManager.getClient(dbName);
+    const renamedTeamEmail = `cascade-renamed-${randomUUID()}@example.com`;
+    const untouchedTeamEmail = `cascade-untouched-${randomUUID()}@example.com`;
+
+    const createTeam = async (displayName: string) => {
+      const response = await niceBackendFetch('/api/v1/teams', {
+        accessType: 'admin',
+        method: 'POST',
+        body: { display_name: displayName },
+      });
+      expect(response.status).toBe(201);
+      const teamId: string = response.body.id;
+      return teamId;
+    };
+    const renamedTeamId = await createTeam('Cascade Team To Rename');
+    const untouchedTeamId = await createTeam('Cascade Team Untouched');
+
+    for (const [teamId, email] of [[renamedTeamId, renamedTeamEmail], [untouchedTeamId, untouchedTeamEmail]]) {
+      const inviteResponse = await niceBackendFetch('/api/v1/team-invitations/send-code', {
+        accessType: 'admin',
+        method: 'POST',
+        body: { team_id: teamId, email, callback_url: 'http://localhost:12345/callback' },
+      });
+      expect(inviteResponse.status).toBe(200);
+    }
+    await waitForSyncedTeamInvitation(client, renamedTeamEmail);
+    await waitForSyncedTeamInvitation(client, untouchedTeamEmail);
+
+    const getUntouchedInvitationSequenceState = async () => await withInternalDatabase(async (internalClient) => {
+      const result = await internalClient.query<{ sequenceId: string | null, shouldUpdateSequenceId: boolean }>(
+        `SELECT "sequenceId"::text AS "sequenceId", "shouldUpdateSequenceId"
+         FROM "VerificationCode"
+         WHERE "type" = 'TEAM_INVITATION' AND "data"->>'team_id' = $1`,
+        [untouchedTeamId],
+      );
+      expect(result.rows.length).toBe(1);
+      return result.rows[0];
+    });
+    const untouchedBefore = await getUntouchedInvitationSequenceState();
+    expect(untouchedBefore.sequenceId).not.toBeNull();
+    expect(untouchedBefore.shouldUpdateSequenceId).toBe(false);
+
+    const updateTeamResponse = await niceBackendFetch(`/api/v1/teams/${renamedTeamId}`, {
+      accessType: 'admin',
+      method: 'PATCH',
+      body: { display_name: 'Cascade Team Renamed' },
+    });
+    expect(updateTeamResponse.status).toBe(200);
+
+    await waitForCondition(
+      async () => {
+        const result = await client.query(
+          `SELECT "team_display_name" FROM "team_invitations" WHERE "recipient_email" = $1`,
+          [renamedTeamEmail],
+        );
+        return result.rows.length === 1 && result.rows[0].team_display_name === 'Cascade Team Renamed';
+      },
+      {
+        timeoutMs: 180_000,
+        intervalMs: 500,
+        description: `team invitation for ${renamedTeamEmail} to reflect renamed team`,
+      },
+    );
+
+    // The cascade runs in the same statement that sequenced the renamed team, so by the time the
+    // renamed team's invitation has synced, any (incorrect) cascade onto the other team would be visible.
+    expect(await getUntouchedInvitationSequenceState()).toEqual(untouchedBefore);
+  }, TEST_TIMEOUT);
+
+  /**
+   * What it does:
    * - Sends a team invitation, queries ClickHouse analytics API to verify.
    */
   test('TeamInvitation sync (ClickHouse)', async ({ expect }) => {

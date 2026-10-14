@@ -1,0 +1,50 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, sans-serif;
+  background: #070b12;
+  color: #f4f7fb;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: radial-gradient(circle at 15% 10%, #0d4b5c55, transparent 38%), radial-gradient(circle at 85% 90%, #39265e44, transparent 36%), #070b12;
+}
+.setup-card {
+  width: min(100%, 35rem);
+  padding: clamp(1.75rem, 5vw, 3rem);
+  border: 1px solid #243244;
+  border-radius: 1.5rem;
+  background: #0c121dcc;
+  box-shadow: 0 1.5rem 5rem #0008;
+}
+.eyebrow { color: #59d8eb; font-size: .78rem; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+h1 { margin: .55rem 0 1rem; font-size: clamp(2rem, 8vw, 3.6rem); line-height: 1; }
+.copy, .status { color: #aab5c5; line-height: 1.6; }
+form { display: grid; gap: 1rem; margin-top: 1.75rem; }
+label { display: grid; gap: .5rem; color: #cbd3df; font-weight: 650; }
+select, input, button {
+  width: 100%;
+  min-height: 3rem;
+  border: 1px solid #2a3a50;
+  border-radius: .75rem;
+  padding: .7rem .85rem;
+  background: #111a28;
+  color: #f4f7fb;
+  font: inherit;
+}
+.checkbox { display: flex; align-items: center; gap: .75rem; }
+.checkbox input { width: 1.1rem; min-height: auto; }
+button { border-color: #36c7dc; background: #36c7dc; color: #041116; font-weight: 800; cursor: pointer; }
+button:disabled { cursor: wait; opacity: .55; }
+.credentials { display: grid; gap: 1rem; margin: 2rem 0; }
+.credentials div { padding: 1rem 1.25rem; border: 1px solid #26364a; border-radius: .9rem; background: #111a28; }
+.credentials dt { color: #8998ab; font-size: .78rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.credentials dd { margin: .35rem 0 0; font-size: clamp(1.3rem, 4vw, 2rem); font-weight: 750; word-break: break-all; }
+.display-page .setup-card { width: min(88vw, 60rem); }
+.display-page .copy, .display-page .status { font-size: clamp(1rem, 2vw, 1.45rem); }

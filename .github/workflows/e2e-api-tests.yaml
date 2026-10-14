@@ -132,8 +132,8 @@ jobs:
       - name: Wait on ClickHouse
         run: pnpm exec wait-on http://localhost:8136/ping
 
-      # The deployments e2e tests hit s3mock and fly-mock directly; marshal's /health does
-      # not touch either, so wait on them explicitly (fly-mock is a build:-from-context image).
+      # The deployments e2e tests hit s3mock, fly-mock and gcp-mock directly; marshal's /health
+      # does not touch any of them, so wait on them explicitly (both mocks are build:-from-context images).
       - name: Wait on s3mock
         run: pnpm exec wait-on http://localhost:8121/
 
@@ -145,6 +145,9 @@ jobs:
 
       - name: Publish SpacetimeDB module
         run: pnpm -C apps/internal-tool run spacetime:publish:local
+
+      - name: Wait on gcp-mock
+        run: pnpm exec wait-on http://localhost:8149/health
 
       - name: Initialize database
         run: pnpm run db:init
@@ -174,12 +177,19 @@ jobs:
       - name: Backfill Bulldozer from Postgres
         run: pnpm run db:backfill-bulldozer-from-prisma
 
-      # Marshal (the deployments runtime) talks to the fly-mock + s3mock
+      # Marshal (the deployments runtime) talks to the fly-mock, gcp-mock + s3mock
       # containers; the deployments e2e tests drive it through the backend.
       - name: Start marshal in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7
         with:
-          run: NODE_ENV=test pnpm run start:marshal &
+          run: |
+            marshal_log="$RUNNER_TEMP/hexclave-marshal.untracked.log"
+            (
+              set +e
+              # Keep service output correlatable with the surrounding GitHub Actions logs.
+              NODE_ENV=test pnpm run start:marshal 2>&1 | TZ=UTC awk '{ print strftime("%Y-%m-%dT%H:%M:%SZ"), $0; fflush() }' >"$marshal_log"
+              echo "${PIPESTATUS[0]}" > "$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt"
+            ) &
           wait-on: |
             http://localhost:8147/health
           tail: true
@@ -446,12 +456,30 @@ jobs:
           fi
           tail -n 2000 "$RUNNER_TEMP/hexclave-bulldozer.untracked.log"
 
+      - name: Print marshal diagnostics
+        if: ${{ failure() }}
+        run: |
+          if [[ -f "$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt" ]]; then
+            echo "Marshal command exited with code $(<"$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt")"
+          else
+            echo "Marshal command is still running; a child process may have exited"
+          fi
+          tail -n 2000 "$RUNNER_TEMP/hexclave-marshal.untracked.log"
+
       - name: Upload bulldozer-js logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-api-bulldozer
           path: ${{ runner.temp }}/hexclave-bulldozer.untracked.log
+          if-no-files-found: warn
+
+      - name: Upload marshal logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-api-marshal
+          path: ${{ runner.temp }}/hexclave-marshal.untracked.log
           if-no-files-found: warn
 
       - name: Capture bulldozer-js diagnostics

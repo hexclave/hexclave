@@ -44,15 +44,46 @@ To use analytics in your project:
 
 1. Enable Analytics in your Hexclave dashboard (**Apps -> Analytics**)
 2. Initialize Hexclave on your frontend with `HexclaveClientApp`/`HexclaveProvider` and a persistent `tokenStore` (e.g. `"cookie"`, or `"nextjs-cookie"` in Next.js)
-3. Sign in with a real user session
-4. Open the app and navigate/click around
-5. Check **Analytics -> Tables** to confirm events are arriving
+3. Call `hexclaveClientApp.initAnalytics()` on every page you want to track (see [Tracking every page](#tracking-every-page))
+4. Sign in with a real user session
+5. Open the app and navigate/click around
+6. Check **Analytics -> Tables** to confirm events are arriving
 
 SDK analytics capture and session replay recording are **on by default** once the Analytics app is enabled — you do not need to set `analytics.enabled` or `analytics.replays.enabled` unless you want to opt out (pass `analytics: { enabled: false }` or `analytics: { replays: { enabled: false } }`).
 
 After setup, Hexclave automatically captures client-side `$page-view` and `$click` events.
 
 See [Replays & Clickmaps](./replays-and-clickmaps) to tune replay privacy or opt out.
+
+### Tracking every page
+
+The client app only records analytics on pages where it is loaded in the browser. If your app only imports `hexclaveClientApp` on pages that use authentication, every other page goes untracked.
+
+To avoid this, call `initAnalytics()` at the top level of a client-side module that every page loads, such as your root layout or entry file:
+
+```ts
+import { hexclaveClientApp } from "./hexclave/client";
+
+hexclaveClientApp.initAnalytics();
+```
+
+In Next.js, the root layout is a server component, so do the call in a client component that you render from `app/layout.tsx`:
+
+```tsx src/components/hexclave-analytics.tsx
+"use client";
+
+import { hexclaveClientApp } from "@/hexclave/client";
+
+hexclaveClientApp.initAnalytics();
+
+export function HexclaveAnalytics() {
+  return null;
+}
+```
+
+`initAnalytics()` doesn't start anything itself, because capture already starts when the client app is created. Calling it makes sure that the module that creates the client app is loaded on that page.
+
+To catch setup mistakes early, `initAnalytics()` throws if your client app is configured so that it never records analytics: when you pass `analytics: { enabled: false }` or `automaticSideEffects: false`, or when `tokenStore` is `null`. If the Analytics app is not enabled on your project, the SDK logs an error as soon as the first upload is rejected. If you've turned off analytics on purpose, remove the `initAnalytics()` call.
 
 ## Tables
 

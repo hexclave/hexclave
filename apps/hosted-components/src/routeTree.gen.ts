@@ -9,18 +9,18 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as EmailVerificationDemoRouteImport } from './routes/email-verification-demo'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as EmailVerificationDemoRouteImport } from './routes/email-verification-demo'
 import { Route as HandlerSplatRouteImport } from './routes/handler/$'
 
-const EmailVerificationDemoRoute = EmailVerificationDemoRouteImport.update({
-  id: '/email-verification-demo',
-  path: '/email-verification-demo',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EmailVerificationDemoRoute = EmailVerificationDemoRouteImport.update({
+  id: '/email-verification-demo',
+  path: '/email-verification-demo',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HandlerSplatRoute = HandlerSplatRouteImport.update({
@@ -61,18 +61,18 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/email-verification-demo': {
-      id: '/email-verification-demo'
-      path: '/email-verification-demo'
-      fullPath: '/email-verification-demo'
-      preLoaderRoute: typeof EmailVerificationDemoRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/': {
       id: '/'
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email-verification-demo': {
+      id: '/email-verification-demo'
+      path: '/email-verification-demo'
+      fullPath: '/email-verification-demo'
+      preLoaderRoute: typeof EmailVerificationDemoRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/handler/$': {

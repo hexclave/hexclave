@@ -1,6 +1,7 @@
 import { createClient, type ClickHouseClient, type ClickHouseSettings } from "@clickhouse/client";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
-import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { Result } from "@hexclave/shared/dist/utils/results";
 
 // Re-exported so other modules can hold a typed ClickHouse client (e.g. to
 // thread a single warmed client through helpers) without taking a direct
@@ -18,6 +19,7 @@ export function createClickhouseClient(
   authType: "admin" | "external",
   database?: string,
   clickhouse_settings?: ClickHouseSettings,
+  options: { maxOpenConnections?: number } = {},
 ) {
   return createClient({
     url: getEnvVariable("STACK_CLICKHOUSE_URL"),
@@ -28,11 +30,92 @@ export function createClickhouseClient(
     database,
     request_timeout: 10 * 60 * 1000, // 10 minutes
     clickhouse_settings,
+    max_open_connections: options.maxOpenConnections,
   });
+}
+
+const PRE_CONNECTION_ERROR_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EAI_FAIL"]);
+// Node raises this (with code ECONNRESET) when the peer drops the connection mid TLS handshake.
+// The HTTP request is only written after the handshake completes, so ClickHouse never saw it.
+const TLS_HANDSHAKE_DISCONNECT_MESSAGE = "Client network socket disconnected before secure TLS connection was established";
+
+/**
+ * Whether a ClickHouse call failed before its request could have reached the server, which makes
+ * it safe to retry even for non-idempotent statements like inserts. A plain ECONNRESET (e.g. a
+ * reused keep-alive socket reset mid-request) is deliberately not included: the server may already
+ * have received and applied the request.
+ */
+export function isClickhousePreConnectionError(error: unknown): boolean {
+  const visited = new Set<unknown>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !visited.has(current)) {
+    visited.add(current);
+    const code = Reflect.get(current, "code");
+    if (typeof code === "string" && PRE_CONNECTION_ERROR_CODES.has(code)) return true;
+    if (current instanceof Error && code === "ECONNRESET" && current.message.startsWith(TLS_HANDSHAKE_DISCONNECT_MESSAGE)) return true;
+    current = Reflect.get(current, "cause");
+  }
+  return false;
+}
+
+/**
+ * Runs a ClickHouse call, retrying up to `retries` times when it fails before the request reached
+ * the server (see isClickhousePreConnectionError). Any other error is rethrown immediately.
+ */
+export async function withClickhousePreConnectionRetries<T>(
+  fn: () => Promise<T>,
+  { retries = 2, exponentialDelayBase = 250 }: { retries?: number, exponentialDelayBase?: number } = {},
+): Promise<T> {
+  const result = await Result.retry(async () => {
+    const attempt = await Result.fromPromise(fn());
+    if (attempt.status === "error" && !isClickhousePreConnectionError(attempt.error)) {
+      throw attempt.error;
+    }
+    return attempt;
+  }, retries + 1, { exponentialDelayBase });
+  if (result.status === "error") {
+    // Rethrow the last attempt's own error rather than Result.retry's RetryError wrapper, so callers
+    // and alerting still see the original ClickHouse error (code, message) once retries run out.
+    throw result.error.errors.at(-1) ?? throwErr("Result.retry failed without recording an attempt error; retries must be >= 0");
+  }
+  return result.data;
 }
 
 export function getClickhouseAdminClient() {
   return createClickhouseClient("admin", getEnvVariable("STACK_CLICKHOUSE_DATABASE", "default"));
+}
+
+// Each sync-engine call queries ClickHouse sequentially, so with ~40 concurrent
+// requests per instance this caps sockets near the actual concurrency instead of
+// the client's default of 10, which would queue requests inside the client.
+const SHARED_ADMIN_CLIENT_MAX_OPEN_CONNECTIONS = 64;
+let sharedClickhouseAdminClient: ClickHouseClient | undefined;
+
+/**
+ * Process-wide admin client for hot paths that run on nearly every request (e.g. the
+ * external DB sync engine). A fresh client per call pays a new TCP + TLS handshake
+ * for its first query; sharing one lets keep-alive sockets be reused across calls.
+ * Socket reuse is no riskier than before: a single sync already reused sockets
+ * across its sequential queries, and the client's default idle_socket_ttl (2.5s)
+ * drops idle sockets before the server's keep-alive timeout closes them.
+ *
+ * Callers must NOT close this client; graceful shutdown does via
+ * closeSharedClickhouseClients().
+ */
+export function getSharedClickhouseAdminClient(): ClickHouseClient {
+  sharedClickhouseAdminClient ??= createClickhouseClient(
+    "admin",
+    getEnvVariable("STACK_CLICKHOUSE_DATABASE", "default"),
+    undefined,
+    { maxOpenConnections: SHARED_ADMIN_CLIENT_MAX_OPEN_CONNECTIONS },
+  );
+  return sharedClickhouseAdminClient;
+}
+
+export async function closeSharedClickhouseClients(): Promise<void> {
+  const client = sharedClickhouseAdminClient;
+  sharedClickhouseAdminClient = undefined;
+  await client?.close();
 }
 
 const BOUNDED_ANALYTICS_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
@@ -174,3 +257,111 @@ export const getQueryTimingStatsForProject = async (
 
   return null;
 };
+
+import.meta.vitest?.describe("ClickHouse pre-connection retries", (test) => {
+  // A TCP server that accepts and immediately closes every connection, so a TLS client sees the
+  // same "disconnected before secure TLS connection was established" error as in production.
+  async function startClosingServer() {
+    const net = await import("node:net");
+    let connections = 0;
+    const sockets = new Set<import("node:net").Socket>();
+    const server = net.createServer((socket) => {
+      connections++;
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.end();
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+          reject(new Error(`Expected a TCP address, got ${JSON.stringify(address)}`));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+    return {
+      port,
+      get connections() { return connections; },
+      // The client never finishes closing its half of the dropped sockets, so server.close() would
+      // wait on them forever.
+      close: () => new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      }),
+    };
+  }
+
+  function insertVia(port: number) {
+    const client = createClient({ url: `https://127.0.0.1:${port}`, username: "test", password: "test" });
+    return client.insert({ table: "t", values: [{ a: 1 }], format: "JSONEachRow" });
+  }
+
+  test("classifies the real client's TLS handshake disconnect as pre-connection", async ({ expect }) => {
+    const server = await startClosingServer();
+    try {
+      const result = await Result.fromPromise(insertVia(server.port));
+      if (result.status === "ok") throw new Error("Expected the insert to fail against a closing server");
+      expect(result.error).toMatchObject({ code: "ECONNRESET" });
+      expect(isClickhousePreConnectionError(result.error)).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("retries a TLS handshake disconnect twice before giving up", async ({ expect }) => {
+    const server = await startClosingServer();
+    try {
+      const result = await Result.fromPromise(withClickhousePreConnectionRetries(() => insertVia(server.port), { exponentialDelayBase: 0 }));
+      if (result.status === "ok") throw new Error("Expected the insert to fail against a closing server");
+      expect(server.connections).toBe(3);
+      // Callers see the original connect error, not Result.retry's RetryError wrapper.
+      expect(result.error).toMatchObject({ code: "ECONNRESET" });
+      expect(result.error).not.toBeInstanceOf(AggregateError);
+      expect(isClickhousePreConnectionError(result.error)).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("returns the result once a retry succeeds", async ({ expect }) => {
+    let calls = 0;
+    const value = await withClickhousePreConnectionRetries(async () => {
+      calls++;
+      if (calls < 3) throw Object.assign(new Error("getaddrinfo EAI_AGAIN"), { code: "EAI_AGAIN" });
+      return "inserted";
+    }, { exponentialDelayBase: 0 });
+    expect(value).toBe("inserted");
+    expect(calls).toBe(3);
+  });
+
+  test("rethrows the last attempt's error once retries are exhausted", async ({ expect }) => {
+    const attemptErrors = [1, 2, 3].map((i) => Object.assign(new Error(`connect ECONNREFUSED (attempt ${i})`), { code: "ECONNREFUSED" }));
+    let calls = 0;
+    const result = await Result.fromPromise(withClickhousePreConnectionRetries(async () => {
+      throw attemptErrors[calls++];
+    }, { exponentialDelayBase: 0 }));
+    if (result.status === "ok") throw new Error("Expected every attempt to fail");
+    expect(result.error).toBe(attemptErrors[2]);
+    expect(calls).toBe(3);
+  });
+
+  test("does not retry errors that may have happened after the request was sent", async ({ expect }) => {
+    let calls = 0;
+    const midRequestReset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    const result = await Result.fromPromise(withClickhousePreConnectionRetries(async () => {
+      calls++;
+      throw midRequestReset;
+    }, { exponentialDelayBase: 0 }));
+    expect(result).toEqual({ status: "error", error: midRequestReset });
+    expect(calls).toBe(1);
+  });
+
+  test("finds pre-connection errors in the cause chain", ({ expect }) => {
+    const wrapped = new Error("insert failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+    expect(isClickhousePreConnectionError(wrapped)).toBe(true);
+    expect(isClickhousePreConnectionError(new Error("Code: 62. Syntax error"))).toBe(false);
+  });
+});

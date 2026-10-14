@@ -12,6 +12,7 @@ import { createBackendRequest } from "./backend-request";
 import { compressResponse } from "./compression";
 import { withVercelCronMonitor } from "./cron-monitor";
 import { handleUncaughtBackendError } from "./error-handler";
+import { instanceRecycler } from "./instance-recycling";
 import { getCorsHeadersInit, runRequestPipeline } from "./middleware";
 import { createRequestCompletionLog } from "./request-log";
 import { MalformedRouteParamError, matchRoute, type RouteMethods } from "./registry";
@@ -32,6 +33,7 @@ const staticRequestLogPaths = new Set([
   "/dev-stats",
   "/health/error-handler-debug",
   "/health/error-handler-debug/endpoint",
+  "/health/ready",
 ]);
 const shouldLogDevelopmentRequests = getNodeEnvironment() === "development";
 
@@ -83,7 +85,8 @@ export const app = new Elysia({
   .get("/health/error-handler-debug/endpoint", () => {
     throw new Error("Server observability debug error thrown successfully!");
   })
-  .all("/*", async ({ request }) => await dispatch(request), {
+  .get("/health/ready", () => instanceRecycler.createReadinessResponse())
+  .all("/*", async ({ request }) => await instanceRecycler.trackRequest(async () => await dispatch(request)), {
     parse: "none",
   });
 
@@ -438,27 +441,27 @@ import.meta.vitest?.test("uncaught /api/ dispatch errors use the global sanitize
   vi.stubEnv("NODE_ENV", "production");
   const request = new Request("http://localhost/api/v1");
   const originalHeaders = request.headers;
-  let headersReadCount = 0;
-  let headerReadThrew = false;
+  let headersIteratedCount = 0;
   // Simulate an unexpected internal failure escaping dispatch for an /api/ request.
-  // This depends on runRequestPipeline reading headers first; after the first throw,
-  // return them because response compression reads request headers after the error handler.
-  Object.defineProperty(request, "headers", {
-    get() {
-      headersReadCount++;
-      if (headersReadCount === 1) {
-        headerReadThrew = true;
+  // The onRequest hook and response compression only call `headers.get(...)`, whereas
+  // runRequestPipeline iterates the headers (to merge header aliases), so making the
+  // first iteration throw fails inside dispatch specifically while leaving the hooks
+  // that run before and after the error handler intact.
+  const originalIterator = originalHeaders[Symbol.iterator].bind(originalHeaders);
+  Object.defineProperty(originalHeaders, Symbol.iterator, {
+    value: function* () {
+      headersIteratedCount++;
+      if (headersIteratedCount === 1) {
         throw new Error("unexpected request header access");
       }
-      return originalHeaders;
+      yield* originalIterator();
     },
   });
 
   try {
     const response = await app.handle(request);
 
-    expect(headerReadThrew).toBe(true);
-    expect(headersReadCount).toBeGreaterThan(1);
+    expect(headersIteratedCount).toBe(1);
     expect({
       status: response.status,
       body: await response.text(),

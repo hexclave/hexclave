@@ -1,0 +1,1 @@
+hexclave-support ALL=(root) NOPASSWD: /usr/lib/hexclave-tv-box/support *

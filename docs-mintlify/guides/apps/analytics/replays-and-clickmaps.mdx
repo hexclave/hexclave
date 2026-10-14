@@ -16,8 +16,9 @@ Replays and clickmaps both depend on the SDK's analytics capture, which runs whe
 1. The **Analytics** app is enabled in your dashboard (**Apps -> Analytics**). The Session Replays and Clickmaps sub-apps inherit this - you don't enable them separately.
 2. Your client app uses a **persistent `tokenStore`** (e.g. `"cookie"`, or `"nextjs-cookie"` in Next.js). Without one, the SDK does not start capture.
 3. The visitor has a Hexclave **session with a refresh token** (a signed-in user, or an anonymous session created by the SDK). If there is no refresh token, the client may still attempt to send events, but the server will reject them and nothing is stored.
+4. The page loads your client app in the browser. Call `hexclaveClientApp.initAnalytics()` on every page you want to track (see [Tracking every page](./overview#tracking-every-page)).
 
-When those hold, the SDK captures `$page-view` and `$click` events and (for replays) records the session - no manual setup required.
+When those hold, the SDK captures `$page-view` and `$click` events and (for replays) records the session.
 
 ## Session Replays
 

@@ -80,7 +80,10 @@ export class RefreshToken {
  */
 export class InternalSession {
   /**
-  * Each session has a session key that depends on the tokens inside. If the session has a refresh token, the session key depends only on the refresh token. If the session does not have a refresh token, the session key depends only on the access token.
+   * Each session has a session key that depends on the tokens inside unless an explicit sessionKey is provided.
+   * Explicit keys override token-derived keys for delegated external sessions. If the session has a refresh token,
+   * the session key depends only on the refresh token. If the session does not have a refresh token, the session key
+   * depends only on the access token.
   *
   * Multiple Session objects may have the same session key, which implies that they represent the same session by the same user. Furthermore, a session's key never changes over the lifetime of a session object.
   *
@@ -108,16 +111,18 @@ export class InternalSession {
 
   constructor(private readonly _options: {
     refreshAccessTokenCallback(refreshToken: RefreshToken): Promise<AccessToken | null>,
+    refreshAccessTokenWithoutRefreshTokenCallback?: () => Promise<AccessToken | null>,
     refreshToken: string | null,
     accessToken?: string | null,
+    sessionKey?: string,
   }) {
     this._accessToken = new Store(_options.accessToken ? AccessToken.createIfValid(_options.accessToken) : null);
     this._refreshToken = _options.refreshToken ? new RefreshToken(_options.refreshToken) : null;
-    if (_options.accessToken === null && _options.refreshToken === null) {
+    if (_options.accessToken === null && _options.refreshToken === null && _options.refreshAccessTokenWithoutRefreshTokenCallback == null) {
       // this session is already invalid
       this._knownToBeInvalid.set(true);
     }
-    this.sessionKey = InternalSession.calculateSessionKey({ accessToken: _options.accessToken ?? null, refreshToken: _options.refreshToken });
+    this.sessionKey = _options.sessionKey ?? InternalSession.calculateSessionKey({ accessToken: _options.accessToken ?? null, refreshToken: _options.refreshToken });
   }
 
   static calculateSessionKey(ofTokens: { refreshToken: string | null, accessToken?: string | null }): string {
@@ -237,7 +242,8 @@ export class InternalSession {
     if (!newAccessToken) return;
     // Self-enforce the "a session never changes which session it belongs to" invariant: only install a token pair
     // that maps to this same session key (validated against the incoming pair, not this session's existing tokens).
-    if (InternalSession.calculateSessionKey(tokens) !== this.sessionKey) return;
+    // Explicit-key sessions skip this in-class session-key check; their caller owns that invariant.
+    if (this._options.sessionKey == null && InternalSession.calculateSessionKey(tokens) !== this.sessionKey) return;
     if (this._accessToken.get()?.token === newAccessToken.token) return;
     this._accessToken.set(newAccessToken);
   }
@@ -261,13 +267,14 @@ export class InternalSession {
    * This is particularly useful when the data associated with the access token may have changed for example due to an
    * update to the user's profile.
    *
-   * The current implementation marks the access token as expired if and only if a refresh token is available (regardless of
-   * whether the refresh token is actually valid or not), although this is not a guarantee and subject to change.
+   * The current implementation marks the access token as expired if and only if a refresh token or a
+   * refreshAccessTokenWithoutRefreshTokenCallback is available (regardless of whether it is actually valid),
+   * although this is not a guarantee and subject to change.
    *
    * If you need a stronger guarantee of revoking an access token, use markAccessTokenExpired instead.
    */
   suggestAccessTokenExpired(): void {
-    if (this._refreshToken) {
+    if (this._refreshToken || this._options.refreshAccessTokenWithoutRefreshTokenCallback != null) {
       this.markAccessTokenExpired();
     }
   }
@@ -317,34 +324,35 @@ export class InternalSession {
    * @returns A newly fetched access token (never read from cache), or null if the session either does not represent a user or the session is invalid.
    */
   private async _getNewlyFetchedAccessToken(): Promise<AccessToken | null> {
-    if (!this._refreshToken) return null;
+    if (!this._refreshToken && this._options.refreshAccessTokenWithoutRefreshTokenCallback == null) return null;
     if (this._knownToBeInvalid.get()) return null;
 
     if (!this._refreshPromise) {
-      this._refreshAndSetRefreshPromise(this._refreshToken);
+      this._refreshAndSetRefreshPromise();
     }
     return await this._refreshPromise;
   }
 
-  private _refreshAndSetRefreshPromise(refreshToken: RefreshToken) {
-    let refreshPromise: Promise<AccessToken | null> = this._options.refreshAccessTokenCallback(refreshToken)
-      .then((accessToken) => {
-        if (refreshPromise === this._refreshPromise) {
-          this._refreshPromise = null;
-          this._accessToken.set(accessToken);
-          if (!accessToken) {
-            this.markInvalid();
-          }
+  private _refreshAndSetRefreshPromise() {
+    const refreshToken = this._refreshToken;
+    const refresh = refreshToken == null
+      ? this._options.refreshAccessTokenWithoutRefreshTokenCallback ?? throwErr("Session has no way to refresh its access token")
+      : async () => await this._options.refreshAccessTokenCallback(refreshToken);
+    let refreshPromise: Promise<AccessToken | null> = refresh().then((accessToken) => {
+      if (refreshPromise === this._refreshPromise) {
+        this._refreshPromise = null;
+        this._accessToken.set(accessToken);
+        if (!accessToken) {
+          this.markInvalid();
         }
-        return accessToken;
-      })
-      .finally(() => {
-        // A failed refresh must not poison this session permanently. Fulfilled refreshes clear the promise above
-        // before notifying listeners, while this also covers rejection without changing that listener ordering.
-        if (refreshPromise === this._refreshPromise) {
-          this._refreshPromise = null;
-        }
-      });
+      }
+      return accessToken;
+    }).finally(() => {
+      // A failed refresh must not poison this session permanently.
+      if (refreshPromise === this._refreshPromise) {
+        this._refreshPromise = null;
+      }
+    });
     this._refreshPromise = refreshPromise;
   }
 }

@@ -316,10 +316,24 @@ export const ALL_APPS_FRONTEND = {
     icon: TelevisionSimpleIcon,
     href: "tv-mode",
     navigationItems: [
-      { displayName: "TV mode", href: "." },
+      {
+        displayName: "Profiles",
+        href: ".",
+        matchPath: (relativePart) => /^\/projects\/[^/]+\/tv-mode(?:\/profiles(?:\/.*)?)?\/?$/.test(new URL(relativePart, DUMMY_ORIGIN).pathname),
+      },
+      {
+        displayName: "Displays",
+        href: "displays",
+        matchPath: (relativePart) => /^\/projects\/[^/]+\/tv-mode\/displays\/?$/.test(new URL(relativePart, DUMMY_ORIGIN).pathname),
+      },
     ],
     screenshots: [],
-    storeDescription: <></>,
+    storeDescription: (
+      <>
+        <p>TV Mode turns your project activity into an ambient, full-screen company pulse.</p>
+        <p>Build named presentation profiles, rotate through office-safe metrics, and preview incident or celebration takeovers.</p>
+      </>
+    ),
   },
   "launch-checklist": {
     icon: RocketIcon,
@@ -403,6 +417,48 @@ export const ALL_APPS_FRONTEND = {
         <p>TanStack Start integration adds Hexclave to full-stack React apps built with TanStack Router and Vite.</p>
         <p>Install the alpha `@hexclave/tanstack-start` package, wire the Stack provider into your root route, and mount the built-in auth handler pages under your app origin.</p>
         <p>The dashboard sidebar entry opens the integration docs so your team can jump back to setup instructions from the project.</p>
+      </>
+    ),
+  },
+  "clerk-integration": {
+    icon: FingerprintSimpleIcon,
+    href: "clerk-integration",
+    navigationItems: [
+      { displayName: "Clerk Integration", href: "." },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Use Clerk as the source of user sessions while Hexclave supplies authorization, teams, and user data.</p>
+        <p>Clerk refreshes its own session tokens; Hexclave exchanges them for short-lived access tokens without storing Clerk credentials.</p>
+      </>
+    ),
+  },
+  "better-auth-integration": {
+    icon: ShieldCheckIcon,
+    href: "better-auth-integration",
+    navigationItems: [
+      { displayName: "Better Auth Integration", href: "." },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Connect a Better Auth JWT issuer to Hexclave through its JWKS endpoint.</p>
+        <p>Keep Better Auth responsible for session refresh while using Hexclave APIs with short-lived access tokens.</p>
+      </>
+    ),
+  },
+  "workos-integration": {
+    icon: UserGearIcon,
+    href: "workos-integration",
+    navigationItems: [
+      { displayName: "WorkOS Integration", href: "." },
+    ],
+    screenshots: [],
+    storeDescription: (
+      <>
+        <p>Use WorkOS AuthKit sessions to authenticate users into Hexclave.</p>
+        <p>Configure the AuthKit client once and let WorkOS continue managing session refresh and organization selection.</p>
       </>
     ),
   },

@@ -130,7 +130,8 @@ jobs:
               fi
               platform_key="${asset_name#dashboard-${VERSION}-}"
               platform_key="${platform_key%.tar.zst}"
-              platform_live_shas="$(jq --arg key "$platform_key" --arg sha "$live_asset_sha" '. + {($key): $sha}' <<<"$platform_live_shas")"
+              # -c keeps the JSON on one line; `key=value` lines in $GITHUB_OUTPUT can't span multiple lines.
+              platform_live_shas="$(jq -c --arg key "$platform_key" --arg sha "$live_asset_sha" '. + {($key): $sha}' <<<"$platform_live_shas")"
             done
           else
             gh release create "$TAG" "${assets[@]}" \

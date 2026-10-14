@@ -1115,6 +1115,8 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
   ];
 
   for (const purchase of oneTimePurchaseSeeds) {
+    // Forward-compatibility seeds current code against the base schema before
+    // this branch's payment columns have been migrated, so avoid selecting them.
     await prisma.oneTimePurchase.upsert({
       where: {
         tenancyId_id: {
@@ -1144,6 +1146,9 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
         creationSource: purchase.creationSource,
         stripePaymentIntentId: purchase.stripePaymentIntentId ?? null,
         createdAt: purchase.createdAt,
+      },
+      select: {
+        id: true,
       },
     });
   }
@@ -1216,6 +1221,8 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
   ];
 
   for (const invoice of invoiceSeeds) {
+    // Keep this seed compatible with the base schema before the new payment
+    // outcome columns are migrated.
     await prisma.subscriptionInvoice.upsert({
       where: {
         tenancyId_id: {
@@ -1236,6 +1243,9 @@ async function seedDummyTransactions(options: TransactionsSeedOptions) {
         status: invoice.status,
         amountTotal: invoice.amountTotal,
         createdAt: invoice.createdAt,
+      },
+      select: {
+        id: true,
       },
     });
   }

@@ -28,7 +28,10 @@ export async function setupProjectWithPaymentsConfig(options: { testMode?: boole
   await Project.createAndSwitch();
   await Payments.setup();
   const config = createDefaultPaymentsConfig(options.testMode);
-  await Project.updateConfig(config);
+  await Project.updateConfig({
+    ...config,
+    "apps.installed.payments.enabled": true,
+  });
   return config;
 }
 
@@ -88,11 +91,14 @@ export async function createLiveModeOneTimePurchaseTransaction(options: { quanti
   const paymentIntentPayload = {
     id: eventId,
     type: "payment_intent.succeeded",
+    created: Math.floor(new Date().getTime() / 1000),
     account: accountId,
     data: {
       object: {
         id: paymentIntentId,
         customer: userId,
+        amount_received: 5_000 * quantity,
+        currency: "usd",
         stack_stripe_mock_data: {
           "accounts.retrieve": { metadata: { tenancyId: stackTestTenancyId } },
           "customers.retrieve": { metadata: { customerId: userId, customerType: "USER" } },

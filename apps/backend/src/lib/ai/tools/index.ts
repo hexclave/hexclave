@@ -45,12 +45,14 @@ export async function getTools(
       }
 
       case "sql-query": {
-        tools["queryAnalytics"] = createSqlQueryTool(context.auth, context.targetProjectId);
+        if (context.targetProjectId != null) {
+          tools["queryAnalytics"] = createSqlQueryTool(context.auth, context.targetProjectId);
+        }
         break;
       }
 
       case "read-config": {
-        const configTool = readConfigTool(context.auth, context.targetProjectId);
+        const configTool = readConfigTool(context.targetProjectId);
         if (configTool != null) {
           tools["readBranchConfig"] = configTool;
         }

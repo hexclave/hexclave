@@ -22,10 +22,49 @@ Optional:
     Default: "https://api.hexclave.com"
     Can specify different URLs for browser vs server environments.
     
-  tokenStore: "cookie" | "memory" | { accessToken, refreshToken } | null
+  tokenStore: "cookie" | "memory" | { accessToken, refreshToken } | ExternalTokenStore | null
     Default: "cookie" (JS) or "memory" (other SDKs)
     Where to store authentication tokens.
     "cookie" is JS-only due to complexity. See _utilities.spec.md for details.
+
+    ExternalTokenStore is JS-only and delegates the long-lived session to another
+    authentication provider:
+      type: "external"
+      providerId: "clerk-integration" | "better-auth-integration" | "workos-integration"
+      getToken(): async string | null
+      getSessionId(): string | null [optional]
+      subscribe(callback): unsubscribe function [optional]
+
+    On demand, call getToken() and exchange the provider JWT for a short-lived
+    Hexclave access token. Never persist the provider JWT or receive a Hexclave
+    refresh token. If getToken() returns null while getSessionId() is null or absent,
+    invalidate that external session; if getSessionId() is non-null, treat a null token
+    as a transient fetch failure (eg. the provider SDK is still initializing) and keep
+    the session. If the exchange is rejected with InvalidExternalAuthToken, retry once
+    with a freshly fetched provider token and then propagate the error without
+    invalidating the session: a rejected token is a configuration problem, not a
+    sign-out, because the backend re-establishes a session for any valid provider token.
+    First-party sign-in with Hexclave tokens is unsupported for an app that uses an
+    ExternalTokenStore and throws.
+    If getSessionId() is provided, use it to keep the SDK session and its caches
+    stable across provider token rotations. A null session ID represents a signed-out
+    provider. Without getSessionId(), each subscription notification starts a new
+    SDK session generation because identity continuity cannot be proven.
+
+    subscribe(callback) notifies the SDK when the provider token or session changes;
+    expire the current Hexclave access token and re-read the provider state. Hexclave
+    sign-out is unsupported for an ExternalTokenStore: it throws a developer-facing
+    assertion before revoking the correlated Hexclave session. The application must
+    sign out through the provider because the provider owns the credential.
+
+    JS SDKs expose clerkTokenStore(), betterAuthTokenStore(), and workosTokenStore()
+    helpers that construct ExternalTokenStore objects with the corresponding
+    providerId.
+
+    Prebuilt user controls must not offer a Hexclave sign-out action when the
+    app uses an ExternalTokenStore. Direct calls to signOut still throw the
+    developer-facing assertion; applications must invoke the provider's own
+    sign-out flow instead.
       
   oauthScopesOnSignIn: object
     Additional OAuth scopes to request during sign-in for each provider.
@@ -276,24 +315,77 @@ Errors:
     message: "The password does not meet the project's requirements."
 
 
+## isExternalAuthApp()
+
+Returns: bool
+
+Returns true when this app's configured token store is an
+ExternalTokenStore, meaning authentication is delegated to the configured
+provider. Prebuilt controls use this to omit Hexclave sign-out actions;
+direct signOut calls still throw and applications must sign out through the
+provider.
+
+
+## initAnalytics()  [BROWSER-LIKE]
+
+Returns: void (synchronous)
+
+Analytics capture (page views, clicks, session replays) starts during
+construction, so this method must not start, restart, or configure any capture
+itself.
+
+The method exists so that applications have an explicit call to place in a
+module that is loaded on every page they want to track. That guarantees the
+module constructing the client app is imported, and therefore constructed, on
+those pages. Setup instructions for the Analytics app tell developers to call
+it on every page.
+
+Because calling it declares that the caller expects analytics, it fails loudly
+whenever analytics are known not to be recorded:
+
+1. Mark that initAnalytics was called on this app instance.
+2. Throw an Error, in any environment, if the app never records analytics
+   because of its constructor options, naming the reason:
+   - analytics.enabled is false
+   - automaticSideEffects is false
+   - tokenStore is null
+   The constructor must use exactly the same conditions to decide whether to
+   start capture in a browser, so the two cannot disagree.
+3. Throw an Error if an earlier analytics upload (event batch or session
+   replay batch) was rejected with ANALYTICS_NOT_ENABLED, ie. the Analytics
+   app is disabled on the project. The message tells the developer to enable
+   the Analytics app or remove the call.
+4. Otherwise, outside a browser-like environment, return. Capture never runs
+   there, but the same module runs again in the browser (eg. after SSR).
+5. In a browser-like environment, capture must have been started by the
+   constructor at this point; if not, throw an assertion error.
+
+The client only learns that the Analytics app is disabled on the project
+when an upload is rejected, which is usually after initAnalytics has run. So
+the first time an upload is rejected with ANALYTICS_NOT_ENABLED, if
+initAnalytics was called before, report the error from step 3 through the
+SDK's error reporting (captureError). Report it at most once per app
+instance.
+
+
 ## signOut(options?)
 
 Arguments:
   options.redirectUrl: string? - where to redirect after sign out
   options.tokenStore: TokenStoreInit? - override token storage for this call
 
-Returns: void
+Returns: void, or throws for an externally authenticated session.
 
 Request:
   DELETE /api/v1/auth/sessions/current [authenticated]
   Body: {}
 
 Implementation:
-1. Send request (ignore errors - session may already be invalid)
-2. Clear stored tokens (mark session invalid)
-3. Redirect to redirectUrl or afterSignOut URL
-
-Does not error (errors are ignored).
+1. If the current session belongs to an ExternalTokenStore, throw a developer-facing
+   assertion naming the provider and do not revoke the Hexclave session.
+2. Otherwise send the request (ignore errors - session may already be invalid).
+3. Clear stored tokens (mark session invalid).
+4. Redirect to redirectUrl or afterSignOut URL.
 
 
 ## getUser(options?)
@@ -414,6 +506,7 @@ TokenPartialUser:
   displayName: string | null
   primaryEmail: string | null
   primaryEmailVerified: bool
+  selectedTeamId: string | null [JS-ONLY]
   isAnonymous: bool
   isMultiFactorRequired: bool
   isRestricted: bool
@@ -423,16 +516,17 @@ Implementation for "token":
 1. Get access token from storage
 2. If no token: return null
 3. Decode JWT payload (base64url decode middle segment)
-4. Extract fields: sub (id), name, email, email_verified, is_anonymous, is_restricted, restricted_reason
+4. Extract fields: sub (id), name, email, email_verified, selected_team_id [JS-ONLY], is_anonymous, is_restricted, restricted_reason
 
 Implementation for "convex" [JS-ONLY]:
 1. Call ctx.auth.getUserIdentity()
 2. If null: return null
-3. Map: subject→id, name→displayName, email, email_verified, is_anonymous, is_restricted, restricted_reason
+3. Map: subject→id, name→displayName, email, email_verified, selected_team_id→selectedTeamId (null if the claim is absent), is_anonymous, is_restricted, restricted_reason
 
 Panics:
   If constructor tokenStore was null and no tokenStore override is provided (for "token" mode).
   This is a programmer error - the code should be fixed to provide a tokenStore.
+  For "convex", if selected_team_id is present and is neither a string nor null.
 
 
 ## cancelSubscription(options)

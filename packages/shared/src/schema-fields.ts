@@ -179,6 +179,27 @@ import.meta.vitest?.test("yupRecord applies nested defaults without leaking the 
     services: { web: { visibility: "private", transport: "http" } },
   });
 });
+import.meta.vitest?.test("yupRecord never writes to the record it validates", async ({ expect }) => {
+  const schema = yupObject({
+    services: yupRecord(yupString(), yupObject({
+      visibility: yupString().oneOf(["public", "private"]).default("private").defined(),
+      transport: yupString().optional(),
+    }).defined()).defined(),
+  });
+
+  // Children whose cast changes them (a default is applied, an explicit undefined key is dropped) end up in the
+  // result, but not in the input.
+  const services = { needsDefault: {}, hasUndefinedKey: { visibility: "public", transport: undefined } };
+  const result = await schema.validate({ services });
+  expect(result.services).toEqual({ needsDefault: { visibility: "private" }, hasUndefinedKey: { visibility: "public" } });
+  expect(services).toEqual({ needsDefault: {}, hasUndefinedKey: { visibility: "public", transport: undefined } });
+  expect("transport" in services.hasUndefinedKey).toBe(true);
+
+  // Frozen inputs validate fine, for top-level records and nested ones alike.
+  const frozen = Object.freeze({ services: Object.freeze({ web: Object.freeze({ visibility: "public", transport: undefined }) }) });
+  await expect(schema.validate(frozen)).resolves.toEqual({ services: { web: { visibility: "public" } } });
+  await expect(yupRecord(yupString(), yupObject({ a: yupString().default("x") })).validate(Object.freeze({ k: Object.freeze({}) }))).resolves.toEqual({ k: { a: "x" } });
+});
 import.meta.vitest?.test("object schemas keep a `__proto__` key as data instead of dying on it", async ({ expect }) => {
   // JSON.parse, not a literal: `{ __proto__: ... }` in source sets the
   // prototype, so only the parsed form reproduces what a request body does.
@@ -369,7 +390,15 @@ export function yupRecord<K extends yup.StringSchema, T extends yup.AnySchema>(
   keySchema: K,
   valueSchema: T,
 ): yup.MixedSchema<Record<yup.InferType<K> & string, yup.InferType<T>>> {
-  return yupObject().meta({ hexclaveSchemaInfo: { type: "record", keySchema, valueSchema } }).unknown(true).test(
+  return yupObject().meta({ hexclaveSchemaInfo: { type: "record", keySchema, valueSchema } }).unknown(true).transform(
+    // The 'record' test below writes cast children back into the record it is
+    // given. Without this copy, that record can be the caller's own object
+    // (Yup's object cast returns its input when nothing changed at the record
+    // level), so validation would mutate the input, or throw if it is frozen
+    // (e.g. the backend's cached, shared config objects). Spread defines own
+    // data properties, so a `__proto__` key stays plain data here too.
+    (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value) ? { ...value } : value,
+  ).test(
     'record',
     '${path} must be a record of valid values',
     async function (value: unknown, context: yup.TestContext) {
@@ -419,7 +448,12 @@ export function yupRecord<K extends yup.StringSchema, T extends yup.AnySchema>(
           // defineProperty, not assignment: a record key is arbitrary user
           // input, and `record.__proto__ = value` would reassign the record's
           // prototype instead of storing the entry.
-          Object.defineProperty(value, key, { value: validatedValue, writable: true, enumerable: true, configurable: true });
+          //
+          // Skipped when the child cast is a no-op: in strict mode the copying
+          // transform above does not run, so `value` is still the caller's.
+          if (!Object.is(validatedValue, (value as Record<string, unknown>)[key])) {
+            Object.defineProperty(value, key, { value: validatedValue, writable: true, enumerable: true, configurable: true });
+          }
         } catch (e: any) {
           return createError({
             path: path ? `${path}.${key}` : key,

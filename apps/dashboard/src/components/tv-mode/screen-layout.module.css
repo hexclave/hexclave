@@ -1,0 +1,83 @@
+/* The TV canvas must budget height as well as width. A panel is a size
+   container so long status text cannot inherit a viewport-sized numeric hero. */
+.frame {
+  padding: min(5vh, 3vw) 5vw 7vh;
+}
+
+.body {
+  margin-top: 2.5vh;
+}
+
+.screenGrid {
+  gap: 3vw;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+}
+
+.panel {
+  min-width: 0;
+  container-type: size;
+}
+
+.panelContent > div {
+  padding: min(2vw, 3vh);
+  gap: min(1.5vw, 2vh);
+}
+
+/* flex space-between does not shrink its children when content grows. Keep
+   the metric grid and the explanatory insight in the panel's height budget. */
+.panelContent > div > div {
+  min-width: 0;
+}
+
+.panelContent > div > div:has(> .metric) {
+  gap: min(1.2vw, 2cqh);
+}
+
+.metric {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.metric > p:first-child {
+  font-size: clamp(0.55rem, min(0.8vw, 2.6cqh), 2rem);
+  line-height: 1.25;
+}
+
+.metric > p:nth-child(2) {
+  margin-top: 1cqh;
+  font-size: clamp(1rem, min(2.2vw, 5cqh), 5.6rem);
+  line-height: 1.05;
+}
+
+.metric[data-text-value="true"] > p:nth-child(2) {
+  font-size: clamp(0.85rem, min(1.6vw, 4cqh), 3.5rem);
+  line-height: 1.15;
+}
+
+.metric[data-hero="true"][data-text-value="true"] > p:nth-child(2) {
+  font-size: clamp(1.25rem, min(3vw, 8cqh, 10cqw), 7rem);
+}
+
+.metric > p:nth-child(3) {
+  margin-top: 1.3cqh;
+  font-size: clamp(0.6rem, min(0.95vw, 3cqh), 2.3rem);
+  line-height: 1.3;
+}
+
+.insightText {
+  font-size: clamp(0.6rem, min(0.9vw, 2.8cqh), 2.24rem);
+  line-height: 1.35;
+  color: rgb(255 255 255 / 76%);
+}
+
+.healthCard {
+  min-width: 0;
+  padding: min(1.2vw, 2cqh);
+  overflow-wrap: anywhere;
+}
+
+.healthCard > p:nth-child(2) {
+  margin-top: 1cqh;
+  font-size: clamp(0.85rem, min(1.65vw, 4cqh), 4rem);
+  line-height: 1.15;
+}

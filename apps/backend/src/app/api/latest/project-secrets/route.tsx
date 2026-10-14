@@ -11,8 +11,8 @@ import { StatusError } from "@hexclave/shared/dist/utils/errors";
 // branch): see @/lib/project-secrets for why, and for the intended shape if
 // per-branch values are ever needed.
 //
-// Deployments are the only consumer today: `secret()` env vars in the config
-// file's `services` export name a key here.
+// Deployments are the only consumer today: `secret()` env vars in the deploy
+// file's `deploy` export name a key here.
 
 export const GET = createSmartRouteHandler({
   metadata: {

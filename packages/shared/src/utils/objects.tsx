@@ -144,6 +144,70 @@ import.meta.vitest?.test("deepPlainClone", ({ expect }) => {
   expect(() => deepPlainClone(Symbol())).toThrow();
 });
 
+/**
+ * Recursively freezes a plain value (plain objects, null-prototype objects and arrays) in place and returns it.
+ *
+ * Throws on any other kind of object (class instances, Maps, Dates, ...), because those can carry mutable internal
+ * state that `Object.freeze` does not protect, so freezing them would give a false sense of immutability.
+ */
+export function deepPlainFreeze<T>(value: T): T {
+  const visited = new Set<object>();
+  const freeze = (current: unknown, path: string) => {
+    if (typeof current !== "object" || current === null) return;
+    if (visited.has(current)) return;
+    visited.add(current);
+
+    const prototype = Object.getPrototypeOf(current);
+    if (!Array.isArray(current) && prototype !== Object.prototype && prototype !== null) {
+      throw new HexclaveAssertionError(`deepPlainFreeze only supports plain objects and arrays, but found a non-plain object at ${path}`, { constructorName: prototype?.constructor?.name });
+    }
+    Object.freeze(current);
+    for (const [key, child] of Object.entries(current)) {
+      freeze(child, `${path}.${key}`);
+    }
+  };
+  freeze(value, "<root>");
+  return value;
+}
+import.meta.vitest?.test("deepPlainFreeze", ({ expect }) => {
+  // Nested objects and arrays become immutable
+  const value = deepPlainFreeze({ a: { b: [1, { c: 2 }] } });
+  expect(Object.isFrozen(value)).toBe(true);
+  expect(Object.isFrozen(value.a)).toBe(true);
+  expect(Object.isFrozen(value.a.b)).toBe(true);
+  expect(Object.isFrozen(value.a.b[1])).toBe(true);
+  expect(() => {
+    Object.assign(value.a.b[1], { c: 3 });
+  }).toThrow(TypeError);
+  expect(() => {
+    value.a.b.push(4);
+  }).toThrow(TypeError);
+  expect(() => {
+    Object.assign(value, { injected: true });
+  }).toThrow(TypeError);
+
+  // Shared references and cycles
+  const shared = { x: 1 };
+  const cyclic: Record<string, unknown> = { left: shared, right: shared };
+  cyclic.self = cyclic;
+  deepPlainFreeze(cyclic);
+  expect(Object.isFrozen(shared)).toBe(true);
+
+  // Descends into already-frozen parents, which may have unfrozen children
+  const child = { x: 1 };
+  deepPlainFreeze(Object.freeze({ child }));
+  expect(Object.isFrozen(child)).toBe(true);
+
+  // Primitives and null-prototype objects
+  expect(deepPlainFreeze(5)).toBe(5);
+  expect(deepPlainFreeze(null)).toBe(null);
+  expect(Object.isFrozen(deepPlainFreeze(Object.assign(Object.create(null), { a: 1 })))).toBe(true);
+
+  // Non-plain objects are refused, naming where they were found
+  expect(() => deepPlainFreeze({ a: new Map() })).toThrow(/non-plain object at <root>\.a/);
+  expect(() => deepPlainFreeze([new Date()])).toThrow(/non-plain object at <root>\.0/);
+});
+
 export type DeepMerge<T, U> = U extends any ? DeepMergeNonDistributive<T, U> : never;  // distributive conditional type https://www.typescriptlang.org/docs/handbook/2/conditional-types.html#distributive-conditional-types
 type DeepMergeNonDistributive<T, U> = Omit<T, keyof U> & Omit<U, keyof T> & DeepMergeInner<Pick<T, keyof U & keyof T>, Pick<U, keyof U & keyof T>>;
 type DeepMergeInner<T, U> = {

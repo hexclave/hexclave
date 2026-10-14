@@ -3197,6 +3197,84 @@
         }
       }
     },
+    "/auth/external/token": {
+      "post": {
+        "summary": "Exchange an external authentication token",
+        "description": "Verifies a configured external provider session and returns a short-lived Hexclave access token.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "provider_id": {
+                    "type": "string",
+                    "enum": [
+                      "clerk-integration",
+                      "better-auth-integration",
+                      "workos-integration"
+                    ],
+                    "example": "clerk-integration",
+                    "description": "The external authentication integration that issued the token."
+                  },
+                  "token": {
+                    "type": "string",
+                    "example": "<external-provider-jwt>",
+                    "description": "The provider's signed session token (a JWT). It must contain sub, sid and exp claims."
+                  }
+                },
+                "required": [
+                  "provider_id",
+                  "token"
+                ],
+                "example": {
+                  "provider_id": "clerk-integration",
+                  "token": "<external-provider-jwt>"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "External authentication"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/auth/external/token",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_token": {
+                      "type": "string"
+                    },
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string"
+                    },
+                    "is_new_user": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "access_token",
+                    "session_id",
+                    "user_id",
+                    "is_new_user"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/oauth/authorize/{provider_id}": {
       "get": {
         "summary": "OAuth authorize endpoint",
@@ -6946,7 +7024,7 @@
     "/auth/sessions/current": {
       "delete": {
         "summary": "Sign out of the current session",
-        "description": "Sign out of the current session and invalidate the refresh token",
+        "description": "Sign out and invalidate the current Hexclave or delegated external session",
         "parameters": [],
         "tags": [
           "Sessions"

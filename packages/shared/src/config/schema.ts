@@ -12,7 +12,7 @@ import { productSchema, userSpecifiedIdSchema, yupBoolean, yupDate, yupMixed, yu
 import { SUPPORTED_CURRENCIES } from "../utils/currency-constants";
 import { HexclaveAssertionError } from "../utils/errors";
 import { allProviders, allProviderTypes } from "../utils/oauth";
-import { DeepFilterUndefined, DeepMerge, DeepRequiredOrUndefined, filterUndefined, get, getOrUndefined, has, isObjectLike, mapValues, set, typedAssign, typedEntries, typedFromEntries } from "../utils/objects";
+import { DeepFilterUndefined, DeepMerge, DeepRequiredOrUndefined, deepPlainClone, filterUndefined, get, getOrUndefined, has, isObjectLike, mapValues, set, typedAssign, typedEntries, typedFromEntries } from "../utils/objects";
 import { Result } from "../utils/results";
 import { stringCompare } from "../utils/strings";
 import { CollapseObjectUnion, Expand, IntersectAll, IsUnion, typeAssert, typeAssertExtends, typeAssertIs } from "../utils/types";
@@ -148,6 +148,28 @@ const branchAuthSchema = yupObject({
     }),
   ),
   signUpRulesDefaultAction: yupString().oneOf(['allow', 'reject']),
+});
+
+const clerkIntegrationSchema = yupObject({
+  issuer: schemaFields.urlSchema.optional(),
+  authorizedParties: yupString().optional(),
+});
+
+const betterAuthIntegrationSchema = yupObject({
+  issuer: schemaFields.urlSchema.optional(),
+  audience: yupString().optional(),
+  // The JWKS is fetched with safeOAuthFetch, which only speaks HTTP(S); any other scheme that is a
+  // syntactically valid URL (eg. ftp://) would pass urlSchema and then fail every token exchange.
+  jwksUrl: schemaFields.urlSchema.test({
+    name: 'http-or-https',
+    message: (params) => `${params.path} must use HTTP or HTTPS`,
+    test: (value) => value == null || (URL.canParse(value) && ['http:', 'https:'].includes(new URL(value).protocol)),
+  }).optional(),
+});
+
+const workosIntegrationSchema = yupObject({
+  clientId: yupString().optional(),
+  issuer: schemaFields.urlSchema.optional(),
 });
 
 export const branchPaymentsSchema = yupObject({
@@ -332,6 +354,10 @@ export const branchConfigSchema = canNoLongerBeOverridden(projectConfigSchema, [
   }),
 
   payments: branchPaymentsSchema,
+
+  "clerk-integration": clerkIntegrationSchema,
+  "better-auth-integration": betterAuthIntegrationSchema,
+  "workos-integration": workosIntegrationSchema,
 
   dataVault: yupObject({
     stores: yupRecord(
@@ -1002,6 +1028,20 @@ const organizationConfigDefaults = {
     signUpRulesDefaultAction: 'allow',
   },
 
+  "clerk-integration": {
+    issuer: undefined,
+    authorizedParties: undefined,
+  },
+  "better-auth-integration": {
+    issuer: undefined,
+    audience: undefined,
+    jwksUrl: undefined,
+  },
+  "workos-integration": {
+    clientId: undefined,
+    issuer: undefined,
+  },
+
   emails: {
     server: {
       isShared: true,
@@ -1532,7 +1572,10 @@ export async function getConfigOverrideErrors<T extends yup.AnySchema>(schema: T
     }
     let restrictedSchema = getRestrictedSchema(key, subSchema);
     try {
-      await restrictedSchema.validate(value, {
+      // Validates a copy: yupRecord writes its cast children back into the record it validates, and with
+      // `strict: true` that record would be the caller's override itself (which may also be frozen and shared, e.g.
+      // by the backend's config rendering cache). This function must only check the override, never change it.
+      await restrictedSchema.validate(deepPlainClone(value), {
         strict: true,
         ...{
           // Although `path` is not part of the yup types, it is actually recognized and does the correct thing

@@ -58,6 +58,7 @@ const setupTestDatabase = async () => {
   await prismaClient.$connect();
 
   return {
+    connectionString,
     prismaClient,
     testDbName,
     dbURL,
@@ -84,11 +85,11 @@ const teardownTestDatabase = async (prismaClient: PrismaClient, testDbName: stri
   await new Promise(resolve => setTimeout(resolve, 500));
 };
 
-function runTest(fn: (options: { expect: ExpectStatic, prismaClient: PrismaClient, dbURL: { full: string, base: string } }) => Promise<void>) {
+function runTest(fn: (options: { connectionString: string, expect: ExpectStatic, prismaClient: PrismaClient, dbURL: { full: string, base: string } }) => Promise<void>) {
   return async ({ expect }: { expect: ExpectStatic }) => {
-    const { prismaClient, testDbName, dbURL } = await setupTestDatabase();
+    const { connectionString, prismaClient, testDbName, dbURL } = await setupTestDatabase();
     try {
-      await fn({ prismaClient, expect, dbURL });
+      await fn({ connectionString, prismaClient, expect, dbURL });
     } finally {
       await teardownTestDatabase(prismaClient, testDbName);
     }
@@ -251,13 +252,118 @@ import.meta.vitest?.test("applies migrations concurrently with 20 concurrent mig
   timeout: 400_000,
 });
 
-// TODO: this test, or a variant of it, might fail because the migrations waiting for locks are exhausting all
-// connections; the RUN_OUTSIDE_TRANSACTION_SENTINEL is then not able to run its own migration outside of the
-// transaction
-//
-// The fix would be to only *try* acquiring the migration lock when we apply a migration, and if it fails to acquire, we
-// wait *outside* of the transaction so it doesn't exhaust all connections
-import.meta.vitest?.test.todo("applies migrations concurrently with 20 concurrent migrations with RUN_OUTSIDE_TRANSACTION_SENTINEL");
+import.meta.vitest?.test("applies migrations concurrently without blocking its own outside-transaction statement", runTest(async ({ connectionString, expect, prismaClient }) => {
+  const migrationFiles = [{
+    migrationName: "001-concurrent-index",
+    sql: `
+      CREATE TABLE outside_transaction_test (id SERIAL PRIMARY KEY, value TEXT NOT NULL);
+      -- SPLIT_STATEMENT_SENTINEL
+      -- SINGLE_STATEMENT_SENTINEL
+      -- RUN_OUTSIDE_TRANSACTION_SENTINEL
+      CREATE INDEX CONCURRENTLY outside_transaction_test_value_idx ON outside_transaction_test(value);
+    `,
+  }];
+
+  const results = await Promise.all(Array.from({ length: 20 }, async () => await applyMigrations({
+    prismaClient,
+    migrationFiles,
+    outsideTransactionConnectionString: connectionString,
+    schema: "public",
+  })));
+
+  expect(results.reduce((sum, result) => sum + result.newlyAppliedMigrationNames.length, 0)).toBe(1);
+  const indexes = await prismaClient.$queryRaw<{ indisready: boolean, indisvalid: boolean }[]>`
+    SELECT i.indisready, i.indisvalid
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE c.relname = 'outside_transaction_test_value_idx'
+  `;
+  expect(indexes).toEqual([{ indisready: true, indisvalid: true }]);
+}), {
+  timeout: 120_000,
+});
+
+import.meta.vitest?.test("does not record a migration when its outside-transaction statement fails", runTest(async ({ connectionString, expect, prismaClient }) => {
+  const migrationName = "001-failing-outside-transaction";
+  const failingMigration = {
+    migrationName,
+    sql: `
+      CREATE TABLE IF NOT EXISTS outside_transaction_failure_test (id SERIAL PRIMARY KEY);
+      -- SPLIT_STATEMENT_SENTINEL
+      -- SINGLE_STATEMENT_SENTINEL
+      -- RUN_OUTSIDE_TRANSACTION_SENTINEL
+      SELECT 1 / 0;
+    `,
+  };
+
+  await expect(applyMigrations({
+    prismaClient,
+    migrationFiles: [failingMigration],
+    outsideTransactionConnectionString: connectionString,
+    schema: "public",
+  })).rejects.toThrow();
+  expect(await prismaClient.$queryRaw`
+    SELECT "migrationName"
+    FROM "SchemaMigration"
+    WHERE "migrationName" = ${migrationName}
+  `).toEqual([]);
+
+  const fixedMigration = {
+    ...failingMigration,
+    sql: `
+      CREATE TABLE IF NOT EXISTS outside_transaction_failure_test (id SERIAL PRIMARY KEY);
+      -- SPLIT_STATEMENT_SENTINEL
+      -- SINGLE_STATEMENT_SENTINEL
+      -- RUN_OUTSIDE_TRANSACTION_SENTINEL
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS outside_transaction_failure_test_id_idx
+        ON outside_transaction_failure_test(id);
+    `,
+  };
+  await expect(applyMigrations({
+    prismaClient,
+    migrationFiles: [fixedMigration],
+    outsideTransactionConnectionString: connectionString,
+    schema: "public",
+  })).resolves.toEqual({ newlyAppliedMigrationNames: [migrationName] });
+}), {
+  timeout: 120_000,
+});
+
+// Regression test: the runner's wrapping transaction used to keep a snapshot pinned while dispatching
+// outside-of-transaction statements (the Prisma driver adapter keeps the last *parameterized* query's
+// snapshot registered until the next statement on that connection), so a CREATE INDEX CONCURRENTLY on
+// its separate connection waited for our own idle wrapper transaction until statement_timeout killed it.
+// Note that this file deliberately does NOT start with a lone SPLIT_STATEMENT_SENTINEL: that leading
+// sentinel (present in most older migrations) made the runner execute a no-op chunk inside the
+// transaction first, which accidentally released the pinned snapshot and masked the bug.
+import.meta.vitest?.test("applies a CREATE INDEX CONCURRENTLY migration via RUN_OUTSIDE_TRANSACTION_SENTINEL", runTest(async ({ connectionString, expect, prismaClient }) => {
+  const migrationFiles = [
+    {
+      migrationName: "001-create-table",
+      sql: "CREATE TABLE cic_test (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL);",
+    },
+    {
+      migrationName: "002-create-index-concurrently",
+      sql: [
+        "-- SINGLE_STATEMENT_SENTINEL",
+        "-- RUN_OUTSIDE_TRANSACTION_SENTINEL",
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS cic_test_name_key ON /* SCHEMA_NAME_SENTINEL */.cic_test (name);",
+      ].join("\n"),
+    },
+  ];
+
+  const result = await applyMigrations({ prismaClient, migrationFiles, outsideTransactionConnectionString: connectionString, schema: 'public' });
+  expect(result.newlyAppliedMigrationNames).toEqual(["001-create-table", "002-create-index-concurrently"]);
+
+  const indexes = await prismaClient.$queryRaw`
+    SELECT indisvalid FROM pg_index WHERE indexrelid = 'cic_test_name_key'::regclass
+  ` as { indisvalid: boolean }[];
+  expect(indexes).toEqual([{ indisvalid: true }]);
+}), {
+  // Without the fix this fails via the database's statement_timeout (30s in the dev docker container),
+  // so give it enough headroom to fail with the real error instead of a generic test timeout.
+  timeout: 120_000,
+});
 
 
 import.meta.vitest?.test("applies migration with a DB previously migrated with prisma", runTest(async ({ expect, prismaClient, dbURL }) => {
