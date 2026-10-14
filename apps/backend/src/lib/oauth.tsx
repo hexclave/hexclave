@@ -4,7 +4,7 @@ import { createOrUpgradeAnonymousUserWithRules, SignUpRuleOptions } from "@/lib/
 import { PrismaClientTransaction } from "@/prisma-client";
 import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
 import { KnownErrors } from "@hexclave/shared/dist/known-errors";
-import { captureError, HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 
 /**
  * Find an existing OAuth account for sign-in.
@@ -87,13 +87,9 @@ export async function handleOAuthEmailMergeStrategy(
         }
 
         if (!emailVerified) {
-          // TODO: Handle this case
-          const err = new HexclaveAssertionError(
-            "OAuth account merge strategy is set to link_method, but the NEW email is not verified. This is an edge case that we don't handle right now",
-            { existingContactChannel, email, emailVerified }
-          );
-          captureError("oauth-link-method-email-not-verified", err);
-          throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse("email", email);
+          // The provider's email is unverified, so we never auto-link it to an existing account.
+          // Ask the person to sign in with their existing method instead.
+          throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse("email", email, true);
         }
 
         // Link to existing user
