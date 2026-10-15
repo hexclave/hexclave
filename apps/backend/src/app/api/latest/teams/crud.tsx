@@ -319,8 +319,38 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
       };
     }
 
+    // Keyset pagination instead of Prisma's `cursor` option: Prisma's cursor only works while the cursor team still
+    // matches the filters, so if the user left that team (or it was renamed out of `query`) between pages, the next
+    // page came back empty and every remaining team was silently dropped. Looking the cursor team up without filters
+    // keeps its position stable; only a deleted cursor team loses its position, which we reject loudly.
+    let cursorFilter: Prisma.TeamWhereInput | undefined;
+    if (query.cursor) {
+      const cursorTeam = await prisma.team.findUnique({
+        where: {
+          tenancyId_teamId: {
+            tenancyId: auth.tenancy.id,
+            teamId: query.cursor,
+          },
+        },
+        select: { createdAt: true },
+      });
+      if (cursorTeam == null) {
+        throw new StatusError(StatusError.BadRequest, "The team referenced by `cursor` does not exist (it may have been deleted). Restart pagination without a cursor.");
+      }
+      cursorFilter = {
+        OR: [
+          { createdAt: sortDirection === 'asc' ? { gt: cursorTeam.createdAt } : { lt: cursorTeam.createdAt } },
+          { createdAt: cursorTeam.createdAt, teamId: sortDirection === 'asc' ? { gt: query.cursor } : { lt: query.cursor } },
+        ],
+      };
+    }
+
     const db = await prisma.team.findMany({
       where: {
+        AND: [
+          ...queryFilter ? [queryFilter] : [],
+          ...cursorFilter ? [cursorFilter] : [],
+        ],
         tenancyId: auth.tenancy.id,
         ...query.user_id ? {
           teamMembers: {
@@ -329,7 +359,6 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
             },
           },
         } : {},
-        ...queryFilter ?? {},
       },
       orderBy: [
         { createdAt: sortDirection },
@@ -337,15 +366,6 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
       ],
       // +1 to detect whether a next page exists without a separate count.
       take: limit + 1,
-      ...query.cursor ? {
-        skip: 1,
-        cursor: {
-          tenancyId_teamId: {
-            tenancyId: auth.tenancy.id,
-            teamId: query.cursor,
-          },
-        },
-      } : {},
     });
 
     const items = db.slice(0, limit).map(teamPrismaToCrud);
