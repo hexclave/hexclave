@@ -112,6 +112,15 @@ export class AsyncCache<D extends any[], T> {
     await Promise.all(promises);
   }
 
+  hasKeyWhere(predicate: (dependencies: D) => boolean): boolean {
+    for (const [dependencies] of this._map) {
+      if (predicate(dependencies)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   async invalidateWhere(predicate: (dependencies: D) => boolean) {
     const promises: Promise<void>[] = [];
     for (const [dependencies, cache] of this._map) {
@@ -132,6 +141,15 @@ export class AsyncCache<D extends any[], T> {
   readonly onStateChange = this._createKeyed("onStateChange");
   readonly isDirty = this._createKeyed("isDirty");
 }
+import.meta.vitest?.test("AsyncCache.hasKeyWhere", async ({ expect }) => {
+  const cache = new AsyncCache<[string, number], string>(async ([a, b]) => `${a}${b}`);
+  expect(cache.hasKeyWhere(() => true)).toBe(false);
+
+  await cache.getOrWait(["a", 1], "write-only");
+  await cache.getOrWait(["b", 2], "write-only");
+  expect(cache.hasKeyWhere(([a]) => a === "b")).toBe(true);
+  expect(cache.hasKeyWhere(([, b]) => b === 3)).toBe(false);
+});
 
 class AsyncValueCache<T> {
   private _store: AsyncStore<T>;

@@ -105,10 +105,20 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
     }
   });
 
+  protected override _isTeamUsedAsListCursor(teamId: string): boolean {
+    return super._isTeamUsedAsListCursor(teamId) || this._serverTeamsCache.hasKeyWhere(([, , , cursor]) => cursor === teamId);
+  }
+
+  /** Always refresh server team lists through this, so pages anchored on a deleted team are never refetched. */
+  protected async _refreshServerTeams(options?: { userId?: string }) {
+    await this._serverTeamsCache.refreshWhere(([userId, , , cursor]) =>
+      !this._isDeletedTeamCursor(cursor) && (options?.userId == null || userId === options.userId || userId === undefined));
+  }
+
   protected async _refreshTeamMembership(teamId: string, userId: string) {
     await Promise.all([
       this._serverTeamMemberProfilesCache.refresh([teamId]),
-      this._serverTeamsCache.refreshWhere(([u]) => u === userId || u === undefined),
+      this._refreshServerTeams({ userId }),
       this._serverUsersCache.refreshWhere((key) => key[8] === teamId),
     ]);
   }
@@ -747,7 +757,7 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
           creatorUserId: crud.id,
           ...data,
         }));
-        await app._serverTeamsCache.refreshWhere(() => true);
+        await app._refreshServerTeams();
         await app._updateServerUser(crud.id, { selectedTeamId: team.id });
         return app._serverTeamFromCrud(team);
       },
@@ -1039,17 +1049,16 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
         await app._interface.updateServerTeam(crud.id, serverTeamUpdateOptionsToCrud(update));
         await Promise.all([
           app._serverTeamCache.refresh([crud.id]),
-          app._serverTeamsCache.refreshWhere(() => true),
+          app._refreshServerTeams(),
           app._serverUsersCache.refreshWhere(() => true),
         ]);
       },
       async delete() {
         await app._interface.deleteServerTeam(crud.id);
+        app._markTeamDeleted(crud.id);
         await Promise.all([
           app._serverTeamCache.refresh([crud.id]),
-          // Pages anchored on the deleted team can't be refetched (the backend rejects that cursor); see
-          // `_refreshCurrentUserTeams` in the client app.
-          app._serverTeamsCache.refreshWhere(([, , , cursor]) => cursor !== crud.id),
+          app._refreshServerTeams(),
           app._serverUsersCache.refreshWhere(() => true),
         ]);
       },
@@ -1548,7 +1557,7 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
   async createTeam(data: ServerTeamCreateOptions): Promise<ServerTeam> {
     const team = await this._interface.createServerTeam(serverTeamCreateOptionsToCrud(data));
     await this._serverTeamCache.refresh([team.id]);
-    await this._serverTeamsCache.refreshWhere(() => true);
+    await this._refreshServerTeams();
     return this._serverTeamFromCrud(team);
   }
 
