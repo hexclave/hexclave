@@ -8,6 +8,7 @@ import {
   type DataGridDataSource,
   type DataGridState,
 } from "@hexclave/dashboard-ui-components";
+import { DesignAlert, DesignButton } from "@/components/design-components";
 import { useMemo, useState } from "react";
 import { useDebounce } from "use-debounce";
 
@@ -66,27 +67,46 @@ export function ServerSearchPickerTable<TRow>(props: {
     paginationMode: "infinite",
   });
 
-  return (
-    <DataGrid
-      columns={columns}
-      rows={gridData.rows}
-      getRowId={getRowId}
-      isLoading={gridData.isLoading}
-      isRefetching={gridData.isRefetching}
-      state={gridState}
-      onChange={setGridState}
-      paginationMode="infinite"
-      hasMore={gridData.hasMore}
-      isLoadingMore={gridData.isLoadingMore}
-      onLoadMore={gridData.loadMore}
-      fillHeight={false}
-      maxHeight={420}
-      footer={false}
-      emptyState={
-        <div className="text-center py-8">
-          <p className="text-sm text-muted-foreground">{props.emptyStateLabel}</p>
+  // `useDataSource` reports failed fetches only through `error` (DataGrid doesn't render it), so without this a
+  // failed first page looks like "no results", and a failed later page just stops loading. The raw error isn't shown:
+  // SDK errors can carry a full retry log and stack trace, and `useDataSource` already logs them to the console.
+  const errorAlert = gridData.error != null && (
+    <DesignAlert
+      variant="error"
+      title="Couldn't load results"
+      description={
+        <div className="flex flex-col items-start gap-2">
+          <span>Something went wrong while loading. Check your connection and try again.</span>
+          <DesignButton size="sm" variant="outline" onClick={() => gridData.reload()}>Retry</DesignButton>
         </div>
       }
     />
+  );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <DataGrid
+        columns={columns}
+        rows={gridData.rows}
+        getRowId={getRowId}
+        isLoading={gridData.isLoading}
+        isRefetching={gridData.isRefetching}
+        state={gridState}
+        onChange={setGridState}
+        paginationMode="infinite"
+        hasMore={gridData.hasMore}
+        isLoadingMore={gridData.isLoadingMore}
+        onLoadMore={gridData.loadMore}
+        fillHeight={false}
+        maxHeight={420}
+        footer={false}
+        emptyState={errorAlert || (
+          <div className="text-center py-8">
+            <p className="text-sm text-muted-foreground">{props.emptyStateLabel}</p>
+          </div>
+        )}
+      />
+      {gridData.rows.length > 0 && errorAlert}
+    </div>
   );
 }
