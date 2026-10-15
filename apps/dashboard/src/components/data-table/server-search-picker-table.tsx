@@ -77,7 +77,7 @@ export function ServerSearchPickerTable<TRow>(props: {
       description={
         <div className="flex flex-col items-start gap-2">
           <span>Something went wrong while loading. Check your connection and try again.</span>
-          <DesignButton size="sm" variant="outline" onClick={() => gridData.reload()}>Retry</DesignButton>
+          <DesignButton type="button" size="sm" variant="outline" onClick={() => gridData.reload()}>Retry</DesignButton>
         </div>
       }
     />
