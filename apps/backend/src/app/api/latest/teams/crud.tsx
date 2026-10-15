@@ -338,6 +338,9 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
         throw new StatusError(StatusError.BadRequest, "The team referenced by `cursor` does not exist (it may have been deleted). Restart pagination without a cursor.");
       }
       cursorFilter = {
+        // Redundant with the OR below, but Postgres can't turn that OR into an index range, so without this bound
+        // every page walks the (tenancyId, createdAt, teamId) index from the tenancy's first team up to the cursor.
+        createdAt: sortDirection === 'asc' ? { gte: cursorTeam.createdAt } : { lte: cursorTeam.createdAt },
         OR: [
           { createdAt: sortDirection === 'asc' ? { gt: cursorTeam.createdAt } : { lt: cursorTeam.createdAt } },
           { createdAt: cursorTeam.createdAt, teamId: sortDirection === 'asc' ? { gt: query.cursor } : { lt: query.cursor } },
