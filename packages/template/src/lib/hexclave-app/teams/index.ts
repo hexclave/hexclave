@@ -173,16 +173,22 @@ export type ServerListUsersOptions = ServerListUsersOptionsBase & (
   }
 );
 
-export type ServerListTeamsOptions = {
+export type ListTeamsOptions = {
   orderBy?: 'createdAt',
   desc?: boolean,
   cursor?: string,
+  /**
+   * Maximum number of teams to return (at most 200). If omitted, at most 200 teams are returned; when there
+   * are more, `nextCursor` on the result is set and can be passed as `cursor` (together with `limit`) to fetch the rest.
+   */
   limit?: number,
   /**
    * Free-text search. Matches team ID (exact UUID) and display name.
    */
   query?: string,
 };
+
+export type ServerListTeamsOptions = ListTeamsOptions;
 
 export type ServerTeamCreateOptions = TeamCreateOptions & {
   creatorUserId?: string,

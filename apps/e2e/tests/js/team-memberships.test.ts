@@ -1,4 +1,5 @@
 import { KnownErrors } from "@hexclave/shared";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { it } from "../helpers";
 import { createApp } from "./js-helpers";
 
@@ -114,6 +115,93 @@ it("refreshes the current user after leaving a team", { timeout: 60_000 }, async
   expect((await userWithTeam.listTeams()).some((candidate) => candidate.id === team.id)).toBe(false);
   const refreshedUser = await clientApp.getUser({ or: "throw" });
   expect(refreshedUser.selectedTeam).toBeNull();
+});
+
+it("returns null from getTeam after leaving the team", { timeout: 60_000 }, async ({ expect }) => {
+  const { clientApp } = await createApp({ config: { clientTeamCreationEnabled: true } });
+
+  await clientApp.signUpWithCredential({
+    email: "membership-get-team-after-leave@test.com",
+    password: "password",
+    noVerificationCallback: true,
+  });
+  const user = await clientApp.getUser({ or: "throw" });
+  const team = await user.createTeam({ displayName: "Leave Team" });
+
+  expect((await user.getTeam(team.id))?.id).toBe(team.id);
+  await user.leaveTeam(team);
+  expect(await user.getTeam(team.id)).toBeNull();
+});
+
+it("paginates and searches the current user's teams on the client", { timeout: 60_000 }, async ({ expect }) => {
+  const { clientApp } = await createApp({ config: { clientTeamCreationEnabled: true } });
+
+  await clientApp.signUpWithCredential({
+    email: "membership-paginate-teams@test.com",
+    password: "password",
+    noVerificationCallback: true,
+  });
+  const user = await clientApp.getUser({ or: "throw" });
+  const created = [];
+  for (const displayName of ["Alpha", "Beta", "Gamma"]) {
+    created.push(await user.createTeam({ displayName }));
+  }
+
+  const all = await user.listTeams();
+  expect(all.map((team) => team.displayName)).toEqual(["Alpha", "Beta", "Gamma"]);
+  expect(all.nextCursor).toBeNull();
+
+  const page1 = await user.listTeams({ limit: 2 });
+  expect(page1.map((team) => team.displayName)).toEqual(["Alpha", "Beta"]);
+  expect(page1.nextCursor).toBe(created[1].id);
+  const page2 = await user.listTeams({ limit: 2, cursor: page1.nextCursor ?? throwErr("expected a next cursor") });
+  expect(page2.map((team) => team.displayName)).toEqual(["Gamma"]);
+  expect(page2.nextCursor).toBeNull();
+
+  const newestFirst = await user.listTeams({ orderBy: "createdAt", desc: true });
+  expect(newestFirst.map((team) => team.displayName)).toEqual(["Gamma", "Beta", "Alpha"]);
+
+  const searched = await user.listTeams({ query: "amm" });
+  expect(searched.map((team) => team.displayName)).toEqual(["Gamma"]);
+});
+
+it("finds a user's team with getTeam even when the user is in more than 200 teams", { timeout: 300_000 }, async ({ expect }) => {
+  const { clientApp, serverApp } = await createApp();
+
+  await clientApp.signUpWithCredential({
+    email: "membership-many-teams@test.com",
+    password: "password",
+    noVerificationCallback: true,
+  });
+  const user = await clientApp.getUser({ or: "throw" });
+
+  const teams = [];
+  for (let batchStart = 0; batchStart < 201; batchStart += 20) {
+    teams.push(...await Promise.all(Array.from({ length: Math.min(20, 201 - batchStart) }, () => serverApp.createTeam({
+      displayName: "Many Teams",
+      creatorUserId: user.id,
+    }))));
+  }
+  const newestTeam = teams[teams.length - 1];
+
+  // The unfiltered list is capped at 200 (oldest first), so the newest team is not in it, but the cursor leads to it.
+  const listedTeams = await user.listTeams();
+  expect(listedTeams).toHaveLength(200);
+  expect(listedTeams.some((team) => team.id === newestTeam.id)).toBe(false);
+  expect(listedTeams.nextCursor).toBe(listedTeams[199].id);
+  const nextPage = await user.listTeams({ limit: 200, cursor: listedTeams.nextCursor ?? throwErr("expected a next cursor") });
+  expect(nextPage.map((team) => team.id)).toEqual([newestTeam.id]);
+  expect(nextPage.nextCursor).toBeNull();
+
+  expect((await user.getTeam(newestTeam.id))?.id).toBe(newestTeam.id);
+  const serverUser = await serverApp.getUser(user.id);
+  if (!serverUser) throw new Error("User not found on server");
+  expect((await serverUser.getTeam(newestTeam.id))?.id).toBe(newestTeam.id);
+
+  // Still a membership check: a team the user isn't in resolves to null.
+  const otherTeam = await serverApp.createTeam({ displayName: "Not My Team" });
+  expect(await user.getTeam(otherTeam.id)).toBeNull();
+  expect(await serverUser.getTeam(otherTeam.id)).toBeNull();
 });
 
 it("exposes the selected team of a server user as a server team", { timeout: 60_000 }, async ({ expect }) => {

@@ -20,6 +20,8 @@ import { createLazyProxy } from "@hexclave/shared/dist/utils/proxies";
 import { isUuid } from "@hexclave/shared/dist/utils/uuids";
 import { addUserToTeam } from "../team-memberships/crud";
 
+const maxListPageSize = 200;
+
 
 export function teamPrismaToCrud(prisma: Prisma.TeamGetPayload<{}>) {
   return {
@@ -40,7 +42,7 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
     add_current_user: yupString().oneOf(["true", "false"]).optional().meta({ openapiField: { onlyShowInOperations: ['Create'], hidden: true } }),
     order_by: yupString().oneOf(["created_at"]).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'Field to order results by. Currently only `created_at` is supported.', exampleValue: 'created_at' } }),
     desc: yupString().oneOf(["true", "false"]).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'Whether to order results in descending order. Defaults to false (ascending).', exampleValue: 'false' } }),
-    limit: yupNumber().integer().min(1).max(200).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'The maximum number of items to return (capped at 200).' } }),
+    limit: yupNumber().integer().min(1).max(maxListPageSize).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: `The maximum number of items to return (capped at ${maxListPageSize}). If omitted, at most ${maxListPageSize} teams are returned; if there are more, the response is paginated and \`pagination.next_cursor\` can be passed as \`cursor\` (together with \`limit\`) to fetch the rest.` } }),
     cursor: yupString().uuid().optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'The cursor to start the result set from. Requires `limit` to also be set.' } }),
     query: yupString().optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: "A search query to filter the results by. Free-text search applied to the team's id (exact-match) and display name." } }),
   }),
@@ -300,6 +302,7 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
 
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const sortDirection = query.desc === 'true' ? 'desc' : 'asc';
+    const limit = query.limit ?? maxListPageSize;
 
     let queryFilter: Prisma.TeamWhereInput | undefined;
     if (query.query) {
@@ -332,7 +335,8 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
         { createdAt: sortDirection },
         { teamId: sortDirection },
       ],
-      take: query.limit ? query.limit + 1 : undefined,
+      // +1 to detect whether a next page exists without a separate count.
+      take: limit + 1,
       ...query.cursor ? {
         skip: 1,
         cursor: {
@@ -344,21 +348,24 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
       } : {},
     });
 
-    if (query.limit) {
-      const items = db.slice(0, query.limit).map(teamPrismaToCrud);
-      const hasMore = db.length > query.limit;
+    const items = db.slice(0, limit).map(teamPrismaToCrud);
+    const hasMore = db.length > limit;
+
+    // Requests without `limit` predate pagination and keep the unpaginated shape when everything fits.
+    // When the default cap truncates the result, return a cursor so callers can tell there's more.
+    if (query.limit == null && !hasMore) {
       return {
         items,
-        is_paginated: true,
-        pagination: {
-          next_cursor: hasMore && items.length > 0 ? items[items.length - 1].id : null,
-        },
+        is_paginated: false,
       };
     }
 
     return {
-      items: db.map(teamPrismaToCrud),
-      is_paginated: false,
+      items,
+      is_paginated: true,
+      pagination: {
+        next_cursor: hasMore && items.length > 0 ? items[items.length - 1].id : null,
+      },
     };
   }
 }));

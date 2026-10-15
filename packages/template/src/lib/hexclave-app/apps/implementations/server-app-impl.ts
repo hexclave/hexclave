@@ -720,14 +720,16 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
       // Unlike the app-level getTeam/useTeam (which fetch any team by id),
       // the user-scoped variants search the user's own team list on purpose:
       // they must return null for teams the user is not a member of, and some
-      // callers rely on that as a membership check.
+      // callers rely on that as a membership check. The unfiltered list is
+      // capped by the backend, so we filter it on the team ID (the `query`
+      // param exact-matches team IDs) rather than searching the full list.
       async getTeam(teamId: string) {
-        const teams = await this.listTeams();
+        const teams = await this.listTeams({ query: teamId });
         return teams.find((t) => t.id === teamId) ?? null;
       },
       // IF_PLATFORM react-like
       useTeam(teamId: string) {
-        const teams = this.useTeams();
+        const teams = this.useTeams({ query: teamId });
         return useMemo(() => {
           return teams.find((t) => t.id === teamId) ?? null;
         }, [teams, teamId]);

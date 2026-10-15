@@ -58,7 +58,7 @@ import { NotificationCategory } from "../../notification-categories";
 import { scopePasskeyAuthenticationToHostname, scopePasskeyRegistrationToHostname } from "../../passkey-rp-id";
 import { TeamPermission } from "../../permissions";
 import { AdminOwnedProject, AdminProjectUpdateOptions, Project, adminProjectCreateOptionsToCrud } from "../../projects";
-import { EditableTeamMemberProfile, ReceivedTeamInvitation, SentTeamInvitation, Team, TeamCreateOptions, TeamUpdateOptions, TeamUser, teamCreateOptionsToCrud, teamUpdateOptionsToCrud } from "../../teams";
+import { EditableTeamMemberProfile, ListTeamsOptions, ReceivedTeamInvitation, SentTeamInvitation, Team, TeamCreateOptions, TeamUpdateOptions, TeamUser, teamCreateOptionsToCrud, teamUpdateOptionsToCrud } from "../../teams";
 import { buildCliAuthConfirmUrl, getHostedHandlerUrl, isHostedHandlerUrlForProject, resolveHandlerUrls } from "../../url-targets";
 import { ActiveSession, Auth, BaseUser, CurrentUser, InternalUserExtra, OAuthProvider, ProjectCurrentUser, SyncedPartialUser, TokenPartialUser, UserExtra, UserUpdateOptions, userUpdateOptionsToCrud, withUserDestructureGuard } from "../../users";
 import { StackClientApp, StackClientAppConstructorOptions, StackClientAppJson } from "../interfaces/client-app";
@@ -468,8 +468,14 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   >(async (session, [recursive]) => {
     return await this._interface.listCurrentUserProjectPermissions({ recursive }, session);
   });
-  private readonly _currentUserTeamsCache = createCacheBySession(async (session) => {
-    return await this._interface.listCurrentUserTeams(session);
+  private readonly _currentUserTeamsCache = createCacheBySession<[
+    orderBy: 'createdAt' | undefined,
+    desc: boolean | undefined,
+    cursor: string | undefined,
+    limit: number | undefined,
+    query: string | undefined,
+  ], TeamsCrud['Client']['List']>(async (session, [orderBy, desc, cursor, limit, query]) => {
+    return await this._interface.listCurrentUserTeams(session, { orderBy, desc, cursor, limit, query });
   });
   /** @deprecated Used by legacy getConnectedAccount(providerId) — uses old per-provider access token endpoint */
   private readonly _currentUserOAuthConnectionAccessTokensCache = createCacheBySession<[string, string], { accessToken: string } | null>(
@@ -2088,7 +2094,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         await app._interface.acceptTeamInvitationById(crud.id, session);
         await Promise.all([
           app._currentUserTeamInvitationsCache.refresh([session]),
-          app._currentUserTeamsCache.refresh([session]),
+          app._refreshCurrentUserTeams(session),
           app._teamInvitationsCache.refresh([session, crud.team_id]),
         ]);
       },
@@ -2145,6 +2151,17 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     };
   }
 
+  protected _clientTeamListFromCrud(crud: TeamsCrud['Client']['List'], session: InternalSession): Team[] & { nextCursor: string | null } {
+    return Object.assign(
+      crud.items.map((team) => this._clientTeamFromCrud(team, session)),
+      { nextCursor: crud.pagination?.next_cursor ?? null },
+    );
+  }
+
+  protected async _refreshCurrentUserTeams(session: InternalSession) {
+    await this._currentUserTeamsCache.refreshWhere(([cachedSession]) => cachedSession === session);
+  }
+
   protected _clientTeamFromCrud(crud: TeamsCrud['Client']['Read'], session: InternalSession): Team {
     const app = this;
     return {
@@ -2170,7 +2187,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       async removeUser(userId: string) {
         await app._interface.removeUserFromTeam(crud.id, userId, session);
         await app._teamMemberProfilesCache.refresh([session, crud.id]);
-        await app._currentUserTeamsCache.refresh([session]);
+        await app._refreshCurrentUserTeams(session);
         await app._currentUserCache.refresh([session]);
       },
       // IF_PLATFORM react-like
@@ -2191,11 +2208,11 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       // END_PLATFORM
       async update(data: TeamUpdateOptions) {
         await app._interface.updateTeam({ data: teamUpdateOptionsToCrud(data), teamId: crud.id }, session);
-        await app._currentUserTeamsCache.refresh([session]);
+        await app._refreshCurrentUserTeams(session);
       },
       async delete() {
         await app._interface.deleteTeam(crud.id, session);
-        await app._currentUserTeamsCache.refresh([session]);
+        await app._refreshCurrentUserTeams(session);
       },
 
       // IF_PLATFORM react-like
@@ -2637,37 +2654,40 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
         return useAsyncCache(app._currentUserValidConnectedAccountForProviderCache, [session, provider, scopeString] as const, "user.useOrLinkConnectedAccount()");
       },
       // END_PLATFORM
+      // The unfiltered team list is capped by the backend, so look the team up by filtering the user's
+      // teams on its ID (the `query` param exact-matches team IDs) instead of searching the full list.
+      // Filtering the user's own teams keeps the "null if not a member" semantics.
       async getTeam(teamId: string) {
-        const teams = await this.listTeams();
+        const teams = await this.listTeams({ query: teamId });
         return teams.find((t) => t.id === teamId) ?? null;
       },
       // IF_PLATFORM react-like
       useTeam(teamId: string) {
-        const teams = this.useTeams();
+        const teams = this.useTeams({ query: teamId });
         return useMemo(() => {
           return teams.find((t) => t.id === teamId) ?? null;
         }, [teams, teamId]);
       },
       // END_PLATFORM
-      async listTeams() {
-        const teams = Result.orThrow(await app._currentUserTeamsCache.getOrWait([session], "write-only"));
-        return teams.map((crud) => app._clientTeamFromCrud(crud, session));
+      async listTeams(options?: ListTeamsOptions) {
+        const result = Result.orThrow(await app._currentUserTeamsCache.getOrWait([session, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query], "write-only"));
+        return app._clientTeamListFromCrud(result, session);
       },
       // IF_PLATFORM react-like
-      useTeams() {
-        const teams = useAsyncCache(app._currentUserTeamsCache, [session], "user.useTeams()");
-        return useMemo(() => teams.map((crud) => app._clientTeamFromCrud(crud, session)), [teams]);
+      useTeams(options?: ListTeamsOptions) {
+        const result = useAsyncCache(app._currentUserTeamsCache, [session, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query] as const, "user.useTeams()");
+        return useMemo(() => app._clientTeamListFromCrud(result, session), [result]);
       },
       // END_PLATFORM
       async createTeam(data: TeamCreateOptions) {
         const crud = await app._interface.createClientTeam(teamCreateOptionsToCrud(data, 'me'), session);
-        await app._currentUserTeamsCache.refresh([session]);
+        await app._refreshCurrentUserTeams(session);
         await this.update({ selectedTeamId: crud.id });
         return app._clientTeamFromCrud(crud, session);
       },
       async leaveTeam(team: Team) {
         await app._interface.leaveTeam(team.id, session);
-        await app._currentUserTeamsCache.refresh([session]);
+        await app._refreshCurrentUserTeams(session);
         await app._currentUserCache.refresh([session]);
       },
       async listTeamInvitations() {

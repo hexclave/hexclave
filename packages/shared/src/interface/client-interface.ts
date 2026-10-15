@@ -1906,14 +1906,27 @@ export class HexclaveClientInterface {
     return result.items;
   }
 
-  async listCurrentUserTeams(session: InternalSession): Promise<TeamsCrud["Client"]["Read"][]> {
+  async listCurrentUserTeams(session: InternalSession, options?: {
+    orderBy?: 'createdAt',
+    desc?: boolean,
+    cursor?: string,
+    limit?: number,
+    query?: string,
+  }): Promise<TeamsCrud["Client"]["List"]> {
     const response = await this.sendClientRequest(
-      "/teams?user_id=me",
+      `/teams?${new URLSearchParams(filterUndefined({
+        user_id: "me",
+        // SDK option uses camelCase `createdAt`; backend uses snake_case.
+        order_by: options?.orderBy === 'createdAt' ? 'created_at' : options?.orderBy,
+        desc: options?.desc !== undefined ? String(options.desc) : undefined,
+        cursor: options?.cursor,
+        limit: options?.limit?.toString(),
+        query: options?.query,
+      }))}`,
       {},
       session,
     );
-    const result = await response.json() as TeamsCrud["Client"]["List"];
-    return result.items;
+    return await response.json();
   }
 
   async getClientProject(): Promise<Result<ClientProjectsCrud['Client']['Read'], KnownErrors["ProjectNotFound"]>> {
