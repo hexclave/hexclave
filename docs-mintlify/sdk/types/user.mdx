@@ -980,13 +980,14 @@ Use `useUser()` to get `CurrentUser` (client). Use `hexclaveServerApp.getUser()`
 
       <AsideSection title="Examples">
         ```typescript
-        const teams = await user.listTeams();
-
         // Page through all teams
-        let page = await user.listTeams({ limit: 100 });
-        while (page.nextCursor) {
-          page = await user.listTeams({ limit: 100, cursor: page.nextCursor });
-        }
+        const allTeams = [];
+        let cursor: string | undefined = undefined;
+        do {
+          const page = await user.listTeams({ limit: 100, cursor });
+          allTeams.push(...page);
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor != null);
         ```
       </AsideSection>
     </MethodAside>

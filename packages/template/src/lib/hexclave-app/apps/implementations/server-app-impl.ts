@@ -1047,7 +1047,9 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
         await app._interface.deleteServerTeam(crud.id);
         await Promise.all([
           app._serverTeamCache.refresh([crud.id]),
-          app._serverTeamsCache.refreshWhere(() => true),
+          // Pages anchored on the deleted team can't be refetched (the backend rejects that cursor); see
+          // `_refreshCurrentUserTeams` in the client app.
+          app._serverTeamsCache.refreshWhere(([, , , cursor]) => cursor !== crud.id),
           app._serverUsersCache.refreshWhere(() => true),
         ]);
       },

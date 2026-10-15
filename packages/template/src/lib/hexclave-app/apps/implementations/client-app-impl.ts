@@ -2155,8 +2155,12 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     return teamListFromCrud(crud, (team) => this._clientTeamFromCrud(team, session));
   }
 
-  protected async _refreshCurrentUserTeams(session: InternalSession) {
-    await this._currentUserTeamsCache.refreshWhere(([cachedSession]) => cachedSession === session);
+  protected async _refreshCurrentUserTeams(session: InternalSession, options?: { deletedTeamId?: string }) {
+    // The backend rejects a cursor whose team was deleted (that page has no position anymore), so refreshing a page
+    // anchored on the deleted team would make its subscribers throw. Its cached contents never included the anchor
+    // team itself, so keeping them as-is is still accurate.
+    await this._currentUserTeamsCache.refreshWhere(([cachedSession, , , cursor]) =>
+      cachedSession === session && (options?.deletedTeamId == null || cursor !== options.deletedTeamId));
   }
 
   protected _clientTeamFromCrud(crud: TeamsCrud['Client']['Read'], session: InternalSession): Team {
@@ -2209,7 +2213,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       },
       async delete() {
         await app._interface.deleteTeam(crud.id, session);
-        await app._refreshCurrentUserTeams(session);
+        await app._refreshCurrentUserTeams(session, { deletedTeamId: crud.id });
       },
 
       // IF_PLATFORM react-like
