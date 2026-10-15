@@ -176,17 +176,32 @@ export type ServerListUsersOptions = ServerListUsersOptionsBase & (
 export type ListTeamsOptions = {
   orderBy?: 'createdAt',
   desc?: boolean,
-  cursor?: string,
-  /**
-   * Maximum number of teams to return (at most 200). If omitted, at most 200 teams are returned; when there
-   * are more, `nextCursor` on the result is set and can be passed as `cursor` (together with `limit`) to fetch the rest.
-   */
-  limit?: number,
   /**
    * Free-text search. Matches team ID (exact UUID) and display name.
    */
   query?: string,
-};
+} & (
+  {
+    /**
+     * Maximum number of teams to return (at most 200). If omitted, at most 200 teams are returned; when there
+     * are more, `nextCursor` on the result is set and can be passed as `cursor` (together with `limit`) to fetch the rest.
+     */
+    limit?: number,
+    cursor?: undefined,
+  } | {
+    limit: number,
+    /**
+     * The `nextCursor` of the previous page. The backend rejects a cursor without a `limit`.
+     */
+    cursor?: string,
+  }
+);
+
+export type TeamList<T> = T[] & { nextCursor: string | null };
+
+export function teamListFromCrud<Crud, T>(crud: { items: Crud[], pagination?: { next_cursor: string | null } }, mapTeam: (crud: Crud) => T): TeamList<T> {
+  return Object.assign(crud.items.map(mapTeam), { nextCursor: crud.pagination?.next_cursor ?? null });
+}
 
 export type ServerListTeamsOptions = ListTeamsOptions;
 

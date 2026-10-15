@@ -58,7 +58,7 @@ import { NotificationCategory } from "../../notification-categories";
 import { scopePasskeyAuthenticationToHostname, scopePasskeyRegistrationToHostname } from "../../passkey-rp-id";
 import { TeamPermission } from "../../permissions";
 import { AdminOwnedProject, AdminProjectUpdateOptions, Project, adminProjectCreateOptionsToCrud } from "../../projects";
-import { EditableTeamMemberProfile, ListTeamsOptions, ReceivedTeamInvitation, SentTeamInvitation, Team, TeamCreateOptions, TeamUpdateOptions, TeamUser, teamCreateOptionsToCrud, teamUpdateOptionsToCrud } from "../../teams";
+import { EditableTeamMemberProfile, ListTeamsOptions, ReceivedTeamInvitation, SentTeamInvitation, Team, TeamCreateOptions, TeamList, TeamUpdateOptions, TeamUser, teamCreateOptionsToCrud, teamListFromCrud, teamUpdateOptionsToCrud } from "../../teams";
 import { buildCliAuthConfirmUrl, getHostedHandlerUrl, isHostedHandlerUrlForProject, resolveHandlerUrls } from "../../url-targets";
 import { ActiveSession, Auth, BaseUser, CurrentUser, InternalUserExtra, OAuthProvider, ProjectCurrentUser, SyncedPartialUser, TokenPartialUser, UserExtra, UserUpdateOptions, userUpdateOptionsToCrud, withUserDestructureGuard } from "../../users";
 import { StackClientApp, StackClientAppConstructorOptions, StackClientAppJson } from "../interfaces/client-app";
@@ -90,7 +90,7 @@ export function stripBrowserActionQueryParam() {
 }
 
 // IF_PLATFORM react-like
-import { useAsyncCache } from "./common";
+import { useAsyncCache, useTeamInUserTeams } from "./common";
 // END_PLATFORM
 // IF_PLATFORM js-like
 import { mountClickmapOverlay } from "../../../../clickmap";
@@ -2151,11 +2151,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     };
   }
 
-  protected _clientTeamListFromCrud(crud: TeamsCrud['Client']['List'], session: InternalSession): Team[] & { nextCursor: string | null } {
-    return Object.assign(
-      crud.items.map((team) => this._clientTeamFromCrud(team, session)),
-      { nextCursor: crud.pagination?.next_cursor ?? null },
-    );
+  protected _clientTeamListFromCrud(crud: TeamsCrud['Client']['List'], session: InternalSession): TeamList<Team> {
+    return teamListFromCrud(crud, (team) => this._clientTeamFromCrud(team, session));
   }
 
   protected async _refreshCurrentUserTeams(session: InternalSession) {
@@ -2663,10 +2660,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       },
       // IF_PLATFORM react-like
       useTeam(teamId: string) {
-        const teams = this.useTeams({ query: teamId });
-        return useMemo(() => {
-          return teams.find((t) => t.id === teamId) ?? null;
-        }, [teams, teamId]);
+        return useTeamInUserTeams((options) => this.useTeams(options), teamId);
       },
       // END_PLATFORM
       async listTeams(options?: ListTeamsOptions) {

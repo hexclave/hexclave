@@ -36,13 +36,13 @@ import { EmailDeliveryInfo, SendEmailOptions } from "../../email";
 import { NotificationCategory } from "../../notification-categories";
 import { scopePasskeyRegistrationToHostname } from "../../passkey-rp-id";
 import { AdminProjectPermissionDefinition, AdminTeamPermission, AdminTeamPermissionDefinition } from "../../permissions";
-import { EditableTeamMemberProfile, ReceivedTeamInvitation, SentTeamInvitation, ServerListTeamsOptions, ServerListUsersOptions, ServerTeam, ServerTeamCreateOptions, ServerTeamUpdateOptions, ServerTeamUser, Team, serverTeamCreateOptionsToCrud, serverTeamUpdateOptionsToCrud } from "../../teams";
+import { EditableTeamMemberProfile, ReceivedTeamInvitation, SentTeamInvitation, ServerListTeamsOptions, ServerListUsersOptions, ServerTeam, ServerTeamCreateOptions, ServerTeamUpdateOptions, ServerTeamUser, Team, TeamList, serverTeamCreateOptionsToCrud, serverTeamUpdateOptionsToCrud, teamListFromCrud } from "../../teams";
 import { ProjectCurrentServerUser, ServerOAuthProvider, ServerUser, ServerUserCreateOptions, ServerUserUpdateOptions, serverUserCreateOptionsToCrud, serverUserUpdateOptionsToCrud, withUserDestructureGuard } from "../../users";
 import { StackServerAppConstructorOptions } from "../interfaces/server-app";
 import { _HexclaveClientAppImplIncomplete } from "./client-app-impl";
 import { clientVersion, createCache, createCacheBySession, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getDefaultSecretServerKey, resolveApiUrls, resolveConstructorOptions } from "./common";
 
-import { useAsyncCache } from "./common"; // THIS_LINE_PLATFORM react-like
+import { useAsyncCache, useTeamInUserTeams } from "./common"; // THIS_LINE_PLATFORM react-like
 
 export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, ProjectId extends string> extends _HexclaveClientAppImplIncomplete<HasTokenStore, ProjectId> {
   declare protected _interface: HexclaveServerInterface;
@@ -729,26 +729,17 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
       },
       // IF_PLATFORM react-like
       useTeam(teamId: string) {
-        const teams = this.useTeams({ query: teamId });
-        return useMemo(() => {
-          return teams.find((t) => t.id === teamId) ?? null;
-        }, [teams, teamId]);
+        return useTeamInUserTeams((options) => this.useTeams(options), teamId);
       },
       // END_PLATFORM
-      async listTeams(options?: ServerListTeamsOptions): Promise<ServerTeam[] & { nextCursor: string | null }> {
+      async listTeams(options?: ServerListTeamsOptions): Promise<TeamList<ServerTeam>> {
         const result = Result.orThrow(await app._serverTeamsCache.getOrWait([crud.id, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query] as const, "write-only"));
-        const teams: any = result.items.map((t) => app._serverTeamFromCrud(t));
-        teams.nextCursor = result.pagination?.next_cursor ?? null;
-        return teams as any;
+        return teamListFromCrud(result, (t) => app._serverTeamFromCrud(t));
       },
       // IF_PLATFORM react-like
-      useTeams(options?: ServerListTeamsOptions): ServerTeam[] & { nextCursor: string | null } {
+      useTeams(options?: ServerListTeamsOptions): TeamList<ServerTeam> {
         const result = useAsyncCache(app._serverTeamsCache, [crud.id, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query] as const, "user.useTeams()");
-        return useMemo(() => {
-          const teams: any = result.items.map((t) => app._serverTeamFromCrud(t));
-          teams.nextCursor = result.pagination?.next_cursor ?? null;
-          return teams as any;
-        }, [result]);
+        return useMemo(() => teamListFromCrud(result, (t) => app._serverTeamFromCrud(t)), [result]);
       },
       // END_PLATFORM
       createTeam: async (data: Omit<ServerTeamCreateOptions, "creatorUserId">) => {
@@ -1559,21 +1550,15 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
     return this._serverTeamFromCrud(team);
   }
 
-  async listTeams(options?: ServerListTeamsOptions): Promise<ServerTeam[] & { nextCursor: string | null }> {
+  async listTeams(options?: ServerListTeamsOptions): Promise<TeamList<ServerTeam>> {
     const crud = Result.orThrow(await this._serverTeamsCache.getOrWait([undefined, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query] as const, "write-only"));
-    const teams: any = crud.items.map((t) => this._serverTeamFromCrud(t));
-    teams.nextCursor = crud.pagination?.next_cursor ?? null;
-    return teams as any;
+    return teamListFromCrud(crud, (t) => this._serverTeamFromCrud(t));
   }
 
   // IF_PLATFORM react-like
-  useTeams(options?: ServerListTeamsOptions): ServerTeam[] & { nextCursor: string | null } {
+  useTeams(options?: ServerListTeamsOptions): TeamList<ServerTeam> {
     const crud = useAsyncCache(this._serverTeamsCache, [undefined, options?.orderBy, options?.desc, options?.cursor, options?.limit, options?.query] as const, "serverApp.useTeams()");
-    return useMemo(() => {
-      const teams: any = crud.items.map((t) => this._serverTeamFromCrud(t));
-      teams.nextCursor = crud.pagination?.next_cursor ?? null;
-      return teams as any;
-    }, [crud]);
+    return useMemo(() => teamListFromCrud(crud, (t) => this._serverTeamFromCrud(t)), [crud]);
   }
   // END_PLATFORM
 

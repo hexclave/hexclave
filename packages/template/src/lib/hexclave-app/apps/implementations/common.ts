@@ -223,6 +223,29 @@ export function createEmptyTokenStore() {
 
 
 // IF_PLATFORM react-like
+/**
+ * Hook backing `user.useTeam(teamId)`: finds the team among the user's own teams, so it's null for non-members.
+ *
+ * `/teams?user_id=me` is one of our hottest endpoints, and apps commonly render `useTeams()` and `useTeam(id)`
+ * side by side, so we first look in the unfiltered (capped) list, which shares its cache entry with `useTeams()`.
+ * Only when the team isn't on that page and there are more pages do we look it up by ID via `query`. The second
+ * hook is always called (rules of hooks); when no lookup is needed it reuses the unfiltered cache key, which costs
+ * no extra request.
+ */
+export function useTeamInUserTeams<T extends { id: string }>(
+  useTeams: (options?: { query?: string }) => T[] & { nextCursor: string | null },
+  teamId: string,
+): T | null {
+  const firstPage = useTeams();
+  const inFirstPage = firstPage.find((team) => team.id === teamId);
+  const needsLookup = inFirstPage === undefined && firstPage.nextCursor != null;
+  const lookup = useTeams(needsLookup ? { query: teamId } : undefined);
+  return React.useMemo(
+    () => inFirstPage ?? lookup.find((team) => team.id === teamId) ?? null,
+    [inFirstPage, lookup, teamId],
+  );
+}
+
 const cachePromiseByHookId = new Map<string, ReactPromise<Result<unknown>>>();
 export function useAsyncCache<D extends any[], T>(cache: AsyncCache<D, Result<T>>, dependencies: D, caller: string): T {
   // we explicitly don't want to run this hook in SSR
