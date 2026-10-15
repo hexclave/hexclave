@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { getInternalUser } from "../lib/app.js";
 import { resolveSessionAuth } from "../lib/auth.js";
 import { withProgress } from "../lib/progress.js";
+import { listAllTeams } from "../lib/resolve-team.js";
 
 export function registerWhoamiCommand(program: Command) {
   program
@@ -12,7 +13,7 @@ export function registerWhoamiCommand(program: Command) {
       const auth = resolveSessionAuth();
       const { user, teams } = await withProgress("Loading account", async () => {
         const user = await getInternalUser(auth);
-        const teams = await user.listTeams();
+        const teams = await listAllTeams(user);
         return { user, teams };
       });
 
