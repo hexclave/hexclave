@@ -503,7 +503,7 @@ function AccountFacts({ user }: { user: ServerUser }) {
         <>
           <FactSeparator />
           <Fact icon={UsersThreeIcon} label="Teams" tooltip={teams.map((t) => t.displayName).join(", ")}>
-            {teams.length === 1 ? teams[0]!.displayName : `${teams.length} teams`}
+            {teams.length === 1 ? teams[0]!.displayName : `${teams.length}${teams.nextCursor != null ? "+" : ""} teams`}
           </Fact>
         </>
       )}

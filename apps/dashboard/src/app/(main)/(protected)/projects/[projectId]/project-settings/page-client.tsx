@@ -103,11 +103,8 @@ export default function PageClient() {
     [jwksUrl]
   );
 
-  // Memoize current owner team lookup
-  const currentOwnerTeam = useMemo(
-    () => teams.find(team => team.id === project.ownerTeamId) ?? throwErr(`Owner team of project ${project.id} not found in user's teams?`, { projectId: project.id, teams }),
-    [teams, project.ownerTeamId, project.id]
-  );
+  // Not looked up in `teams`, which only holds the user's first 200 teams.
+  const currentOwnerTeam = user.useTeam(project.ownerTeamId ?? throwErr(`Project ${project.id} has no owner team.`)) ?? throwErr(`Owner team of project ${project.id} not found in user's teams?`, { projectId: project.id, ownerTeamId: project.ownerTeamId });
 
   // Check if user has team_admin permission for the current team
   const hasAdminPermissionForCurrentTeam = user.usePermission(currentOwnerTeam, "team_admin");
