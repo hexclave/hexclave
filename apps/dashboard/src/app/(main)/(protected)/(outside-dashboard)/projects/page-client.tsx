@@ -442,6 +442,11 @@ function ProjectsListPage() {
     };
   }, [appInternals, rawProjects.length]);
 
+  const handleProjectDeleted = useCallback(async () => {
+    toast({ title: "Project deleted" });
+    await appInternals.refreshOwnedProjects();
+  }, [appInternals]);
+
   const teamIdMap = useMemo(() => {
     return new Map(teams.map((team) => [team.id, team.displayName]));
   }, [teams]);
@@ -545,6 +550,7 @@ function ProjectsListPage() {
                     dailySignups={projectDailySignups.get(project.id)}
                     metricsLoading={loadingProjectMetrics}
                     metricsError={projectMetricsError}
+                    onDeleted={handleProjectDeleted}
                   />
                 );
               })}
