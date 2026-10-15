@@ -120,29 +120,29 @@ public actor StackServerApp {
     
     // MARK: - Teams
     
+    /// Lists teams in the project (or the given user's teams). Returns at most 200 teams; use `listTeamsPage` to page
+    /// through more.
     public func listTeams(
         userId: String? = nil
     ) async throws -> [ServerTeam] {
-        var query: [String] = []
-        if let userId = userId { query.append("user_id=\(userId)") }
-        
-        var path = "/teams"
-        if !query.isEmpty {
-            path += "?" + query.joined(separator: "&")
-        }
-        
+        return try await listTeamsPage(userId: userId).items
+    }
+    
+    /// Lists one page of teams in the project (or the given user's teams). `cursor` requires `limit`.
+    public func listTeamsPage(
+        userId: String? = nil,
+        limit: Int? = nil,
+        cursor: String? = nil,
+        query: String? = nil,
+        orderBy: String? = nil,
+        descending: Bool? = nil
+    ) async throws -> TeamPage<ServerTeam> {
         let (data, _) = try await client.sendRequest(
-            path: path,
+            path: teamListPath(userId: userId, limit: limit, cursor: cursor, query: query, orderBy: orderBy, descending: descending),
             method: "GET",
             serverOnly: true
         )
-        
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let items = json["items"] as? [[String: Any]] else {
-            return []
-        }
-        
-        return items.map { ServerTeam(client: client, json: $0) }
+        return try parseTeamPage(data: data) { ServerTeam(client: client, json: $0) }
     }
     
     public func getTeam(id teamId: String) async throws -> ServerTeam? {

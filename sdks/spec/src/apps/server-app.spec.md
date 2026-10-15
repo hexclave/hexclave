@@ -195,18 +195,29 @@ Does not error.
 
 Arguments:
   options.userId: string? - filter by user membership
+  options.limit: number? - max results, 1 to 200. If omitted, at most 200 teams are returned.
+  options.cursor: string? - nextCursor of the previous page. Requires limit (the backend returns 400 otherwise).
+  options.query: string? - free-text search; exact match on team ID (if it is a UUID), substring match on display name
+  options.orderBy: "createdAt"? - sort field (sent as order_by=created_at)
+  options.desc: bool? - descending order (default ascending)
 
-Returns: ServerTeam[]
+Returns: ServerTeam[] & { nextCursor: string | null }
 
 Request:
   GET /api/v1/teams [server-only]
-  Query params: user_id?
-
-Note: This endpoint does NOT support pagination parameters like limit/cursor.
-Use optional user_id filter to get teams a specific user belongs to.
+  Query params: user_id?, limit?, cursor?, query?, order_by?, desc?
 
 Response:
-  { items: [ServerTeamCrud, ...] }
+  {
+    items: [ServerTeamCrud, ...],
+    is_paginated: bool,
+    pagination?: { next_cursor: string | null }
+  }
+
+nextCursor is pagination.next_cursor, or null if absent. Without limit, the response has is_paginated: false and no
+pagination when all matching teams fit in 200; when they don't, the first 200 are returned with a next_cursor.
+Languages that can't attach a property to an array may instead expose listTeams() returning only the items, plus a
+page-returning variant (e.g. Swift's listTeamsPage, returning { items, nextCursor }).
 
 Does not error.
 

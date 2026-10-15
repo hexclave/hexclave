@@ -280,7 +280,8 @@ struct ServerTeamTests {
         
         let team = try await app.createTeam(displayName: TestConfig.uniqueTeamName())
         
-        let teams = try await app.listTeams()
+        // The test project is shared and can hold more than the 200 teams `listTeams()` returns, so search by ID.
+        let teams = try await app.listTeamsPage(query: team.id).items
         
         let found = teams.contains { $0.id == team.id }
         #expect(found)
@@ -453,5 +454,130 @@ struct ServerTeamTests {
         
         let deletedTeam = try await app.getTeam(id: teamId)
         #expect(deletedTeam == nil)
+    }
+}
+
+@Suite("Team Tests - Pagination")
+struct TeamPaginationTests {
+    /// Creates `count` teams with `userId` as a member, 20 at a time, and returns their IDs in creation order.
+    private func createTeams(count: Int, creatorUserId: String, app: StackServerApp) async throws -> [String] {
+        var ids: [String] = []
+        for batchStart in stride(from: 0, to: count, by: 20) {
+            let batch = try await withThrowingTaskGroup(of: (Int, String).self) { group in
+                for index in batchStart..<min(batchStart + 20, count) {
+                    group.addTask {
+                        let team = try await app.createTeam(displayName: "Paged Team \(index)", creatorUserId: creatorUserId)
+                        return (index, team.id)
+                    }
+                }
+                var results: [(Int, String)] = []
+                for try await result in group { results.append(result) }
+                return results
+            }
+            // Concurrent creation within a batch has no defined order, so we only rely on batch order below.
+            ids.append(contentsOf: batch.sorted { $0.0 < $1.0 }.map { $0.1 })
+        }
+        return ids
+    }
+
+    @Test("Should page through the current user's teams")
+    func pageCurrentUserTeams() async throws {
+        let app = TestConfig.createClientApp()
+        try await app.signUpWithCredential(email: TestConfig.uniqueEmail(), password: TestConfig.testPassword)
+        let user = try #require(try await app.getUser())
+
+        // The test project may create a personal team on sign-up, so include whatever teams already exist.
+        var expected = try await user.listTeams().map { $0.id }
+        for index in 0..<(4 - expected.count) {
+            expected.append(try await user.createTeam(displayName: "Page \(index)").id)
+        }
+
+        let page1 = try await user.listTeamsPage(limit: 3)
+        #expect(page1.items.map { $0.id } == Array(expected[0..<3]))
+        #expect(page1.nextCursor == expected[2])
+
+        let page2 = try await user.listTeamsPage(limit: 3, cursor: try #require(page1.nextCursor))
+        #expect(page2.items.map { $0.id } == [expected[3]])
+        #expect(page2.nextCursor == nil)
+
+        let newestFirst = try await user.listTeamsPage(orderBy: "created_at", descending: true)
+        #expect(newestFirst.items.map { $0.id } == expected.reversed())
+
+        let all = try await user.listTeams()
+        #expect(all.map { $0.id } == expected)
+    }
+
+    @Test("Should search teams with characters that need URL encoding")
+    func searchWithSpecialCharacters() async throws {
+        let app = TestConfig.createClientApp()
+        try await app.signUpWithCredential(email: TestConfig.uniqueEmail(), password: TestConfig.testPassword)
+        let user = try #require(try await app.getUser())
+
+        let plus = try await user.createTeam(displayName: "R+D & Ops")
+        _ = try await user.createTeam(displayName: "R D Ops")
+
+        let found = try await user.listTeamsPage(query: "R+D & Ops").items
+        #expect(found.map { $0.id } == [plus.id])
+    }
+
+    @Test("Should return nil from getTeam for teams the user is not a member of")
+    func getTeamMembershipCheck() async throws {
+        let serverApp = TestConfig.createServerApp()
+        let app = TestConfig.createClientApp()
+        try await app.signUpWithCredential(email: TestConfig.uniqueEmail(), password: TestConfig.testPassword)
+        let user = try #require(try await app.getUser())
+        let serverUser = try #require(try await serverApp.getUser(id: user.id))
+
+        let myTeam = try await user.createTeam(displayName: TestConfig.uniqueTeamName())
+        let otherTeam = try await serverApp.createTeam(displayName: TestConfig.uniqueTeamName())
+
+        #expect(try await user.getTeam(id: myTeam.id)?.id == myTeam.id)
+        #expect(try await user.getTeam(id: otherTeam.id) == nil)
+        #expect(try await user.getTeam(id: "not-a-uuid") == nil)
+        #expect(try await serverUser.getTeam(id: myTeam.id)?.id == myTeam.id)
+        #expect(try await serverUser.getTeam(id: otherTeam.id) == nil)
+
+        try await otherTeam.delete()
+    }
+
+    @Test("Should list a server user's teams")
+    func listServerUserTeams() async throws {
+        let serverApp = TestConfig.createServerApp()
+        let user = try await serverApp.createUser(email: TestConfig.uniqueEmail())
+        let team = try await serverApp.createTeam(displayName: TestConfig.uniqueTeamName(), creatorUserId: user.id)
+
+        let teams = try await user.listTeams()
+        #expect(teams.contains { $0.id == team.id })
+        #expect(try await user.listTeamsPage(query: team.id).items.map { $0.id } == [team.id])
+
+        try await team.delete()
+        try await user.delete()
+    }
+
+    @Test("Should find a team past the first 200 with getTeam")
+    func getTeamPastCap() async throws {
+        let serverApp = TestConfig.createServerApp()
+        let email = TestConfig.uniqueEmail()
+        let serverUser = try await serverApp.createUser(email: email, password: TestConfig.testPassword, primaryEmailAuthEnabled: true)
+
+        // Create the teams before signing in: creating 201 teams can outlive a dev access token.
+        let ids = try await createTeams(count: 201, creatorUserId: serverUser.id, app: serverApp)
+        let newestId = try #require(ids.last)
+
+        let app = TestConfig.createClientApp()
+        try await app.signInWithCredential(email: email, password: TestConfig.testPassword)
+        let user = try #require(try await app.getUser())
+
+        let firstPage = try await user.listTeamsPage()
+        #expect(firstPage.items.count == 200)
+        #expect(!firstPage.items.contains { $0.id == newestId })
+        let nextPage = try await user.listTeamsPage(limit: 200, cursor: try #require(firstPage.nextCursor))
+        #expect(nextPage.items.last?.id == newestId)
+        #expect(nextPage.nextCursor == nil)
+        let total = firstPage.items.count + nextPage.items.count
+        #expect(total >= 201)
+
+        #expect(try await user.getTeam(id: newestId)?.id == newestId)
+        #expect(try await serverUser.getTeam(id: newestId)?.id == newestId)
     }
 }

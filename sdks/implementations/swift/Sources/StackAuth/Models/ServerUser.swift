@@ -143,19 +143,32 @@ public actor ServerUser {
     
     // MARK: - Teams
     
+    /// Lists the user's teams. Returns at most 200 teams; use `listTeamsPage` to page through more.
     public func listTeams() async throws -> [ServerTeam] {
+        return try await listTeamsPage().items
+    }
+    
+    /// Lists one page of the user's teams. `cursor` requires `limit`.
+    public func listTeamsPage(
+        limit: Int? = nil,
+        cursor: String? = nil,
+        query: String? = nil,
+        orderBy: String? = nil,
+        descending: Bool? = nil
+    ) async throws -> TeamPage<ServerTeam> {
         let (data, _) = try await client.sendRequest(
-            path: "/users/\(id)/teams",
+            path: teamListPath(userId: id, limit: limit, cursor: cursor, query: query, orderBy: orderBy, descending: descending),
             method: "GET",
             serverOnly: true
         )
-        
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let items = json["items"] as? [[String: Any]] else {
-            return []
-        }
-        
-        return items.map { ServerTeam(client: client, json: $0) }
+        return try parseTeamPage(data: data) { ServerTeam(client: client, json: $0) }
+    }
+    
+    /// Returns the team if the user is a member of it, nil otherwise (unlike `StackServerApp.getTeam`, which returns
+    /// any team). Filters the user's teams on the ID (`query` exact-matches team IDs), as the unfiltered list is capped.
+    public func getTeam(id teamId: String) async throws -> ServerTeam? {
+        let teams = try await listTeamsPage(query: teamId).items
+        return teams.first { $0.id == teamId }
     }
     
     // MARK: - Contact Channels
