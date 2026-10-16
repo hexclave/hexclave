@@ -127,7 +127,7 @@ async function backfillSequenceIds(batchSize: number): Promise<boolean> {
       didUpdate = true;
     }
 
-    const teamTenants = (await runSequenceAllocation((tx) => tx.$queryRaw<{ tenancyId: string, teamId: string }[]>`
+    const teamTenants = (await runSequenceAllocation((tx) => tx.$queryRaw<{ tenancyId: string }[]>`
       WITH rows_to_update AS (
         SELECT "tenancyId", "teamId"
         FROM "Team"
@@ -144,8 +144,19 @@ async function backfillSequenceIds(batchSize: number): Promise<boolean> {
         WHERE t."tenancyId" = r."tenancyId"
           AND t."teamId"    = r."teamId"
         RETURNING t."tenancyId", t."teamId"
+      ),
+      cascaded_invitations AS (
+        UPDATE "VerificationCode" vc
+        SET "shouldUpdateSequenceId" = TRUE
+        FROM updated_rows
+        JOIN "Tenancy" ON "Tenancy"."id" = updated_rows."tenancyId"
+        WHERE vc."projectId" = "Tenancy"."projectId"
+          AND vc."branchId"  = "Tenancy"."branchId"
+          AND vc."type" = 'TEAM_INVITATION'
+          AND vc."data"->>'team_id' = updated_rows."teamId"::text
+          AND vc."shouldUpdateSequenceId" = FALSE
       )
-      SELECT DISTINCT "tenancyId", "teamId" FROM updated_rows
+      SELECT DISTINCT "tenancyId" FROM updated_rows
     `, span)) ?? [];
 
     span.setAttribute("stack.external-db-sync.team-tenants", teamTenants.length);
@@ -153,26 +164,6 @@ async function backfillSequenceIds(batchSize: number): Promise<boolean> {
     if (teamTenants.length > 0) {
       await enqueueExternalDbSyncBatch(teamTenants.map(t => t.tenancyId));
       didUpdate = true;
-
-      // Cascade: when a team changes, mark related TEAM_INVITATION verification codes for re-sync
-      // so the team_display_name in team_invitations stays fresh
-      await globalPrismaClient.$executeRaw`
-        UPDATE "VerificationCode"
-        SET "shouldUpdateSequenceId" = TRUE
-        FROM (
-          SELECT DISTINCT "Tenancy"."projectId", "Tenancy"."branchId", "Team"."teamId"
-          FROM "Team"
-          JOIN "Tenancy" ON "Tenancy"."id" = "Team"."tenancyId"
-          WHERE "Team"."tenancyId" IN (${Prisma.join(teamTenants.map(t => t.tenancyId))})
-            AND "Team"."shouldUpdateSequenceId" = FALSE
-            AND "Team"."sequenceId" IS NOT NULL
-        ) AS changed_teams
-        WHERE "VerificationCode"."projectId" = changed_teams."projectId"
-          AND "VerificationCode"."branchId" = changed_teams."branchId"
-          AND "VerificationCode"."type" = 'TEAM_INVITATION'
-          AND "VerificationCode"."data"->>'team_id' = changed_teams."teamId"::text
-          AND "VerificationCode"."shouldUpdateSequenceId" = FALSE
-      `;
     }
 
     const teamMemberTenants = (await runSequenceAllocation((tx) => tx.$queryRaw<{ tenancyId: string }[]>`

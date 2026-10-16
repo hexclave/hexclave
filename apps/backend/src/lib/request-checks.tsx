@@ -80,6 +80,34 @@ export async function ensureTeamExists(
   }
 }
 
+/**
+ * Like `ensureTeamExists`, but also takes a FOR UPDATE row lock on the team for the rest of the transaction.
+ *
+ * Use this as the first lock in transactions that lock a team's dependent rows (members, permissions,
+ * invitations) and then the team itself. The external DB sync sequencer locks the Team row first and then
+ * the team's TEAM_INVITATION verification codes (in one statement), so taking the locks in the opposite
+ * order can deadlock against it.
+ */
+export async function lockTeamForUpdate(
+  tx: PrismaTransaction,
+  options: {
+    tenancyId: string,
+    teamId: string,
+  }
+) {
+  const rows = await tx.$queryRaw<{ teamId: string }[]>`
+    SELECT "teamId"
+    FROM "Team"
+    WHERE "tenancyId" = ${options.tenancyId}::uuid
+      AND "teamId" = ${options.teamId}::uuid
+    FOR UPDATE
+  `;
+
+  if (rows.length === 0) {
+    throw new KnownErrors.TeamNotFound(options.teamId);
+  }
+}
+
 export async function ensureUserTeamPermissionExists(
   tx: PrismaTransaction,
   options: {

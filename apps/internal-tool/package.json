@@ -1,7 +1,7 @@
 {
   "name": "@hexclave/internal-tool",
   "private": true,
-  "version": "1.0.126",
+  "version": "1.0.133",
   "type": "module",
   "scripts": {
     "dev": "node scripts/pre-dev.mjs && next dev --turbopack --port ${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}41",
@@ -26,7 +26,7 @@
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "jose": "^6.1.3",
-    "next": "16.3.1",
+    "next": "16.4.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "react": "19.2.3",

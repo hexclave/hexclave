@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/example-clerk-integration-demo",
-  "version": "1.0.0",
+  "version": "1.0.133",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack --port ${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}15",

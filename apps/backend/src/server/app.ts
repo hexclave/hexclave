@@ -12,6 +12,7 @@ import { createBackendRequest } from "./backend-request";
 import { compressResponse } from "./compression";
 import { withVercelCronMonitor } from "./cron-monitor";
 import { handleUncaughtBackendError } from "./error-handler";
+import { instanceRecycler } from "./instance-recycling";
 import { getCorsHeadersInit, runRequestPipeline } from "./middleware";
 import { createRequestCompletionLog } from "./request-log";
 import { MalformedRouteParamError, matchRoute, type RouteMethods } from "./registry";
@@ -32,6 +33,7 @@ const staticRequestLogPaths = new Set([
   "/dev-stats",
   "/health/error-handler-debug",
   "/health/error-handler-debug/endpoint",
+  "/health/ready",
 ]);
 const shouldLogDevelopmentRequests = getNodeEnvironment() === "development";
 
@@ -83,7 +85,8 @@ export const app = new Elysia({
   .get("/health/error-handler-debug/endpoint", () => {
     throw new Error("Server observability debug error thrown successfully!");
   })
-  .all("/*", async ({ request }) => await dispatch(request), {
+  .get("/health/ready", () => instanceRecycler.createReadinessResponse())
+  .all("/*", async ({ request }) => await instanceRecycler.trackRequest(async () => await dispatch(request)), {
     parse: "none",
   });
 

@@ -2,7 +2,7 @@ import { Tenancy } from "@/lib/tenancies";
 import type { PrismaTransaction } from "@/lib/types";
 import { getPrismaClientForTenancy, PrismaClientWithReplica } from "@/prisma-client";
 import { Prisma } from "@/generated/prisma/client";
-import { getClickhouseAdminClient } from "@/lib/clickhouse";
+import { getSharedClickhouseAdminClient, withClickhousePreConnectionRetries } from "@/lib/clickhouse";
 import { getSafeExternalPostgresClientOptions } from "@/lib/ssrf-protection/external-db-sync";
 import { DEFAULT_DB_SYNC_MAPPINGS } from "@hexclave/shared/dist/config/db-sync-mappings";
 import type { CompleteConfig } from "@hexclave/shared/dist/config/schema";
@@ -10,6 +10,7 @@ import { captureError, HexclaveAssertionError, throwErr } from "@hexclave/shared
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { omit } from "@hexclave/shared/dist/utils/objects";
 import { Result } from "@hexclave/shared/dist/utils/results";
+import { traceSpan } from "@/utils/telemetry";
 import type { ClickHouseClient } from "@clickhouse/client";
 import { Client } from 'pg';
 
@@ -1229,50 +1230,63 @@ async function pushRowsToClickhouse(
     return normalized;
   });
 
-  await client.insert({
+  await withClickhousePreConnectionRetries(() => client.insert({
     table: tableName,
     values: normalizedRows,
     format: "JSONEachRow",
     clickhouse_settings: {
       date_time_input_format: "best_effort",
     },
-  });
+  }));
 }
 
-async function getClickhouseLastSyncedSequenceId(
+/**
+ * Reads the ClickHouse watermarks of all mappings for a tenancy in one round trip
+ * (previously one query per mapping, which dominated no-op sync latency). Mappings
+ * without a row are absent from the map and start from -1.
+ *
+ * The snapshot is taken once before the mappings run. If a concurrent sync of the
+ * same tenancy advances a watermark in the meantime, we only re-push rows that
+ * were already pushed, which the ReplacingMergeTree target tables deduplicate; a
+ * stale watermark can never cause rows to be skipped.
+ */
+async function getClickhouseLastSyncedSequenceIds(
   client: ClickHouseClient,
   tenancyId: string,
-  mappingId: string,
-): Promise<number> {
+): Promise<Map<string, number>> {
   assertUuid(tenancyId, "tenancyId");
-  assertNonEmptyString(mappingId, "mappingId");
-  const resultSet = await client.query({
+  const resultSet = await withClickhousePreConnectionRetries(() => client.query({
+    // _stack_sync_metadata is a ReplacingMergeTree, so unmerged older versions can
+    // still be present; argMax picks the newest per mapping. Ties on updated_at
+    // (two syncs finishing in the same instant) resolve to the higher watermark,
+    // which is safe because each sync only records a watermark after pushing
+    // every row up to it.
     query: `
-      SELECT last_synced_sequence_id
+      SELECT
+        mapping_name,
+        argMax(last_synced_sequence_id, (updated_at, last_synced_sequence_id)) AS last_synced_sequence_id
       FROM analytics_internal._stack_sync_metadata
       WHERE tenancy_id = {tenancy_id:UUID}
-        AND mapping_name = {mapping_name:String}
-      ORDER BY updated_at DESC
-      LIMIT 1
+      GROUP BY mapping_name
     `,
     query_params: {
       tenancy_id: tenancyId,
-      mapping_name: mappingId,
     },
     format: "JSONEachRow",
-  });
+  }));
 
-  const result = await resultSet.json<{ last_synced_sequence_id: string }>();
-  if (result.length === 0) {
-    return -1;
+  const rows = await resultSet.json<{ mapping_name: string, last_synced_sequence_id: string }>();
+  const lastSyncedSequenceIds = new Map<string, number>();
+  for (const row of rows) {
+    const parsed = Number(row.last_synced_sequence_id);
+    if (!Number.isFinite(parsed)) {
+      throw new HexclaveAssertionError(
+        `Invalid last_synced_sequence_id for mapping ${row.mapping_name}: ${JSON.stringify(row.last_synced_sequence_id)}`
+      );
+    }
+    lastSyncedSequenceIds.set(row.mapping_name, parsed);
   }
-  const parsed = Number(result[0]?.last_synced_sequence_id);
-  if (!Number.isFinite(parsed)) {
-    throw new HexclaveAssertionError(
-      `Invalid last_synced_sequence_id for mapping ${mappingId}: ${JSON.stringify(result[0]?.last_synced_sequence_id)}`
-    );
-  }
-  return parsed;
+  return lastSyncedSequenceIds;
 }
 
 async function updateClickhouseSyncMetadata(
@@ -1286,7 +1300,7 @@ async function updateClickhouseSyncMetadata(
   if (!Number.isFinite(lastSequenceId)) {
     throw new HexclaveAssertionError(`lastSequenceId must be a finite number for mapping ${mappingId}.`);
   }
-  await client.insert({
+  await withClickhousePreConnectionRetries(() => client.insert({
     table: "analytics_internal._stack_sync_metadata",
     values: [{
       tenancy_id: tenancyId,
@@ -1297,6 +1311,19 @@ async function updateClickhouseSyncMetadata(
     clickhouse_settings: {
       date_time_input_format: "best_effort",
     },
+  }));
+}
+
+async function fetchSourceRows<Row>(
+  internalPrisma: PrismaClientWithReplica,
+  fetchQuery: string,
+  tenancyId: string,
+  lastSequenceId: number,
+): Promise<Row[]> {
+  return await traceSpan("external-db-sync.fetch-source-rows", async (span) => {
+    const rows = await internalPrisma.$replica().$queryRawUnsafe<Row[]>(fetchQuery, tenancyId, lastSequenceId);
+    span.setAttribute("stack.external-db-sync.row-count", rows.length);
+    return rows;
   });
 }
 
@@ -1324,13 +1351,15 @@ async function syncPostgresMapping(
   }
 
   const tableSchema = mapping.targetTableSchemas.postgres;
-  await ensureExternalSchema(externalClient, tableSchema, tableName);
+  await traceSpan("external-db-sync.postgres.ensure-schema", async () => {
+    await ensureExternalSchema(externalClient, tableSchema, tableName);
+  });
 
   let lastSequenceId = -1;
-  const metadataResult = await externalClient.query(
+  const metadataResult = await traceSpan("external-db-sync.postgres.read-sync-metadata", async () => await externalClient.query(
     `SELECT "last_synced_sequence_id" FROM "_stack_sync_metadata" WHERE "mapping_name" = $1`,
     [mappingId]
-  );
+  ));
   if (metadataResult.rows.length > 0) {
     lastSequenceId = Number(metadataResult.rows[0].last_synced_sequence_id);
   }
@@ -1350,7 +1379,7 @@ async function syncPostgresMapping(
     if (!Number.isFinite(lastSequenceId)) {
       throw new HexclaveAssertionError(`lastSequenceId must be a finite number for mapping ${mappingId}.`);
     }
-    const rows = await internalPrisma.$replica().$queryRawUnsafe<any[]>(fetchQuery, tenancyId, lastSequenceId);
+    const rows = await fetchSourceRows<any>(internalPrisma, fetchQuery, tenancyId, lastSequenceId);
 
     if (rows.length === 0) {
       break;
@@ -1359,14 +1388,16 @@ async function syncPostgresMapping(
       console.log("db-sync-postgres: more than 1 row returned from source db fetch", { tenancyId, numRows: rows.length });
     }
 
-    await pushRowsToExternalDb(
-      externalClient,
-      tableName,
-      rows,
-      updateQuery,
-      tenancyId,
-      mappingId,
-    );
+    await traceSpan("external-db-sync.postgres.push-rows", async () => {
+      await pushRowsToExternalDb(
+        externalClient,
+        tableName,
+        rows,
+        updateQuery,
+        tenancyId,
+        mappingId,
+      );
+    });
 
     // This watermark relies on sequencer allocation committing in sequence order; a visible
     // higher value must imply that every lower value is already visible to the source reader.
@@ -1399,6 +1430,7 @@ async function syncClickhouseMapping(
   mapping: DbSyncMapping,
   internalPrisma: PrismaClientWithReplica,
   tenancyId: string,
+  initialLastSequenceId: number,
 ): Promise<boolean> {
   assertNonEmptyString(mappingId, "mappingId");
   assertNonEmptyString(mapping.targetTable, "mapping.targetTable");
@@ -1419,7 +1451,7 @@ async function syncClickhouseMapping(
   }
 
   const clickhouseTableName = `analytics_internal.${mapping.targetTable}`;
-  let lastSequenceId = await getClickhouseLastSyncedSequenceId(client, tenancyId, mappingId);
+  let lastSequenceId = initialLastSequenceId;
 
   const BATCH_LIMIT = 1000;
   const maxBatchesPerMapping = getMaxBatchesPerMapping();
@@ -1431,7 +1463,7 @@ async function syncClickhouseMapping(
     if (!Number.isFinite(lastSequenceId)) {
       throw new HexclaveAssertionError(`lastSequenceId must be a finite number for mapping ${mappingId}.`);
     }
-    const rows = await internalPrisma.$replica().$queryRawUnsafe<Record<string, unknown>[]>(fetchQuery, tenancyId, lastSequenceId);
+    const rows = await fetchSourceRows<Record<string, unknown>>(internalPrisma, fetchQuery, tenancyId, lastSequenceId);
 
     if (rows.length === 0) {
       break;
@@ -1440,13 +1472,15 @@ async function syncClickhouseMapping(
       console.log("db-sync-clickhouse: more than 1 row returned from source db fetch", { tenancyId, numRows: rows.length });
     }
 
-    await pushRowsToClickhouse(
-      client,
-      clickhouseTableName,
-      rows,
-      tenancyId,
-      mappingId,
-    );
+    await traceSpan("external-db-sync.clickhouse.push-rows", async () => {
+      await pushRowsToClickhouse(
+        client,
+        clickhouseTableName,
+        rows,
+        tenancyId,
+        mappingId,
+      );
+    });
 
     // This watermark relies on sequencer allocation committing in sequence order; a visible
     // higher value must imply that every lower value is already visible to the source reader.
@@ -1458,7 +1492,9 @@ async function syncClickhouseMapping(
       }
     }
     lastSequenceId = maxSeqInBatch;
-    await updateClickhouseSyncMetadata(client, tenancyId, mappingId, lastSequenceId);
+    await traceSpan("external-db-sync.clickhouse.write-sync-metadata", async () => {
+      await updateClickhouseSyncMetadata(client, tenancyId, mappingId, lastSequenceId);
+    });
 
     if (rows.length < BATCH_LIMIT) {
       break;
@@ -1500,26 +1536,33 @@ async function syncDatabase(
 
     let needsResync = false;
     const syncResult = await Result.fromPromise((async () => {
-      await externalClient.connect();
+      await traceSpan("external-db-sync.postgres.connect", async () => {
+        await externalClient.connect();
+      });
 
       // Always use DEFAULT_DB_SYNC_MAPPINGS - users cannot customize mappings
       // because internalDbFetchQuery runs against Hexclave's internal DB
       for (const [mappingId, mapping] of Object.entries(DEFAULT_DB_SYNC_MAPPINGS)) {
-        const mappingThrottled = await syncPostgresMapping(
+        const mappingThrottled = await traceSpan({
+          description: "external-db-sync.postgres.mapping",
+          attributes: { "stack.external-db-sync.mapping-id": mappingId },
+        }, async () => await syncPostgresMapping(
           externalClient,
           mappingId,
           mapping,
           internalPrisma,
           dbId,
           tenancyId,
-        );
+        ));
         if (mappingThrottled) {
           needsResync = true;
         }
       }
     })());
 
-    const closeResult = await Result.fromPromise(externalClient.end());
+    const closeResult = await Result.fromPromise(traceSpan("external-db-sync.postgres.close", async () => {
+      await externalClient.end();
+    }));
     if (closeResult.status === "error") {
       captureError(`external-db-sync-${dbId}-close`, closeResult.error);
     }
@@ -1541,32 +1584,35 @@ async function syncDatabase(
 export async function syncExternalDatabases(tenancy: Tenancy): Promise<boolean> {
   assertUuid(tenancy.id, "tenancy.id");
   const externalDatabases = tenancy.config.dbSync.externalDatabases;
-  const internalPrisma = await getPrismaClientForTenancy(tenancy);
+  const internalPrisma = await traceSpan("external-db-sync.get-prisma-client", async () => await getPrismaClientForTenancy(tenancy));
   let needsResync = false;
 
   // Always sync to ClickHouse if STACK_CLICKHOUSE_URL is set (not driven by config)
   const clickhouseUrl = getEnvVariable("STACK_CLICKHOUSE_URL", "");
   if (clickhouseUrl) {
-    const clickhouseClient = getClickhouseAdminClient();
+    const clickhouseClient = getSharedClickhouseAdminClient();
     const syncResult = await Result.fromPromise((async () => {
+      const lastSyncedSequenceIds = await traceSpan(
+        "external-db-sync.clickhouse.read-sync-metadata",
+        async () => await getClickhouseLastSyncedSequenceIds(clickhouseClient, tenancy.id),
+      );
       for (const [mappingId, mapping] of Object.entries(DEFAULT_DB_SYNC_MAPPINGS)) {
-        const mappingThrottled = await syncClickhouseMapping(
+        const mappingThrottled = await traceSpan({
+          description: "external-db-sync.clickhouse.mapping",
+          attributes: { "stack.external-db-sync.mapping-id": mappingId },
+        }, async () => await syncClickhouseMapping(
           clickhouseClient,
           mappingId,
           mapping,
           internalPrisma,
           tenancy.id,
-        );
+          lastSyncedSequenceIds.get(mappingId) ?? -1,
+        ));
         if (mappingThrottled) {
           needsResync = true;
         }
       }
     })());
-
-    const closeResult = await Result.fromPromise(clickhouseClient.close());
-    if (closeResult.status === "error") {
-      captureError("external-db-sync-clickhouse-close", closeResult.error);
-    }
 
     if (syncResult.status === "error") {
       captureError("external-db-sync-clickhouse", syncResult.error);

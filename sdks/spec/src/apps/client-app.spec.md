@@ -326,6 +326,48 @@ direct signOut calls still throw and applications must sign out through the
 provider.
 
 
+## initAnalytics()  [BROWSER-LIKE]
+
+Returns: void (synchronous)
+
+Analytics capture (page views, clicks, session replays) starts during
+construction, so this method must not start, restart, or configure any capture
+itself.
+
+The method exists so that applications have an explicit call to place in a
+module that is loaded on every page they want to track. That guarantees the
+module constructing the client app is imported, and therefore constructed, on
+those pages. Setup instructions for the Analytics app tell developers to call
+it on every page.
+
+Because calling it declares that the caller expects analytics, it fails loudly
+whenever analytics are known not to be recorded:
+
+1. Mark that initAnalytics was called on this app instance.
+2. Throw an Error, in any environment, if the app never records analytics
+   because of its constructor options, naming the reason:
+   - analytics.enabled is false
+   - automaticSideEffects is false
+   - tokenStore is null
+   The constructor must use exactly the same conditions to decide whether to
+   start capture in a browser, so the two cannot disagree.
+3. Throw an Error if an earlier analytics upload (event batch or session
+   replay batch) was rejected with ANALYTICS_NOT_ENABLED, ie. the Analytics
+   app is disabled on the project. The message tells the developer to enable
+   the Analytics app or remove the call.
+4. Otherwise, outside a browser-like environment, return. Capture never runs
+   there, but the same module runs again in the browser (eg. after SSR).
+5. In a browser-like environment, capture must have been started by the
+   constructor at this point; if not, throw an assertion error.
+
+The client only learns that the Analytics app is disabled on the project
+when an upload is rejected, which is usually after initAnalytics has run. So
+the first time an upload is rejected with ANALYTICS_NOT_ENABLED, if
+initAnalytics was called before, report the error from step 3 through the
+SDK's error reporting (captureError). Report it at most once per app
+instance.
+
+
 ## signOut(options?)
 
 Arguments:

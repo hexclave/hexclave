@@ -12,7 +12,7 @@ import { filterUndefined, typedKeys } from "@hexclave/shared/dist/utils/objects"
 import { UnionToIntersection } from "@hexclave/shared/dist/utils/types";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import * as yup from "yup";
-import { getClickhouseAdminClient } from "./clickhouse";
+import { getClickhouseAdminClient, withClickhousePreConnectionRetries } from "./clickhouse";
 import { getEndUserInfo } from "./end-users";
 import { DEFAULT_BRANCH_ID } from "./tenancies";
 
@@ -538,7 +538,10 @@ export async function logEvent<T extends EventType[]>(
         ? (clickhouseEventData as any).team_id as string
         : null;
 
-      await clickhouseClient.insert({
+      // Each event opens a fresh connection to ClickHouse Cloud, and a small fraction of TLS
+      // handshakes get dropped (~1 in 5000 from Cloud Run). Those never reach ClickHouse, so
+      // retrying them can't duplicate the row.
+      await withClickhousePreConnectionRetries(() => clickhouseClient.insert({
         table: "analytics_internal.events",
         values: [{
           event_type: matchingEventType.id,
@@ -557,7 +560,7 @@ export async function logEvent<T extends EventType[]>(
           date_time_input_format: "best_effort",
           async_insert: 1,
         },
-      });
+      }));
     }
 
     // log event in PostHog

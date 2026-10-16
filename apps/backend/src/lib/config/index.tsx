@@ -7,13 +7,14 @@ import { branchConfigSourceSchema, type ConfigAgentRunApi, type ConfigAgentSafeE
 import { isTruthy } from "@hexclave/shared/dist/utils/booleans";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
-import { filterUndefined, typedEntries } from "@hexclave/shared/dist/utils/objects";
+import { deepPlainFreeze, filterUndefined, typedEntries } from "@hexclave/shared/dist/utils/objects";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { deindent, stringCompare } from "@hexclave/shared/dist/utils/strings";
 import * as yup from "yup";
 import { PrismaClientTransaction, RawQuery, globalPrismaClient, rawQuery, retryTransaction } from "../../prisma-client";
 import { DEVELOPMENT_ENVIRONMENT_ENV_CONFIG_BLOCKED_MESSAGE, getEnvironmentConfigWriteBlockReason, isDevelopmentEnvironmentProject } from "../development-environment";
 import { listPermissionDefinitionsFromConfig } from "../permissions";
+import { FrozenIdentityMemo, getCanonicalMigratedConfigOverride } from "./rendering-cache";
 import type { CapturedChange, ConfigAgentInFlightStage, GithubRepoRef } from "./repo-agent";
 
 type BranchConfigSourceApi = yup.InferType<typeof branchConfigSourceSchema>;
@@ -29,10 +30,20 @@ type BranchOptions = ProjectOptions & { branchId: string };
 type EnvironmentOptions = BranchOptions;
 type OrganizationOptions = EnvironmentOptions & ({ organizationId: string | null } | { forUserId: string });
 
-const DEVELOPMENT_ENVIRONMENT_CONFIG_OVERRIDE = migrateConfigOverride("environment", {
+const DEVELOPMENT_ENVIRONMENT_CONFIG_OVERRIDE = deepPlainFreeze(migrateConfigOverride("environment", {
   "domains.allowLocalhost": true,
   "payments.testMode": true,
-});
+}));
+
+// CPU optimization only; see ./rendering-cache.ts. All of these are keyed on canonical (interned) config objects, so
+// results are shared across requests and are deeply frozen.
+const EMPTY_INCOMPLETE_CONFIG: Config = deepPlainFreeze({});
+const developmentEnvironmentOverrideMemo = new FrozenIdentityMemo<Config>();
+const incompleteConfigMemo = new FrozenIdentityMemo<Config>();
+const renderedProjectConfigMemo = new FrozenIdentityMemo<ProjectRenderedConfig>();
+const renderedBranchConfigMemo = new FrozenIdentityMemo<BranchRenderedConfig>();
+const renderedEnvironmentConfigMemo = new FrozenIdentityMemo<EnvironmentRenderedConfig>();
+const renderedOrganizationConfigMemo = new FrozenIdentityMemo<CompleteConfig>();
 
 // ---------------------------------------------------------------------------------------------------------------------
 // getRendered<$$$>Config
@@ -45,28 +56,52 @@ const DEVELOPMENT_ENVIRONMENT_CONFIG_OVERRIDE = migrateConfigOverride("environme
 export function getRenderedProjectConfigQuery(options: ProjectOptions): RawQuery<Promise<ProjectRenderedConfig>> {
   return RawQuery.then(
     getIncompleteProjectConfigQuery(options),
-    async (incompleteConfig) => await sanitizeProjectConfig(normalize(applyProjectDefaults(await incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+    async (incompleteConfigPromise) => {
+      const incompleteConfig = await incompleteConfigPromise;
+      return await renderedProjectConfigMemo.get(
+        [incompleteConfig],
+        async () => await sanitizeProjectConfig(normalize(applyProjectDefaults(incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+      );
+    },
   );
 }
 
 export function getRenderedBranchConfigQuery(options: BranchOptions): RawQuery<Promise<BranchRenderedConfig>> {
   return RawQuery.then(
     getIncompleteBranchConfigQuery(options),
-    async (incompleteConfig) => await sanitizeBranchConfig(normalize(applyBranchDefaults(await incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+    async (incompleteConfigPromise) => {
+      const incompleteConfig = await incompleteConfigPromise;
+      return await renderedBranchConfigMemo.get(
+        [incompleteConfig],
+        async () => await sanitizeBranchConfig(normalize(applyBranchDefaults(incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+      );
+    },
   );
 }
 
 export function getRenderedEnvironmentConfigQuery(options: EnvironmentOptions): RawQuery<Promise<EnvironmentRenderedConfig>> {
   return RawQuery.then(
     getIncompleteEnvironmentConfigQuery(options),
-    async (incompleteConfig) => await sanitizeEnvironmentConfig(normalize(applyEnvironmentDefaults(await incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+    async (incompleteConfigPromise) => {
+      const incompleteConfig = await incompleteConfigPromise;
+      return await renderedEnvironmentConfigMemo.get(
+        [incompleteConfig],
+        async () => await sanitizeEnvironmentConfig(normalize(applyEnvironmentDefaults(incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+      );
+    },
   );
 }
 
 export function getRenderedOrganizationConfigQuery(options: OrganizationOptions): RawQuery<Promise<CompleteConfig>> {
   return RawQuery.then(
     getIncompleteOrganizationConfigQuery(options),
-    async (incompleteConfig) => await sanitizeOrganizationConfig(normalize(applyOrganizationDefaults(await incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+    async (incompleteConfigPromise) => {
+      const incompleteConfig = await incompleteConfigPromise;
+      return await renderedOrganizationConfigMemo.get(
+        [incompleteConfig],
+        async () => await sanitizeOrganizationConfig(normalize(applyOrganizationDefaults(incompleteConfig), { onDotIntoNonObject: "ignore" }) as any),
+      );
+    },
   );
 }
 
@@ -147,7 +182,7 @@ export function getProjectConfigOverrideQuery(options: ProjectOptions): RawQuery
       if (queryResult.length > 1) {
         throw new HexclaveAssertionError(`Expected 0 or 1 project config overrides for project ${options.projectId}, got ${queryResult.length}`, { queryResult });
       }
-      return migrateConfigOverride("project", queryResult[0]?.projectConfigOverride ?? {});
+      return getCanonicalMigratedConfigOverride({ level: "project", projectId: options.projectId }, queryResult[0]?.projectConfigOverride ?? {});
     },
   };
 }
@@ -166,7 +201,7 @@ export function getBranchConfigOverrideQuery(options: BranchOptions): RawQuery<P
       if (queryResult.length > 1) {
         throw new HexclaveAssertionError(`Expected 0 or 1 branch config overrides for project ${options.projectId} and branch ${options.branchId}, got ${queryResult.length}`, { queryResult });
       }
-      return migrateConfigOverride("branch", queryResult[0]?.config ?? {});
+      return getCanonicalMigratedConfigOverride({ level: "branch", projectId: options.projectId, branchId: options.branchId }, queryResult[0]?.config ?? {});
     },
   };
   return fetchFromDbQuery;
@@ -190,9 +225,13 @@ export function getEnvironmentConfigOverrideQuery(options: EnvironmentOptions): 
       if (queryResult.length > 1) {
         throw new HexclaveAssertionError(`Expected 0 or 1 environment config overrides for project ${options.projectId} and branch ${options.branchId}, got ${queryResult.length}`, { queryResult });
       }
-      const storedConfigOverride = migrateConfigOverride("environment", queryResult[0]?.config ?? {});
+      const storedConfigOverride = getCanonicalMigratedConfigOverride({ level: "environment", projectId: options.projectId, branchId: options.branchId }, queryResult[0]?.config ?? {});
       if (queryResult[0]?.isDevelopmentEnvironment === true) {
-        return override(storedConfigOverride, DEVELOPMENT_ENVIRONMENT_CONFIG_OVERRIDE);
+        // Memoized so that the merged override stays a canonical object, which the downstream rendering memos key on.
+        return await developmentEnvironmentOverrideMemo.get(
+          [storedConfigOverride],
+          async () => override(storedConfigOverride, DEVELOPMENT_ENVIRONMENT_CONFIG_OVERRIDE),
+        );
       }
       return storedConfigOverride;
     },
@@ -210,7 +249,15 @@ export function getOrganizationConfigOverrideQuery(options: OrganizationOptions)
     readOnlyQuery: true,
     sql: Prisma.sql`SELECT 1`,
     postProcess: async () => {
-      return migrateConfigOverride("organization", {});
+      return getCanonicalMigratedConfigOverride({
+        level: "organization",
+        projectId: options.projectId,
+        branchId: options.branchId,
+        // `forUserId` resolves to the null organization for now, matching the (empty) override this query returns for
+        // every user. Once organizations are implemented, this must become the user's resolved organization ID; it
+        // must not be the user ID itself, or every user would get their own cache entries.
+        organizationId: "forUserId" in options ? null : options.organizationId,
+      }, {});
     },
   };
 }
@@ -1023,17 +1070,21 @@ function getIncompleteOrganizationConfigQuery(options: OrganizationOptions): Raw
 function makeUnsanitizedIncompleteConfigQuery<T, O>(options: { previous?: RawQuery<Promise<Config>>, override: RawQuery<Promise<Config>>, schema: yup.AnySchema, extraInfo: any }): RawQuery<Promise<any>> {
   return RawQuery.then(
     RawQuery.all([
-      options.previous ?? RawQuery.resolve(Promise.resolve({})),
+      options.previous ?? RawQuery.resolve(Promise.resolve(EMPTY_INCOMPLETE_CONFIG)),
       options.override,
     ] as const),
     async ([prevPromise, overPromise]) => {
       const prev = await prevPromise;
       const over = await overPromise;
-      const overrideErrors = await getConfigOverrideErrors(options.schema, over);
-      if (overrideErrors.status === "error") {
-        captureError("config-override-validation-error", new HexclaveAssertionError(`Config override is invalid — at a place where it should have already been validated! ${overrideErrors.error}`, { extraInfo: options.extraInfo }));
-      }
-      return override(prev, over);
+      // Since this is memoized, the sanity check below (and its captureError) runs once per distinct override content
+      // per instance, not once per request; `extraInfo` therefore names the first tenancy that hit it.
+      return await incompleteConfigMemo.get([options.schema, prev, over], async () => {
+        const overrideErrors = await getConfigOverrideErrors(options.schema, over);
+        if (overrideErrors.status === "error") {
+          captureError("config-override-validation-error", new HexclaveAssertionError(`Config override is invalid — at a place where it should have already been validated! ${overrideErrors.error}`, { extraInfo: options.extraInfo }));
+        }
+        return override(prev, over);
+      });
     },
   );
 }

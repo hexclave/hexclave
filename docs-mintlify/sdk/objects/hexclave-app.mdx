@@ -45,6 +45,8 @@ type HexclaveClientApp = {
   signUpWithCredential([options]): Promise<...>;
   sendForgotPasswordEmail(email): Promise<...>;
   sendMagicLinkEmail(email): Promise<...>;
+
+  initAnalytics(): void;
 };
 ```
 
@@ -500,6 +502,40 @@ If you're building a client-only app and don't have a `HEXCLAVE_SECRET_SERVER_KE
     <AsideSection title="Examples">
       ```typescript
       const result = await hexclaveClientApp.sendMagicLinkEmail("test@example.com");
+      ```
+    </AsideSection>
+
+  </MethodAside>
+</MethodLayout>
+
+## Analytics
+
+### `hexclaveClientApp.initAnalytics()`
+
+<MethodLayout>
+  <MethodContent>
+    Marks the current page as one that should record [analytics](/guides/apps/analytics/overview), including page views, clicks, session replays, and clickmaps.
+
+    Call this at the top level of a client-side module that every page you want to track loads, such as your root layout or entry file. Analytics capture starts as soon as the client app is created in the browser, so the function doesn't start anything itself. The call makes sure that the module creating the client app is loaded on every page, not just on pages that use authentication. See [Tracking every page](/guides/apps/analytics/overview#tracking-every-page).
+
+    Throws if the app is configured so that it never records analytics (`analytics: { enabled: false }`, `automaticSideEffects: false`, or a `null` token store). If the Analytics app is not enabled on the project, an error is logged as soon as the first upload is rejected.
+
+    <MethodReturns type="void" />
+
+  </MethodContent>
+
+  <MethodAside>
+    <AsideSection title="Signature">
+      ```typescript
+      declare function initAnalytics(): void;
+      ```
+    </AsideSection>
+
+    <AsideSection title="Examples">
+      ```typescript
+      import { hexclaveClientApp } from "./hexclave/client";
+
+      hexclaveClientApp.initAnalytics();
       ```
     </AsideSection>
 

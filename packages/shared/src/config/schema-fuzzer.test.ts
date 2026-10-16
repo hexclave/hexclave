@@ -1,7 +1,7 @@
 import { ALL_APPS } from "../apps/apps-config";
 import { SUPPORTED_CURRENCIES } from "../utils/currency-constants";
 import { HexclaveAssertionError } from "../utils/errors";
-import { getOrUndefined, isObjectLike, set, typedEntries, typedFromEntries } from "../utils/objects";
+import { deepPlainFreeze, getOrUndefined, isObjectLike, set, typedEntries, typedFromEntries } from "../utils/objects";
 import { nicify } from "../utils/strings";
 import { normalize, override } from "./format";
 import { BranchConfigNormalizedOverride, EnvironmentConfigNormalizedOverride, OrganizationConfigNormalizedOverride, ProjectConfigNormalizedOverride, applyBranchDefaults, applyEnvironmentDefaults, applyOrganizationDefaults, applyProjectDefaults, assertNoConfigOverrideErrors, branchConfigSchema, environmentConfigSchema, migrateConfigOverride, organizationConfigSchema, projectConfigSchema, sanitizeBranchConfig, sanitizeEnvironmentConfig, sanitizeOrganizationConfig, sanitizeProjectConfig } from "./schema";
@@ -352,26 +352,29 @@ import.meta.vitest?.test("fuzz schemas", async ({ expect }) => {
     const environmentInput = createFuzzerInput<EnvironmentConfigNormalizedOverride>(environmentSchemaFuzzerConfig, i / totalIterations);
     const organizationInput = createFuzzerInput<OrganizationConfigNormalizedOverride>(organizationSchemaFuzzerConfig, i / totalIterations);
 
+    // Every intermediate value is deep-frozen before the next step consumes it, because the backend caches and shares
+    // these exact objects between requests (see apps/backend/src/lib/config/rendering-cache.ts). Any step that writes
+    // to its input therefore fails here with a TypeError.
     try {
-      const projectMigrated = migrateConfigOverride("project", projectInput);
+      const projectMigrated = deepPlainFreeze(migrateConfigOverride("project", projectInput));
       await assertNoConfigOverrideErrors(projectConfigSchema, projectMigrated);
-      const projectOverridden = override({}, projectMigrated);
-      await sanitizeProjectConfig(normalize(applyProjectDefaults(projectOverridden), { onDotIntoNonObject: "ignore" }) as any);
+      const projectOverridden = deepPlainFreeze(override({}, projectMigrated));
+      deepPlainFreeze(await sanitizeProjectConfig(normalize(applyProjectDefaults(projectOverridden), { onDotIntoNonObject: "ignore" }) as any));
 
-      const branchMigrated = migrateConfigOverride("branch", branchInput);
+      const branchMigrated = deepPlainFreeze(migrateConfigOverride("branch", branchInput));
       await assertNoConfigOverrideErrors(branchConfigSchema, branchMigrated);
-      const branchOverridden = override(projectOverridden, branchMigrated);
-      await sanitizeBranchConfig(normalize(applyBranchDefaults(branchOverridden), { onDotIntoNonObject: "ignore" }) as any);
+      const branchOverridden = deepPlainFreeze(override(projectOverridden, branchMigrated));
+      deepPlainFreeze(await sanitizeBranchConfig(normalize(applyBranchDefaults(branchOverridden), { onDotIntoNonObject: "ignore" }) as any));
 
-      const environmentMigrated = migrateConfigOverride("environment", environmentInput);
+      const environmentMigrated = deepPlainFreeze(migrateConfigOverride("environment", environmentInput));
       await assertNoConfigOverrideErrors(environmentConfigSchema, environmentMigrated);
-      const environmentOverridden = override(branchOverridden, environmentMigrated);
-      await sanitizeEnvironmentConfig(normalize(applyEnvironmentDefaults(environmentOverridden), { onDotIntoNonObject: "ignore" }) as any);
+      const environmentOverridden = deepPlainFreeze(override(branchOverridden, environmentMigrated));
+      deepPlainFreeze(await sanitizeEnvironmentConfig(normalize(applyEnvironmentDefaults(environmentOverridden), { onDotIntoNonObject: "ignore" }) as any));
 
-      const organizationMigrated = migrateConfigOverride("organization", organizationInput);
+      const organizationMigrated = deepPlainFreeze(migrateConfigOverride("organization", organizationInput));
       await assertNoConfigOverrideErrors(organizationConfigSchema, organizationMigrated);
-      const organizationOverridden = override(environmentOverridden, organizationMigrated);
-      await sanitizeOrganizationConfig(normalize(applyOrganizationDefaults(organizationOverridden), { onDotIntoNonObject: "ignore" }) as any);
+      const organizationOverridden = deepPlainFreeze(override(environmentOverridden, organizationMigrated));
+      deepPlainFreeze(await sanitizeOrganizationConfig(normalize(applyOrganizationDefaults(organizationOverridden), { onDotIntoNonObject: "ignore" }) as any));
 
     } catch (e) {
       const data = {

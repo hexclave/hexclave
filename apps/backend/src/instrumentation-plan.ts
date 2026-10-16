@@ -1,6 +1,8 @@
 type BackendInstrumentationPlanOptions = {
   ci: string,
+  googleCloudTraceSampleRate: string,
   nodeEnvironment: string,
+  otelResourceAttributes: string,
   otlpEndpoint: string,
   otlpTracesEndpoint: string,
   portPrefix: string,
@@ -8,7 +10,19 @@ type BackendInstrumentationPlanOptions = {
   sentryTracesSampleRate: number,
 };
 
+export type GoogleCloudTracePlan = {
+  projectId: string,
+  /** Fraction of all traces that should end up in Cloud Trace (HEXCLAVE_GOOGLE_CLOUD_TRACE_SAMPLE_RATE). */
+  sampleRate: number,
+  /**
+   * Trace-ID ratio the Cloud Trace span processor applies on top of the provider's own sampling decision, so that
+   * `tracesSampleRate * spanProcessorSampleRate === sampleRate`.
+   */
+  spanProcessorSampleRate: number,
+};
+
 export type BackendInstrumentationPlan = {
+  googleCloudTrace: GoogleCloudTracePlan | undefined,
   otlpTracesEndpoint: string | undefined,
   sentryEnabled: boolean,
   tracesSampleRate: number,
@@ -17,6 +31,7 @@ export type BackendInstrumentationPlan = {
 export function createBackendInstrumentationPlan(options: BackendInstrumentationPlanOptions): BackendInstrumentationPlan {
   if (options.ci !== "") {
     return {
+      googleCloudTrace: undefined,
       otlpTracesEndpoint: undefined,
       sentryEnabled: false,
       tracesSampleRate: 0,
@@ -41,13 +56,66 @@ export function createBackendInstrumentationPlan(options: BackendInstrumentation
         ? `http://localhost:${options.portPrefix}31/v1/traces`
         : undefined;
 
+  const googleCloudTraceTarget = parseGoogleCloudTraceTarget(options.googleCloudTraceSampleRate, options.otelResourceAttributes);
+
+  // Sentry owns the one global provider, so this single rate decides which traces every destination can see.
+  // - With Sentry enabled and Cloud Trace configured, the provider samples at the lower of the two rates. Recording
+  //   and sending a span to Sentry costs real CPU per request, and we only look at a few percent of traces anyway, so
+  //   there is no point in sampling (much) more than what Cloud Trace keeps. Errors are unaffected; Sentry reports
+  //   them independently of trace sampling.
+  // - A non-Sentry destination still needs sampled spans so its additional processor receives real data.
+  const tracesSampleRate = sentryEnabled
+    ? Math.min(options.sentryTracesSampleRate, googleCloudTraceTarget?.sampleRate ?? options.sentryTracesSampleRate)
+    : otlpTracesEndpoint == null && googleCloudTraceTarget == null ? 0 : 1;
+
   return {
+    googleCloudTrace: googleCloudTraceTarget == null ? undefined : {
+      ...googleCloudTraceTarget,
+      // The provider's decision is random per trace (Sentry's sample_rand) and the processor's filter is based on the
+      // trace ID, so the two are independent and their rates multiply. If Sentry samples less than Cloud Trace wants,
+      // Cloud Trace simply gets everything Sentry samples.
+      spanProcessorSampleRate: Math.min(1, googleCloudTraceTarget.sampleRate / tracesSampleRate),
+    },
     otlpTracesEndpoint,
     sentryEnabled,
-    // Sentry owns the one global provider. A non-Sentry OTLP destination still
-    // needs sampled spans so its additional processor receives real data.
-    tracesSampleRate: sentryEnabled ? options.sentryTracesSampleRate : otlpTracesEndpoint == null ? 0 : 1,
+    tracesSampleRate,
   };
+}
+
+function parseGoogleCloudTraceTarget(sampleRateValue: string, otelResourceAttributes: string): Omit<GoogleCloudTracePlan, "spanProcessorSampleRate"> | undefined {
+  if (sampleRateValue.trim() === "") {
+    return undefined;
+  }
+  const sampleRate = Number(sampleRateValue);
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0 || sampleRate > 1) {
+    throw new Error(`HEXCLAVE_GOOGLE_CLOUD_TRACE_SAMPLE_RATE must be a number in (0, 1], got: ${JSON.stringify(sampleRateValue)}`);
+  }
+  // Google's Telemetry API rejects spans whose resource lacks gcp.project_id.
+  // Sentry builds the global provider's resource from OTEL_RESOURCE_ATTRIBUTES,
+  // so that env var is the only way to put the attribute on every span; reading
+  // the project ID from it too keeps a single source of truth.
+  const projectId = parseOtelResourceAttributes(otelResourceAttributes).get("gcp.project_id");
+  if (projectId == null || projectId === "") {
+    throw new Error("HEXCLAVE_GOOGLE_CLOUD_TRACE_SAMPLE_RATE is set, but OTEL_RESOURCE_ATTRIBUTES does not contain gcp.project_id (e.g. OTEL_RESOURCE_ATTRIBUTES=gcp.project_id=my-project,service.name=hexclave-backend)");
+  }
+  return { projectId, sampleRate };
+}
+
+function parseOtelResourceAttributes(value: string): Map<string, string> {
+  // Format per the OpenTelemetry spec: comma-separated key=value pairs with
+  // percent-encoded values.
+  const attributes = new Map<string, string>();
+  for (const pair of value.split(",")) {
+    if (pair.trim() === "") {
+      continue;
+    }
+    const separatorIndex = pair.indexOf("=");
+    if (separatorIndex === -1) {
+      throw new Error(`OTEL_RESOURCE_ATTRIBUTES contains an entry without "=": ${JSON.stringify(pair)}`);
+    }
+    attributes.set(pair.slice(0, separatorIndex).trim(), decodeURIComponent(pair.slice(separatorIndex + 1).trim()));
+  }
+  return attributes;
 }
 
 function validateOtlpEndpoint(environmentVariableName: string, value: string) {

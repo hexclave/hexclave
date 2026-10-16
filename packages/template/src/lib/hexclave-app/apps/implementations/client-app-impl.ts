@@ -71,7 +71,7 @@ import { recordRedirectAndThrowIfLoopDetected } from "./redirect-loop-breaker";
 import type { CrossDomainHandoffParams } from "./redirect-page-urls";
 import { crossDomainAuthQueryParams, getCrossDomainHandoffParamsFromCurrentUrl, planRedirectToHandler } from "./redirect-page-urls";
 import { subscribeSessionRefresh } from "./session-refresh-subscription";
-import { AnalyticsOptions, SessionRecorder, analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions } from "./session-replay";
+import { AnalyticsOptions, SessionRecorder, analyticsOptionsFromJson, analyticsOptionsToJson, getSessionReplayOptions, isAnalyticsNotEnabledError } from "./session-replay";
 
 export function stripBrowserActionQueryParam() {
   let stripAttemptsRemaining = 20;
@@ -215,6 +215,10 @@ function createMalformedNestedCrossDomainUrlError(options: {
 function throwSetupError(error: HexclaveSetupError): never {
   showSetupErrorOverlay(error); // THIS_LINE_PLATFORM js-like
   throw error;
+}
+
+function createAnalyticsAppDisabledOnProjectError(): Error {
+  return new Error("initAnalytics() was called, but the Analytics app is not enabled on this Hexclave project, so the backend rejects all analytics uploads. Enable the Analytics app in the Hexclave dashboard (or in hexclave.config.ts), or remove the initAnalytics() call if this is intentional.");
 }
 
 function getRedirectHelperInstruction(handlerName: string): string {
@@ -413,6 +417,8 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   private readonly _analyticsOptions: AnalyticsOptions | undefined;
   private _sessionRecorder: SessionRecorder | null = null;
   private _eventTracker: EventTracker | null = null;
+  private _initAnalyticsCalled = false;
+  private _analyticsAppDisabledOnProject = false;
   private _pendingSignOut: Promise<void> | null = null;
   private readonly _externalTokenStoreSessionAdapter: ExternalTokenStoreSessionAdapter;
 
@@ -896,24 +902,28 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       return anonUser._internalSession;
     };
 
-    const analyticsEnabled = this._analyticsOptions?.enabled !== false;
+    const recordsAnalytics = this._getAnalyticsDisabledReason() == null && isBrowserLike();
 
     const sessionReplayOptions = getSessionReplayOptions(this._analyticsOptions);
-    if (analyticsEnabled && isBrowserLike() && this._hasPersistentTokenStore() && sessionReplayOptions.enabled) {
+    if (recordsAnalytics && sessionReplayOptions.enabled) {
       this._sessionRecorder = new SessionRecorder({
         projectId: this.projectId,
         sendBatch: async (body, opts) => {
-          return await this._interface.sendSessionReplayBatch(body, await getAnalyticsSession(), opts);
+          return this._handleAnalyticsUploadResult(
+            await this._interface.sendSessionReplayBatch(body, await getAnalyticsSession(), opts),
+          );
         },
       }, sessionReplayOptions);
       this._sessionRecorder.start();
     }
 
-    if (analyticsEnabled && isBrowserLike() && this._hasPersistentTokenStore()) {
+    if (recordsAnalytics) {
       this._eventTracker = new EventTracker({
         projectId: this.projectId,
         sendBatch: async (body, opts) => {
-          return await this._interface.sendAnalyticsEventBatch(body, await getAnalyticsSession(), opts);
+          return this._handleAnalyticsUploadResult(
+            await this._interface.sendAnalyticsEventBatch(body, await getAnalyticsSession(), opts),
+          );
         },
       });
       this._eventTracker.start();
@@ -3718,6 +3728,63 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     return typeof this._tokenStoreInit === "object"
       && this._tokenStoreInit != null
       && isExternalTokenStore(this._tokenStoreInit);
+  }
+
+  initAnalytics(): void {
+    // This doesn't start anything: the constructor already starts analytics capture (see
+    // _initializeAutomaticSideEffects). Pages that never import the module constructing the client app record no
+    // analytics, which is easy to miss when the app is only imported where auth is used. Having a dedicated function
+    // to call on every tracked page makes that import explicit, and gives setup docs and AI prompts a concrete step
+    // to point at. Since the caller has thereby declared that they expect analytics, we fail loudly whenever we know
+    // analytics won't be recorded.
+    this._initAnalyticsCalled = true;
+
+    const disabledReason = this._getAnalyticsDisabledReason();
+    if (disabledReason != null) {
+      throw new Error(`initAnalytics() was called, but this Hexclave app will not record analytics because ${disabledReason}. Remove the initAnalytics() call if this is intentional.`);
+    }
+    if (this._analyticsAppDisabledOnProject) {
+      throw createAnalyticsAppDisabledOnProjectError();
+    }
+
+    // Outside the browser (eg. during SSR of a client component), analytics are never recorded, but the same module
+    // runs again in the browser where they are, so this isn't an error.
+    if (isBrowserLike() && this._eventTracker == null) {
+      throw new HexclaveAssertionError("initAnalytics() was called in the browser and _getAnalyticsDisabledReason() returned null, but the constructor did not start the event tracker. The two must agree on when analytics are recorded.");
+    }
+  }
+
+  /**
+   * Returns why this app will never record analytics, or null if it records them whenever it runs in a browser. The
+   * constructor and initAnalytics() both use this, so that the conditions under which analytics start and the
+   * conditions under which initAnalytics() throws can't drift apart.
+   *
+   * Whether the Analytics app is enabled on the project is not part of this, as the client only learns that once the
+   * backend rejects an upload; see _handleAnalyticsUploadResult.
+   */
+  private _getAnalyticsDisabledReason(): string | null {
+    if (this._analyticsOptions?.enabled === false) {
+      return "the `analytics.enabled` constructor option is set to false";
+    }
+    if (this._options.automaticSideEffects === false) {
+      return "the `automaticSideEffects` constructor option is set to false, which also disables analytics";
+    }
+    if (!this._hasPersistentTokenStore()) {
+      return "the `tokenStore` constructor option is null; analytics require a persistent token store such as \"cookie\" (or \"nextjs-cookie\" in Next.js)";
+    }
+    return null;
+  }
+
+  private _handleAnalyticsUploadResult(result: Result<Response, Error>): Result<Response, Error> {
+    if (result.status === "error" && isAnalyticsNotEnabledError(result.error) && !this._analyticsAppDisabledOnProject) {
+      this._analyticsAppDisabledOnProject = true;
+      // initAnalytics() usually runs at module load, long before the first upload, so it can't throw this itself. If
+      // it gets called after this point instead, it throws synchronously (see initAnalytics()).
+      if (this._initAnalyticsCalled) {
+        captureError("initAnalytics", createAnalyticsAppDisabledOnProjectError());
+      }
+    }
+    return result;
   }
 
   // IF_PLATFORM react-like

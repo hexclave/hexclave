@@ -959,6 +959,7 @@ model ProjectUserRefreshToken {
   @@id([tenancyId, id])
   @@index([tenancyId, sequenceId], name: "ProjectUserRefreshToken_tenancyId_sequenceId_idx")
   @@index([shouldUpdateSequenceId, tenancyId], name: "ProjectUserRefreshToken_shouldUpdateSequenceId_idx")
+  @@index([tenancyId, projectUserId], name: "ProjectUserRefreshToken_tenancyId_projectUserId_idx")
 }
 
 model ProjectUserAuthorizationCode {

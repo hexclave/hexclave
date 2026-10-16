@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/skills",
-  "version": "1.0.126",
+  "version": "1.0.133",
   "repository": "https://github.com/hexclave/hexclave",
   "private": true,
   "type": "module",
@@ -16,7 +16,7 @@
     "@bydefault/vercel": "^0.1.4",
     "@hexclave/shared": "workspace:*",
     "@sentry/nextjs": "^10.45.0",
-    "next": "16.3.1",
+    "next": "16.4.1",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
