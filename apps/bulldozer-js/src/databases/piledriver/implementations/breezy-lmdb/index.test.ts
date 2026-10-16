@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { declareLmdbLowLevelDatabase } from "../../../low-level/implementations/lmdb.js";
 import type { LowLevelKvStore } from "../../../low-level/index.js";
 import { asHeapObject, isPiledriverHeapObjectSymbol, type PiledriverDatabase } from "../../index.js";
-import { declareBreezyPiledriverDatabase } from "./index.js";
+import { declareBreezyLMDBPiledriverDatabase } from "./index.js";
 
 const parseJson = (value: ArrayBuffer) => JSON.parse(new TextDecoder().decode(value));
 const listEntries = async (store: LowLevelKvStore) => (await store.listEntries()).entries;
@@ -15,11 +15,11 @@ const debugSnapshot = async (database: PiledriverDatabase) => {
   return await database.debugSnapshot();
 };
 
-describe("Breezy Piledriver", () => {
+describe("BreezyLMDB Piledriver", () => {
   it("atomically publishes shared references and revives zero-reference metadata", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
-    const database = declareBreezyPiledriverDatabase(lmdbOptions);
+    const database = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
     try {
       const rootKey = new TextEncoder().encode("root").buffer;
@@ -59,7 +59,7 @@ describe("Breezy Piledriver", () => {
   it("rolls back the heap insert when referenced metadata cannot be incremented", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
-    const database = declareBreezyPiledriverDatabase(lmdbOptions);
+    const database = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
     try {
       const rootKey = new TextEncoder().encode("root").buffer;
@@ -98,7 +98,7 @@ describe("Breezy Piledriver", () => {
   it("rolls back root replacement and deletion when the old reference cannot be decremented", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
-    const database = declareBreezyPiledriverDatabase(lmdbOptions);
+    const database = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
     try {
       const rootKey = new TextEncoder().encode("root").buffer;
@@ -130,7 +130,7 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       const written = await writer.setRootObject(rootKey, asHeapObject({ value: "persisted" }));
       await writer.waitUntilConsistent(written.seq);
@@ -138,7 +138,7 @@ describe("Breezy Piledriver", () => {
       await writer.close();
     }
 
-    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    const reader = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     try {
       const { object } = await reader.getRootObject(rootKey);
       if (typeof object !== "object" || object === null || !(isPiledriverHeapObjectSymbol in object)) {
@@ -155,13 +155,13 @@ describe("Breezy Piledriver", () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     const rootKey = new TextEncoder().encode("root").buffer;
-    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const writer = declareBreezyLMDBPiledriverDatabase(lmdbOptions);
     await writer.setRootObject(rootKey, asHeapObject({ child: asHeapObject({ value: "child" }) }));
     await writer.deleteRootObject(rootKey);
     await writer.close();
 
     const cutoff = Date.now() + 1;
-    const collector = declareBreezyPiledriverDatabase(lmdbOptions, {
+    const collector = declareBreezyLMDBPiledriverDatabase(lmdbOptions, {
       garbageCollectionProcessStartedAtMillis: cutoff + 1,
     });
     try {
