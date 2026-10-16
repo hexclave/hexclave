@@ -153,16 +153,22 @@ it("paginates and searches the current user's teams on the client", { timeout: 6
 
   const page1 = await user.listTeams({ limit: 2 });
   expect(page1.map((team) => team.displayName)).toEqual(["Alpha", "Beta"]);
-  expect(page1.nextCursor).toBe(created[1].id);
+  expect(page1.nextCursor).toMatch(new RegExp(`_${created[1].id}$`));
   const page2 = await user.listTeams({ limit: 2, cursor: page1.nextCursor ?? throwErr("expected a next cursor") });
   expect(page2.map((team) => team.displayName)).toEqual(["Gamma"]);
   expect(page2.nextCursor).toBeNull();
 
+  // The cursor encodes a position, so the next page can still be loaded (and refreshed) after its anchor team is gone.
+  await created[1].delete();
+  await created[2].update({ displayName: "Gamma renamed" });
+  const page2AfterDelete = await user.listTeams({ limit: 2, cursor: page1.nextCursor ?? throwErr("expected a next cursor") });
+  expect(page2AfterDelete.map((team) => team.displayName)).toEqual(["Gamma renamed"]);
+
   const newestFirst = await user.listTeams({ orderBy: "createdAt", desc: true });
-  expect(newestFirst.map((team) => team.displayName)).toEqual(["Gamma", "Beta", "Alpha"]);
+  expect(newestFirst.map((team) => team.displayName)).toEqual(["Gamma renamed", "Alpha"]);
 
   const searched = await user.listTeams({ query: "amm" });
-  expect(searched.map((team) => team.displayName)).toEqual(["Gamma"]);
+  expect(searched.map((team) => team.displayName)).toEqual(["Gamma renamed"]);
 });
 
 it("finds a user's team with getTeam even when the user is in more than 200 teams", { timeout: 300_000 }, async ({ expect }) => {
@@ -188,7 +194,7 @@ it("finds a user's team with getTeam even when the user is in more than 200 team
   const listedTeams = await user.listTeams();
   expect(listedTeams).toHaveLength(200);
   expect(listedTeams.some((team) => team.id === newestTeam.id)).toBe(false);
-  expect(listedTeams.nextCursor).toBe(listedTeams[199].id);
+  expect(listedTeams.nextCursor).toMatch(new RegExp(`_${listedTeams[199].id}$`));
   const nextPage = await user.listTeams({ limit: 200, cursor: listedTeams.nextCursor ?? throwErr("expected a next cursor") });
   expect(nextPage.map((team) => team.id)).toEqual([newestTeam.id]);
   expect(nextPage.nextCursor).toBeNull();

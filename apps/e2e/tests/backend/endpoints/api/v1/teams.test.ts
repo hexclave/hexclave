@@ -1,5 +1,6 @@
 import { it } from "../../../../helpers";
 import { Auth, InternalApiKey, Project, Team, Webhook, bumpEmailAddress, niceBackendFetch } from "../../../backend-helpers";
+import { withInternalDatabase } from "./external-db-sync-utils";
 
 
 it("is not allowed to list all the teams in a project on the client", async ({ expect }) => {
@@ -108,8 +109,8 @@ it("paginates teams across two pages without duplicates or skips", async ({ expe
   const cursor = page1.body.pagination?.next_cursor;
   expect(cursor).toEqual(expect.any(String));
 
-  // Cursor should be the id of the last item we received, not a peek-ahead.
-  expect(cursor).toBe(page1.body.items[limit - 1].id);
+  // Cursor should be the position of the last item we received, not a peek-ahead.
+  expect(cursor).toBe(`${page1.body.items[limit - 1].created_at_millis}_${page1.body.items[limit - 1].id}`);
 
   const page2 = await niceBackendFetch(`/api/v1/teams?limit=${limit}&cursor=${encodeURIComponent(cursor)}`, { accessType: "server" });
   expect(page2.status).toBe(200);
@@ -141,11 +142,11 @@ async function createTeams(count: number, body: (index: number) => Record<string
   return ids;
 }
 
-async function listAllTeamIds(query: string) {
+async function listAllTeamIds(query: string, limit = 7) {
   const ids: string[] = [];
   let cursor: string | null = null;
   do {
-    const response = await niceBackendFetch(`/api/v1/teams?${query}&limit=7${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`, { accessType: "server" });
+    const response = await niceBackendFetch(`/api/v1/teams?${query}&limit=${limit}${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`, { accessType: "server" });
     if (response.status !== 200) throw new Error(`Failed to list teams: ${response.status}`);
     ids.push(...response.body.items.map((team: { id: string }) => team.id));
     cursor = response.body.pagination.next_cursor;
@@ -163,7 +164,7 @@ it("caps listing teams without a limit at 200 and returns a cursor to the rest",
   expect(response.body.is_paginated).toBe(true);
   expect(response.body.items).toHaveLength(200);
   const cursor = response.body.pagination?.next_cursor;
-  expect(cursor).toBe(response.body.items[199].id);
+  expect(cursor).toBe(`${response.body.items[199].created_at_millis}_${response.body.items[199].id}`);
 
   const rest = await niceBackendFetch(`/api/v1/teams?limit=200&cursor=${encodeURIComponent(cursor)}`, { accessType: "server" });
   expect(rest.status).toBe(200);
@@ -194,7 +195,7 @@ it("caps a user's teams at 200 without a limit, for client and server", async ({
     expect(response.status).toBe(200);
     expect(response.body.is_paginated).toBe(true);
     expect(response.body.items).toHaveLength(200);
-    expect(response.body.pagination.next_cursor).toBe(response.body.items[199].id);
+    expect(response.body.pagination.next_cursor).toMatch(new RegExp(`^\\d+_${response.body.items[199].id}$`));
 
     const rest = await niceBackendFetch(`/api/v1/teams?user_id=me&limit=200&cursor=${encodeURIComponent(response.body.pagination.next_cursor)}`, { accessType });
     expect(rest.body.items).toHaveLength(1);
@@ -247,6 +248,94 @@ it("rejects invalid pagination parameters", async ({ expect }) => {
     const response = await niceBackendFetch(`/api/v1/teams?limit=${limit}`, { accessType: "server" });
     expect(response.status).toBe(400);
   }
+  for (const cursor of [
+    "", "null", "undefined", "not-a-cursor", "123", `abc_${teamId}`, `123_not-a-uuid`, `-5_${teamId}`, `1.5_${teamId}`,
+    ` 1_${teamId}`, `1_${teamId}\n`, `1_${teamId}_x`,
+    // Digit strings past the largest valid Date (8.64e15 ms) must be rejected, not turned into an Invalid Date.
+    `8640000000000001_${teamId}`, `99999999999999999999_${teamId}`, `${"9".repeat(400)}_${teamId}`,
+  ]) {
+    const response = await niceBackendFetch(`/api/v1/teams?limit=5&cursor=${encodeURIComponent(cursor)}`, { accessType: "server" });
+    expect(response.status).toBe(400);
+  }
+});
+
+it("accepts cursors at the edges of the valid range and in any letter case", async ({ expect }) => {
+  await Project.createAndSwitch();
+  const ids = await createTeams(3, () => ({}), 1);
+  const listIds = async (query: string) => {
+    const response = await niceBackendFetch(`/api/v1/teams?${query}`, { accessType: "server" });
+    expect(response.status).toBe(200);
+    return { ids: response.body.items.map((team: { id: string }) => team.id), nextCursor: response.body.pagination.next_cursor };
+  };
+  const minCursor = encodeURIComponent("0_00000000-0000-0000-0000-000000000000");
+  const maxCursor = encodeURIComponent("8640000000000000_ffffffff-ffff-ffff-ffff-ffffffffffff");
+
+  expect(await listIds(`limit=10&cursor=${minCursor}`)).toEqual({ ids, nextCursor: null });
+  expect(await listIds(`limit=10&cursor=${maxCursor}`)).toEqual({ ids: [], nextCursor: null });
+  expect(await listIds(`desc=true&limit=10&cursor=${maxCursor}`)).toEqual({ ids: [...ids].reverse(), nextCursor: null });
+  expect(await listIds(`desc=true&limit=10&cursor=${minCursor}`)).toEqual({ ids: [], nextCursor: null });
+
+  const { nextCursor } = await listIds("limit=1");
+  expect(await listIds(`limit=10&cursor=${encodeURIComponent(nextCursor.toUpperCase())}`)).toEqual({ ids: ids.slice(1), nextCursor: null });
+  // Legacy bare-ID cursors were validated case-insensitively before positions were encoded, so they still are.
+  expect(await listIds(`limit=10&cursor=${ids[0].toUpperCase()}`)).toEqual({ ids: ids.slice(1), nextCursor: null });
+});
+
+it("returns no trailing empty page when the total is a multiple of the limit", async ({ expect }) => {
+  await Project.createAndSwitch();
+  expect((await niceBackendFetch("/api/v1/teams?limit=5", { accessType: "server" })).body).toEqual({ items: [], is_paginated: true, pagination: { next_cursor: null } });
+  expect((await niceBackendFetch("/api/v1/teams", { accessType: "server" })).body).toEqual({ items: [], is_paginated: false });
+
+  const ids = await createTeams(12, () => ({}), 1);
+  for (const limit of [1, 3, 4, 6, 11, 12, 13]) {
+    let cursor: string | null = null;
+    const seen: string[] = [];
+    let pages = 0;
+    do {
+      const response: { body: { items: { id: string }[], pagination: { next_cursor: string | null } } } = await niceBackendFetch(`/api/v1/teams?limit=${limit}${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`, { accessType: "server" });
+      expect(response.body.items.length).toBeGreaterThan(0);
+      seen.push(...response.body.items.map((team) => team.id));
+      cursor = response.body.pagination.next_cursor;
+      pages++;
+    } while (cursor != null);
+    expect(seen, `limit=${limit}`).toEqual(ids);
+    expect(pages, `limit=${limit}`).toBe(Math.ceil(12 / limit));
+  }
+}, 120_000);
+
+it("pages through teams with identical created_at timestamps, ties broken by team ID", async ({ expect }) => {
+  const { projectId } = await Project.createAndSwitch();
+  const ids = await createTeams(30);
+  // Teams created via the API rarely share a millisecond, so force tie groups that straddle page boundaries.
+  const order = await withInternalDatabase(async (client) => {
+    const tenancyId = (await client.query(`SELECT id FROM "Tenancy" WHERE "projectId" = $1 AND "branchId" = 'main'`, [projectId])).rows[0].id;
+    await client.query(`UPDATE "Team" SET "createdAt" = '2020-01-01 00:00:00.123' WHERE "tenancyId" = $1 AND "teamId" = ANY($2::uuid[])`, [tenancyId, ids.slice(0, 20)]);
+    await client.query(`UPDATE "Team" SET "createdAt" = '2020-01-01 00:00:00.124' WHERE "tenancyId" = $1 AND "teamId" = ANY($2::uuid[])`, [tenancyId, ids.slice(20)]);
+    const rows = await client.query(`SELECT "teamId" FROM "Team" WHERE "tenancyId" = $1 ORDER BY "createdAt", "teamId"`, [tenancyId]);
+    return rows.rows.map((row) => row.teamId);
+  });
+
+  for (const limit of [1, 7, 19, 20, 21]) {
+    expect(await listAllTeamIds("order_by=created_at", limit), `limit=${limit}`).toEqual(order);
+    expect(await listAllTeamIds("order_by=created_at&desc=true", limit), `desc limit=${limit}`).toEqual([...order].reverse());
+  }
+
+  // Deleting a cursor team in the middle of a tie group doesn't skip or repeat its tied neighbours.
+  const page = await niceBackendFetch("/api/v1/teams?limit=10", { accessType: "server" });
+  expect((await niceBackendFetch(`/api/v1/teams/${order[9]}`, { accessType: "server", method: "DELETE" })).status).toBe(200);
+  const rest = await niceBackendFetch(`/api/v1/teams?limit=200&cursor=${encodeURIComponent(page.body.pagination.next_cursor)}`, { accessType: "server" });
+  expect(rest.body.items.map((team: { id: string }) => team.id)).toEqual(order.slice(10));
+}, 120_000);
+
+it("returns an empty last page when every team after the cursor was deleted", async ({ expect }) => {
+  await Project.createAndSwitch();
+  const ids = await createTeams(5, () => ({}), 1);
+  const page = await niceBackendFetch("/api/v1/teams?limit=2", { accessType: "server" });
+  for (const teamId of ids.slice(1)) {
+    expect((await niceBackendFetch(`/api/v1/teams/${teamId}`, { accessType: "server", method: "DELETE" })).status).toBe(200);
+  }
+  const rest = await niceBackendFetch(`/api/v1/teams?limit=2&cursor=${encodeURIComponent(page.body.pagination.next_cursor)}`, { accessType: "server" });
+  expect(rest.body).toEqual({ items: [], is_paginated: true, pagination: { next_cursor: null } });
 });
 
 it("does not drop teams when the cursor team stops matching the filters between pages", async ({ expect }) => {
@@ -259,13 +348,14 @@ it("does not drop teams when the cursor team stops matching the filters between 
   const cursor = page1.body.pagination.next_cursor;
 
   // The user leaves the cursor team, so it no longer matches the user_id filter.
-  const leave = await niceBackendFetch(`/api/v1/team-memberships/${cursor}/${userId}`, { accessType: "server", method: "DELETE" });
+  const leave = await niceBackendFetch(`/api/v1/team-memberships/${ids[0]}/${userId}`, { accessType: "server", method: "DELETE" });
   expect(leave.status).toBe(200);
   const afterLeave = await niceBackendFetch(`/api/v1/teams?user_id=me&limit=10&cursor=${cursor}`, { accessType: "client" });
   expect(afterLeave.status).toBe(200);
   expect(afterLeave.body.items.map((team: { id: string }) => team.id)).toEqual(ids.slice(1));
 
-  // The cursor team is renamed so it no longer matches `query`.
+  // The cursor team is renamed so it no longer matches `query`. This and the descending case below use legacy cursors
+  // (bare team IDs, the format before positions were encoded), which must keep working.
   const rename = await niceBackendFetch(`/api/v1/teams/${ids[1]}`, { accessType: "server", method: "PATCH", body: { display_name: "Renamed" } });
   expect(rename.status).toBe(200);
   const afterRename = await niceBackendFetch(`/api/v1/teams?user_id=me&query=paged&limit=10&cursor=${ids[1]}`, { accessType: "client" });
@@ -276,7 +366,29 @@ it("does not drop teams when the cursor team stops matching the filters between 
   expect(descending.body.items.map((team: { id: string }) => team.id)).toEqual([ids[2], ids[1]]);
 });
 
-it("rejects a cursor whose team was deleted", async ({ expect }) => {
+it("keeps paginating from a cursor after its team is deleted, in both directions", async ({ expect }) => {
+  await Project.createAndSwitch();
+  const ids = await createTeams(4, () => ({}), 1);
+
+  const ascending = await niceBackendFetch(`/api/v1/teams?limit=2`, { accessType: "server" });
+  expect(ascending.body.items.map((team: { id: string }) => team.id)).toEqual(ids.slice(0, 2));
+  const descending = await niceBackendFetch(`/api/v1/teams?desc=true&limit=2`, { accessType: "server" });
+  expect(descending.body.items.map((team: { id: string }) => team.id)).toEqual([ids[3], ids[2]]);
+
+  for (const teamId of [ids[1], ids[2]]) {
+    const del = await niceBackendFetch(`/api/v1/teams/${teamId}`, { accessType: "server", method: "DELETE" });
+    expect(del.status).toBe(200);
+  }
+
+  const ascendingRest = await niceBackendFetch(`/api/v1/teams?limit=10&cursor=${encodeURIComponent(ascending.body.pagination.next_cursor)}`, { accessType: "server" });
+  expect(ascendingRest.status).toBe(200);
+  expect(ascendingRest.body.items.map((team: { id: string }) => team.id)).toEqual([ids[3]]);
+  const descendingRest = await niceBackendFetch(`/api/v1/teams?desc=true&limit=10&cursor=${encodeURIComponent(descending.body.pagination.next_cursor)}`, { accessType: "server" });
+  expect(descendingRest.status).toBe(200);
+  expect(descendingRest.body.items.map((team: { id: string }) => team.id)).toEqual([ids[0]]);
+});
+
+it("rejects a legacy (bare team ID) cursor whose team was deleted", async ({ expect }) => {
   await Project.createAndSwitch();
   const [teamId] = await createTeams(2);
   const del = await niceBackendFetch(`/api/v1/teams/${teamId}`, { accessType: "server", method: "DELETE" });

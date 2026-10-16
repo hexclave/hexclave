@@ -494,7 +494,7 @@ struct TeamPaginationTests {
 
         let page1 = try await user.listTeamsPage(limit: 3)
         #expect(page1.items.map { $0.id } == Array(expected[0..<3]))
-        #expect(page1.nextCursor == expected[2])
+        #expect(page1.nextCursor?.hasSuffix("_\(expected[2])") == true)
 
         let page2 = try await user.listTeamsPage(limit: 3, cursor: try #require(page1.nextCursor))
         #expect(page2.items.map { $0.id } == [expected[3]])

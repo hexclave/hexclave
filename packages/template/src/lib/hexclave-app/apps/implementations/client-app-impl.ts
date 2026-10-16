@@ -2156,29 +2156,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
   }
 
   protected async _refreshCurrentUserTeams(session: InternalSession) {
-    await this._currentUserTeamsCache.refreshWhere(([cachedSession, , , cursor]) =>
-      cachedSession === session && !this._isDeletedTeamCursor(cursor));
-  }
-
-  // The backend rejects a deleted team as a list `cursor` (its page has no position anymore), so a cached teams page
-  // anchored on a team deleted through this app must never be refetched: every later teams refresh (create, update,
-  // another delete, ...) would make that page's subscribers throw even though the mutation succeeded. Its cached
-  // contents never included the anchor team itself, so leaving it as-is stays accurate. Only IDs that some cached page
-  // actually uses as its cursor are remembered, so this is bounded by the number of cached pages, not by deletions.
-  private readonly _deletedTeamCursors = new Set<string>();
-
-  protected _isTeamUsedAsListCursor(teamId: string): boolean {
-    return this._currentUserTeamsCache.hasKeyWhere(([, , , cursor]) => cursor === teamId);
-  }
-
-  protected _markTeamDeleted(teamId: string) {
-    if (this._isTeamUsedAsListCursor(teamId)) {
-      this._deletedTeamCursors.add(teamId);
-    }
-  }
-
-  protected _isDeletedTeamCursor(cursor: string | undefined): boolean {
-    return cursor != null && this._deletedTeamCursors.has(cursor);
+    await this._currentUserTeamsCache.refreshWhere(([cachedSession]) => cachedSession === session);
   }
 
   protected _clientTeamFromCrud(crud: TeamsCrud['Client']['Read'], session: InternalSession): Team {
@@ -2231,7 +2209,6 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       },
       async delete() {
         await app._interface.deleteTeam(crud.id, session);
-        app._markTeamDeleted(crud.id);
         await app._refreshCurrentUserTeams(session);
       },
 

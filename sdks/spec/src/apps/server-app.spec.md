@@ -214,7 +214,8 @@ Response:
     pagination?: { next_cursor: string | null }
   }
 
-nextCursor is pagination.next_cursor, or null if absent. Without limit, the response has is_paginated: false and no
+nextCursor is pagination.next_cursor, or null if absent. Treat it as opaque (pass it back unchanged); it stays valid
+even if the team it was derived from is deleted later, so cached pages can be refetched after any team mutation. Without limit, the response has is_paginated: false and no
 pagination when all matching teams fit in 200; when they don't, the first 200 are returned with a next_cursor.
 Languages that can't attach a property to an array may instead expose listTeams() returning only the items, plus a
 page-returning variant (e.g. Swift's listTeamsPage, returning { items, nextCursor }).
