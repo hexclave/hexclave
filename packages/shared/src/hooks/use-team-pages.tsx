@@ -2,45 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { captureError } from "../utils/errors";
 import { runAsynchronously } from "../utils/promises";
 import { Result } from "../utils/results";
+import { teamsPageSize, type TeamList, type TeamPageLister } from "../utils/team-lists";
 
-/** Structurally the SDK's `TeamList<T>`: one page of teams plus the cursor for the next one. */
-type TeamList<T> = T[] & { nextCursor: string | null };
-
-// Matches the backend's per-request cap for `/teams`.
-const teamsPageSize = 200;
 const searchDebounceMs = 250;
-
-/** The subset of the SDK's `ListTeamsOptions` used here: a cursor is only valid together with a limit. */
-export type TeamPageRequest =
-  | { query?: string, limit: number, cursor?: undefined }
-  | { query?: string, limit: number, cursor: string };
 
 /**
  * Both functions are called as methods on the source object, so an SDK user (whose methods rely on `this`) can be
  * passed directly.
  */
-export type TeamPagesSource<T> = {
+export type TeamPagesSource<T> = TeamPageLister<T> & {
   useTeams: () => TeamList<T>,
-  listTeams: (options: TeamPageRequest) => Promise<TeamList<T>>,
 };
 
-/**
- * Fetches every team after `firstPage`, one capped page at a time, and returns them all including `firstPage`.
- * Only for checks that genuinely need every team (e.g. which teams have products); pickers should page lazily
- * with `useTeamPages` instead.
- */
-export async function listAllTeams<T>(source: Pick<TeamPagesSource<T>, "listTeams">, firstPage: TeamList<T>): Promise<T[]> {
-  const teams = [...firstPage];
-  let cursor = firstPage.nextCursor;
-  while (cursor != null) {
-    const page = await source.listTeams({ limit: teamsPageSize, cursor });
-    teams.push(...page);
-    cursor = page.nextCursor;
-  }
-  return teams;
-}
-
-type SearchOutcome<T> = { query: string, attempt: number, result: Result<TeamList<T>, unknown> };
+type SearchOutcome = { query: string, attempt: number, failed: boolean };
 
 /**
  * Team lists are capped at 200 per request, so any UI that lets a user pick one of their teams must be able to
@@ -61,13 +35,19 @@ export function useTeamPages<T extends { id: string }>(source: TeamPagesSource<T
   const unfilteredFirstPage = source.useTeams();
 
   const [attempt, setAttempt] = useState(0);
-  const [search, setSearch] = useState<SearchOutcome<T> | null>(null);
+  // The outcome of the most recent search request, success or failure.
+  const [latestSearch, setLatestSearch] = useState<SearchOutcome | null>(null);
+  // The most recent successful search, kept separately so that a failed or still-loading search leaves it in place.
+  const [lastSuccessfulSearch, setLastSuccessfulSearch] = useState<{ query: string, firstPage: TeamList<T> } | null>(null);
   const [previousQuery, setPreviousQuery] = useState(query);
   if (query !== previousQuery) {
     setPreviousQuery(query);
     // Clearing the search box goes straight back to the unfiltered list. Without this, the next search would
     // keep showing the results from before the box was cleared while it loads.
-    if (query === "") setSearch(null);
+    if (query === "") {
+      setLatestSearch(null);
+      setLastSuccessfulSearch(null);
+    }
   }
 
   useEffect(() => {
@@ -79,19 +59,23 @@ export function useTeamPages<T extends { id: string }>(source: TeamPagesSource<T
       if (cancelled) return;
       if (result.status === "error") {
         captureError("useTeamPages search", result.error);
+      } else {
+        setLastSuccessfulSearch({ query, firstPage: result.data });
       }
-      setSearch({ query, attempt, result });
+      setLatestSearch({ query, attempt, failed: result.status === "error" });
     });
     return () => {
       cancelled = true;
     };
-  }, [query, attempt, source]);
+    // `unfilteredFirstPage` changes identity whenever the SDK refreshes the user's teams (team renamed, created,
+    // left, ...). Search results aren't in the SDK's cache, so an open search is re-run then to pick up the change.
+  }, [query, attempt, source, unfilteredFirstPage]);
 
-  const currentSearch = query !== "" && search?.query === query && search.attempt === attempt ? search : null;
-  // While a search is loading (or after it failed), the previous successful results stay on screen, so typing
+  const currentSearch = query !== "" && latestSearch?.query === query && latestSearch.attempt === attempt ? latestSearch : null;
+  // While a search is loading (or after it failed), the previous successful results stay in `teams`, so typing
   // more characters refines the list instead of flashing back to the unfiltered one.
-  const shown = query !== "" && search?.result.status === "ok"
-    ? { query: search.query, firstPage: search.result.data }
+  const shown = query !== "" && lastSuccessfulSearch != null
+    ? { query: lastSuccessfulSearch.query, firstPage: lastSuccessfulSearch.firstPage }
     : { query: "", firstPage: unfilteredFirstPage };
 
   const [laterPages, setLaterPages] = useState<{ after: TeamList<T>, teams: T[], nextCursor: string | null } | null>(null);
@@ -136,11 +120,12 @@ export function useTeamPages<T extends { id: string }>(source: TeamPagesSource<T
     hasMultiplePages: unfilteredFirstPage.nextCursor != null,
     isSearchPending: rawQuery.trim() !== query || (query !== "" && currentSearch == null),
     /**
-     * Whether the current search failed; `teams` then still holds the previously shown results. The error itself
-     * is already reported via `captureError` and isn't exposed, since SDK errors can carry retry logs and stack
-     * traces that shouldn't be shown to users.
+     * Whether the current search failed. `teams` and `activeQuery` then still describe the last successful search
+     * (or the unfiltered list), which no longer matches the search box, so callers show the error in place of the
+     * list. The error itself is already reported via `captureError` and isn't exposed, since SDK errors can carry
+     * retry logs and stack traces that shouldn't be shown to users.
      */
-    searchFailed: currentSearch?.result.status === "error",
+    searchFailed: currentSearch?.failed === true,
     retrySearch,
     activeQuery: shown.query,
   };

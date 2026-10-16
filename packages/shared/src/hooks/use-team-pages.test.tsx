@@ -3,7 +3,8 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { listAllTeams, useTeamPages, type TeamPageRequest, type TeamPagesSource } from "./use-team-pages";
+import type { TeamPageRequest } from "../utils/team-lists";
+import { useTeamPages, type TeamPagesSource } from "./use-team-pages";
 
 type FakeTeam = { id: string, displayName: string };
 type FakeTeamList = FakeTeam[] & { nextCursor: string | null };
@@ -43,31 +44,6 @@ function createFakeSource(total: number) {
   };
   return { source, listTeams, invalidate, page };
 }
-
-describe("listAllTeams", () => {
-  it("follows the cursor from the given first page until the end", async () => {
-    const { source, listTeams, page } = createFakeSource(450);
-    const teams = await listAllTeams(source, page(undefined, undefined));
-    expect(teams).toHaveLength(450);
-    expect(new Set(teams.map(team => team.id)).size).toBe(450);
-    expect(listTeams.mock.calls.map(([options]) => options)).toEqual([
-      { limit: 200, cursor: "team-0199" },
-      { limit: 200, cursor: "team-0399" },
-    ]);
-  });
-
-  it("makes no requests when the first page is the only one", async () => {
-    const { source, listTeams, page } = createFakeSource(200);
-    expect(await listAllTeams(source, page(undefined, undefined))).toHaveLength(200);
-    expect(listTeams).not.toHaveBeenCalled();
-  });
-
-  it("propagates a failed page instead of returning a partial list", async () => {
-    const { source, listTeams, page } = createFakeSource(450);
-    listTeams.mockRejectedValueOnce(new Error("network down"));
-    await expect(listAllTeams(source, page(undefined, undefined))).rejects.toThrow("network down");
-  });
-});
 
 describe("useTeamPages", () => {
   const previousActEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
@@ -246,6 +222,56 @@ describe("useTeamPages", () => {
     expect(current().searchFailed).toBe(false);
     expect(current().teams.map(team => team.displayName)).toEqual(["Zebra Needle"]);
     expect(listTeams).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the last successful search in place when a later search fails, and during its retry", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { source, listTeams, page } = createFakeSource(450);
+    await render(source, "Zebra");
+    await act(async () => {});
+    expect(current().teams.map(team => team.displayName)).toEqual(["Zebra Needle"]);
+
+    listTeams.mockRejectedValueOnce(new Error("network down"));
+    await render(source, "Zebra N");
+    await settleSearch();
+    expect(current().searchFailed).toBe(true);
+    expect(current().activeQuery).toBe("Zebra");
+    expect(current().teams.map(team => team.displayName)).toEqual(["Zebra Needle"]);
+
+    let resolveRetry: ((value: FakeTeamList) => void) | null = null;
+    listTeams.mockImplementationOnce(() => new Promise(resolve => {
+      resolveRetry = resolve;
+    }));
+    await act(async () => {
+      current().retrySearch();
+    });
+    // While the retry is in flight, the list must not flash back to the unfiltered teams.
+    expect(current().isSearchPending).toBe(true);
+    expect(current().activeQuery).toBe("Zebra");
+    expect(current().teams.map(team => team.displayName)).toEqual(["Zebra Needle"]);
+
+    await act(async () => {
+      if (resolveRetry == null) throw new Error("The retry request was never started");
+      resolveRetry(page("Zebra N", undefined));
+    });
+    expect(current().activeQuery).toBe("Zebra N");
+    expect(current().searchFailed).toBe(false);
+  });
+
+  it("re-runs an open search when the user's teams are refreshed", async () => {
+    const { source, listTeams, invalidate } = createFakeSource(450);
+    await render(source, "Zebra");
+    await act(async () => {});
+    expect(listTeams).toHaveBeenCalledTimes(1);
+
+    invalidate();
+    await render(source, "Zebra");
+    await act(async () => {});
+    expect(listTeams).toHaveBeenCalledTimes(2);
+    expect(listTeams).toHaveBeenLastCalledWith({ query: "Zebra", limit: 200 });
+    // A background refresh doesn't put the search back into the pending state.
+    expect(current().isSearchPending).toBe(false);
+    expect(current().teams.map(team => team.displayName)).toEqual(["Zebra Needle"]);
   });
 
   it("clears a search failure when the query changes", async () => {

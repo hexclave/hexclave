@@ -460,24 +460,50 @@ struct ServerTeamTests {
 @Suite("Team Tests - Pagination")
 struct TeamPaginationTests {
     /// Creates `count` teams with `userId` as a member, 20 at a time, and returns their IDs in creation order.
-    private func createTeams(count: Int, creatorUserId: String, app: StackServerApp) async throws -> [String] {
-        var ids: [String] = []
+    /// Creates `count` teams in batches of 20, in batch order. If any creation fails, the teams created so far are
+    /// deleted before rethrowing, so a failed run doesn't leave them behind in the shared test project.
+    private func createTeams(count: Int, creatorUserId: String, app: StackServerApp) async throws -> [ServerTeam] {
+        var teams: [ServerTeam] = []
         for batchStart in stride(from: 0, to: count, by: 20) {
-            let batch = try await withThrowingTaskGroup(of: (Int, String).self) { group in
+            let batch = await withTaskGroup(of: (Int, Result<ServerTeam, Error>).self) { group in
                 for index in batchStart..<min(batchStart + 20, count) {
                     group.addTask {
-                        let team = try await app.createTeam(displayName: "Paged Team \(index)", creatorUserId: creatorUserId)
-                        return (index, team.id)
+                        do {
+                            return (index, .success(try await app.createTeam(displayName: "Paged Team \(index)", creatorUserId: creatorUserId)))
+                        } catch {
+                            return (index, .failure(error))
+                        }
                     }
                 }
-                var results: [(Int, String)] = []
-                for try await result in group { results.append(result) }
+                var results: [(Int, Result<ServerTeam, Error>)] = []
+                for await result in group { results.append(result) }
                 return results
             }
             // Concurrent creation within a batch has no defined order, so we only rely on batch order below.
-            ids.append(contentsOf: batch.sorted { $0.0 < $1.0 }.map { $0.1 })
+            var firstError: Error?
+            for (_, result) in batch.sorted(by: { $0.0 < $1.0 }) {
+                switch result {
+                case .success(let team): teams.append(team)
+                case .failure(let error): firstError = firstError ?? error
+                }
+            }
+            if let firstError {
+                try await deleteTeams(teams)
+                throw firstError
+            }
         }
-        return ids
+        return teams
+    }
+
+    private func deleteTeams(_ teams: [ServerTeam]) async throws {
+        for batchStart in stride(from: 0, to: teams.count, by: 20) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for team in teams[batchStart..<min(batchStart + 20, teams.count)] {
+                    group.addTask { try await team.delete() }
+                }
+                try await group.waitForAll()
+            }
+        }
     }
 
     @Test("Should page through the current user's teams")
@@ -561,23 +587,40 @@ struct TeamPaginationTests {
         let serverUser = try await serverApp.createUser(email: email, password: TestConfig.testPassword, primaryEmailAuthEnabled: true)
 
         // Create the teams before signing in: creating 201 teams can outlive a dev access token.
-        let ids = try await createTeams(count: 201, creatorUserId: serverUser.id, app: serverApp)
-        let newestId = try #require(ids.last)
+        let teams: [ServerTeam]
+        do {
+            teams = try await createTeams(count: 201, creatorUserId: serverUser.id, app: serverApp)
+        } catch {
+            try await serverUser.delete()
+            throw error
+        }
 
-        let app = TestConfig.createClientApp()
-        try await app.signInWithCredential(email: email, password: TestConfig.testPassword)
-        let user = try #require(try await app.getUser())
+        // TestConfig binds every test app to the shared `internal` project, so the 201 teams and the user are
+        // deleted whether the assertions below pass or throw (`#require` throws on failure).
+        do {
+            let newestId = try #require(teams.last?.id)
 
-        let firstPage = try await user.listTeamsPage()
-        #expect(firstPage.items.count == 200)
-        #expect(!firstPage.items.contains { $0.id == newestId })
-        let nextPage = try await user.listTeamsPage(limit: 200, cursor: try #require(firstPage.nextCursor))
-        #expect(nextPage.items.last?.id == newestId)
-        #expect(nextPage.nextCursor == nil)
-        let total = firstPage.items.count + nextPage.items.count
-        #expect(total >= 201)
+            let app = TestConfig.createClientApp()
+            try await app.signInWithCredential(email: email, password: TestConfig.testPassword)
+            let user = try #require(try await app.getUser())
 
-        #expect(try await user.getTeam(id: newestId)?.id == newestId)
-        #expect(try await serverUser.getTeam(id: newestId)?.id == newestId)
+            let firstPage = try await user.listTeamsPage()
+            #expect(firstPage.items.count == 200)
+            #expect(!firstPage.items.contains { $0.id == newestId })
+            let nextPage = try await user.listTeamsPage(limit: 200, cursor: try #require(firstPage.nextCursor))
+            #expect(nextPage.items.last?.id == newestId)
+            #expect(nextPage.nextCursor == nil)
+            let total = firstPage.items.count + nextPage.items.count
+            #expect(total >= 201)
+
+            #expect(try await user.getTeam(id: newestId)?.id == newestId)
+            #expect(try await serverUser.getTeam(id: newestId)?.id == newestId)
+        } catch {
+            try await deleteTeams(teams)
+            try await serverUser.delete()
+            throw error
+        }
+        try await deleteTeams(teams)
+        try await serverUser.delete()
     }
 }

@@ -8,7 +8,7 @@ import { SidebarLayout, useHash } from './sidebar-layout';
 import { ProfilePage } from "./profile-page/profile-page";
 import { SettingsPage } from './settings/settings-page';
 import { TeamIcon } from "./supporting/team-icon";
-import { listAllTeams } from "@hexclave/shared/dist/hooks/use-team-pages";
+import { findTeamsWithProducts } from "@hexclave/shared/dist/utils/team-lists";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 
 const iconMap = {
@@ -157,16 +157,7 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
       }
       const [userProducts, teamsWithProducts] = await Promise.all([
         currentUser.listProducts({ limit: 1 }),
-        // `teamsById` is only the first (capped) page of teams; teams on later pages can have products too.
-        listAllTeams(currentUser, teamsById).then(allTeams => Promise.all(allTeams.map(async (team) => {
-          const isTeamAdmin = await currentUser.hasPermission(team, "team_admin");
-          if (!isTeamAdmin) {
-            return null;
-          }
-          const teamProducts = await team.listProducts({ limit: 1 });
-          const hasTeamProducts = teamProducts.some((product) => product.customerType === "team");
-          return hasTeamProducts ? team : null;
-        }))),
+        findTeamsWithProducts(currentUser, teamsById),
       ]);
       if (cancelled) {
         return;
@@ -174,7 +165,7 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
       const userHasProducts = userProducts.some((product) => product.customerType === "user");
       setPaymentsAvailability({
         userHasProducts,
-        teamsWithProducts: teamsWithProducts.filter((team): team is Team => team !== null),
+        teamsWithProducts,
         isReady: true,
       });
     });

@@ -1,6 +1,6 @@
 'use client';
 
-import { listAllTeams } from "@hexclave/shared/dist/hooks/use-team-pages";
+import { findTeamsWithProducts } from "@hexclave/shared/dist/utils/team-lists";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { Skeleton, Typography } from '@hexclave/ui';
 import { Contact, ShieldCheck, Bell, Monitor, Key, Settings, CirclePlus, CreditCard, Users } from 'lucide-react';
@@ -134,16 +134,7 @@ export function AccountSettings(props: {
       }
       const [userProducts, teamsWithProducts] = await Promise.all([
         currentUser.listProducts({ limit: 1 }),
-        // `teamsById` is only the first (capped) page of teams; teams on later pages can have products too.
-        listAllTeams(currentUser, teamsById).then(allTeams => Promise.all(allTeams.map(async (team) => {
-          const isTeamAdmin = await currentUser.hasPermission(team, "team_admin");
-          if (!isTeamAdmin) {
-            return null;
-          }
-          const teamProducts = await team.listProducts({ limit: 1 });
-          const hasTeamProducts = teamProducts.some((product) => product.customerType === "team");
-          return hasTeamProducts ? team : null;
-        }))),
+        findTeamsWithProducts(currentUser, teamsById),
       ]);
       if (cancelled) {
         return;
@@ -151,7 +142,7 @@ export function AccountSettings(props: {
       const userHasProducts = userProducts.some((product) => product.customerType === "user");
       setPaymentsAvailability({
         userHasProducts,
-        teamsWithProducts: teamsWithProducts.filter((team): team is Team => team !== null),
+        teamsWithProducts,
         isReady: true,
       });
     });
