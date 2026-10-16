@@ -41,7 +41,9 @@ The team profile is visible to all the other users in the team that have the `$r
 
 ## Retrieving a user's teams
 
-You can list all teams a user belongs to using the `listTeams` or `useTeams` functions or fetch a specific team with `getTeam` or `useTeam`. These functions work on both clients and servers.
+You can list the teams a user belongs to using the `listTeams` or `useTeams` functions or fetch a specific team with `getTeam` or `useTeam`. These functions work on both clients and servers.
+
+`listTeams` and `useTeams` return at most 200 teams per call. If the user is in more teams, the returned list's `nextCursor` is set; pass it as `cursor` (together with `limit`) to fetch the next page, or pass `query` to search. To check whether a user is in one particular team, use `getTeam` / `useTeam` instead of searching the list.
 
 <Tabs>
   <Tab title="Client Component">

@@ -1,5 +1,6 @@
 "use client";
 
+import { DesignButton } from "@/components/design-components";
 import { Spinner, Typography, cn } from "@/components/ui";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -7,7 +8,7 @@ import { type CurrentUser, type Team } from "@hexclave/next";
 import { useTeamPages } from "@hexclave/shared/dist/hooks/use-team-pages";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { CaretSortIcon, CheckIcon } from "@radix-ui/react-icons";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useState } from "react";
 
 type TeamSource = Pick<CurrentUser, "useTeams" | "listTeams">;
 
@@ -90,12 +91,16 @@ function TeamOptions(props: {
   selectedTeamId: string | null,
   onSelect: (team: Team) => void,
 }) {
-  const { user } = props;
-  const source = useMemo(() => ({
-    useTeams: (options?: { query?: string }) => user.useTeams(options),
-    listTeams: (options: { query?: string, limit: number, cursor: string }) => user.listTeams(options),
-  }), [user]);
-  const pages = useTeamPages(source, props.query);
+  const pages = useTeamPages(props.user, props.query);
+
+  if (pages.searchFailed) {
+    return (
+      <div className="flex items-center justify-between gap-2 px-3 py-3">
+        <Typography variant="secondary" className="text-sm text-destructive">Could not search teams.</Typography>
+        <DesignButton type="button" size="sm" variant="outline" onClick={pages.retrySearch}>Retry</DesignButton>
+      </div>
+    );
+  }
 
   return (
     <>

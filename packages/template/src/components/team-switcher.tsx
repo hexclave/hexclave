@@ -17,7 +17,7 @@ import {
   cn,
 } from "@hexclave/ui";
 import { PlusCircle, Settings } from "lucide-react";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useState } from "react";
 import { CurrentUser, Team, useStackApp, useUser } from "..";
 import { useTranslation } from "../lib/translations";
 import { TeamIcon } from "./team-icon";
@@ -119,13 +119,8 @@ function PagedTeamSwitcherWithTeamId(props: ViewSharedProps & { user: CurrentUse
 }
 
 function PagedTeamSwitcher(props: ViewSharedProps & { user: CurrentUser, selectedTeam: Team | null }) {
-  const { user } = props;
   const [query, setQuery] = useState("");
-  const source = useMemo(() => ({
-    useTeams: (options?: { query?: string }) => user.useTeams(options),
-    listTeams: (options: { query?: string, limit: number, cursor: string }) => user.listTeams(options),
-  }), [user]);
-  const pages = useTeamPages(source, query);
+  const pages = useTeamPages(props.user, query);
 
   return <TeamSwitcherView
     {...props}
@@ -135,6 +130,7 @@ function PagedTeamSwitcher(props: ViewSharedProps & { user: CurrentUser, selecte
       setQuery,
       isPending: pages.isSearchPending,
       isActive: pages.activeQuery !== "",
+      failure: pages.searchFailed ? { retry: pages.retrySearch } : null,
     } : undefined}
     loadMore={pages.hasMore ? pages.loadMore : undefined}
   />;
@@ -143,12 +139,20 @@ function PagedTeamSwitcher(props: ViewSharedProps & { user: CurrentUser, selecte
 function TeamSwitcherView(props: ViewSharedProps & {
   teams: MockTeam[],
   selectedTeam: MockTeam | null,
-  search?: { query: string, setQuery: (query: string) => void, isPending: boolean, isActive: boolean },
+  search?: {
+    query: string,
+    setQuery: (query: string) => void,
+    isPending: boolean,
+    isActive: boolean,
+    failure: { retry: () => void } | null,
+  },
   loadMore?: () => Promise<void>,
 }) {
   const { t } = useTranslation();
   const { selectedTeam, search } = props;
-  const otherTeams = props.teams.filter(team => team.id !== selectedTeam?.id);
+  const searchFailure = search?.failure ?? null;
+  // After a failed search, the previous results no longer match the search box, so they're hidden behind the error.
+  const otherTeams = searchFailure != null ? [] : props.teams.filter(team => team.id !== selectedTeam?.id);
 
   return (
     <Select
@@ -233,12 +237,19 @@ function TeamSwitcherView(props: ViewSharedProps & {
             ))}
           </SelectGroup> : null}
 
-        {search?.isActive && otherTeams.length === 0 ?
+        {searchFailure != null ? <div className="flex items-center justify-between gap-2 p-2">
+          <Typography variant='destructive' className="text-sm">{t('Could not search teams.')}</Typography>
+          <Button onClick={searchFailure.retry} variant='secondary' size='sm'>
+            {t('Retry')}
+          </Button>
+        </div> : null}
+
+        {searchFailure == null && search?.isActive && otherTeams.length === 0 ?
           <SelectGroup>
             <SelectLabel>{t('No matching teams')}</SelectLabel>
           </SelectGroup> : null}
 
-        {!search?.isActive && props.teams.length === 0 && !props.allowNull ?
+        {searchFailure == null && !search?.isActive && props.teams.length === 0 && !props.allowNull ?
           <SelectGroup>
             <SelectLabel>{t('No teams yet')}</SelectLabel>
           </SelectGroup> : null}
@@ -248,7 +259,7 @@ function TeamSwitcherView(props: ViewSharedProps & {
             <SelectLabel>{t('Searching...')}</SelectLabel>
           </SelectGroup> : null}
 
-        {props.loadMore ? <div className="p-1">
+        {props.loadMore && searchFailure == null ? <div className="p-1">
           <Button onClick={props.loadMore} className="w-full" variant='ghost' size='sm'>
             {t('Load more teams')}
           </Button>

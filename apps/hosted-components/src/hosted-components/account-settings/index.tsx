@@ -8,6 +8,7 @@ import { SidebarLayout, useHash } from './sidebar-layout';
 import { ProfilePage } from "./profile-page/profile-page";
 import { SettingsPage } from './settings/settings-page';
 import { TeamIcon } from "./supporting/team-icon";
+import { listAllTeams } from "@hexclave/shared/dist/hooks/use-team-pages";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 
 const iconMap = {
@@ -132,11 +133,11 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
 
   const [paymentsAvailability, setPaymentsAvailability] = useState<{
     userHasProducts: boolean,
-    teamIdsWithProducts: Set<string>,
+    teamsWithProducts: Team[],
     isReady: boolean,
   }>(() => ({
     userHasProducts: false,
-    teamIdsWithProducts: new Set<string>(),
+    teamsWithProducts: [],
     isReady: !!props.mockUser,
   }));
 
@@ -156,24 +157,24 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
       }
       const [userProducts, teamsWithProducts] = await Promise.all([
         currentUser.listProducts({ limit: 1 }),
-        Promise.all(teamsById.map(async (team) => {
+        // `teamsById` is only the first (capped) page of teams; teams on later pages can have products too.
+        listAllTeams(currentUser, teamsById).then(allTeams => Promise.all(allTeams.map(async (team) => {
           const isTeamAdmin = await currentUser.hasPermission(team, "team_admin");
           if (!isTeamAdmin) {
             return null;
           }
           const teamProducts = await team.listProducts({ limit: 1 });
           const hasTeamProducts = teamProducts.some((product) => product.customerType === "team");
-          return hasTeamProducts ? team.id : null;
-        })),
+          return hasTeamProducts ? team : null;
+        }))),
       ]);
       if (cancelled) {
         return;
       }
       const userHasProducts = userProducts.some((product) => product.customerType === "user");
-      const teamIdsWithProducts = new Set<string>(teamsWithProducts.filter((id): id is string => id !== null));
       setPaymentsAvailability({
         userHasProducts,
-        teamIdsWithProducts,
+        teamsWithProducts: teamsWithProducts.filter((team): team is Team => team !== null),
         isReady: true,
       });
     });
@@ -182,10 +183,7 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
     };
   }, [props.mockUser, teamsById, userId]);
 
-  const teamsWithProducts = useMemo(
-    () => teamsById.filter(team => paymentsAvailability.teamIdsWithProducts.has(team.id)),
-    [paymentsAvailability.teamIdsWithProducts, teamsById],
-  );
+  const teamsWithProducts = paymentsAvailability.teamsWithProducts;
 
   const shouldShowPaymentsTab = props.mockUser
     || !paymentsAvailability.isReady
