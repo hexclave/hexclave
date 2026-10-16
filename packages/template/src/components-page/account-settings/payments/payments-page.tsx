@@ -7,10 +7,15 @@ import { useTranslation } from "../../../lib/translations";
 import { PageLayout } from "../page-layout";
 import { PaymentsPanel } from "./payments-panel";
 
-export function PaymentsPage(props: { mockMode?: boolean, availableTeams?: Team[], allowPersonal?: boolean }) {
+export function PaymentsPage(props: {
+  mockMode?: boolean,
+  /** Teams the user can manage billing for; computed by the caller, since `useTeams()` is capped at one page. */
+  availableTeams: Team[],
+  allowPersonal?: boolean,
+}) {
   const { t } = useTranslation();
   const user = useUser({ or: props.mockMode ? "return-null" : "redirect" });
-  const teams = props.availableTeams ?? user?.useTeams() ?? [];
+  const teams = props.availableTeams;
   const allowPersonal = props.allowPersonal ?? true;
   const hasTeams = teams.length > 0;
   const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);

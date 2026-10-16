@@ -2,6 +2,7 @@
 import { CopyableText } from "@/components/copyable-text";
 import { SmartFormDialog } from "@/components/form-dialog";
 import { Link, StyledLink } from "@/components/link";
+import { UserTeamPicker } from "@/components/user-team-picker";
 import { LogoUpload } from "@/components/logo-upload";
 import {
   DesignAlert,
@@ -14,7 +15,7 @@ import { ActionDialog, Avatar, AvatarFallback, AvatarImage, SimpleTooltip, Switc
 import { useDashboardInternalUser } from "@/lib/dashboard-user";
 import { getPublicEnvVar } from "@/lib/env";
 import type { PushedConfigSource } from "@hexclave/next";
-import { TeamSwitcher } from "@hexclave/next";
+import { type Team } from "@hexclave/next";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
@@ -58,8 +59,7 @@ export default function PageClient() {
   const project = hexclaveAdminApp.useProject();
   const productionModeErrors = project.useProductionModeErrors();
   const user = useDashboardInternalUser();
-  const teams = user.useTeams();
-  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
   const [isTransferring, setIsTransferring] = useState(false);
   const [configSource, setConfigSource] = useState<PushedConfigSource | null>(null);
   const [isLoadingSource, setIsLoadingSource] = useState(true);
@@ -109,12 +109,6 @@ export default function PageClient() {
   // Check if user has team_admin permission for the current team
   const hasAdminPermissionForCurrentTeam = user.usePermission(currentOwnerTeam, "team_admin");
 
-  // Memoize selected team lookup
-  const selectedTeam = useMemo(
-    () => teams.find(team => team.id === selectedTeamId),
-    [teams, selectedTeamId]
-  );
-
   const currentTeamMembers = currentOwnerTeam.useUsers();
 
   // Memoize team settings path
@@ -124,12 +118,12 @@ export default function PageClient() {
   );
 
   const handleTransfer = useCallback(async () => {
-    if (!selectedTeamId || selectedTeamId === project.ownerTeamId) return;
+    if (selectedTeam == null || selectedTeam.id === project.ownerTeamId) return;
     if (isTransferring) return;
 
     setIsTransferring(true);
     try {
-      await user.transferProject(project.id, selectedTeamId);
+      await user.transferProject(project.id, selectedTeam.id);
 
       toast({
         title: 'Project transferred successfully',
@@ -142,7 +136,7 @@ export default function PageClient() {
     } finally {
       setIsTransferring(false);
     }
-  }, [selectedTeamId, project.ownerTeamId, project.id, user, toast, isTransferring]);
+  }, [selectedTeam, project.ownerTeamId, project.id, user, toast, isTransferring]);
 
   // Memoize logo update callbacks
   const handleLogoChange = useCallback(async (logoUrl: string | null) => {
@@ -157,11 +151,6 @@ export default function PageClient() {
   const handleProductionModeChange = useCallback(async (checked: boolean) => {
     await project.update({ isProductionMode: checked });
   }, [project]);
-
-  // Memoize team switcher change callback
-  const handleTeamSwitcherChange = useCallback(async (team: any) => {
-    setSelectedTeamId(team.id);
-  }, []);
 
   // Memoize project details submit callback
   const handleProjectDetailsSubmit = useCallback(async (values: any) => {
@@ -389,10 +378,12 @@ export default function PageClient() {
               </DesignAlert>
             ) : (
               <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-2">
-                <TeamSwitcher
-                  triggerClassName="w-full sm:w-96"
-                  teamId={selectedTeamId || ""}
-                  onChange={handleTeamSwitcherChange}
+                <UserTeamPicker
+                  user={user}
+                  value={selectedTeam}
+                  onChange={setSelectedTeam}
+                  placeholder="Select a team"
+                  className="w-full sm:w-96"
                 />
                 <ActionDialog
                   trigger={

@@ -1,10 +1,10 @@
 import { Skeleton, cn } from "~/components/ui";
-import { Bell, Contact, CreditCard, Key, Monitor, PlusCircle, Settings, ShieldCheck } from "lucide-react";
+import { Bell, Contact, CreditCard, Key, Monitor, PlusCircle, Settings, ShieldCheck, Users } from "lucide-react";
 import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Team, useStackApp, useUser } from "@hexclave/react";
 import { AccountDeletionBoundary, type DeleteAccountCallback } from "./account-deletion-boundary";
 import { HostedFullPage } from "./hosted-full-page";
-import { SidebarLayout } from './sidebar-layout';
+import { SidebarLayout, useHash } from './sidebar-layout';
 import { ProfilePage } from "./profile-page/profile-page";
 import { SettingsPage } from './settings/settings-page';
 import { TeamIcon } from "./supporting/team-icon";
@@ -19,6 +19,7 @@ const iconMap = {
   Settings,
   CreditCard,
   Plus: PlusCircle,
+  Users,
 } as const;
 
 const Icon = ({ name }: { name: keyof typeof iconMap }) => {
@@ -26,7 +27,7 @@ const Icon = ({ name }: { name: keyof typeof iconMap }) => {
   return <LucideIcon className="h-4 w-4 shrink-0" />;
 };
 
-const emptyTeams: Team[] = [];
+const emptyTeams: Team[] & { nextCursor: string | null } = Object.assign([], { nextCursor: null });
 
 const EmailsAndAuthPage = React.lazy(async () => ({
   default: (await import("./email-and-auth/email-and-auth-page")).EmailsAndAuthPage,
@@ -50,6 +51,10 @@ const PaymentsPage = React.lazy(async () => ({
 
 const TeamPage = React.lazy(async () => ({
   default: (await import("./teams/team-page")).TeamPage,
+}));
+
+const TeamDirectoryPage = React.lazy(async () => ({
+  default: (await import("./teams/team-directory-page")).TeamDirectoryPage,
 }));
 
 const TeamCreationPage = React.lazy(async () => ({
@@ -110,6 +115,15 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
   const project = props.mockProject || projectFromHook;
 
   const teams = user?.useTeams() ?? emptyTeams;
+  // The sidebar only lists the first (capped) page of teams. A `#team-<id>` link to any other team (e.g. from the
+  // team switcher, or the "All teams" page) is resolved by ID so its page still opens. The lookup hook is always
+  // called; without a lookup it reuses the unfiltered cache entry, so it costs no extra request.
+  const hash = useHash();
+  const hashTeamId = hash.startsWith("team-") && hash !== "team-creation" ? hash.slice("team-".length) : null;
+  const needsHashTeamLookup = hashTeamId != null && teams.nextCursor != null && !teams.some(team => team.id === hashTeamId);
+  const hashTeamLookup = user?.useTeams(needsHashTeamLookup ? { query: hashTeamId } : undefined) ?? emptyTeams;
+  const hashTeamOutsideSidebar = needsHashTeamLookup ? hashTeamLookup.find(team => team.id === hashTeamId) ?? null : null;
+  const sidebarTeams = hashTeamOutsideSidebar == null ? teams : [...teams, hashTeamOutsideSidebar];
   const teamsKey = teams.map(team => team.id).join("|");
   // useTeams() may return a fresh array on each render; key by IDs so product checks do not refire unnecessarily.
   const teamsById = useMemo(() => teams, [teamsKey]);
@@ -265,7 +279,7 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
       title: 'Teams',
       type: 'divider' as const,
     }] as const : [] ),
-    ...teams.map(team => ({
+    ...sidebarTeams.map(team => ({
       title: (
         <div className="flex gap-2 items-center w-full min-w-0">
           <TeamIcon team={team}/>
@@ -278,6 +292,15 @@ function AuthenticatedAccountSettings(props: HostedAccountSettingsProps & {
         <TeamPage team={team}/>
       </Suspense>,
     } as const)),
+    ...( teams.nextCursor != null ? [{
+      title: 'All teams',
+      icon: <Icon name="Users"/>,
+      type: 'item' as const,
+      id: 'teams',
+      content: <Suspense fallback={<TeamPageSkeleton/>}>
+        <TeamDirectoryPage />
+      </Suspense>,
+    }] as const : [] ),
     ...( project.config.clientTeamCreationEnabled ? [{
       title: 'Create a team',
       icon: <Icon name="Plus"/>,

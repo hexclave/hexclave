@@ -2,11 +2,12 @@
 
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { Skeleton, Typography } from '@hexclave/ui';
-import { Contact, ShieldCheck, Bell, Monitor, Key, Settings, CirclePlus, CreditCard } from 'lucide-react';
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useStackApp, useUser } from '..';
+import { Contact, ShieldCheck, Bell, Monitor, Key, Settings, CirclePlus, CreditCard, Users } from 'lucide-react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Team, useStackApp, useUser } from '..';
+import type { ListTeamsOptions, TeamList } from "../lib/hexclave-app/teams";
 import { MaybeFullPage } from "../components/elements/maybe-full-page";
-import { SidebarLayout } from '../components/elements/sidebar-layout';
+import { SidebarLayout, useHash } from '../components/elements/sidebar-layout';
 import { TeamIcon } from '../components/team-icon';
 import { useTranslation } from "../lib/translations";
 import { ActiveSessionsPage } from "./account-settings/active-sessions/active-sessions-page";
@@ -17,6 +18,7 @@ import { ProfilePage } from "./account-settings/profile-page/profile-page";
 import { PaymentsPage } from "./account-settings/payments/payments-page";
 import { SettingsPage } from './account-settings/settings/settings-page';
 import { TeamCreationPage } from './account-settings/teams/team-creation-page';
+import { TeamDirectoryPage } from './account-settings/teams/team-directory-page';
 import { TeamPage } from './account-settings/teams/team-page';
 
 const iconMap = {
@@ -28,7 +30,10 @@ const iconMap = {
   Settings,
   CirclePlus,
   CreditCard,
+  Users,
 } as const;
+
+const emptyTeamList: TeamList<Team> = Object.assign([], { nextCursor: null });
 
 const Icon = ({ name }: { name: keyof typeof iconMap }) => {
   const LucideIcon = iconMap[name];
@@ -82,12 +87,21 @@ export function AccountSettings(props: {
 
   // Use mock data if provided, otherwise use real data
   const user = props.mockUser ? {
-    useTeams: () => [], // Mock empty teams for now
+    useTeams: (_options?: ListTeamsOptions) => emptyTeamList, // Mock empty teams for now
     useBilling: () => ({ hasCustomer: false }), // Mock empty billing for now
   } : userFromHook;
 
   const project = props.mockProject || projectFromHook;
-  const teams = user?.useTeams() || [];
+  const teams = user?.useTeams() ?? emptyTeamList;
+  // The sidebar only lists the first (capped) page of teams. A `#team-<id>` link to any other team (e.g. from a
+  // team switcher, or the "All teams" page) is resolved by ID so its page still opens. The lookup hook is always
+  // called; without a lookup it reuses the unfiltered cache entry, so it costs no extra request.
+  const hash = useHash();
+  const hashTeamId = hash.startsWith("team-") && hash !== "team-creation" ? hash.slice("team-".length) : null;
+  const needsHashTeamLookup = hashTeamId != null && teams.nextCursor != null && !teams.some(team => team.id === hashTeamId);
+  const hashTeamLookup = user?.useTeams(needsHashTeamLookup ? { query: hashTeamId } : undefined) ?? emptyTeamList;
+  const hashTeamOutsideSidebar = needsHashTeamLookup ? hashTeamLookup.find(team => team.id === hashTeamId) ?? null : null;
+  const sidebarTeams = hashTeamOutsideSidebar == null ? teams : [...teams, hashTeamOutsideSidebar];
   const billing = user?.useBilling() || null;
   const teamsKey = useMemo(() => teams.map(team => team.id).join("|"), [teams]);
   const teamsById = useMemo(() => teams, [teamsKey]);
@@ -245,7 +259,7 @@ export function AccountSettings(props: {
               title: t('Teams'),
               type: 'divider',
             }] as const : [],
-            ...teams.map(team => ({
+            ...sidebarTeams.map(team => ({
               title: <div className='flex gap-2 items-center w-full'>
                 <TeamIcon team={team}/>
                 <Typography className="max-w-[320px] md:w-[90%] truncate">{team.displayName}</Typography>
@@ -256,6 +270,15 @@ export function AccountSettings(props: {
                 <TeamPage team={team}/>
               </Suspense>,
             } as const)),
+            ...teams.nextCursor != null ? [{
+              title: t('All teams'),
+              icon: <Icon name="Users"/>,
+              type: 'item',
+              id: 'teams',
+              content: <Suspense fallback={<TeamDirectorySkeleton/>}>
+                <TeamDirectoryPage />
+              </Suspense>,
+            }] as const : [],
             ...project.config.clientTeamCreationEnabled ? [{
               title: t('Create a team'),
               icon: <Icon name="CirclePlus"/>,
@@ -318,6 +341,13 @@ function TeamPageSkeleton() {
   return <PageLayout>
     <Skeleton className="h-9 w-full mt-1"/>
     <Skeleton className="h-9 w-full mt-1"/>
+    <Skeleton className="h-9 w-full mt-1"/>
+    <Skeleton className="h-[200px] w-full mt-1 rounded-md"/>
+  </PageLayout>;
+}
+
+function TeamDirectorySkeleton() {
+  return <PageLayout>
     <Skeleton className="h-9 w-full mt-1"/>
     <Skeleton className="h-[200px] w-full mt-1 rounded-md"/>
   </PageLayout>;

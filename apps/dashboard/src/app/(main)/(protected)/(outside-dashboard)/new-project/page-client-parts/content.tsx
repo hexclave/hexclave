@@ -3,8 +3,8 @@
 import { DesignDialog } from "@/components/design-components";
 import { DesignButton } from "@/components/design-components/button";
 import { DesignInput } from "@/components/design-components/input";
-import { DesignSelectorDropdown } from "@/components/design-components/select";
 import { useRouter } from "@/components/router";
+import { UserTeamPicker } from "@/components/user-team-picker";
 import {
   Button,
   Card,
@@ -19,7 +19,7 @@ import {
 import { useDashboardInternalUser } from "@/lib/dashboard-user";
 import { getPublicEnvVar } from "@/lib/env";
 import { PlusCircleIcon } from "@phosphor-icons/react";
-import { type AdminOwnedProject } from "@hexclave/next";
+import { type AdminOwnedProject, type Team } from "@hexclave/next";
 import { runAsynchronouslyWithAlert, wait } from "@hexclave/shared/dist/utils/promises";
 import { useSearchParams } from "next/navigation";
 import { type FormEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -80,7 +80,7 @@ function PageClientInner() {
   const [projectOnboardingStates, setProjectOnboardingStates] = useState<Map<string, unknown>>(new Map());
   const [projectName, setProjectName] = useState(displayNameFromSearch ?? "");
   const hasProjectName = projectName.trim().length > 0;
-  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(() => user.selectedTeam?.id ?? teams.at(0)?.id ?? null);
+  const [selectedTeam, setSelectedTeam] = useState<Team | null>(() => user.selectedTeam ?? teams.at(0) ?? null);
   const [creatingTeam, setCreatingTeam] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [isCreateTeamOpen, setIsCreateTeamOpen] = useState(false);
@@ -113,8 +113,7 @@ function PageClientInner() {
       if (trimmedProjectName.length === 0) {
         throw new Error("Project name is required.");
       }
-      const firstTeam = teams.at(0);
-      const teamId = selectedTeamId ?? user.selectedTeam?.id ?? firstTeam?.id;
+      const teamId = selectedTeam?.id;
       if (teamId === undefined) {
         throw new Error("Select a team before creating the project.");
       }
@@ -179,7 +178,7 @@ function PageClientInner() {
     } finally {
       endPendingAction(creatingProjectRef, setCreatingProject);
     }
-  }, [primaryAppFromSearch, projectName, redirectToConfirmWith, redirectToNeonConfirmWith, router, selectedTeamId, teams, user]);
+  }, [primaryAppFromSearch, projectName, redirectToConfirmWith, redirectToNeonConfirmWith, router, selectedTeam, user]);
 
   const handleCreateProjectSubmit = useCallback((event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -361,7 +360,7 @@ function PageClientInner() {
               <DesignButton
                 type="submit"
                 form="create-project-form"
-                disabled={!hasProjectName || selectedTeamId == null || creatingProject}
+                disabled={!hasProjectName || selectedTeam == null || creatingProject}
                 loading={creatingProject}
               >
                 Continue
@@ -384,13 +383,12 @@ function PageClientInner() {
             <div className="space-y-2">
               <Label htmlFor="team-id">Team</Label>
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <DesignSelectorDropdown
-                  value={selectedTeamId ?? ""}
-                  onValueChange={setSelectedTeamId}
+                <UserTeamPicker
+                  user={user}
+                  value={selectedTeam}
+                  onChange={setSelectedTeam}
                   placeholder="Select a team"
-                  size="md"
-                  className="w-full"
-                  options={teams.map((team) => ({ value: team.id, label: team.displayName }))}
+                  triggerId="team-id"
                 />
                 <DesignButton type="button" variant="outline" onClick={() => setIsCreateTeamOpen(true)} className="sm:min-w-[140px]">
                   <PlusCircleIcon className="mr-2 h-4 w-4" />
@@ -436,7 +434,7 @@ function PageClientInner() {
                         displayName: trimmedTeamName,
                       });
                       await user.setSelectedTeam(createdTeam.id);
-                      setSelectedTeamId(createdTeam.id);
+                      setSelectedTeam(createdTeam);
                       setNewTeamName("");
                       setIsCreateTeamOpen(false);
                     } finally {
