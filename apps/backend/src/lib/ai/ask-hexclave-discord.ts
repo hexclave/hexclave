@@ -3,9 +3,30 @@ import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 
 const DISCORD_WEBHOOK_HOSTS = new Set(["discord.com", "discordapp.com"]);
-const MAX_CONTENT_LENGTH = 2_000;
-const MAX_FIELD_LENGTH = 1_000;
-const MAX_QUESTION_CONTENT_LENGTH = 500;
+// Discord rejects Components V2 messages whose text displays sum past this.
+const DISCORD_TEXT_LIMIT = 4_000;
+// A long answer should keep most of the budget. The small print can shrink first.
+const DISCORD_META_BUDGET = 800;
+// IS_COMPONENTS_V2. Setting it disables top-level content and embeds, which is
+// the point: those render as a colored card, and this channel reads as a post.
+const DISCORD_COMPONENTS_V2_FLAG = 1 << 15;
+const DISCORD_TEXT_DISPLAY = 10;
+const DISCORD_SEPARATOR = 14;
+const DISCORD_ACTION_ROW = 1;
+const DISCORD_BUTTON = 2;
+const DISCORD_LINK_BUTTON = 5;
+
+type DiscordTextDisplay = { type: typeof DISCORD_TEXT_DISPLAY, content: string };
+type DiscordSeparator = { type: typeof DISCORD_SEPARATOR, divider: false, spacing: 1 };
+type DiscordLinkRow = {
+  type: typeof DISCORD_ACTION_ROW,
+  components: Array<{
+    type: typeof DISCORD_BUTTON,
+    style: typeof DISCORD_LINK_BUTTON,
+    label: string,
+    url: string,
+  }>,
+};
 
 function truncate(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
@@ -18,10 +39,79 @@ function formatTransport(transport: AskHexclaveRequestMetadata["transport"]): st
   return transport === "skill-ask" ? "Skill /ask" : "MCP ask_hexclave";
 }
 
-function formatMessageBody(question: string, response: string): string {
-  const formattedQuestion = `**${truncate(question, MAX_QUESTION_CONTENT_LENGTH)}**`;
-  const responseMaxLength = MAX_CONTENT_LENGTH - formattedQuestion.length - 2;
-  return `${formattedQuestion}\n\n${truncate(response, responseMaxLength)}`;
+function singleLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function subtext(value: string): string | null {
+  const line = singleLine(value);
+  if (line === "") {
+    return null;
+  }
+  // `-#` is Discord's small-print markdown. It has to be the start of the line.
+  return `-# ${line}`;
+}
+
+function formatQuestion(question: string): string {
+  // Headings only style the first line, and a paragraph-length heading wraps
+  // into a banner. Bold keeps a long or multiline question as normal text.
+  if (!question.includes("\n") && question.length <= 180) {
+    return `### ${question}`;
+  }
+  return `**${question}**`;
+}
+
+function fitMessage(body: string, meta: string): { body: string, meta: string } {
+  if (body.length + meta.length <= DISCORD_TEXT_LIMIT) {
+    return { body, meta };
+  }
+  const metaBudget = Math.min(meta.length, DISCORD_META_BUDGET);
+  const fittedBody = truncate(body, DISCORD_TEXT_LIMIT - metaBudget);
+  return {
+    body: fittedBody,
+    meta: truncate(meta, DISCORD_TEXT_LIMIT - fittedBody.length),
+  };
+}
+
+function buildAskHexclaveDashboardUrl(callId: string): string {
+  const dashboardBaseUrl = getEnvVariable("NEXT_PUBLIC_STACK_DASHBOARD_URL", "https://app.hexclave.com").trim();
+  const url = new URL("/projects/internal/ask-hexclave-history", dashboardBaseUrl);
+  // The history page opens this call directly. Discord messages link here.
+  url.searchParams.set("call", callId);
+  return url.toString();
+}
+
+function buildMeta(options: {
+  conversationId: string,
+  reason: string,
+  userPrompt: string,
+  context: string | null,
+  user: string | null,
+  project: string | null,
+  requestMetadata: AskHexclaveRequestMetadata,
+  modelId: string,
+  stepCount: number,
+  durationMs: number,
+}): string {
+  const transportLabel = formatTransport(options.requestMetadata.transport);
+  const ipValue = options.requestMetadata.requestIp == null
+    ? null
+    : options.requestMetadata.requestIpSource == null
+      ? options.requestMetadata.requestIp
+      : `${options.requestMetadata.requestIp} (${options.requestMetadata.requestIpSource})`;
+  const lines = [
+    subtext([options.user, options.project].filter((part) => part != null && part !== "").join(" · ")),
+    subtext(`${transportLabel} · ${new Intl.NumberFormat("en-US").format(options.durationMs)} ms · ${options.stepCount} steps · ${options.modelId || "—"}`),
+    subtext([options.requestMetadata.requestHost, ipValue].filter((part) => part != null && part !== "").join(" · ")),
+    options.reason === "" ? null : subtext(`Reason: ${options.reason}`),
+    options.userPrompt === "" ? null : subtext(`Prompt: ${options.userPrompt}`),
+    options.context == null || options.context === "" ? null : subtext(`Context: ${options.context}`),
+    subtext([options.conversationId, options.requestMetadata.userAgent].filter((part) => part != null && part !== "").join(" · ")),
+    options.requestMetadata.mcpProtocolVersion == null
+      ? null
+      : subtext(`MCP protocol: ${options.requestMetadata.mcpProtocolVersion}`),
+  ];
+  return lines.filter((line) => line != null).join("\n");
 }
 
 function getDiscordWebhookUrl(): string | null {
@@ -54,7 +144,15 @@ function getDiscordWebhookUrl(): string | null {
   return webhookUrl;
 }
 
+function webhookUrlWithComponents(webhookUrl: string): string {
+  const url = new URL(webhookUrl);
+  // Webhook execution drops components unless this query param is set.
+  url.searchParams.set("with_components", "true");
+  return url.toString();
+}
+
 export function buildAskHexclaveDiscordPayload(options: {
+  id: string,
   conversationId: string,
   question: string,
   response: string,
@@ -68,54 +166,46 @@ export function buildAskHexclaveDiscordPayload(options: {
   stepCount: number,
   durationMs: number,
 }): {
-  content: string,
+  flags: typeof DISCORD_COMPONENTS_V2_FLAG,
   allowed_mentions: { parse: [] },
-  embeds: Array<{
-    title: string,
-    color: number,
-    fields: Array<{ name: string, value: string, inline?: boolean }>,
-  }>,
+  components: Array<DiscordTextDisplay | DiscordSeparator | DiscordLinkRow>,
 } {
-  const transportLabel = formatTransport(options.requestMetadata.transport);
-  const ipValue = options.requestMetadata.requestIp == null
-    ? "—"
-    : options.requestMetadata.requestIpSource == null
-      ? options.requestMetadata.requestIp
-      : `${options.requestMetadata.requestIp} (${options.requestMetadata.requestIpSource})`;
+  const dashboardUrl = buildAskHexclaveDashboardUrl(options.id);
+  const fitted = fitMessage(
+    `${formatQuestion(options.question)}\n\n${options.response}`,
+    buildMeta(options),
+  );
+  const components: Array<DiscordTextDisplay | DiscordSeparator | DiscordLinkRow> = [{
+    type: DISCORD_TEXT_DISPLAY,
+    content: fitted.body,
+  }];
+  if (fitted.meta !== "") {
+    components.push(
+      { type: DISCORD_SEPARATOR, divider: false, spacing: 1 },
+      { type: DISCORD_TEXT_DISPLAY, content: fitted.meta },
+    );
+  }
+  components.push({
+    type: DISCORD_ACTION_ROW,
+    components: [{
+      type: DISCORD_BUTTON,
+      style: DISCORD_LINK_BUTTON,
+      label: "Open in dashboard",
+      url: dashboardUrl,
+    }],
+  });
 
   return {
-    content: formatMessageBody(options.question, options.response),
-    // Question and answer are user-controlled message content. Keep them from
-    // notifying Discord users or roles when they contain mention syntax.
+    flags: DISCORD_COMPONENTS_V2_FLAG,
+    // Question and answer are user-controlled. Keep them from notifying Discord
+    // users or roles when they contain mention syntax.
     allowed_mentions: { parse: [] },
-    embeds: [{
-      title: `Ask Hexclave · ${transportLabel}`,
-      color: options.requestMetadata.transport === "skill-ask" ? 0x3B82F6 : 0x8B5CF6,
-      fields: [
-        { name: "Reason", value: truncate(options.reason || "—", MAX_FIELD_LENGTH) },
-        { name: "Original user prompt", value: truncate(options.userPrompt || "—", MAX_FIELD_LENGTH) },
-        { name: "Context", value: truncate(options.context ?? "—", MAX_FIELD_LENGTH) },
-        { name: "User", value: truncate(options.user ?? "—", MAX_FIELD_LENGTH) },
-        { name: "Project", value: truncate(options.project ?? "—", MAX_FIELD_LENGTH) },
-        { name: "Transport", value: transportLabel, inline: true },
-        { name: "Duration", value: `${options.durationMs.toLocaleString()} ms`, inline: true },
-        { name: "Steps", value: String(options.stepCount), inline: true },
-        { name: "Model", value: truncate(options.modelId || "—", MAX_FIELD_LENGTH), inline: true },
-        { name: "Request IP", value: truncate(ipValue, MAX_FIELD_LENGTH), inline: true },
-        { name: "Host", value: truncate(options.requestMetadata.requestHost ?? "—", MAX_FIELD_LENGTH), inline: true },
-        { name: "Conversation", value: truncate(options.conversationId, MAX_FIELD_LENGTH), inline: true },
-        { name: "User agent", value: truncate(options.requestMetadata.userAgent ?? "—", MAX_FIELD_LENGTH) },
-        ...(options.requestMetadata.mcpProtocolVersion == null ? [] : [{
-          name: "MCP protocol",
-          value: truncate(options.requestMetadata.mcpProtocolVersion, MAX_FIELD_LENGTH),
-          inline: true,
-        }]),
-      ],
-    }],
+    components,
   };
 }
 
 export async function sendAskHexclaveDiscordNotification(options: {
+  id: string,
   conversationId: string,
   question: string,
   response: string,
@@ -134,7 +224,7 @@ export async function sendAskHexclaveDiscordNotification(options: {
     return;
   }
 
-  const response = await fetch(webhookUrl, {
+  const response = await fetch(webhookUrlWithComponents(webhookUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

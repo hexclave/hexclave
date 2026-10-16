@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { globalVar } from "@hexclave/shared/dist/utils/globals";
 
@@ -7,7 +7,11 @@ import {
   sendAskHexclaveDiscordNotification,
 } from "./ask-hexclave-discord";
 
+const CALL_ID = "11111111-1111-4111-8111-111111111111";
+const DASHBOARD_URL = `https://app.hexclave.com/projects/internal/ask-hexclave-history?call=${CALL_ID}`;
+
 const baseOptions = {
+  id: CALL_ID,
   conversationId: "conversation-123",
   question: "How do I configure OAuth?",
   response: "Use the OAuth provider configuration in your project settings.",
@@ -29,32 +33,51 @@ const baseOptions = {
   durationMs: 1234,
 };
 
+function textContents(payload: ReturnType<typeof buildAskHexclaveDiscordPayload>): string[] {
+  return payload.components.flatMap((component) => "content" in component ? [component.content] : []);
+}
+
 describe("ask Hexclave Discord notifications", () => {
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_HEXCLAVE_DASHBOARD_URL", "https://app.hexclave.com");
+    vi.stubEnv("NEXT_PUBLIC_STACK_DASHBOARD_URL", "https://app.hexclave.com");
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
-  it("puts a truncated question and answer in the message body and metadata in the embed", () => {
+  it("renders the question and answer as message text, with the dashboard link on a button", () => {
     const payload = buildAskHexclaveDiscordPayload({
       ...baseOptions,
       question: "Q".repeat(300),
-      response: "R".repeat(4_000),
+      response: "R".repeat(5_000),
     });
+    const [body, meta] = textContents(payload);
 
-    expect(payload.content).toHaveLength(2_000);
-    expect(payload.content).toMatch(/^\*\*Q+\*\*\n\nR+…$/);
+    expect(payload).not.toHaveProperty("content");
+    expect(payload).not.toHaveProperty("embeds");
+    expect(payload.flags).toBe(1 << 15);
     expect(payload.allowed_mentions).toEqual({ parse: [] });
-    expect(payload.embeds[0].title).toBe("Ask Hexclave · Skill /ask");
-    expect(payload.embeds[0].fields).toEqual(expect.arrayContaining([
-      { name: "Context", value: "Adding authentication to an existing dashboard" },
-      { name: "User", value: "Ada Lovelace" },
-      { name: "Project", value: "Analytical Engine dashboard, TypeScript and Next.js" },
-      { name: "Request IP", value: "203.0.113.10 (x-forwarded-for)", inline: true },
-      { name: "Host", value: "skill.hexclave.com", inline: true },
-      { name: "Conversation", value: "conversation-123", inline: true },
-    ]));
+    expect(body?.startsWith(`**${"Q".repeat(300)}**\n\n`)).toBe(true);
+    expect(body?.endsWith("…")).toBe(true);
+    expect(meta).toContain("Skill /ask");
+    expect(meta).toContain("Ada Lovelace");
+    expect(meta).toContain("Analytical Engine dashboard, TypeScript and Next.js");
+    expect(meta).toContain("203.0.113.10 (x-forwarded-for)");
+    expect(meta).toContain("conversation-123");
+    expect(textContents(payload).join("").length).toBeLessThanOrEqual(4_000);
+    expect(payload.components.at(-1)).toEqual({
+      type: 1,
+      components: [{
+        type: 2,
+        style: 5,
+        label: "Open in dashboard",
+        url: DASHBOARD_URL,
+      }],
+    });
   });
 
   it("does nothing when the webhook URL env var is unset", async () => {
@@ -75,14 +98,39 @@ describe("ask Hexclave Discord notifications", () => {
     await sendAskHexclaveDiscordNotification(baseOptions);
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] ?? throwErr("Expected Discord webhook fetch to be called");
-    expect(String(url)).toBe("https://discord.com/api/webhooks/123/abc");
+    expect(String(url)).toBe("https://discord.com/api/webhooks/123/abc?with_components=true");
     expect(init?.method).toBe("POST");
     expect(JSON.parse(String(init?.body))).toMatchObject({
-      content: "**How do I configure OAuth?**\n\nUse the OAuth provider configuration in your project settings.",
+      flags: 1 << 15,
       allowed_mentions: { parse: [] },
-      embeds: [{
-        title: "Ask Hexclave · Skill /ask",
-      }],
+      components: [
+        {
+          type: 10,
+          content: "### How do I configure OAuth?\n\nUse the OAuth provider configuration in your project settings.",
+        },
+        { type: 14, divider: false, spacing: 1 },
+        {
+          type: 10,
+          content: [
+            "-# Ada Lovelace · Analytical Engine dashboard, TypeScript and Next.js",
+            "-# Skill /ask · 1,234 ms · 2 steps · test-model",
+            "-# skill.hexclave.com · 203.0.113.10 (x-forwarded-for)",
+            "-# Reason: User asked about OAuth",
+            "-# Prompt: Help me set up OAuth with GitHub",
+            "-# Context: Adding authentication to an existing dashboard",
+            "-# conversation-123 · skill-test-agent/1.0",
+          ].join("\n"),
+        },
+        {
+          type: 1,
+          components: [{
+            type: 2,
+            style: 5,
+            label: "Open in dashboard",
+            url: DASHBOARD_URL,
+          }],
+        },
+      ],
     });
   });
 

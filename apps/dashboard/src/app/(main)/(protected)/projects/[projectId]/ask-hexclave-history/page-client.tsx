@@ -20,7 +20,9 @@ import {
 } from "@hexclave/shared/dist/schema-fields";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import type { Json } from "@hexclave/shared/dist/utils/json";
+import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { use } from "@hexclave/shared/dist/utils/react";
+import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { useStackApp, useUser } from "@hexclave/next";
 import {
   createDefaultDataGridState,
@@ -29,9 +31,11 @@ import {
   type DataGridColumnDef,
 } from "@hexclave/dashboard-ui-components";
 import { ChatCircleTextIcon } from "@phosphor-icons/react";
-import { Suspense, useCallback, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageLayout } from "../page-layout";
 import { useProjectId } from "../use-admin-app";
+
+const CALL_QUERY_PARAM = "call";
 
 type AskTransport = "all" | "skill-ask" | "mcp-ask-hexclave";
 
@@ -210,6 +214,27 @@ function fetchInitialHistoryState(app: object, _session: object): Promise<Histor
   return fetchHistoryState(app, DEFAULT_FILTERS);
 }
 
+async function fetchCall(app: object, id: string): Promise<{ status: "ok", call: AskCall } | { status: "error", message: string }> {
+  try {
+    const response = await sendInternalUserRequest(
+      app,
+      urlString`/internal/ask-hexclave-history/${id}`,
+    );
+    if (response.status === 404) return { status: "error", message: "This query was not found." };
+    if (response.status === 403) return { status: "error", message: "Restricted to the platform team (owner team of the internal project)." };
+    if (!response.ok) {
+      return { status: "error", message: `Request failed (${response.status})` };
+    }
+    return { status: "ok", call: await CallSchema.validate(await response.json()) };
+  } catch (error) {
+    captureError("ask-hexclave-history-call", error);
+    return {
+      status: "error",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export default function PageClient() {
   return (
     <Suspense fallback={<Skeleton className="h-96 w-full rounded-xl" />}>
@@ -257,6 +282,87 @@ function HistoryContent(props: {
   const [appliedFilters, setAppliedFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [state, setState] = useState<HistoryState>(initialState);
   const [selectedCall, setSelectedCall] = useState<AskCall | null>(null);
+  const [linkedCallLoading, setLinkedCallLoading] = useState(false);
+  const [linkedCallError, setLinkedCallError] = useState<string | null>(null);
+  const [linkedCallId, setLinkedCallId] = useState<string | null>(null);
+  // Set when the open dialog already matches the URL, so a row click does not
+  // refetch the call it just displayed. Discord links land with the param set
+  // and the ref empty, which is what triggers the fetch below.
+  const displayedCallIdRef = useRef<string | null>(null);
+
+  // Read the call id from the address bar instead of useSearchParams. That hook
+  // makes Next treat this route as a search-params hole, and the protected
+  // layout's SSR bailout then renders a blank page.
+  useEffect(() => {
+    const syncCallId = () => {
+      setLinkedCallId(new URLSearchParams(window.location.search).get(CALL_QUERY_PARAM));
+    };
+    syncCallId();
+    window.addEventListener("popstate", syncCallId);
+    return () => window.removeEventListener("popstate", syncCallId);
+  }, []);
+
+  const replaceCallParam = (callId: string | null) => {
+    const url = new URL(window.location.href);
+    if (callId == null || callId === "") {
+      url.searchParams.delete(CALL_QUERY_PARAM);
+    } else {
+      url.searchParams.set(CALL_QUERY_PARAM, callId);
+    }
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    setLinkedCallId(callId);
+  };
+
+  const openCall = (call: AskCall) => {
+    displayedCallIdRef.current = call.id;
+    setSelectedCall(call);
+    setLinkedCallError(null);
+    setLinkedCallLoading(false);
+    replaceCallParam(call.id);
+  };
+
+  const closeCall = () => {
+    displayedCallIdRef.current = null;
+    setSelectedCall(null);
+    setLinkedCallError(null);
+    setLinkedCallLoading(false);
+    replaceCallParam(null);
+  };
+
+  useEffect(() => {
+    if (linkedCallId == null || linkedCallId === "") {
+      if (displayedCallIdRef.current != null) {
+        displayedCallIdRef.current = null;
+        setSelectedCall(null);
+        setLinkedCallError(null);
+        setLinkedCallLoading(false);
+      }
+      return;
+    }
+    if (displayedCallIdRef.current === linkedCallId) {
+      return;
+    }
+
+    let cancelled = false;
+    setLinkedCallLoading(true);
+    setLinkedCallError(null);
+    runAsynchronouslyWithAlert(async () => {
+      const result = await fetchCall(props.app, linkedCallId);
+      if (cancelled) return;
+      setLinkedCallLoading(false);
+      if (result.status === "ok") {
+        displayedCallIdRef.current = result.call.id;
+        setSelectedCall(result.call);
+        return;
+      }
+      displayedCallIdRef.current = null;
+      setSelectedCall(null);
+      setLinkedCallError(result.message);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.app, linkedCallId]);
 
   const applyFilters = async () => {
     const filters = { query, transport };
@@ -330,13 +436,15 @@ function HistoryContent(props: {
           calls={state.data.calls}
           hasMore={state.data.next_cursor != null}
           onLoadMore={loadMore}
-          onSelectCall={setSelectedCall}
+          onSelectCall={openCall}
         />
       ) : null}
 
       <CallDetail
         call={selectedCall}
-        onClose={() => setSelectedCall(null)}
+        loading={linkedCallLoading && selectedCall == null}
+        errorMessage={selectedCall == null ? linkedCallError : null}
+        onClose={closeCall}
       />
     </div>
   );
@@ -404,11 +512,16 @@ function DetailField(props: { label: string, value: string | number | null }) {
   );
 }
 
-function CallDetail(props: { call: AskCall | null, onClose: () => void }) {
+function CallDetail(props: {
+  call: AskCall | null,
+  loading: boolean,
+  errorMessage: string | null,
+  onClose: () => void,
+}) {
   const call = props.call;
   return (
     <DesignDialog
-      open={call != null}
+      open={call != null || props.loading || props.errorMessage != null}
       onOpenChange={(open) => {
         if (!open) props.onClose();
       }}
@@ -417,7 +530,11 @@ function CallDetail(props: { call: AskCall | null, onClose: () => void }) {
       title="Ask Hexclave query"
       description={call == null ? undefined : new Date(call.created_at).toLocaleString()}
     >
-      {call == null ? null : (
+      {props.errorMessage != null ? (
+        <DesignAlert variant="error">{props.errorMessage}</DesignAlert>
+      ) : props.loading || call == null ? (
+        <Skeleton className="h-64 w-full rounded-xl" />
+      ) : (
         <div className="flex flex-col gap-5">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <DetailField label="Transport" value={call.transport} />
