@@ -6,6 +6,8 @@ sidebarTitle: "hexclave.config.ts"
 
 `hexclave.config.ts` is the config file for your Hexclave project. It contains all important settings for your project.
 
+It is not a `.env` file. Database URLs and other app secrets stay in your own environment. Wrap your start command with [`hexclave dev`](/guides/going-further/cli#hexclave-dev) to receive Hexclave credentials (`HEXCLAVE_PROJECT_ID`, keys, API URL, and the `STACK_*` aliases).
+
 The file exports a static `config` object:
 
 ```ts title="hexclave.config.ts"
@@ -79,6 +81,7 @@ export const config: HexclaveConfig = {
     installed: {
       authentication: { enabled: true },
       teams: { enabled: true },
+      rbac: { enabled: true },
       payments: { enabled: true },
     },
   },
@@ -177,7 +180,7 @@ RBAC config defines permissions and default grants. Permission IDs support lower
 | Field | Type | Description |
 | --- | --- | --- |
 | `rbac.permissions.<permissionId>` | `{ description?: string, scope?: "team" \| "project", containedPermissionIds?: Record<string, true> }` | Defines one permission. `description` explains it in the dashboard. `scope` decides whether it applies inside a team or globally to the project. `containedPermissionIds` makes it include other permissions, which is useful for roles like `admin`. |
-| `rbac.defaultPermissions.teamCreator` | `Record<string, true>` | Permissions granted to users who create a team. |
+| `rbac.defaultPermissions.teamCreator` | `Record<string, true>` | Permissions granted to the user added as the team's creator. Client `createTeam` adds you as creator. Members added later get `teamMember`. |
 | `rbac.defaultPermissions.teamMember` | `Record<string, true>` | Permissions granted to users when they become team members. |
 | `rbac.defaultPermissions.signUp` | `Record<string, true>` | Project permissions granted to users when they sign up. |
 
