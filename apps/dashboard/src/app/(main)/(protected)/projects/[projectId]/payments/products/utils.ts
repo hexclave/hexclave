@@ -181,7 +181,7 @@ export function getPriceCheckoutError(price: Price): string | null {
       return "$0 one-time prices can't be checked out — switch to a recurring interval to offer it for free.";
     }
     if (amountStripeUnits < minOneTimeStripeUnits) {
-      return `One-time prices must be at least $${minOneTime.toFixed(2)} (Stripe minimum) — customers can't complete checkout below this amount.`;
+      return `One-time prices must be at least $${minOneTime.toFixed(2)}. Amounts between $0.01 and $${(minOneTime - 0.01).toFixed(2)} cannot be charged; use $0 with a recurring interval to offer it for free.`;
     }
   }
   return null;
