@@ -1,5 +1,5 @@
 import { CustomerType, PrismaClient, PurchaseCreationSource, Subscription, SubscriptionStatus } from "@/generated/prisma/client";
-import { isAddOnProduct } from "@/lib/payments";
+import { isAddOnProduct, isSubscriptionInEffect } from "@/lib/payments";
 import { bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { getSubscriptionMapForCustomer } from "@/lib/payments/customer-data";
 import type { ProductSnapshot } from "@/lib/payments/schema/types";
@@ -24,7 +24,9 @@ import { getOrUndefined, typedEntries } from "@hexclave/shared/dist/utils/object
  *     if the team already owns a plan in the same product line.
  */
 
-async function getInternalBillingTenancy(): Promise<Tenancy> {
+// Exported for `free-plan-regrant-sweep.ts`, which needs the same tenancy to
+// scope its query before delegating each candidate team back to this file.
+export async function getInternalBillingTenancy(): Promise<Tenancy> {
   const tenancy = await getSoleTenancyFromProjectBranch("internal", DEFAULT_BRANCH_ID, true);
   if (tenancy == null) {
     throw new HexclaveAssertionError("Internal billing tenancy not found");
@@ -146,29 +148,15 @@ export async function ensureFreePlanForBillingTeam(billingTeamId: string): Promi
 
   // Snapshot-based "occupies the free plan's product line" predicate. We
   // treat a sub as occupying the line iff its captured product snapshot
-  // lives in that line, isn't an add-on, and HASN'T ENDED YET (endedAt in
-  // the future or absent). Crucially we do NOT gate on `status` —
-  // `incomplete` / `past_due` / `unpaid` subs that arrive mid-Stripe-flow
-  // still reserve the line (they will either transition to `active` or to
-  // a terminal status with `endedAt` set), and this matches the semantics
-  // that `ownedProducts` derives via the Subscription TimeFold (see
-  // `subscription-timefold-algo.ts` — `subscription-start` emits on row
-  // insert regardless of status; `subscription-end` emits at
-  // `endedAtMillis`). Treating only active/trialing as occupying would
-  // (and did) cause the free plan to be double-granted on top of a
-  // just-created incomplete paid sub.
+  // lives in that line, isn't an add-on, and is still in effect
+  // (`isSubscriptionInEffect` — status-agnostic, endedAt-based; see its doc
+  // comment for why gating on `status` here would (and did) cause the free
+  // plan to be double-granted on top of a just-created incomplete paid sub).
   const nowMillis = Date.now();
-  const productLineStillOccupiedBy = (sub: {
-    product: ProductSnapshot,
-    endedAtMillis?: number | null,
-    endedAt?: Date | null,
-  }): boolean => {
+  const productLineStillOccupiedBy = (sub: { product: ProductSnapshot } & ({ endedAtMillis: number | null } | { endedAt: Date | null })): boolean => {
     if (sub.product.productLineId !== freeProductLineId) return false;
     if (isAddOnProduct(sub.product)) return false;
-    const endedAtMillis = sub.endedAtMillis != null
-      ? sub.endedAtMillis
-      : sub.endedAt != null ? sub.endedAt.getTime() : null;
-    return endedAtMillis == null || endedAtMillis > nowMillis;
+    return isSubscriptionInEffect(sub, nowMillis);
   };
 
   // Fast path: read the customer's synchronous subscription LFold. Note

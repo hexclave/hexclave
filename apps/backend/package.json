@@ -43,6 +43,7 @@
     "db:migrate": "pnpm run with-env:dev tsx scripts/db-migrations.ts migrate",
     "db:backfill-bulldozer-from-prisma": "pnpm run with-env:dev tsx scripts/db-migrations.ts backfill-bulldozer-from-prisma",
     "db:backfill-internal-free-plans": "pnpm run with-env:dev tsx scripts/db-migrations.ts backfill-internal-free-plans",
+    "db:reconcile-terminal-subscriptions-to-bulldozer": "pnpm run with-env:dev tsx scripts/db-migrations.ts reconcile-terminal-subscriptions-to-bulldozer",
     "db:regen-internal-subscriptions-to-latest": "pnpm run with-env:dev tsx scripts/db-migrations.ts regen-internal-subscriptions-to-latest",
     "generate-migration-imports": "pnpm run with-env tsx scripts/generate-migration-imports.ts",
     "generate-migration-imports:watch": "chokidar 'prisma/migrations/**/*.sql' -c 'pnpm run generate-migration-imports'",

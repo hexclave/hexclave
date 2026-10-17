@@ -140,6 +140,31 @@ export const POST = createSmartRouteHandler({
     if (conflictingSubscriptions.length > 0) {
       const conflicting = conflictingSubscriptions[0];
       if (conflicting.stripeSubscriptionId) {
+        // Reject purchases whose conflicting Stripe sub is winding down
+        // (canceled-at-period-end but still paid through). The branches below
+        // reuse that same Stripe sub — either re-pricing it in place
+        // (`default_incomplete`, paid later via Elements) or canceling it
+        // immediately for a one-time replacement — and neither is safe here:
+        //   - We can't clear `cancel_at_period_end` at session creation:
+        //     that runs before payment and `default_incomplete` has no
+        //     rollback, so a declined card would silently reactivate an
+        //     explicitly-canceled sub while leaving it re-priced.
+        //   - We can't leave the flag set either: Stripe would still end the
+        //     sub at the period boundary AFTER the customer paid the re-price
+        //     invoice — they'd pay and lose the product anyway.
+        // Future fix (deliberately deferred, see PR #1773): clear
+        // `cancel_at_period_end` from the `invoice.paid` webhook once the
+        // re-price invoice is actually paid. Pending-cancel subs generate no
+        // renewal invoices, so a paid invoice with `invoice.created` after
+        // the sub's `canceledAt` can only be the re-purchase (and a
+        // late-delivered `invoice.paid` for the original creation invoice
+        // predates the cancel, so it can't undo it). Until then, wind-down
+        // replacements only work for non-Stripe subs (test mode / free
+        // plans), which are fully ended and re-created below instead of
+        // reused.
+        if (conflicting.status === "canceled" || conflicting.cancelAtPeriodEnd) {
+          throw new StatusError(400, "The current subscription is already canceled and remains active until the end of the billing period. This product can be purchased after the current subscription ends.");
+        }
         const existingStripeSub = await stripe.subscriptions.retrieve(conflicting.stripeSubscriptionId);
         const existingItem = existingStripeSub.items.data[0];
         const product = await stripe.products.create({ name: data.product.displayName ?? "Subscription" });

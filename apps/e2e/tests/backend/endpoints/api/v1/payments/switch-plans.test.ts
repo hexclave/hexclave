@@ -424,6 +424,88 @@ it("switches in test mode from an existing test-mode grant", async ({ expect }) 
   expect(switchResponse.body).toEqual({ success: true });
 }, { timeout: 30_000 });
 
+it("switches in test mode from a canceled-but-still-in-effect grant", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Project.updateConfig({
+    payments: {
+      productLines: { plans: { displayName: "Plans" } },
+      products: {
+        basic: {
+          displayName: "Basic",
+          customerType: "user",
+          serverOnly: false,
+          stackable: false,
+          productLineId: "plans",
+          prices: { monthly: { USD: "1000", interval: [1, "month"] } },
+          includedItems: {},
+        },
+        pro: {
+          displayName: "Pro",
+          customerType: "user",
+          serverOnly: false,
+          stackable: false,
+          productLineId: "plans",
+          prices: { monthly: { USD: "2000", interval: [1, "month"] } },
+          includedItems: {},
+        },
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+
+  const createUrl = await niceBackendFetch("/api/latest/payments/purchases/create-purchase-url", {
+    method: "POST",
+    accessType: "client",
+    body: { customer_type: "user", customer_id: userId, product_id: "basic" },
+  });
+  expect(createUrl.status).toBe(200);
+  const fullCode = (createUrl.body as { url: string }).url.match(/\/purchase\/([a-z0-9-_]+)/)?.[1];
+  if (!fullCode) {
+    throw new Error("Expected full purchase code");
+  }
+  const purchaseResponse = await niceBackendFetch("/api/latest/internal/payments/test-mode-purchase-session", {
+    method: "POST",
+    accessType: "admin",
+    body: { full_code: fullCode, price_id: "monthly", quantity: 1 },
+  });
+  expect(purchaseResponse.status).toBe(200);
+
+  // Cancel: the local sub is written `canceled` with a future `endedAt`, so the
+  // customer keeps "basic" until the period ends.
+  const cancelResponse = await niceBackendFetch(`/api/latest/payments/products/user/${userId}/basic`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(cancelResponse.status).toBe(200);
+
+  // Still listed as an in-effect subscription...
+  const products = await niceBackendFetch(`/api/latest/payments/products/user/${userId}`, {
+    accessType: "client",
+  });
+  const basic = (products.body as { items: { id: string, type: string }[] }).items.find(i => i.id === "basic");
+  expect(basic?.type).toBe("subscription");
+
+  // ...so it can still be switched away from, exactly like a Stripe pending cancel.
+  const switchResponse = await niceBackendFetch(`/api/latest/payments/products/user/${userId}/switch`, {
+    method: "POST",
+    accessType: "client",
+    body: { from_product_id: "basic", to_product_id: "pro" },
+  });
+  expect(switchResponse.status).toBe(200);
+  expect(switchResponse.body).toEqual({ success: true });
+
+  // The switch must close out the wind-down sub, not stack a second plan on
+  // top of it: "pro" is now the in-effect subscription and "basic" is gone.
+  const productsAfter = await niceBackendFetch(`/api/latest/payments/products/user/${userId}`, {
+    accessType: "client",
+  });
+  expect(productsAfter.status).toBe(200);
+  const itemsAfter = (productsAfter.body as { items: { id: string, type: string }[] }).items;
+  expect(itemsAfter.find(i => i.id === "pro")?.type).toBe("subscription");
+  expect(itemsAfter.find(i => i.id === "basic")).toBeUndefined();
+}, { timeout: 30_000 });
+
 it("rejects switch in live mode without Stripe onboarding", async ({ expect }) => {
   await Project.createAndSwitch();
   await Project.updateConfig({
@@ -551,4 +633,78 @@ it("two rapid sequential test-mode switches in the same product line leave only 
     .map(i => i.id)
     .sort((a, b) => stringCompare(a ?? "", b ?? ""));
   expect(activeIds).toEqual(["elite"]);
+}, { timeout: 30_000 });
+
+it("blocks a free-plan switch when a canceled-but-still-in-effect sub holds the product line", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Project.updateConfig({
+    payments: {
+      productLines: { plans: { displayName: "Plans" } },
+      products: {
+        free: {
+          displayName: "Free",
+          customerType: "user",
+          serverOnly: false,
+          stackable: false,
+          productLineId: "plans",
+          prices: {},
+          includedItems: {},
+        },
+        basic: {
+          displayName: "Basic",
+          customerType: "user",
+          serverOnly: false,
+          stackable: false,
+          productLineId: "plans",
+          prices: { monthly: { USD: "1000", interval: [1, "month"] } },
+          includedItems: {},
+        },
+        pro: {
+          displayName: "Pro",
+          customerType: "user",
+          serverOnly: false,
+          stackable: false,
+          productLineId: "plans",
+          prices: { monthly: { USD: "2000", interval: [1, "month"] } },
+          includedItems: {},
+        },
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+
+  const grantResponse = await niceBackendFetch(`/api/latest/payments/products/user/${userId}`, {
+    method: "POST",
+    accessType: "server",
+    body: { product_id: "basic" },
+  });
+  expect(grantResponse.status).toBe(200);
+
+  // Canceling a sub with no Stripe object writes status `canceled` with a
+  // future `endedAt`: it stops being "active" while still entitling the
+  // customer for the rest of the period.
+  const cancelResponse = await niceBackendFetch(`/api/latest/payments/products/user/${userId}/basic`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(cancelResponse.status).toBe(200);
+
+  // Switching "from free" must still see that sub as occupying the product
+  // line — otherwise the new paid sub coexists with one that's still granting.
+  const switchResponse = await niceBackendFetch(`/api/latest/payments/products/user/${userId}/switch`, {
+    method: "POST",
+    accessType: "client",
+    body: {
+      from_product_id: "free",
+      to_product_id: "pro",
+    },
+  });
+  expect(switchResponse).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "Customer has an active subscription in this product line; switch from that product instead.",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
 }, { timeout: 30_000 });
