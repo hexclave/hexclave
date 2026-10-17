@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getOAuthAccessTokenRefreshError, getOAuthAccessTokenRefreshErrorDisposition, getOAuthCallbackExtraParams, isRetryableOAuthUserInfoError, resolveOAuthAccessTokenExpiredAt } from "./base";
+import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { getOAuthNonJsonResponseError, getOAuthAccessTokenRefreshError, getOAuthAccessTokenRefreshErrorDisposition, getOAuthCallbackExtraParams, isRetryableOAuthUserInfoError, resolveOAuthAccessTokenExpiredAt } from "./base";
 
 describe("isRetryableOAuthUserInfoError", () => {
   it("returns true for openid-client timeout errors", () => {
@@ -150,5 +151,23 @@ describe("resolveOAuthAccessTokenExpiredAt", () => {
       defaultExpiresInMillis: undefined,
       nowMillis: 1000,
     })?.toISOString()).toBe("1970-01-01T01:00:01.000Z");
+  });
+});
+
+describe("getOAuthNonJsonResponseError", () => {
+  it("turns a plain-text provider response into a bounded StatusError", () => {
+    const text = `The user is not authorized. ${"x".repeat(600)}`;
+    const parseError = Object.assign(new SyntaxError("Unexpected token T in JSON at position 0"), {
+      response: { body: Buffer.from(text) },
+    });
+    const error = getOAuthNonJsonResponseError(parseError);
+    expect(error).toBeInstanceOf(StatusError);
+    expect(error?.message).toContain("The user is not authorized.");
+    expect(error?.message.length).toBeLessThan(600);
+  });
+
+  it("ignores errors that are not JSON parse failures from a provider response", () => {
+    expect(getOAuthNonJsonResponseError(new Error("socket hang up"))).toBeUndefined();
+    expect(getOAuthNonJsonResponseError(new SyntaxError("no response attached"))).toBeUndefined();
   });
 });
