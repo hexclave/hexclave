@@ -2,27 +2,9 @@ import "server-only";
 
 import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { spacetimeDbName } from "../spacetimedb-constants";
+import { spacetimedbHttpBase as httpBase } from "../spacetimedb-http";
 
 const SPACETIMEDB_FETCH_TIMEOUT_MS = 10_000;
-const WS_TO_HTTP_SCHEME = new Map([
-  ["wss://", "https://"],
-  ["ws://", "http://"],
-]);
-
-function wsHostToHttpBase(host: string): string {
-  for (const [wsScheme, httpScheme] of WS_TO_HTTP_SCHEME) {
-    if (host.startsWith(wsScheme)) return httpScheme + host.slice(wsScheme.length);
-  }
-  return host;
-}
-
-function httpBase(): string {
-  const host = process.env.NEXT_PUBLIC_SPACETIMEDB_HOST;
-  if (host == null || host.trim() === "" || host === "REPLACE_ME") {
-    throw new HexclaveAssertionError("NEXT_PUBLIC_SPACETIMEDB_HOST is not configured for the internal tool.");
-  }
-  return wsHostToHttpBase(host);
-}
 
 export async function callReducerStrict(accessToken: string, reducer: string, args: unknown[]): Promise<void> {
   const base = httpBase();

@@ -1,10 +1,17 @@
-import { useMemo } from "react";
+import { useId, useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { formatAiRequestContext } from "../lib/copy-log-context";
+import { formatSignedUsd } from "../lib/format-usd";
 import type { AiQueryLogRow } from "../types";
 import { toDate } from "../utils";
 import { AssistantBubble, ToolCallCard, UserBubble } from "./ConversationReplay";
+import { CopyFullContextButton } from "./CopyFullContextButton";
+import { DetailMetricStrip, DetailPanelTabs, DetailTabPanel } from "./DetailPanelNavigation";
+import { Alert, Badge, Button } from "./design";
 import { markdownComponents } from "./markdown-components";
+
+const sectionLabelClasses = "text-[10px] font-medium uppercase tracking-wider text-muted-foreground";
 
 type MessageIn = {
   role: "user" | "assistant" | "tool",
@@ -34,6 +41,8 @@ function messageContentToText(content: unknown): string {
 }
 
 export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () => void }) {
+  const [activeSection, setActiveSection] = useState<"conversation" | "request">("conversation");
+  const tabsId = useId();
   const messages: MessageIn[] = useMemo(() => {
     try {
       const parsed = JSON.parse(row.messagesJson);
@@ -76,84 +85,60 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
   });
 
   const isError = row.errorMessage != null && row.errorMessage !== "";
+  const inputTokens = row.inputTokens?.toLocaleString() ?? "Unknown";
+  const outputTokens = row.outputTokens?.toLocaleString() ?? "Unknown";
 
   return (
-    <div className="flex flex-col h-full bg-white">
-      <div className="px-5 py-3 border-b border-gray-200 flex items-center justify-between">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="inline-flex px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 font-mono text-[10px]">
-              {row.systemPromptId}
-            </span>
-            <span className="inline-flex px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 font-mono text-[10px]">
-              {row.modelId}
-            </span>
-            <span className="inline-flex px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 text-[10px]">
-              {row.mode}
-            </span>
-            {isError && (
-              <span className="inline-flex px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px]">error</span>
-            )}
-            {row.conversationId != null && (
-              <span className="inline-flex px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px]">MCP</span>
-            )}
+    <div className="flex h-full flex-col">
+      <header className="sticky top-0 z-10 bg-background/95 pt-4 backdrop-blur-md">
+        <div className="flex items-start justify-between gap-4 px-4 pb-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold tracking-tight text-foreground">AI request</h2>
+              <Badge color={isError ? "red" : "green"} size="xs">{isError ? "Error" : "Completed"}</Badge>
+              {row.conversationId != null && <Badge color="orange" size="xs">MCP</Badge>}
+            </div>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
+              <span className="font-mono">{row.modelId}</span>
+              <span aria-hidden="true">·</span>
+              <span>{toDate(row.createdAt).toLocaleString()}</span>
+            </div>
           </div>
-          <p className="text-[11px] text-gray-400 font-mono mt-1">
-            {toDate(row.createdAt).toLocaleString()}
-            {" · "}{Number(row.durationMs).toLocaleString()}ms
-            {" · "}in {row.inputTokens?.toLocaleString() ?? "?"} tok
-            {(() => {
-              const r = row.cachedInputTokens ?? 0;
-              const w = row.cacheCreationTokens ?? 0;
-              if (r === 0 && w === 0) return null;
-              const parts: string[] = [];
-              if (r > 0) parts.push(`r ${r.toLocaleString()}`);
-              if (w > 0) parts.push(`w ${w.toLocaleString()}`);
-              return <> (cache {parts.join(", ")})</>;
-            })()}
-            {" · "}out {row.outputTokens?.toLocaleString() ?? "?"} tok
-            {row.costUsd != null && <>{" · "}${row.costUsd.toFixed(4)}</>}
-            {(() => {
-              const savings = row.cacheDiscountUsd;
-              if (savings == null) return null;
-              const sign = savings >= 0 ? "+" : "−";
-              const color = savings >= 0 ? "text-green-600" : "text-red-600";
-              return <>{" · "}<span className={color}>cache {sign}${Math.abs(savings).toFixed(4)}</span></>;
-            })()}
-          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <CopyFullContextButton getText={() => formatAiRequestContext(row)} subject="AI request" />
+            <Button variant="ghost" className="size-7 shrink-0 px-0 text-base" aria-label="Close AI request details" onClick={onClose}>×</Button>
+          </div>
         </div>
-        <button
-          onClick={onClose}
-          className="shrink-0 ml-2 text-gray-400 hover:text-gray-600 text-sm"
-        >
-          ✕
-        </button>
-      </div>
+        <DetailMetricStrip items={[
+          { label: "Duration", value: `${Number(row.durationMs).toLocaleString()}ms` },
+          { label: "Input", value: `${inputTokens} tok` },
+          { label: "Output", value: `${outputTokens} tok` },
+          { label: "Cost", value: row.costUsd == null ? "Unpriced" : `$${row.costUsd.toFixed(4)}` },
+        ]} />
+        <DetailPanelTabs
+          id={tabsId}
+          label="AI request detail sections"
+          value={activeSection}
+          onChange={setActiveSection}
+          items={[
+            { value: "conversation", label: "Conversation" },
+            { value: "request", label: "Request details" },
+          ]}
+        />
+      </header>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 p-4">
         {isError && (
-          <div className="mx-4 mt-4 rounded-lg bg-red-50 ring-1 ring-red-200 p-3">
-            <p className="text-[10px] uppercase text-red-500 font-medium tracking-wider mb-1">Error</p>
-            <pre className="text-xs text-red-800 whitespace-pre-wrap break-words font-mono">{row.errorMessage}</pre>
-          </div>
+          <Alert className="mb-4">
+            <p className="mb-1 text-[10px] font-medium uppercase tracking-wider">Request error</p>
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs">{row.errorMessage}</pre>
+          </Alert>
         )}
 
-        {/* Metadata panel */}
-        <div className="m-4 bg-gray-50 rounded-lg p-3 space-y-1 text-xs">
-          <MetaRow label="Quality / Speed" value={`${row.quality} / ${row.speed}`} />
-          <MetaRow label="Authed" value={row.isAuthenticated ? "yes" : "no"} />
-          {row.projectId && <MetaRow label="Project" value={row.projectId} />}
-          {row.userId && <MetaRow label="User" value={row.userId} />}
-          {row.conversationId && <MetaRow label="Conversation" value={row.conversationId} />}
-          <MetaRow label="Steps" value={String(row.stepCount)} />
-          <MetaRow label="Tools requested" value={requestedTools.length > 0 ? requestedTools.join(", ") : "—"} />
-        </div>
-
-        {/* Conversation replay */}
-        <div className="px-4 pb-6 space-y-3">
-          <h3 className="text-[10px] uppercase text-gray-400 font-medium tracking-wider">Input Messages</h3>
+        {activeSection === "conversation" && <DetailTabPanel id={tabsId} value="conversation" className="space-y-3 pb-6">
+          <h3 className={sectionLabelClasses}>Input messages</h3>
           {messages.length === 0 && (
-            <p className="text-xs text-gray-400">No input messages.</p>
+            <p className="text-xs text-muted-foreground">No input messages.</p>
           )}
           {messages.map((m, i) => {
             const text = messageContentToText(m.content);
@@ -165,19 +150,19 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
             }
             return (
               <div key={`in-${i}`} className="flex gap-2.5 justify-start">
-                <div className="shrink-0 w-6 h-6 mt-0.5 rounded-full bg-gray-200 flex items-center justify-center">
-                  <span className="text-gray-500 text-[10px] font-bold">T</span>
+                <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-foreground/10">
+                  <span className="text-[10px] font-bold text-muted-foreground">T</span>
                 </div>
-                <div className="rounded-xl px-3.5 py-2 bg-gray-50 max-w-[80%]">
-                  <pre className="text-[11px] font-mono text-gray-600 whitespace-pre-wrap break-all">{text}</pre>
+                <div className="max-w-[80%] rounded-xl bg-foreground/[0.04] px-3.5 py-2">
+                  <pre className="whitespace-pre-wrap break-all font-mono text-[11px] text-muted-foreground">{text}</pre>
                 </div>
               </div>
             );
           })}
 
-          <h3 className="text-[10px] uppercase text-gray-400 font-medium tracking-wider pt-2">Assistant Steps</h3>
+          <h3 className={`${sectionLabelClasses} pt-3`}>Assistant trace</h3>
           {assistantBubbles.length === 0 && (
-            <p className="text-xs text-gray-400">No assistant output recorded.</p>
+            <p className="text-xs text-muted-foreground">No assistant output recorded.</p>
           )}
           {assistantBubbles.map(bubble => (
             <div key={bubble.key} className="space-y-1.5">
@@ -190,10 +175,10 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
               )}
               {bubble.text && (
                 <div className="flex gap-2.5 justify-start">
-                  <div className="shrink-0 w-6 h-6 mt-0.5 rounded-full bg-purple-100 flex items-center justify-center">
-                    <span className="text-purple-500 text-xs font-bold">AI</span>
+                  <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-purple-500/15">
+                    <span className="text-xs font-bold text-purple-600 dark:text-purple-400">AI</span>
                   </div>
-                  <div className="min-w-0 max-w-[calc(100%-2rem)] rounded-xl px-3.5 py-2 bg-gray-50">
+                  <div className="min-w-0 max-w-[calc(100%-2rem)] rounded-xl bg-foreground/[0.04] px-3.5 py-2">
                     <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                       {bubble.text}
                     </Markdown>
@@ -205,15 +190,50 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
 
           {row.finalText && assistantBubbles.length === 0 && (
             <>
-              <h3 className="text-[10px] uppercase text-gray-400 font-medium tracking-wider pt-2">Final Response</h3>
-              <div className="rounded-xl px-3.5 py-2 bg-blue-50">
+              <h3 className={`${sectionLabelClasses} pt-3`}>Final response</h3>
+              <div className="rounded-xl bg-blue-500/10 px-3.5 py-2">
                 <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                   {row.finalText}
                 </Markdown>
               </div>
             </>
           )}
-        </div>
+        </DetailTabPanel>}
+
+        {activeSection === "request" && <DetailTabPanel id={tabsId} value="request" className="pb-6">
+          <section>
+            <h3 className="mb-2 text-xs font-semibold text-foreground">Routing</h3>
+            <div className="divide-y divide-black/[0.06] border-y border-black/[0.06] dark:divide-white/[0.06] dark:border-white/[0.06]">
+              <MetaRow label="System prompt" value={row.systemPromptId} />
+              <MetaRow label="Model" value={row.modelId} />
+              <MetaRow label="Mode" value={row.mode} />
+              <MetaRow label="Quality / speed" value={`${row.quality} / ${row.speed}`} />
+              <MetaRow label="Steps" value={String(row.stepCount)} />
+              <MetaRow label="Tools requested" value={requestedTools.length > 0 ? requestedTools.join(", ") : "None"} />
+            </div>
+          </section>
+          <section className="mt-6">
+            <h3 className="mb-2 text-xs font-semibold text-foreground">Identity</h3>
+            <div className="divide-y divide-black/[0.06] border-y border-black/[0.06] dark:divide-white/[0.06] dark:border-white/[0.06]">
+              <MetaRow label="Authentication" value={row.isAuthenticated ? "Authenticated" : "Anonymous"} />
+              {row.projectId && <MetaRow label="Project" value={row.projectId} />}
+              {row.userId && <MetaRow label="User" value={row.userId} />}
+              {/* Nullish, not truthy: the header's MCP badge uses the same check, and `log-ai-query`
+                  stores "" as a present value, so the two must not disagree on an empty id. */}
+              {row.conversationId != null && <MetaRow label="Conversation" value={row.conversationId} />}
+            </div>
+          </section>
+          {(row.cachedInputTokens != null || row.cacheCreationTokens != null || row.cacheDiscountUsd != null) && (
+            <section className="mt-6">
+              <h3 className="mb-2 text-xs font-semibold text-foreground">Prompt cache</h3>
+              <div className="divide-y divide-black/[0.06] border-y border-black/[0.06] dark:divide-white/[0.06] dark:border-white/[0.06]">
+                <MetaRow label="Cache read" value={`${(row.cachedInputTokens ?? 0).toLocaleString()} tok`} />
+                <MetaRow label="Cache write" value={`${(row.cacheCreationTokens ?? 0).toLocaleString()} tok`} />
+                {row.cacheDiscountUsd != null && <MetaRow label="Savings" value={formatSignedUsd(row.cacheDiscountUsd)} />}
+              </div>
+            </section>
+          )}
+        </DetailTabPanel>}
       </div>
     </div>
   );
@@ -221,9 +241,9 @@ export function UsageDetail({ row, onClose }: { row: AiQueryLogRow, onClose: () 
 
 function MetaRow({ label, value }: { label: string, value: string }) {
   return (
-    <div className="flex gap-2">
-      <span className="text-[10px] uppercase text-gray-400 font-medium tracking-wider w-32 shrink-0">{label}</span>
-      <span className="text-gray-700 font-mono break-all">{value}</span>
+    <div className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-3 py-2.5 text-xs">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="break-all font-mono text-foreground">{value}</span>
     </div>
   );
 }
