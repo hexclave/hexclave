@@ -3,7 +3,7 @@ import { demoteAllContactChannelsToNonPrimary, setContactChannelAsPrimaryById } 
 import { normalizeEmail } from "@/lib/emails";
 import { markProjectUserForExternalDbSync, recordExternalDbSyncDeletion, withExternalDbSyncUpdate } from "@/lib/external-db-sync";
 import { ensureContactChannelDoesNotExists, ensureContactChannelExists } from "@/lib/request-checks";
-import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
+import { getPrismaClientForTenancy, isPrismaError, retryTransaction } from "@/prisma-client";
 import { createCrudHandlers } from "@/route-handlers/crud-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { contactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
@@ -213,21 +213,31 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
         });
       }
 
-      const updated = await tx.contactChannel.update({
-        where: {
-          tenancyId_projectUserId_id: {
-            tenancyId: auth.tenancy.id,
-            projectUserId: params.user_id,
-            id: params.contact_channel_id || throwErr("Missing contact channel id"),
+      let updated;
+      try {
+        updated = await tx.contactChannel.update({
+          where: {
+            tenancyId_projectUserId_id: {
+              tenancyId: auth.tenancy.id,
+              projectUserId: params.user_id,
+              id: params.contact_channel_id || throwErr("Missing contact channel id"),
+            },
           },
-        },
-        data: withExternalDbSyncUpdate({
-          value: value,
-          isVerified: data.is_verified ?? (value ? false : undefined), // if value is updated and is_verified is not provided, set to false
-          usedForAuth: data.used_for_auth !== undefined ? (data.used_for_auth ? 'TRUE' : null) : undefined,
-          isPrimary: data.is_primary !== undefined ? (data.is_primary ? 'TRUE' : null) : undefined,
-        }),
-      });
+          data: withExternalDbSyncUpdate({
+            value: value,
+            isVerified: data.is_verified ?? (value ? false : undefined), // if value is updated and is_verified is not provided, set to false
+            usedForAuth: data.used_for_auth !== undefined ? (data.used_for_auth ? 'TRUE' : null) : undefined,
+            isPrimary: data.is_primary !== undefined ? (data.is_primary ? 'TRUE' : null) : undefined,
+          }),
+        });
+      } catch (e) {
+        // Two requests can race past the duplicate check above; the unique index then rejects the update.
+        // Report it as the same client error instead of an internal error.
+        if (isPrismaError(e, "UNIQUE_CONSTRAINT_VIOLATION")) {
+          throw new StatusError(StatusError.BadRequest, 'Contact channel already exists');
+        }
+        throw e;
+      }
 
       await markProjectUserForExternalDbSync(tx, {
         tenancyId: auth.tenancy.id,
