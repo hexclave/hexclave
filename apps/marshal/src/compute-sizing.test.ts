@@ -7,6 +7,7 @@ import {
   SERVER_MACHINE_TYPE_BY_MEMORY_MB,
   builderMachineFor,
   buildkitTmpfsSize,
+  flyBuilderGuestFor,
   serviceMemoryMb,
 } from "./config.js";
 import { computeRevision } from "./revision.js";
@@ -148,5 +149,21 @@ describe("builder sizing", () => {
       expect(tmpfsGb).toBeGreaterThan(0);
       expect(tmpfsGb).toBeLessThan(memoryMb / 1024);
     }
+  });
+});
+
+
+describe("Fly builder sizing", () => {
+  it.each([null, 8192])("uses four performance CPUs and 8GB for Dockerfile builds requested at %s", (requestedMemoryMb) => {
+    expect(flyBuilderGuestFor({ requestedMemoryMb, isRailpackBuild: false })).toEqual({ cpu_kind: "performance", cpus: 4, memory_mb: 8192 });
+    expect(buildkitTmpfsSize(8192)).toBe("4g");
+  });
+
+  it.each([null, 8192, 16384])("retains Railpack's memory floor for a %s request", (requestedMemoryMb) => {
+    expect(flyBuilderGuestFor({ requestedMemoryMb, isRailpackBuild: true })).toEqual({ cpu_kind: "performance", cpus: 4, memory_mb: 16384 });
+  });
+
+  it.each([16384, 32768])("honors larger explicit allocations of %s", (requestedMemoryMb) => {
+    expect(flyBuilderGuestFor({ requestedMemoryMb, isRailpackBuild: false }).memory_mb).toBe(requestedMemoryMb);
   });
 });
