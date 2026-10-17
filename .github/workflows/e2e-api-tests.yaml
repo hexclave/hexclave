@@ -163,7 +163,7 @@ jobs:
             (
               set +e
               # Keep service output correlatable with the surrounding GitHub Actions logs.
-              pnpm run start:bulldozer 2>&1 | TZ=UTC awk '{ print strftime("%Y-%m-%dT%H:%M:%SZ"), $0; fflush() }' >"$bulldozer_log"
+              pnpm run start:bulldozer --log-order=stream 2>&1 | TZ=UTC awk '{ print strftime("%Y-%m-%dT%H:%M:%SZ"), $0; fflush() }' >"$bulldozer_log"
               echo "${PIPESTATUS[0]}" > "$RUNNER_TEMP/hexclave-bulldozer-exit-code.untracked.txt"
             ) &
           wait-on: |
@@ -187,7 +187,7 @@ jobs:
             (
               set +e
               # Keep service output correlatable with the surrounding GitHub Actions logs.
-              NODE_ENV=test pnpm run start:marshal 2>&1 | TZ=UTC awk '{ print strftime("%Y-%m-%dT%H:%M:%SZ"), $0; fflush() }' >"$marshal_log"
+              NODE_ENV=test pnpm run start:marshal --log-order=stream 2>&1 | TZ=UTC awk '{ print strftime("%Y-%m-%dT%H:%M:%SZ"), $0; fflush() }' >"$marshal_log"
               echo "${PIPESTATUS[0]}" > "$RUNNER_TEMP/hexclave-marshal-exit-code.untracked.txt"
             ) &
           wait-on: |
