@@ -2,6 +2,10 @@
 
 ---
 
+## 10/2/26
+
+- _(entries added throughout the week)_
+
 ## 9/11/26
 
 - Trusted domains can now include a custom port, e.g. `*.example.com:4250`.
