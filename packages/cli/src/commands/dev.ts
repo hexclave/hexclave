@@ -1,4 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from "child_process";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { Command } from "commander";
 import crossSpawn from "cross-spawn";
 import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
@@ -8,10 +9,11 @@ import { forwardSignals } from "../lib/child-process.js";
 import { resolveConfigFilePathOption } from "../lib/config-file-path.js";
 import { DASHBOARD_SERVER_RELATIVE_PATH, dashboardDirOverride, fetchDashboardManifest, resolveDashboardRuntime, type DashboardManifest } from "../lib/dashboard-release.js";
 import { devEnvStatePath, ensureLocalDashboardSecret, readDevEnvState, recordLocalDashboardProcess } from "../lib/dev-env-state.js";
+import { resolveDevSecretsFromLinkedProject } from "../lib/dev-secrets.js";
 import { CliError, errorMessage } from "../lib/errors.js";
 import { DASHBOARD_PORT_ENV_VAR, dashboardPort, dashboardRequest, dashboardUrl, createRemoteDevelopmentEnvironmentSession, type DashboardSessionResponse } from "../lib/local-dashboard.js";
 import { startProgress } from "../lib/progress.js";
-import { evaluateDeploymentConfig, importDeployModule, resolveDeployFilePath, resolveDevEnv, type EvaluatedService } from "../lib/deployment-config.js";
+import { assertDevEnvResolvable, collectSecretKeysByEnvVar, evaluateDeploymentConfig, importDeployModule, resolveDeployFilePath, resolveDevEnv, type EvaluatedService } from "../lib/deployment-config.js";
 
 type ChildCommand = {
   command: string,
@@ -25,6 +27,7 @@ type DevOptions = {
   configFile?: string,
   deployFile?: string,
   serviceId?: string,
+  cloudProjectId?: string,
 };
 
 type ConfigSyncEventBase = {
@@ -124,12 +127,49 @@ export function shellChildCommand(commandLine: string, platform: NodeJS.Platform
  * stale hexclave.* value baked into the config would otherwise break the dev
  * session. Exported for unit tests (the ordering IS the contract).
  */
-export function composeDevChildEnv(processEnv: NodeJS.ProcessEnv, serviceEnv: Record<string, string>, sessionEnv: Record<string, string>): NodeJS.ProcessEnv {
+export function composeDevChildEnv(processEnv: NodeJS.ProcessEnv, serviceEnv: Map<string, string>, sessionEnv: Record<string, string>): NodeJS.ProcessEnv {
   return {
     ...processEnv,
-    ...serviceEnv,
+    ...Object.fromEntries(serviceEnv),
     ...sessionEnv,
   };
+}
+
+export function formatMissingDevSecretsMessage(missing: readonly string[]): string {
+  const single = missing.length === 1;
+  return [
+    `Missing ${single ? "a value" : "values"} for ${single ? "this secret" : `these ${missing.length} secrets`} in the \`development\` environment (or \`default\`):`,
+    ...missing.map((key) => `  - ${key}`),
+    "",
+    single
+      ? "Set it in the dashboard under Project Settings > Secrets, or set `development: null` on the env var to omit it locally."
+      : "Set them in the dashboard under Project Settings > Secrets, or set `development: null` on those env vars to omit them locally.",
+  ].join("\n");
+}
+
+/**
+ * Pulls the selected service's `secret()` values for the `development` environment
+ * from the linked cloud project, keyed by ENV VAR. Runs before the dashboard
+ * starts, so a missing login, project id, or secret fails fast. A service
+ * without secrets needs neither a login nor a project id.
+ */
+async function pullDevServiceSecrets(service: EvaluatedService, cloudProjectId: string | undefined): Promise<Map<string, string>> {
+  const secretKeysByEnvVar = collectSecretKeysByEnvVar(service);
+  const uniqueKeys = [...new Set(secretKeysByEnvVar.values())].sort();
+  if (uniqueKeys.length === 0) return new Map();
+  const values = await resolveDevSecretsFromLinkedProject({ cloudProjectId, keys: uniqueKeys });
+  const missing = uniqueKeys.filter((key) => !values.has(key));
+  if (missing.length > 0) {
+    throw new CliError(formatMissingDevSecretsMessage(missing));
+  }
+  return new Map([...secretKeysByEnvVar].map(([envVarKey, secretKey]) => [
+    envVarKey,
+    values.get(secretKey) ?? throwErr(`Secret ${JSON.stringify(secretKey)} is missing from the resolve response, but the missing-key check above should have caught it.`),
+  ]));
+}
+
+export function resolveDevServiceEnv(service: EvaluatedService, sessionEnv: Record<string, string>, secretValuesByEnvVar: Map<string, string>): Map<string, string> {
+  return new Map([...resolveDevEnv(service, sessionEnv), ...secretValuesByEnvVar]);
 }
 
 export function devDashboardCommandFromEnv(env: NodeJS.ProcessEnv): string | undefined {
@@ -939,9 +979,10 @@ export function registerDevCommand(program: Command) {
   program
     .command("dev")
     .usage("--config-file <path> [--service-id <id>] [-- <command> [args...]]")
-    .description("Run a command with Hexclave development-environment credentials. With --service-id, the service's devCommand from the deploy file's `deploy` export is run in the service's rootDirectory and its env vars are injected (secrets resolve to their default values; `service()` returns null, so guard connection values with isDev — reading an output off it, e.g. `service(\"api\").url`, throws).")
+    .description("Run a command with Hexclave development-environment credentials. With --service-id, the service's devCommand from the deploy file's `deploy` export is run in the service's rootDirectory and its env vars are injected (secret values are pulled from the cloud project's Project Settings → Secrets for the `development` environment, falling back to `default` — this needs `hexclave login` and --cloud-project-id / HEXCLAVE_PROJECT_ID; put localhost URLs on each var's `development` key instead of calling `service()`).")
     .requiredOption("--config-file <path>", "Path to hexclave.config.ts")
     .option("--service-id <id>", "Run the devCommand of this service from the deploy file's `deploy` export, in its rootDirectory and with the service's env vars injected")
+    .option("--cloud-project-id <id>", "Cloud project to pull the service's secret values from (defaults to the HEXCLAVE_PROJECT_ID env var). Only needed when the service's env uses secret()")
     .option("--deploy-file <path>", "Path to the deploy file for --service-id (default: auto-discover hexclave.deploy.ts next to the config file)")
     .argument("[command...]", "Command and arguments to run after --")
     .action(async (commandArgs: string[], opts: DevOptions) => {
@@ -955,6 +996,7 @@ export function registerDevCommand(program: Command) {
       // Evaluate the deploy file's services BEFORE starting the dashboard so a
       // mistake there fails fast (and without a half-started session).
       let devService: EvaluatedService | undefined;
+      let devSecretValues = new Map<string, string>();
       if (opts.serviceId != null) {
         // Services live in the DEPLOY file, not the config file: --config-file
         // is what the development-environment session is keyed on, and the two
@@ -974,6 +1016,7 @@ export function registerDevCommand(program: Command) {
         if (devService == null) {
           throw new CliError(`No service named ${JSON.stringify(opts.serviceId)} in the deploy file's \`deploy\` export. Available services: ${[...services.keys()].join(", ")}.`);
         }
+        assertDevEnvResolvable(devService);
         // A BLANK devCommand counts as missing. `shellChildCommand("")` runs `sh -c ""`,
         // which exits 0 immediately — so an empty string would report a successful dev
         // session that never started the service, instead of naming the actual problem.
@@ -995,6 +1038,7 @@ export function registerDevCommand(program: Command) {
         if (rootDirectoryStats == null || !rootDirectoryStats.isDirectory()) {
           throw new CliError(`The rootDirectory of the service ${JSON.stringify(opts.serviceId)} is ${devService.absoluteRootDirectory}, which ${rootDirectoryStats == null ? "does not exist" : "is not a directory"}. Fix \`rootDirectory\` in the deploy file's \`deploy\` export — it is where the service's devCommand runs.`);
         }
+        devSecretValues = await pullDevServiceSecrets(devService, opts.cloudProjectId);
       }
       // The selection guard above makes these modes mutually exclusive.
       const childCommand = commandArgs.length > 0
@@ -1035,9 +1079,10 @@ export function registerDevCommand(program: Command) {
       });
       let exitCode = 1;
       try {
+        const serviceEnv = devService == null ? new Map<string, string>() : resolveDevServiceEnv(devService, sessionState.session.env, devSecretValues);
         exitCode = await runChildProcess(childCommand, composeDevChildEnv(
           process.env,
-          devService != null ? resolveDevEnv(devService, sessionState.session.env) : {},
+          serviceEnv,
           sessionState.session.env,
         // A selected service runs in its own rootDirectory, which is where its
         // code lives (`pnpm dev` at a monorepo root would otherwise start the
