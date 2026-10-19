@@ -4,11 +4,12 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const { packageManager } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const pinnedAgent = packageManager.split('+')[0].replace('@', '/');
 function check(agent) {
-  return spawnSync(process.execPath, [new URL('./check-package-manager.mjs', import.meta.url).pathname], {
+  return spawnSync(process.execPath, [fileURLToPath(new URL('./check-package-manager.mjs', import.meta.url))], {
     env: { ...process.env, npm_config_user_agent: agent }, encoding: 'utf8',
   });
 }
@@ -25,7 +26,7 @@ test('a different installer or pnpm version cannot run install hooks', () => {
 
 test('workspace Corepack pins agree when a command starts inside a package', () => {
   const root = new URL('../', import.meta.url);
-  const manifests = ['docs-mintlify/package.json'];
+  const manifests = ['docs-mintlify/package.json', 'docker/tools/package.json'];
   for (const group of ['apps', 'examples', 'packages']) {
     for (const entry of readdirSync(new URL(group, root), { withFileTypes: true })) {
       if (entry.isDirectory()) manifests.push(`${group}/${entry.name}/package.json`);
