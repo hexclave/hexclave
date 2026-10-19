@@ -5,6 +5,7 @@ import { describe } from "vitest";
 import { it } from "../../../../../helpers";
 import { withPortPrefix } from "../../../../../helpers/ports";
 import { Project, backendContext, bumpEmailAddress, getOutboxEmails, niceBackendFetch, waitForOutboxEmailWithStatus } from "../../../../backend-helpers";
+import { withInternalDatabase } from "../external-db-sync-utils";
 
 const testEmailConfig = {
   type: "standard",
@@ -269,6 +270,155 @@ describe("email outbox API", () => {
       });
       expect(listResponse.status).toBe(200);
       expect(listResponse.body.items).toEqual([]);
+    });
+
+    async function createOutboxEmails(count: number) {
+      const createUserResponse = await niceBackendFetch("/api/v1/users", {
+        method: "POST",
+        accessType: "server",
+        body: {
+          primary_email: backendContext.value.mailbox.emailAddress,
+          primary_email_verified: true,
+        },
+      });
+      if (createUserResponse.status !== 201) throw new Error(`Failed to create user: ${createUserResponse.status}`);
+      const userId = createUserResponse.body.id;
+      for (let i = 0; i < count; i++) {
+        const sendResponse = await niceBackendFetch("/api/v1/emails/send-email", {
+          method: "POST",
+          accessType: "server",
+          body: {
+            user_ids: [userId],
+            html: `<p>Pagination ${i}</p>`,
+            subject: `Pagination ${i}`,
+            notification_category_name: "Transactional",
+          },
+        });
+        if (sendResponse.status !== 200) throw new Error(`Failed to send email: ${sendResponse.status} ${JSON.stringify(sendResponse.body)}`);
+      }
+      const list = await niceBackendFetch("/api/v1/emails/outbox?limit=100", { accessType: "server" });
+      if (list.status !== 200) throw new Error(`Failed to list outbox: ${list.status}`);
+      return list.body.items as { id: string, created_at_millis: number }[];
+    }
+
+    async function listAllOutboxIds(limit = 3) {
+      const ids: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const response = await niceBackendFetch(`/api/v1/emails/outbox?limit=${limit}${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`, { accessType: "server" });
+        if (response.status !== 200) throw new Error(`Failed to list outbox: ${response.status} ${JSON.stringify(response.body)}`);
+        ids.push(...response.body.items.map((email: { id: string }) => email.id));
+        cursor = response.body.pagination.next_cursor;
+      } while (cursor != null);
+      return ids;
+    }
+
+    it("paginates outbox emails across pages without duplicates or skips", async ({ expect }) => {
+      await Project.createAndSwitch({
+        display_name: "Test Outbox Pagination Project",
+        config: {
+          email_config: testEmailConfig,
+        },
+      });
+      const all = await createOutboxEmails(7);
+      const allIds = all.map((email) => email.id);
+      for (const limit of [1, 3, 5]) {
+        expect(await listAllOutboxIds(limit), `limit=${limit}`).toEqual(allIds);
+      }
+      const page1 = await niceBackendFetch("/api/v1/emails/outbox?limit=3", { accessType: "server" });
+      expect(page1.status).toBe(200);
+      expect(page1.body.items).toHaveLength(3);
+      expect(page1.body.pagination.next_cursor).toBe(`${page1.body.items[2].created_at_millis}_${page1.body.items[2].id}`);
+    });
+
+    it("accepts a legacy inclusive bare-ID outbox cursor", async ({ expect }) => {
+      await Project.createAndSwitch({
+        display_name: "Test Outbox Legacy Cursor Project",
+        config: {
+          email_config: testEmailConfig,
+        },
+      });
+      const all = await createOutboxEmails(5);
+      const allIds = all.map((email) => email.id);
+      // Legacy next_cursor named the first row of the next page (inclusive).
+      const rest = await niceBackendFetch(`/api/v1/emails/outbox?limit=10&cursor=${allIds[2]}`, { accessType: "server" });
+      expect(rest.status).toBe(200);
+      expect(rest.body.items.map((email: { id: string }) => email.id)).toEqual(allIds.slice(2));
+    });
+
+    async function deleteOutboxEmail(id: string) {
+      await withInternalDatabase(async (client) => {
+        const deleted = await client.query(`DELETE FROM "EmailOutbox" WHERE id = $1`, [id]);
+        if (deleted.rowCount !== 1) throw new Error(`Expected to delete 1 outbox row, deleted ${deleted.rowCount}`);
+      });
+      // SQL delete bypasses Prisma's replica wait. List/read go to the replica, so wait until it
+      // no longer returns the row before asserting cursor behavior.
+      const deadline = performance.now() + 5_000;
+      while (true) {
+        const get = await niceBackendFetch(`/api/v1/emails/outbox/${id}`, { accessType: "server" });
+        if (get.status === 404) return;
+        if (performance.now() >= deadline) {
+          throw new Error(`Outbox row ${id} was deleted on the primary but GET still returned ${get.status}`);
+        }
+        await wait(50);
+      }
+    }
+
+    it("keeps paginating from a position cursor after its email is deleted", async ({ expect }) => {
+      await Project.createAndSwitch({
+        display_name: "Test Outbox Deleted Cursor Project",
+        config: {
+          email_config: testEmailConfig,
+        },
+      });
+      const all = await createOutboxEmails(7);
+      const allIds = all.map((email) => email.id);
+      const page1 = await niceBackendFetch("/api/v1/emails/outbox?limit=3", { accessType: "server" });
+      const cursor = page1.body.pagination.next_cursor;
+      expect(cursor).toBe(`${page1.body.items[2].created_at_millis}_${page1.body.items[2].id}`);
+
+      await deleteOutboxEmail(page1.body.items[2].id);
+
+      const rest = await niceBackendFetch(`/api/v1/emails/outbox?limit=10&cursor=${encodeURIComponent(cursor)}`, { accessType: "server" });
+      expect(rest.status).toBe(200);
+      expect(rest.body.items.map((email: { id: string }) => email.id)).toEqual(allIds.slice(3));
+    });
+
+    it("rejects a legacy (bare email ID) cursor whose email was deleted", async ({ expect }) => {
+      await Project.createAndSwitch({
+        display_name: "Test Outbox Legacy Deleted Cursor Project",
+        config: {
+          email_config: testEmailConfig,
+        },
+      });
+      const [email] = await createOutboxEmails(1);
+      await deleteOutboxEmail(email.id);
+      const response = await niceBackendFetch(`/api/v1/emails/outbox?limit=10&cursor=${encodeURIComponent(email.id)}`, { accessType: "server" });
+      expect(response).toMatchInlineSnapshot(`
+        NiceResponse {
+          "status": 400,
+          "body": "The email referenced by \`cursor\` does not exist (it may have been deleted). Restart pagination without a cursor.",
+          "headers": Headers { <some fields may have been hidden> },
+        }
+      `);
+    });
+
+    it("rejects invalid outbox list cursors", async ({ expect }) => {
+      await Project.createAndSwitch({
+        display_name: "Test Outbox Invalid Cursor Project",
+        config: {
+          email_config: testEmailConfig,
+        },
+      });
+      const [email] = await createOutboxEmails(1);
+      for (const cursor of [
+        "", "null", "undefined", "not-a-cursor", "123", `abc_${email.id}`, `123_not-a-uuid`, `-5_${email.id}`, `1.5_${email.id}`,
+        ` 1_${email.id}`, `1_${email.id}\n`, `1_${email.id}_x`,
+        `8640000000000001_${email.id}`, `99999999999999999999_${email.id}`,
+      ]) {
+        const response = await niceBackendFetch(`/api/v1/emails/outbox?limit=5&cursor=${encodeURIComponent(cursor)}`, { accessType: "server" });
+        expect(response.status, cursor).toBe(400);
+      }
     });
   });
 
