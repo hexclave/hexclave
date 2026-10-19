@@ -4,8 +4,8 @@
   "private": true,
   "repository": "https://github.com/hexclave/hexclave",
   "scripts": {
-    "pre-no-codegen": "pnpm exec only-allow pnpm",
-    "pre-preinstall": "pnpx only-allow@1.2.2 pnpm && node -e \"if(process.env.HEXCLAVE_SKIP_TEMPLATE_GENERATION !== 'true') require('child_process').execSync('pnpm exec tsx ./scripts/generate-sdks.ts', {stdio: 'inherit'})\"",
+    "pre-no-codegen": "node ./scripts/check-package-manager.mjs",
+    "pre-preinstall": "node ./scripts/check-package-manager.mjs && node -e \"if(process.env.HEXCLAVE_SKIP_TEMPLATE_GENERATION !== 'true') require('child_process').execSync('pnpm exec tsx ./scripts/generate-sdks.ts', {stdio: 'inherit'})\"",
     "pre": "pnpm pre-preinstall",
     "preinstall": "pnpm pre-preinstall",
     "postinstall": "node ./scripts/postinstall-patch-next-async-debug-info.mjs",
@@ -113,7 +113,7 @@
   "engines": {
     "node": ">=24.0.0"
   },
-  "packageManager": "pnpm@11.5.0+sha512.dbfcc4f81cf48597afd4bc391ffdf12c11f1a9fb83a395bfa6b0a2d9cc2fd8ffebafdb1ccbd529632153f793904c2615b7f09fe1a345473fd1c35845172a8eb1",
+  "packageManager": "pnpm@11.28.6+sha512.55d90390c3b39042f1505a2697789f0256c6d95bb28bdd7cb731af1887c9f2629ef581acb9f4e4ec772024c8203c2aed22a03299b97103fdcf32668e905d0024",
   "dependencies": {
     "commander": "^13.1.0",
     "tsx": "^4.19.3",
