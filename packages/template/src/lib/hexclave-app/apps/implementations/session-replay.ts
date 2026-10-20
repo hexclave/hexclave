@@ -46,7 +46,9 @@ export type AnalyticsOptions = {
    * @default true
    */
   enabled?: boolean,
+  /** Transform automatic page-view/click events before buffering, or return null to drop them. Does not filter replay data. */
   sanitizeEvent?: (event: AnalyticsEvent) => AnalyticsEvent | null,
+  /** Skip clicks on elements matching this CSS selector, including their descendants. */
   ignoreClickSelector?: string,
   /**
    * Options for session replay recording. Replays are enabled by default;

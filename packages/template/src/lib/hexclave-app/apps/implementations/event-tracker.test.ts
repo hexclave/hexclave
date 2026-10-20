@@ -73,6 +73,21 @@ describe("EventTracker", () => {
     expect(sendBatch).not.toHaveBeenCalled();
   });
 
+  it("does not buffer the original event when the sanitizer throws", async () => {
+    vi.useFakeTimers();
+    const sendBatch = vi.fn(async () => Result.ok(new Response()));
+    const tracker = new EventTracker({ projectId: "internal", sendBatch }, {
+      sanitizeEvent: () => { throw new Error("Sanitizer failed"); },
+    });
+    try {
+      expect(() => tracker.start()).toThrow("Sanitizer failed");
+    } finally {
+      tracker.stop();
+    }
+    await Promise.resolve();
+    expect(sendBatch).not.toHaveBeenCalled();
+  });
+
   it("excludes matching elements and their descendants without suppressing other clicks", async () => {
     vi.useFakeTimers();
     document.body.innerHTML = '<section class="ph-no-capture"><button><span>Private</span></button></section><button id="public">Public</button>';
@@ -86,6 +101,7 @@ describe("EventTracker", () => {
     }, { ignoreClickSelector: ".ph-no-capture" });
     try {
       tracker.start();
+      document.querySelector<HTMLElement>(".ph-no-capture")?.click();
       document.querySelector("span")?.click();
       document.querySelector<HTMLButtonElement>("#public")?.click();
       await advancePastFlush();
