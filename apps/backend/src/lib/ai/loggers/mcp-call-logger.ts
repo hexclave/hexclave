@@ -83,6 +83,9 @@ export function logIfMcpToolCall(args: {
     durationMs,
     modelId,
     errorMessage,
+    context: mcpCallMetadata.context ?? undefined,
+    user: mcpCallMetadata.user ?? undefined,
+    project: mcpCallMetadata.project ?? undefined,
   });
   runAsynchronouslyAndWaitUntil(logPromise);
   if (errorMessage != null) return;
