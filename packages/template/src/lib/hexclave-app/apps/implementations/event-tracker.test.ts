@@ -26,6 +26,76 @@ describe("EventTracker", () => {
     vi.useRealTimers();
   });
 
+  it("sanitizes page views and clicks before buffering, including replacement events", async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = "<button>Private content</button>";
+    const sentBodies: string[] = [];
+    const tracker = new EventTracker({
+      projectId: "internal",
+      sendBatch: async (body) => {
+        sentBodies.push(body);
+        return Result.ok(new Response());
+      },
+    }, {
+      sanitizeEvent: (event) => ({ ...event, data: { redacted: true } }),
+    });
+    try {
+      tracker.start();
+      document.querySelector("button")?.click();
+      await advancePastFlush();
+      expect(getSentEventTypes(sentBodies)).toEqual(["$page-view", "$click"]);
+      expect(sentBodies.join("")).not.toContain("Private content");
+      expect(sentBodies.join("")).not.toContain("elements_chain");
+      expect(JSON.parse(sentBodies[0]).events[1].data.redacted).toBe(true);
+    } finally {
+      tracker.stop();
+    }
+  });
+
+  it("drops events when the sanitizer returns null, including during shutdown", async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = "<button>Private content</button>";
+    const sendBatch = vi.fn(async () => Result.ok(new Response()));
+    const sanitizeEvent = vi.fn(() => null);
+    const tracker = new EventTracker({ projectId: "internal", sendBatch }, { sanitizeEvent });
+    try {
+      tracker.start();
+      document.querySelector("button")?.click();
+      window.history.pushState({}, "", "/filtered");
+      await advancePastFlush();
+      expect(sanitizeEvent).toHaveBeenCalledTimes(3);
+      expect(sendBatch).not.toHaveBeenCalled();
+    } finally {
+      tracker.stop();
+      window.history.replaceState({}, "", "/");
+    }
+    await Promise.resolve();
+    expect(sendBatch).not.toHaveBeenCalled();
+  });
+
+  it("excludes matching elements and their descendants without suppressing other clicks", async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<section class="ph-no-capture"><button><span>Private</span></button></section><button id="public">Public</button>';
+    const sentBodies: string[] = [];
+    const tracker = new EventTracker({
+      projectId: "internal",
+      sendBatch: async (body) => {
+        sentBodies.push(body);
+        return Result.ok(new Response());
+      },
+    }, { ignoreClickSelector: ".ph-no-capture" });
+    try {
+      tracker.start();
+      document.querySelector("span")?.click();
+      document.querySelector<HTMLButtonElement>("#public")?.click();
+      await advancePastFlush();
+      expect(getSentEventTypes(sentBodies)).toEqual(["$page-view", "$click"]);
+      expect(JSON.parse(sentBodies[0]).events[1].data.text).toBe("Public");
+    } finally {
+      tracker.stop();
+    }
+  });
+
   it("captures events when browser globals are exposed as accessor descriptors", async () => {
     vi.useFakeTimers();
     document.body.innerHTML = "<button>Open project</button>";
