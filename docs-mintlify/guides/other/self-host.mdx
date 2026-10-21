@@ -81,7 +81,7 @@ Do not use the example passwords, open ports, or single-node database layout for
 
 Start from the [server environment template](https://github.com/hexclave/hexclave/blob/dev/docker/server/.env), then fill in your production values.
 
-At minimum, set:
+NOTE: The configuration was not designed to be a drop-in solution. A misconfiguration, or lack of configuration, may cause the server to be insecure. Proceed at your own risk. If you are hosting Hexclave in a publicly accessible environment, you should consider reaching out to us for support.
 
 ```env title="hexclave.env"
 NEXT_PUBLIC_STACK_API_URL=https://auth-api.example.com
