@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
+import { zstdDecompressSync } from "node:zlib";
 import { openBreezyliteStorage } from "./index.js";
 
 const { DatabaseSync }: typeof import("node:sqlite") = createRequire(import.meta.url)("node:sqlite");
@@ -30,8 +31,10 @@ it("reads mixed codecs regardless of the write compression setting", async () =>
     await Promise.all(writes);
     const inspect = new DatabaseSync(join(path, "breezy.sqlite"));
     try {
-      expect(inspect.prepare("SELECT codec FROM entries ORDER BY key").all().map(row => row.codec)).toEqual([0, 1, 0, 0]);
-      expect(Number(inspect.prepare("SELECT length(value) AS size FROM entries WHERE codec=1").get()?.size)).toBeLessThan(repeated.length);
+      expect(inspect.prepare("SELECT codec FROM entries ORDER BY key").all().map(row => row.codec)).toEqual([0, 2, 0, 0]);
+      const compressed = inspect.prepare("SELECT value FROM entries WHERE codec=2").get()?.value as Uint8Array;
+      expect(compressed.length).toBeLessThan(repeated.length);
+      expect(zstdDecompressSync(compressed)).toEqual(repeated);
     } finally { inspect.close(); }
     await db.close();
     db = openBreezyliteStorage({ path, compression: false });
@@ -65,6 +68,8 @@ it("rejects unknown codecs and corrupt compressed bytes", async () => {
     expect(store.doesExist(Buffer.from("missing"))).toBe(false);
     expect(() => store.get(key)).toThrow("Unsupported Breezylite value codec");
     raw.exec("UPDATE entries SET codec=1");
+    expect(() => store.get(key)).toThrow("Unsupported Breezylite value codec");
+    raw.exec("UPDATE entries SET codec=2");
     expect(() => store.get(key)).toThrow();
     expect(() => [...store.getRange()]).toThrow();
   } finally {

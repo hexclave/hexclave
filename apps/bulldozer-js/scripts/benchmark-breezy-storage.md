@@ -4,7 +4,7 @@ Breezylite uses Node's built-in SQLite driver under Breezy's shared codec, heap 
 
 ## Try the service
 
-Use Node >=22.13 (tested on 24.21.0) and the normal Bulldozer environment/dependencies. From the repository root:
+Use Node >=22.15 for the built-in SQLite and Zstd APIs (the repository requires Node >=24) and the normal Bulldozer environment/dependencies. From the repository root:
 
 ```sh
 HEXCLAVE_BULLDOZER_JS_PILEDRIVER_IMPLEMENTATION=breezylite \
@@ -84,15 +84,15 @@ Compression reduced BreezyLMDB’s database file by about 57%. Uncompressed Bree
 
 ## Breezylite compression
 
-Breezylite compresses new SQLite values by default; the service has no compression flag. The adapter accepts `compression: false` for controlled benchmarks. Compression uses Node zlib raw DEFLATE at level 1, attempts values of at least 256 bytes and keeps the original bytes when compression is not smaller. Keys remain uncompressed and retain their ordering. Compression and decompression are synchronous.
+Breezylite compresses new SQLite values by default; the service has no compression flag. The adapter accepts `compression: false` for controlled benchmarks. Compression uses Node Zstd at level 1, attempts values of at least 256 bytes and keeps the original bytes when compression is not smaller. Keys remain uncompressed and retain their ordering. Compression and decompression are synchronous.
 
-Each row has a codec column (0 = raw, 1 = DEFLATE). The reader handles both codecs regardless of the write setting, so disabling compression remains safe. Unknown codecs and corrupt compressed payloads fail reads. Stores use persistent integer IDs from a separate name dictionary, and existence queries use SELECT 1 without fetching value bytes. Breezylite is undeployed: older TEXT-store PoC files are rejected before changes, and require a fresh directory instead of a migration. Older PoC binaries do not understand this format; use the matching binary and database. No LMDB-to-SQLite migration is provided.
+Each row has a codec column (0 = raw, 2 = Zstd). The reader handles both codecs regardless of the write setting, so disabling compression remains safe. Unknown codecs and corrupt compressed payloads fail reads. Stores use persistent integer IDs from a separate name dictionary, and existence queries use SELECT 1 without fetching value bytes. SQLite `user_version=1` identifies the Zstd format. Breezylite is undeployed: older PoC files, including integer-ID DEFLATE databases, are rejected before changes and require a fresh directory instead of a migration. DEFLATE codec 1 is not supported. Older PoC binaries do not understand Zstd values; use the matching binary and database. No LMDB-to-SQLite migration is provided.
 
 Run `node scripts/benchmark-breezy-size.mjs` for three repetitions of size and payments throughput for all four variants. For complete performance suites with compressed SQLite, add `HEXCLAVE_BREEZY_BENCH_COMPRESSION=1` to the performance command above.
 
 ### Compression measurements (October 9, 2026)
 
-Fresh four-variant comparison, three repetitions each, Node 24.21.0; same 1,200 prefill facts and 792 measured payments writes, durable completion, buffering off. Medians:
+Historical DEFLATE comparison, before integer IDs and the switch to Zstd: fresh four-variant comparison, three repetitions each, Node 24.21.0; same 1,200 prefill facts and 792 measured payments writes, durable completion, buffering off. Medians:
 
 | Backend | Compression | Closed DB | Open files including WAL | Payments writes |
 |---|---|---:|---:|---:|
