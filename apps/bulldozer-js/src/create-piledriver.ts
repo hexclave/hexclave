@@ -10,7 +10,7 @@ export async function createServicePiledriver(
   if (options.sqlitePath === undefined || options.sqlitePath.trim().length === 0) {
     throw new Error("SQLite PoC requires HEXCLAVE_BULLDOZER_JS_SQLITE_PATH pointing to a separate database directory");
   }
-  // Keep the Node >=22.13 SQLite requirement out of the default backend's startup path.
+  // Keep the Node >=22.15 SQLite/Zstd requirement out of the default backend's startup path.
   const { declareBreezylitePiledriverDatabase } = await import("./databases/piledriver/implementations/breezylite/index.js");
   return declareBreezylitePiledriverDatabase({ path: options.sqlitePath }, { disableHeapReadCache: options.disableHeapReadCache });
 }

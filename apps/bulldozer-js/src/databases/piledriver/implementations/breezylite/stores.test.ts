@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { deflateRawSync } from "node:zlib";
 import { openBreezyliteStorage } from "./index.js";
 
 const { DatabaseSync }: typeof import("node:sqlite") = createRequire(import.meta.url)("node:sqlite");
@@ -56,6 +57,24 @@ it.each([false, true])("rejects older text-store PoC files (codec column: %s) wi
     expect(() => openBreezyliteStorage({ path })).toThrow("use a fresh SQLite directory");
     expect(Buffer.from(raw.prepare("SELECT value FROM entries").get()!.value as Uint8Array)).toEqual(Buffer.from("preserved"));
     expect(raw.prepare("SELECT 1 FROM sqlite_master WHERE name='store_names'").get()).toBeUndefined();
+  } finally {
+    raw.close();
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+it("rejects the older DEFLATE format without modifying its data or format version", async () => {
+  const path = mkdtempSync(join(tmpdir(), "breezylite-deflate-format-"));
+  const db = openBreezyliteStorage({ path });
+  await db.close();
+  const raw = new DatabaseSync(join(path, "breezy.sqlite"));
+  try {
+    const compressed = deflateRawSync(Buffer.alloc(4096, 97));
+    raw.exec("PRAGMA user_version=0; INSERT INTO store_names VALUES (1, 'test')");
+    raw.prepare("INSERT INTO entries VALUES (1, ?, ?, 1, 1)").run(Buffer.from("key"), compressed);
+    expect(() => openBreezyliteStorage({ path })).toThrow("use a fresh SQLite directory");
+    expect(Buffer.from(raw.prepare("SELECT value FROM entries").get()!.value as Uint8Array)).toEqual(compressed);
+    expect(raw.prepare("PRAGMA user_version").get()?.user_version).toBe(0);
   } finally {
     raw.close();
     rmSync(path, { recursive: true, force: true });

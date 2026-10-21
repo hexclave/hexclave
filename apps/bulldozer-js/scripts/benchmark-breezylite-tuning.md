@@ -1,6 +1,6 @@
 # Breezylite tuning experiments — October 10, 2026
 
-Adopted: the inexpensive existence query and integer store IDs. Breezylite is undeployed, so no upgrade migration is needed; older PoC files are rejected with an instruction to use a fresh directory. Zstd remains a modest optional improvement. Keep the default SQLite cache size for the measured workload.
+Adopted: the inexpensive existence query, integer store IDs and Zstd level 1 in place of DEFLATE. Breezylite is undeployed, so no upgrade migration is needed; older PoC files are rejected with an instruction to use a fresh directory. Keep the default SQLite cache size for the measured workload. The measurements below predate the final codec replacement; they do not benchmark all three adopted changes together.
 
 ## End-to-end payments
 
@@ -37,14 +37,14 @@ Separate fresh process per variant, 16,384 uncompressed 4 KiB values (64 MiB pay
 
 - **Existence query: yes.** One prepared statement and one call-site change (2 added lines, 1 removed). About 31% faster hit checks in the microbenchmark, ~1% payments median improvement, unchanged misses. No format or runtime change.
 - **Integer store IDs: adopted.** Strongest repeatable file-size gain (~23%); a persistent dictionary replaces repeated store names in entry keys. The adapter reuses existing mappings without writing, handles conflicting name inserts, and rejects older TEXT-key files before changing them. Tests cover store isolation, ID stability across reopen and independent connections, and preservation of rejected old files. No upgrade migration is provided for this undeployed PoC.
-- **Zstd: optional/lower priority.** About 6% smaller and 6% higher median payments throughput, with overlapping timing ranges. Only 4 added/3 removed prototype lines, but another permanent codec/read path and compatibility tests. The repo already requires Node >=24, so the API minimum of Node 22.15 adds no practical runtime bump here. Existing DEFLATE data must remain readable; older readers cannot decode new Zstd values.
+- **Zstd: adopted as a replacement.** About 6% smaller and 6% higher median payments throughput, with overlapping timing ranges. The undeployed adapter now replaces DEFLATE rather than retaining a second compression/read path. Older PoC databases are rejected using a format version; no migration or DEFLATE reader is included. The repo already requires Node >=24, so the API minimum of Node 22.15 adds no practical runtime bump here. Older readers cannot decode new Zstd values.
 - **32/64 MiB cache: no default change.** One line each, but no payments win and only ~2–3% microbenchmark read improvement, with ~25/~63 MiB more peak process memory. A different workload may justify tuning; these measurements do not.
 
 ## Validation and reproduction
 
 All seven variants passed the selected full 32-test suite (21 Bulldozer, 2 payments/listing, 9 storage outcomes including the known expected LMDB failure). All 21 payments benchmark runs and all six read microbenchmark runs passed. Each variant was also checked with the focused TypeScript configuration. These are PoC experiments; no power-loss testing or integer-ID upgrade migration is included.
 
-The archive contains raw logs, per-file logical/allocated sizes, timing JSON, exact adapter variants, patches for individual candidates and the scripts used. The final adapter adopts integer IDs plus SELECT 1, retaining DEFLATE and default cache sizing. Baseline commit: b567878f91c18d8b9da110159dc36d06817f949c. See environment.json for runtime/hardware.
+The archive contains raw logs, per-file logical/allocated sizes, timing JSON, exact adapter variants, patches for individual candidates and the scripts used. Its combined adapter uses integer IDs plus SELECT 1, retaining DEFLATE and default cache sizing; the current adapter additionally replaces DEFLATE with Zstd. Baseline commit: b567878f91c18d8b9da110159dc36d06817f949c. See environment.json for runtime/hardware.
 
 Implementation context: https://github.com/hexclave/hexclave/pull/2098
 

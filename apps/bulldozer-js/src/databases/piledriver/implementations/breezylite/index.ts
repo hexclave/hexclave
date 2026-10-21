@@ -1,4 +1,4 @@
-import { deflateRawSync, inflateRawSync } from "node:zlib";
+import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -17,7 +17,8 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
   try {
     const columns = db.prepare("PRAGMA table_info(entries)").all();
     if (columns.length > 0 && (
-      columns.find(column => column.name === "store")?.type !== "INTEGER"
+      db.prepare("PRAGMA user_version").get()?.user_version !== 1
+      || columns.find(column => column.name === "store")?.type !== "INTEGER"
       || !columns.some(column => column.name === "codec")
       || db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='store_names'").get() === undefined
     )) {
@@ -32,6 +33,7 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
       ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS sequence (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
       INSERT OR IGNORE INTO sequence VALUES (1, 0);
+      PRAGMA user_version=1;
       COMMIT;`);
   } catch (error) {
     db.close();
@@ -39,7 +41,7 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
   }
   const decode = (value: Uint8Array, codec: unknown) => {
     if (codec === 0) return Buffer.from(value);
-    if (codec === 1) return inflateRawSync(value);
+    if (codec === 2) return zstdDecompressSync(value);
     throw new Error(`Unsupported Breezylite value codec: ${String(codec)}`);
   };
   const select = db.prepare("SELECT value, version, codec FROM entries WHERE store = ? AND key = ?");
@@ -83,9 +85,9 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
         put(key, value, version) {
           requireWrite();
           // Skip tiny values and retain raw bytes whenever compression would increase size.
-          const compressed = options.compression !== false && value.length >= 256 ? deflateRawSync(value, { level: 1 }) : undefined;
+          const compressed = options.compression !== false && value.length >= 256 ? zstdCompressSync(value, { params: { [constants.ZSTD_c_compressionLevel]: 1 } }) : undefined;
           const useCompressed = compressed !== undefined && compressed.length < value.length;
-          put.run(store, key, useCompressed ? compressed : value, version, useCompressed ? 1 : 0);
+          put.run(store, key, useCompressed ? compressed : value, version, useCompressed ? 2 : 0);
           return Promise.resolve(true);
         },
         remove(key) {
