@@ -274,20 +274,16 @@ actor APIClient {
             }
             
             // Check for known error
-            if let errorCode = httpResponse.value(forHTTPHeaderField: "x-stack-known-error") {
-                let errorData = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                let message = errorData?["message"] as? String ?? "Unknown error"
-                let details = errorData?["details"] as? [String: Any]
-                throw StackAuthError.from(code: errorCode, message: message, details: details)
-            }
+            let isKnownError = httpResponse.value(forHTTPHeaderField: "x-hexclave-known-error") != nil
+                || httpResponse.value(forHTTPHeaderField: "x-stack-known-error") != nil
             
             // Success
-            if actualStatus >= 200 && actualStatus < 300 {
+            if !isKnownError && actualStatus >= 200 && actualStatus < 300 {
                 return (data, httpResponse)
             }
             
-            // Other error
-            throw StackAuthError(code: "http_error", message: "HTTP \(actualStatus)")
+            throw StackAuthError.fromHTTPErrorResponse(data: data, response: httpResponse)
+                ?? StackAuthError(code: "http_error", message: "HTTP \(actualStatus)")
             
         } catch let error as URLError {
             // Network error - retry for idempotent requests
