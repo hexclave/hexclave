@@ -4,13 +4,14 @@ import { declareInstantAvailabilityLowLevelDatabase } from "../../databases/low-
 import { declareLmdbLowLevelDatabase } from "../../databases/low-level/implementations/lmdb.js";
 import { declareBulldozerDatabase } from "../../databases/bulldozer/index.js";
 import { declareBasePiledriverDatabase } from "../../databases/piledriver/implementations/base.js";
-import { declareBreezyPiledriverDatabase } from "../../databases/piledriver/implementations/breezy/index.js";
+import { declareBreezyLMDBPiledriverDatabase } from "../../databases/piledriver/implementations/breezy-lmdb/index.js";
+import { declareBreezylitePiledriverDatabase } from "../../databases/piledriver/implementations/breezylite/index.js";
 import { declareBufferedPiledriverDatabase } from "../../databases/piledriver/implementations/buffered.js";
 import { declareInMemoryPiledriverDatabase } from "../../databases/piledriver/implementations/in-memory.js";
 import type { PiledriverObject } from "../../databases/piledriver/index.js";
 import { createPaymentsSchema } from "./index.js";
 import type { ProductSnapshot, SubscriptionRow } from "./types.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, statSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -56,7 +57,7 @@ const databases: Array<ReturnType<typeof declareBulldozerDatabase>> = [];
 const perfBackend = process.env.BULLDOZER_PAYMENTS_PERF_BACKEND ?? "lmdb-instant";
 const piledriverImplementation = process.env.STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION ?? "base";
 const bufferedPiledriver = process.env.BULLDOZER_PAYMENTS_PERF_BUFFERED_PILEDRIVER === "1";
-if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base or breezy");
+if (piledriverImplementation !== "base" && piledriverImplementation !== "breezy-lmdb" && piledriverImplementation !== "breezylite") throw new Error("STACK_BULLDOZER_PILEDRIVER_IMPLEMENTATION must be base, breezy-lmdb or breezylite");
 const effectivePiledriverImplementation = perfBackend.includes("piledriver-in-memory") ? "in-memory" : piledriverImplementation;
 
 const product = (includedItems: ProductSnapshot["includedItems"]): ProductSnapshot => ({
@@ -160,11 +161,12 @@ const newPiledriverDb = () => {
   if (perfBackend === "buffered-piledriver-in-memory") {
     return declareBufferedPiledriverDatabase(declareInMemoryPiledriverDatabase(crypto.randomUUID()));
   }
-  if (piledriverImplementation === "breezy") {
-    if (perfBackend !== "lmdb") throw new Error("Breezy requires the lmdb performance backend");
+  if (piledriverImplementation !== "base") {
+    const requiredBackend = piledriverImplementation === "breezylite" ? "sqlite" : "lmdb";
+    if (perfBackend !== requiredBackend) throw new Error(`${piledriverImplementation} requires the ${requiredBackend} performance backend`);
     const path = mkdtempSync(join(tmpdir(), "bulldozer-payments-schema-perf-"));
     tempPaths.push(path);
-    const breezy = declareBreezyPiledriverDatabase({ path, dbId: crypto.randomUUID() });
+    const breezy = (piledriverImplementation === "breezylite" ? declareBreezylitePiledriverDatabase : declareBreezyLMDBPiledriverDatabase)({ path, dbId: crypto.randomUUID(), compression: process.env.HEXCLAVE_BREEZY_BENCH_COMPRESSION === "1" });
     return bufferedPiledriver ? declareBufferedPiledriverDatabase(breezy) : breezy;
   }
   if (perfBackend === "lmdb" || perfBackend === "lmdb-instant") {
@@ -362,7 +364,17 @@ describe("transactions listing performance", () => {
 });
 
 afterAll(async () => {
+  const sizeOutput = process.env.HEXCLAVE_BREEZY_BENCH_SIZE_OUTPUT;
+  const measureFiles = () => tempPaths.flatMap((path, database) => readdirSync(path).map(name => {
+    const stat = statSync(join(path, name));
+    return { database, name, bytes: stat.size, allocatedBytes: stat.blocks * 512 };
+  }));
+  const openFiles = sizeOutput === undefined ? undefined : measureFiles();
   // An unclosed LMDB environment keeps native handles alive, preventing Vitest's worker and main process from exiting; remove its mapped directory only after closing it.
   for (const db of databases.reverse()) await db.close();
+  if (sizeOutput !== undefined) writeFileSync(sizeOutput, JSON.stringify({
+    piledriverImplementation, compression: process.env.HEXCLAVE_BREEZY_BENCH_COMPRESSION === "1",
+    openFiles, closedFiles: measureFiles(),
+  }, null, 2));
   for (const path of tempPaths) rmSync(path, { recursive: true, force: true });
 });
