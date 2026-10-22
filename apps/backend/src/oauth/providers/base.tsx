@@ -58,6 +58,34 @@ function getUnknownProperty(obj: unknown, key: string): unknown {
   return Reflect.get(obj, key);
 }
 
+// openid-client parses provider responses as JSON lazily, so a plain-text provider answer surfaces as a SyntaxError
+// that carries the raw response. Turn it into a bounded, client-safe error instead of an unexpected server error.
+export function getOAuthNonJsonResponseError(error: unknown): StatusError | undefined {
+  if (!(error instanceof SyntaxError)) {
+    return undefined;
+  }
+  const response = getUnknownProperty(error, "response");
+  if (typeof response !== "object" || response === null) {
+    return undefined;
+  }
+  let body: unknown;
+  try {
+    body = getUnknownProperty(response, "body");
+  } catch {
+    return undefined;
+  }
+  const text = Buffer.isBuffer(body) ? body.toString("utf8") : typeof body === "string" ? body : "";
+  return new StatusError(502, `OAuth provider returned a non-JSON response: ${text.slice(0, 500)}`);
+}
+
+function getNestedStatusError(error: unknown): StatusError | undefined {
+  if (error instanceof StatusError) {
+    return error;
+  }
+  const cause = getUnknownProperty(error, "cause");
+  return cause === undefined || cause === error ? undefined : getNestedStatusError(cause);
+}
+
 function getNumberProperty(obj: unknown, key: string): number | undefined {
   if (typeof obj !== "object" || obj === null || !(key in obj)) {
     return undefined;
@@ -481,6 +509,10 @@ export abstract class OAuthBaseProvider {
         // Though a reasonable scenario where this might happen is eg. if the authorization code expires before we can exchange it, or the page is reloaded so we try to reuse a code that was already used
         captureError("inner-oauth-callback", { error, params });
         throw new StatusError(400, "Inner OAuth callback failed due to invalid grant. Please try again.");
+      }
+      const statusError = getNestedStatusError(error) ?? getOAuthNonJsonResponseError(error);
+      if (statusError) {
+        throw statusError;
       }
       if (error?.error === 'access_denied' || error?.error === 'consent_required') {
         throw new KnownErrors.OAuthProviderAccessDenied();
