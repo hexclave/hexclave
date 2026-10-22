@@ -10,6 +10,48 @@ import { HexclaveAssertionError, StatusError, throwErr } from "@hexclave/shared/
 import { Json } from "@hexclave/shared/dist/utils/json";
 import { createLazyProxy } from "@hexclave/shared/dist/utils/proxies";
 
+// An outbox list cursor is the position of the previous page's last email, `<createdAt millis>_<id>`. Clients treat it
+// as opaque. Bare email IDs (the format before this) are still accepted; they keep their old inclusive meaning (the
+// cursor ID is the first row of the next page) and only resolve while the email exists.
+export type EmailOutboxListPosition = { createdAt: Date, id: string };
+const uuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const emailOutboxListCursorRegex = new RegExp(`^(\\d+)_(${uuidPattern})$`, "i");
+const legacyEmailOutboxListCursorRegex = new RegExp(`^${uuidPattern}$`, "i");
+
+export function encodeEmailOutboxListCursor(position: EmailOutboxListPosition): string {
+  return `${position.createdAt.getTime()}_${position.id}`;
+}
+
+export function parseEmailOutboxListCursor(cursor: string): { type: "position", position: EmailOutboxListPosition } | { type: "legacy", id: string } | null {
+  if (legacyEmailOutboxListCursorRegex.test(cursor)) {
+    return { type: "legacy", id: cursor };
+  }
+  const match = cursor.match(emailOutboxListCursorRegex);
+  if (match == null) {
+    return null;
+  }
+  const createdAt = new Date(Number(match[1]));
+  if (Number.isNaN(createdAt.getTime())) {
+    return null;
+  }
+  return { type: "position", position: { createdAt, id: match[2] } };
+}
+
+// Keyset "rows after this position" for (createdAt DESC, id ASC). The redundant createdAt bound lets Postgres turn
+// the OR into an index range. `inclusive` is for legacy bare-ID cursors, which named the first row of the next page.
+export function emailOutboxCursorWhere(
+  position: EmailOutboxListPosition,
+  inclusive: boolean,
+): Prisma.EmailOutboxWhereInput {
+  return {
+    createdAt: { lte: position.createdAt },
+    OR: [
+      { createdAt: { lt: position.createdAt } },
+      { createdAt: position.createdAt, id: inclusive ? { gte: position.id } : { gt: position.id } },
+    ],
+  };
+}
+
 /**
  * Converts an API recipient (snake_case: user_id) to the DB format (camelCase: userId).
  * This is necessary because the API uses snake_case for consistency with other endpoints,
@@ -298,7 +340,11 @@ export const emailOutboxCrudHandlers = createLazyProxy(() => createCrudHandlers(
     simple_status: yupString().optional(),
     user_id: yupString().optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: "Filter for emails whose recipient is the given user ID." } }),
     limit: yupString().optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: `The maximum number of items to return. Maximum allowed is ${MAX_LIMIT}` } }),
-    cursor: yupString().uuid().optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: "The cursor to start the result set from (email ID)" } }),
+    cursor: yupString().optional().test(
+      "email-outbox-list-cursor",
+      "cursor must be a `next_cursor` returned by a previous request",
+      (cursor) => cursor == null || parseEmailOutboxListCursor(cursor) != null,
+    ).meta({ openapiField: { onlyShowInOperations: ['List'], description: "The cursor to start the result set from." } }),
   }),
   onRead: async ({ auth, params }) => {
     if (!params.id) {
@@ -348,33 +394,59 @@ export const emailOutboxCrudHandlers = createLazyProxy(() => createCrudHandlers(
       };
     }
 
+    // Keyset pagination on (createdAt DESC, id ASC) instead of Prisma's `cursor` option: Prisma drops LIMIT on
+    // compound-key models, and its cursor only works while the cursor email still exists. Encoded position cursors
+    // don't depend on that. Legacy bare-ID cursors keep their old inclusive meaning.
+    let cursorFilter: Prisma.EmailOutboxWhereInput | undefined;
+    if (query.cursor) {
+      const parsed = parseEmailOutboxListCursor(query.cursor) ?? throwErr("cursor passed schema validation, so it must parse");
+      let position: EmailOutboxListPosition;
+      let inclusive = false;
+      if (parsed.type === "position") {
+        position = parsed.position;
+      } else {
+        const cursorEmail = await globalPrismaClient.emailOutbox.findUnique({
+          where: {
+            tenancyId_id: {
+              tenancyId: auth.tenancy.id,
+              id: parsed.id,
+            },
+          },
+          select: { createdAt: true, id: true },
+        });
+        if (cursorEmail == null) {
+          throw new StatusError(StatusError.BadRequest, "The email referenced by `cursor` does not exist (it may have been deleted). Restart pagination without a cursor.");
+        }
+        position = cursorEmail;
+        inclusive = true;
+      }
+      cursorFilter = emailOutboxCursorWhere(position, inclusive);
+    }
+
     const emails = await globalPrismaClient.emailOutbox.findMany({
-      where,
+      where: {
+        AND: [
+          where,
+          ...cursorFilter ? [cursorFilter] : [],
+        ],
+      },
       orderBy: [
         { createdAt: "desc" },
         { id: "asc" },
       ],
       // +1 to check if there's a next page
       take: parsedLimit + 1,
-      ...query.cursor ? {
-        cursor: {
-          tenancyId_id: {
-            tenancyId: auth.tenancy.id,
-            id: query.cursor,
-          },
-        },
-      } : {},
     });
 
     const hasMore = emails.length > parsedLimit;
     const resultEmails = hasMore ? emails.slice(0, parsedLimit) : emails;
-    const nextCursor = hasMore ? emails[parsedLimit].id : null;
+    const lastReturned = hasMore ? emails[parsedLimit - 1] ?? throwErr("hasMore implies the page has `limit` rows") : null;
 
     return {
       items: resultEmails.map(prismaModelToCrud),
       is_paginated: true,
       pagination: {
-        next_cursor: nextCursor,
+        next_cursor: lastReturned == null ? null : encodeEmailOutboxListCursor(lastReturned),
       },
     };
   },
