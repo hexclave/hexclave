@@ -16,6 +16,7 @@ import {
 import { parseBackfillResumeOptions, runBulldozerPaymentsInit } from "./bulldozer-payments-init";
 import { runClickhouseMigrations } from "./clickhouse-migrations";
 import { runRegenInternalSubscriptionsToLatest } from "./regen-internal-subscriptions-to-latest";
+import { parseReconcileTerminalSubscriptionsArgs, runReconcileTerminalSubscriptionsToBulldozer } from "./reconcile-terminal-subscriptions-to-bulldozer";
 
 const getClickhouseClient = () => getClickhouseAdminClient();
 
@@ -207,6 +208,13 @@ Commands:
                                    all at the end (default is fail-fast on the first bad row)
                                    --batch-size=<n> rows per page/POST (default 50)
   backfill-internal-free-plans     Grant the free plan to internal-tenancy teams that have no plan. Run AFTER seed.
+  reconcile-terminal-subscriptions-to-bulldozer
+                                   After the terminal-subscription endedAt SQL migration, re-emit
+                                   corrected terminal subscriptions from the Postgres primary to
+                                   bulldozer-js and regrant free plans to affected internal teams.
+                                   Idempotent and fail-fast. Optional:
+                                   --batch-size=<n>
+                                   --resume-cursor=<tenancyId>,<subscriptionId>
   copy-specified-tenancy-subscriptions
                                    One-off: copy Subscription + related SubscriptionInvoice rows for one
                                    tenancy filtered by productId into bulldozer-js over HTTP.
@@ -283,6 +291,14 @@ const main = async () => {
       // a prior `backfill-bulldozer-from-prisma` on a fresh DB) — this reads
       // the Subscription LFold via `ensureFreePlanForBillingTeam`.
       await runBackfillInternalFreePlans();
+      break;
+    }
+    case 'reconcile-terminal-subscriptions-to-bulldozer': {
+      // Post-migration rollout step. This intentionally reads the primary so
+      // replica lag cannot publish pre-migration endedAt=null values.
+      await runReconcileTerminalSubscriptionsToBulldozer(
+        parseReconcileTerminalSubscriptionsArgs(args),
+      );
       break;
     }
     case 'copy-specified-tenancy-subscriptions': {

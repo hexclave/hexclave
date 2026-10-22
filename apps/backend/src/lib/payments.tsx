@@ -116,10 +116,134 @@ export async function ensureProductIdOrInlineProduct(
 // getCustomerPurchaseContext, OwnedProduct type, getOwnedProductsForCustomerLegacy
 // were removed. All reads now go through customer-data.ts backed by Bulldozer.
 
+/**
+ * Stripe status is `active` or `trialing`.
+ *
+ * A sub set to cancel at period end stays `active` in Stripe, so this returns
+ * true for it. To ask "will it renew?", use `isSubscriptionCancelable`. To ask
+ * "does the customer still get the product?", use `isSubscriptionInEffect`.
+ */
 export function isActiveSubscription(subscription: { status: string }): boolean {
   const s = subscription.status;
-  return s === "active" || s === SubscriptionStatus.active || s === "trialing" || s === SubscriptionStatus.trialing;
+  return s === SubscriptionStatus.active || s === SubscriptionStatus.trialing;
 }
+
+/**
+ * Active and not already winding down. Used by both the product list's
+ * `is_cancelable` and the cancel route's filter — keep them in sync so
+ * `is_cancelable: false` always implies the DELETE returns 400.
+ */
+export function isSubscriptionCancelable(subscription: { status: string, cancelAtPeriodEnd: boolean }): boolean {
+  return isActiveSubscription(subscription) && !subscription.cancelAtPeriodEnd;
+}
+
+/**
+ * Picks the representative sub when several in-effect subs share a productId
+ * (stackable products): cancelable > active > in-effect. The middle tier is
+ * for pending-cancel Stripe subs, which stay `active` and would otherwise
+ * shadow a cancelable sibling.
+ */
+export function subscriptionDisplayRank(subscription: { status: string, cancelAtPeriodEnd: boolean }): number {
+  return isSubscriptionCancelable(subscription) ? 2 : isActiveSubscription(subscription) ? 1 : 0;
+}
+
+/**
+ * The subscription still confers its product/items, regardless of whether it
+ * will renew. Deliberately status-agnostic and `endedAt`-based, mirroring
+ * Bulldozer's grant timefold (grants run from row insert until
+ * `endedAtMillis`; every terminal writer sets `endedAt`).
+ */
+export function isSubscriptionInEffect(
+  subscription: { endedAtMillis: number | null } | { endedAt: Date | null },
+  nowMillis: number,
+): boolean {
+  const endedAtMillis = "endedAtMillis" in subscription
+    ? subscription.endedAtMillis
+    : subscription.endedAt != null ? subscription.endedAt.getTime() : null;
+  return endedAtMillis == null || endedAtMillis > nowMillis;
+}
+
+/**
+ * Active, or winding down but still paid through — the subs a customer can
+ * still act on: switch away from, or have replaced by a same-line purchase.
+ * Narrower than `isSubscriptionInEffect`, which also covers `past_due` /
+ * `incomplete` subs; those still entitle, but can't take a plan change until
+ * their payment clears. `replaceableSubs` in `grantProductToCustomer` is the
+ * Prisma-query mirror of this predicate — keep the two in sync.
+ */
+export function isSubscriptionSwitchable(
+  subscription: { status: string } & ({ endedAtMillis: number | null } | { endedAt: Date | null }),
+  nowMillis: number,
+): boolean {
+  return isActiveSubscription(subscription)
+    || (subscription.status === SubscriptionStatus.canceled && isSubscriptionInEffect(subscription, nowMillis));
+}
+
+/**
+ * The billing period a subscription is in right now, rolled forward from the
+ * stored one if it has lapsed.
+ *
+ * Local (non-Stripe) subs never renew: `currentPeriodEnd` is frozen at grant
+ * time, so a monthly sub granted in January still reads "period ends Jan 31"
+ * in March while remaining in effect (`endedAt` null). Copying that stale
+ * boundary into `endedAt` on cancel would end the sub in the past — revoking
+ * access the moment the customer cancels, and retroactively rewriting grant
+ * history for the elapsed window. Advancing by whole periods puts the
+ * boundary where a renewing sub would have it.
+ *
+ * Period length comes from the stored period rather than the price interval so
+ * this needs no parsing of the (untrusted) product snapshot; month/year subs
+ * drift by at most a day or two, which a wind-down date can absorb.
+ */
+export function getCurrentBillingPeriod(
+  subscription: { currentPeriodStartMillis: number, currentPeriodEndMillis: number },
+  nowMillis: number,
+): { start: Date, end: Date } {
+  const { currentPeriodStartMillis: start, currentPeriodEndMillis: end } = subscription;
+  const periodLength = end - start;
+  if (end > nowMillis || periodLength <= 0) {
+    // Still inside the stored period, or a degenerate one we can't extrapolate
+    // from — clamp so a lapsed degenerate period never lands in the past.
+    return { start: new Date(start), end: new Date(Math.max(end, nowMillis)) };
+  }
+  const periodsElapsed = Math.ceil((nowMillis - end) / periodLength);
+  return {
+    start: new Date(start + periodsElapsed * periodLength),
+    end: new Date(end + periodsElapsed * periodLength),
+  };
+}
+
+import.meta.vitest?.describe("getCurrentBillingPeriod", (test) => {
+  const MONTH = 30 * 24 * 60 * 60 * 1000;
+  const jan1 = new Date("2026-01-01T00:00:00Z").getTime();
+
+  test("returns the stored period while it is still running", ({ expect }) => {
+    const period = getCurrentBillingPeriod(
+      { currentPeriodStartMillis: jan1, currentPeriodEndMillis: jan1 + MONTH },
+      jan1 + MONTH / 2,
+    );
+    expect(period.start.getTime()).toBe(jan1);
+    expect(period.end.getTime()).toBe(jan1 + MONTH);
+  });
+
+  test("rolls a lapsed period forward to the one containing `now`", ({ expect }) => {
+    const period = getCurrentBillingPeriod(
+      { currentPeriodStartMillis: jan1, currentPeriodEndMillis: jan1 + MONTH },
+      jan1 + 2.5 * MONTH,
+    );
+    expect(period.start.getTime()).toBe(jan1 + 2 * MONTH);
+    expect(period.end.getTime()).toBe(jan1 + 3 * MONTH);
+  });
+
+  test("never returns an end in the past, even for a degenerate period", ({ expect }) => {
+    const now = jan1 + 5 * MONTH;
+    const period = getCurrentBillingPeriod(
+      { currentPeriodStartMillis: jan1, currentPeriodEndMillis: jan1 },
+      now,
+    );
+    expect(period.end.getTime()).toBe(now);
+  });
+});
 
 /**
  * True when the given product config / snapshot declares itself as an add-on
@@ -387,7 +511,7 @@ export async function validatePurchaseSession(options: {
   quantity: number,
 }): Promise<{
   selectedPrice: SelectedPrice | undefined,
-  conflictingSubscriptions: Array<{ id: string, stripeSubscriptionId: string | null }>,
+  conflictingSubscriptions: Array<{ id: string, stripeSubscriptionId: string | null, status: SubscriptionStatus, cancelAtPeriodEnd: boolean }>,
 }> {
   const { prisma, tenancyId, customerType, customerId, product, productId, priceId, quantity } = options;
 
@@ -433,7 +557,7 @@ export async function validatePurchaseSession(options: {
   //     conflict.
   // TODO: swap this for bulldozer read when it's consistent
   // Read subs from Prisma (not the bulldozer view) — the view can lag, so a duplicate request would otherwise miss the just-granted sub.
-  let conflictingSubscriptions: Array<{ id: string, stripeSubscriptionId: string | null }> = [];
+  let conflictingSubscriptions: Array<{ id: string, stripeSubscriptionId: string | null, status: SubscriptionStatus, cancelAtPeriodEnd: boolean }> = [];
   const productLineId = product.productLineId;
   const addOnBaseProductIds = product.isAddOnTo ? typedKeys(product.isAddOnTo) : [];
   const isStackableSelfMatch = (pid: string) =>
@@ -443,14 +567,22 @@ export async function validatePurchaseSession(options: {
   // a duplicate request during lag would slip past it and silently re-grant.
   // We query Prisma directly so the sub guard is symmetric with the OTP guard
   // and works for products with no productLineId.
-  const activeSubs = await prisma.subscription.findMany({
+  // Includes canceled-at-period-end subs: they still back their product, so
+  // a same-line purchase must treat them as replaceable conflicts, not OTPs.
+  // This is the query form of `isSubscriptionSwitchable` — narrower than
+  // isSubscriptionInEffect so a payment retry of an incomplete sub isn't
+  // rejected as ProductAlreadyGranted below. Keep the two in sync.
+  const replaceableSubs = await prisma.subscription.findMany({
     where: {
       tenancyId,
       customerType: typedToUppercase(customerType),
       customerId,
-      status: { in: [SubscriptionStatus.active, SubscriptionStatus.trialing] },
+      OR: [
+        { status: { in: [SubscriptionStatus.active, SubscriptionStatus.trialing] } },
+        { status: SubscriptionStatus.canceled, endedAt: { gt: new Date() } },
+      ],
     },
-    select: { id: true, stripeSubscriptionId: true, productId: true, product: true },
+    select: { id: true, stripeSubscriptionId: true, productId: true, product: true, status: true, cancelAtPeriodEnd: true },
   });
   if (productId != null && product.stackable !== true) {
     const activeOtp = await prisma.oneTimePurchase.findFirst({
@@ -464,32 +596,32 @@ export async function validatePurchaseSession(options: {
       },
       select: { id: true },
     });
-    if (activeOtp || activeSubs.some(s => s.productId === productId)) {
+    if (activeOtp || replaceableSubs.some(s => s.productId === productId)) {
       throw new KnownErrors.ProductAlreadyGranted(productId, customerId);
     }
   }
 
   if (productLineId) {
-    conflictingSubscriptions = activeSubs
+    conflictingSubscriptions = replaceableSubs
       .filter(s =>
         (s.product as Product).productLineId === productLineId
         && !addOnBaseProductIds.includes(s.productId ?? "")
         && !isStackableSelfMatch(s.productId ?? ""),
       )
-      .map(s => ({ id: s.id, stripeSubscriptionId: s.stripeSubscriptionId }));
+      .map(s => ({ id: s.id, stripeSubscriptionId: s.stripeSubscriptionId, status: s.status, cancelAtPeriodEnd: s.cancelAtPeriodEnd }));
 
     // If ownedProducts shows a same-line holding but there's no active subscription
     // backing it, the customer owns via OTP — which can't be replaced by a switch.
     // (We still rely on bulldozer here because OTPs aren't part of the duplicate-
     // request race we're guarding above and OTP propagation lag is low-stakes.)
-    const activeSubProductIds = new Set(activeSubs.map(s => s.productId ?? "__null__"));
+    const subBackedProductIds = new Set(replaceableSubs.map(s => s.productId ?? "__null__"));
     const otpInProductLine = Object.entries(ownedProducts).some(
       ([pid, p]) =>
         p.productLineId === productLineId
         && p.quantity > 0
         && !addOnBaseProductIds.includes(pid)
         && !isStackableSelfMatch(pid)
-        && !activeSubProductIds.has(pid),
+        && !subBackedProductIds.has(pid),
     );
     if (otpInProductLine && conflictingSubscriptions.length === 0) {
       // TODO: reconsider the coupling here between products and purchases. OTPs can
