@@ -99,6 +99,43 @@ it("cannot create duplicate contact channels", async ({ expect }) => {
   `);
 });
 
+it("cannot update a contact channel to a duplicate value", async ({ expect }) => {
+  await Auth.Otp.signIn();
+  const firstMailbox = createMailbox();
+  const secondMailbox = createMailbox();
+
+  await niceBackendFetch("/api/v1/contact-channels", {
+    accessType: "client",
+    method: "POST",
+    body: {
+      value: firstMailbox.emailAddress,
+      type: "email",
+      used_for_auth: false,
+      user_id: "me",
+    }
+  });
+  const second = await niceBackendFetch("/api/v1/contact-channels", {
+    accessType: "client",
+    method: "POST",
+    body: {
+      value: secondMailbox.emailAddress,
+      type: "email",
+      used_for_auth: false,
+      user_id: "me",
+    }
+  });
+
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${second.body.id}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: firstMailbox.emailAddress },
+  });
+  expect(response).toMatchObject({
+    status: 400,
+    body: "Contact channel already exists",
+  });
+});
+
 it("create contact channel on the server", async ({ expect }) => {
   const { userId } = await Auth.Otp.signIn();
   const mailbox = createMailbox();
