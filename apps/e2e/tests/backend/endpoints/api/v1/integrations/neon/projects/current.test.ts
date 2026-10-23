@@ -17,6 +17,8 @@ it("get project details", async ({ expect }) => {
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -78,6 +80,8 @@ it("creates and updates the basic project information of a project", async ({ ex
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -147,6 +151,8 @@ it("creates and updates the email config of a project", async ({ expect }) => {
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
