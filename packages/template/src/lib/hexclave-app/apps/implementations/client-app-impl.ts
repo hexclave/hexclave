@@ -3684,8 +3684,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
     }
   }
 
-  async verifyEmail(code: string): Promise<Result<undefined, KnownErrors["VerificationCodeError"]>> {
-    const result = await this._interface.verifyEmail(code);
+  async verifyEmail(code: string): Promise<Result<undefined, KnownErrors["VerificationCodeError"]>>;
+  async verifyEmail(code: string, options: { requirePasswordIfSet?: boolean, password?: string }): Promise<Result<undefined, KnownErrors["VerificationCodeError"] | KnownErrors["EmailVerificationRequiresPassword"] | KnownErrors["PasswordConfirmationMismatch"]>>;
+  async verifyEmail(code: string, options?: { requirePasswordIfSet?: boolean, password?: string }): Promise<Result<undefined, KnownErrors["VerificationCodeError"] | KnownErrors["EmailVerificationRequiresPassword"] | KnownErrors["PasswordConfirmationMismatch"]>> {
+    const result = await this._interface.verifyEmail(code, options, await this._getSession());
     await this._currentUserCache.refresh([await this._getSession()]);
     await this._clientContactChannelsCache.refresh([await this._getSession()]);
     return result;
