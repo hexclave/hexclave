@@ -20,6 +20,42 @@ import { createLazyProxy } from "@hexclave/shared/dist/utils/proxies";
 import { isUuid } from "@hexclave/shared/dist/utils/uuids";
 import { addUserToTeam } from "../team-memberships/crud";
 
+const maxListPageSize = 200;
+// Requests without `limit` predate pagination and return every matching team unpaginated. Past this many we reject
+// them instead of truncating, since callers that don't paginate (eg. older SDKs) can't tell a truncated list apart
+// from a complete one. It's higher than `maxListPageSize` so that existing callers just above 200 teams keep working.
+const maxUnpaginatedListSize = 500;
+
+// A team list cursor is the position of the previous page's last team, `<createdAt millis>_<teamId>`, rather than just
+// its ID, so a page can still be (re)fetched after that team is deleted; eg. the SDK's caches refresh mounted pages
+// after every team mutation, including deleting the page's own cursor team. Clients treat it as opaque. Bare team IDs
+// (the format before this) are still accepted for backwards compatibility, but only resolve while the team exists.
+type TeamListPosition = { createdAt: Date, teamId: string };
+// Case-insensitive and version-agnostic, matching the `yupString().uuid()` check legacy cursors were validated with.
+const uuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const teamListCursorRegex = new RegExp(`^(\\d+)_(${uuidPattern})$`, "i");
+const legacyTeamListCursorRegex = new RegExp(`^${uuidPattern}$`, "i");
+
+function encodeTeamListCursor(position: TeamListPosition): string {
+  return `${position.createdAt.getTime()}_${position.teamId}`;
+}
+
+function parseTeamListCursor(cursor: string): { type: "position", position: TeamListPosition } | { type: "legacy", teamId: string } | null {
+  if (legacyTeamListCursorRegex.test(cursor)) {
+    return { type: "legacy", teamId: cursor };
+  }
+  const match = cursor.match(teamListCursorRegex);
+  if (match == null) {
+    return null;
+  }
+  // The regex accepts any digit string, but past ±8.64e15 ms a Date is invalid, which Prisma rejects with a 500.
+  const createdAt = new Date(Number(match[1]));
+  if (Number.isNaN(createdAt.getTime())) {
+    return null;
+  }
+  return { type: "position", position: { createdAt, teamId: match[2] } };
+}
+
 
 export function teamPrismaToCrud(prisma: Prisma.TeamGetPayload<{}>) {
   return {
@@ -40,8 +76,12 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
     add_current_user: yupString().oneOf(["true", "false"]).optional().meta({ openapiField: { onlyShowInOperations: ['Create'], hidden: true } }),
     order_by: yupString().oneOf(["created_at"]).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'Field to order results by. Currently only `created_at` is supported.', exampleValue: 'created_at' } }),
     desc: yupString().oneOf(["true", "false"]).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'Whether to order results in descending order. Defaults to false (ascending).', exampleValue: 'false' } }),
-    limit: yupNumber().integer().min(1).max(200).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'The maximum number of items to return (capped at 200).' } }),
-    cursor: yupString().uuid().optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'The cursor to start the result set from. Requires `limit` to also be set.' } }),
+    limit: yupNumber().integer().min(1).max(maxListPageSize).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: `The maximum number of items to return (capped at ${maxListPageSize}). If omitted, all matching teams are returned unpaginated, unless more than ${maxUnpaginatedListSize} teams match, in which case the request fails with a 400 error; set \`limit\` and follow \`pagination.next_cursor\` instead.` } }),
+    cursor: yupString().optional().test(
+      "team-list-cursor",
+      "cursor must be a `next_cursor` returned by a previous request",
+      (cursor) => cursor == null || parseTeamListCursor(cursor) != null,
+    ).meta({ openapiField: { onlyShowInOperations: ['List'], description: 'The cursor to start the result set from. Requires `limit` to also be set.' } }),
     query: yupString().optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: "A search query to filter the results by. Free-text search applied to the team's id (exact-match) and display name." } }),
   }),
   paramsSchema: yupObject({
@@ -300,6 +340,7 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
 
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const sortDirection = query.desc === 'true' ? 'desc' : 'asc';
+    const limit = query.limit;
 
     let queryFilter: Prisma.TeamWhereInput | undefined;
     if (query.query) {
@@ -316,8 +357,48 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
       };
     }
 
+    // Keyset pagination on (createdAt, teamId) instead of Prisma's `cursor` option: Prisma's cursor only works while the
+    // cursor team still matches the filters, so if the user left that team (or it was renamed out of `query`) between
+    // pages, the next page came back empty and every remaining team was silently dropped. A position doesn't depend on
+    // the cursor team matching the filters (or, for encoded cursors, on it existing at all).
+    let cursorFilter: Prisma.TeamWhereInput | undefined;
+    if (query.cursor) {
+      const parsed = parseTeamListCursor(query.cursor) ?? throwErr("cursor passed schema validation, so it must parse");
+      let position: TeamListPosition | null;
+      if (parsed.type === "position") {
+        position = parsed.position;
+      } else {
+        // Legacy cursor: a bare team ID, whose position we can only look up while the team exists.
+        position = await prisma.team.findUnique({
+          where: {
+            tenancyId_teamId: {
+              tenancyId: auth.tenancy.id,
+              teamId: parsed.teamId,
+            },
+          },
+          select: { createdAt: true, teamId: true },
+        });
+        if (position == null) {
+          throw new StatusError(StatusError.BadRequest, "The team referenced by `cursor` does not exist (it may have been deleted). Restart pagination without a cursor.");
+        }
+      }
+      cursorFilter = {
+        // Redundant with the OR below, but Postgres can't turn that OR into an index range, so without this bound
+        // every page walks the (tenancyId, createdAt, teamId) index from the tenancy's first team up to the cursor.
+        createdAt: sortDirection === 'asc' ? { gte: position.createdAt } : { lte: position.createdAt },
+        OR: [
+          { createdAt: sortDirection === 'asc' ? { gt: position.createdAt } : { lt: position.createdAt } },
+          { createdAt: position.createdAt, teamId: sortDirection === 'asc' ? { gt: position.teamId } : { lt: position.teamId } },
+        ],
+      };
+    }
+
     const db = await prisma.team.findMany({
       where: {
+        AND: [
+          ...queryFilter ? [queryFilter] : [],
+          ...cursorFilter ? [cursorFilter] : [],
+        ],
         tenancyId: auth.tenancy.id,
         ...query.user_id ? {
           teamMembers: {
@@ -326,39 +407,35 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
             },
           },
         } : {},
-        ...queryFilter ?? {},
       },
       orderBy: [
         { createdAt: sortDirection },
         { teamId: sortDirection },
       ],
-      take: query.limit ? query.limit + 1 : undefined,
-      ...query.cursor ? {
-        skip: 1,
-        cursor: {
-          tenancyId_teamId: {
-            tenancyId: auth.tenancy.id,
-            teamId: query.cursor,
-          },
-        },
-      } : {},
+      // +1 to detect whether a next page exists (or, without `limit`, whether the unpaginated cap is exceeded)
+      // without a separate count.
+      take: (limit ?? maxUnpaginatedListSize) + 1,
     });
 
-    if (query.limit) {
-      const items = db.slice(0, query.limit).map(teamPrismaToCrud);
-      const hasMore = db.length > query.limit;
+    if (limit == null) {
+      if (db.length > maxUnpaginatedListSize) {
+        throw new StatusError(StatusError.BadRequest, `More than ${maxUnpaginatedListSize} teams match this request, which is too many to return without pagination. Set \`limit\` (at most ${maxListPageSize}) and pass each response's \`pagination.next_cursor\` as \`cursor\` to fetch the rest, or narrow the results with \`query\` or \`user_id\`.`);
+      }
       return {
-        items,
-        is_paginated: true,
-        pagination: {
-          next_cursor: hasMore && items.length > 0 ? items[items.length - 1].id : null,
-        },
+        items: db.map(teamPrismaToCrud),
+        is_paginated: false,
       };
     }
 
+    const items = db.slice(0, limit).map(teamPrismaToCrud);
+    const hasMore = db.length > limit;
+
     return {
-      items: db.map(teamPrismaToCrud),
-      is_paginated: false,
+      items,
+      is_paginated: true,
+      pagination: {
+        next_cursor: hasMore ? encodeTeamListCursor(db[limit - 1] ?? throwErr("hasMore implies the page has `limit` rows")) : null,
+      },
     };
   }
 }));

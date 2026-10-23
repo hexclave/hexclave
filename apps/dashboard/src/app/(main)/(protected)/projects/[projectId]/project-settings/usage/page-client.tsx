@@ -334,11 +334,7 @@ export default function PageClient() {
   const project = adminApp.useProject();
   const planUsage = adminApp.usePlanUsage();
   const user = useDashboardInternalUser();
-  const teams = user.useTeams();
-  const ownerTeam = useMemo(
-    () => teams.find((team) => team.id === planUsage.ownerTeamId) ?? throwErr(`Owner team ${planUsage.ownerTeamId} not found in user's teams?`, { projectId: project.id, teamIds: teams.map((team) => team.id) }),
-    [planUsage.ownerTeamId, project.id, teams],
-  );
+  const ownerTeam = user.useTeam(planUsage.ownerTeamId) ?? throwErr(`Owner team ${planUsage.ownerTeamId} not found in user's teams?`, { projectId: project.id });
   const visibleRows = useMemo(
     () => planUsage.rows.filter(shouldShowUsageRow),
     [planUsage.rows],

@@ -52,15 +52,9 @@ vi.mock("@/components/design-components/input", () => ({
   DesignInput: (props: InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
 }));
 
-vi.mock("@/components/design-components/select", () => ({
-  DesignSelectorDropdown: ({ value, onValueChange, options }: {
-    value: string,
-    onValueChange: (value: string) => void,
-    options: Array<{ value: string, label: string }>,
-  }) => (
-    <select aria-label="team" value={value} onChange={(event) => onValueChange(event.target.value)}>
-      {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-    </select>
+vi.mock("@/components/user-team-picker", () => ({
+  UserTeamPicker: ({ value }: { value: { id: string, displayName: string } | null }) => (
+    <div aria-label="team">{value?.displayName ?? "Select a team"}</div>
   ),
 }));
 

@@ -456,6 +456,7 @@ model Team {
   @@unique([mirroredProjectId, mirroredBranchId, teamId])
   @@index([tenancyId, sequenceId], name: "Team_tenancyId_sequenceId_idx")
   @@index([shouldUpdateSequenceId, tenancyId], name: "Team_shouldUpdateSequenceId_idx")
+  @@index([tenancyId, createdAt, teamId], name: "Team_tenancyId_createdAt_teamId_idx")
 }
 
 // This is used for fields that are boolean but only the true value is part of a unique constraint.

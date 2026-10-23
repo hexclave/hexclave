@@ -10,10 +10,11 @@ import {
   Gear,
   CreditCard,
   Plus,
+  UsersThree,
 } from "@phosphor-icons/react";
 import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Team, useStackApp, useUser } from "@hexclave/next";
-import { SidebarLayout } from './sidebar-layout';
+import { SidebarLayout, useHash } from './sidebar-layout';
 import { ActiveSessionsPage } from "./active-sessions/active-sessions-page";
 import { ApiKeysPage } from "./api-keys/api-keys-page";
 import { EmailsAndAuthPage } from './email-and-auth/email-and-auth-page';
@@ -23,7 +24,9 @@ import { SettingsPage } from './settings/settings-page';
 import { PaymentsPage } from "./payments/payments-page";
 import { TeamPage } from "./teams/team-page";
 import { TeamCreationPage } from "./teams/team-creation-page";
+import { TeamDirectoryPage } from "./teams/team-directory-page";
 import { TeamIcon } from "./supporting/team-icon";
+import { findTeamsWithProducts, firstTeamsPageOptions } from "@hexclave/shared/dist/utils/team-lists";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 
 const iconMap = {
@@ -35,6 +38,7 @@ const iconMap = {
   Settings: Gear,
   CreditCard,
   Plus,
+  Users: UsersThree,
 } as const;
 
 const Icon = ({ name }: { name: keyof typeof iconMap }) => {
@@ -42,7 +46,7 @@ const Icon = ({ name }: { name: keyof typeof iconMap }) => {
   return <PhosphorIcon className="h-4 w-4 shrink-0" />;
 };
 
-const emptyTeams: Team[] = [];
+const emptyTeams: Team[] & { nextCursor: string | null } = Object.assign([], { nextCursor: null });
 
 export function DashboardAccountSettingsPage(props: {
   mockUser?: {
@@ -81,7 +85,16 @@ export function DashboardAccountSettingsPage(props: {
   const user = props.mockUser ? null : userFromHook;
   const project = props.mockProject || projectFromHook;
 
-  const teams = user?.useTeams() ?? emptyTeams;
+  const teams = user?.useTeams(firstTeamsPageOptions) ?? emptyTeams;
+  // The sidebar only lists the first (capped) page of teams. A `#team-<id>` link to any other team (e.g. from the
+  // team switcher, or the "All teams" page) is resolved by ID so its page still opens. The lookup hook is always
+  // called; without a lookup it reuses the unfiltered cache entry, so it costs no extra request.
+  const hash = useHash();
+  const hashTeamId = hash.startsWith("team-") && hash !== "team-creation" ? hash.slice("team-".length) : null;
+  const needsHashTeamLookup = hashTeamId != null && teams.nextCursor != null && !teams.some(team => team.id === hashTeamId);
+  const hashTeamLookup = user?.useTeams(needsHashTeamLookup ? { query: hashTeamId, limit: firstTeamsPageOptions.limit } : firstTeamsPageOptions) ?? emptyTeams;
+  const hashTeamOutsideSidebar = needsHashTeamLookup ? hashTeamLookup.find(team => team.id === hashTeamId) ?? null : null;
+  const sidebarTeams = hashTeamOutsideSidebar == null ? teams : [...teams, hashTeamOutsideSidebar];
   const teamsKey = teams.map(team => team.id).join("|");
   // useTeams() may return a fresh array on each render; key by IDs so product checks do not refire unnecessarily.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -91,11 +104,11 @@ export function DashboardAccountSettingsPage(props: {
 
   const [paymentsAvailability, setPaymentsAvailability] = useState<{
     userHasProducts: boolean,
-    teamIdsWithProducts: Set<string>,
+    teamsWithProducts: Team[],
     isReady: boolean,
   }>(() => ({
     userHasProducts: false,
-    teamIdsWithProducts: new Set<string>(),
+    teamsWithProducts: [],
     isReady: !!props.mockUser,
   }));
 
@@ -115,24 +128,15 @@ export function DashboardAccountSettingsPage(props: {
       }
       const [userProducts, teamsWithProducts] = await Promise.all([
         currentUser.listProducts({ limit: 1 }),
-        Promise.all(teamsById.map(async (team) => {
-          const isTeamAdmin = await currentUser.hasPermission(team, "team_admin");
-          if (!isTeamAdmin) {
-            return null;
-          }
-          const teamProducts = await team.listProducts({ limit: 1 });
-          const hasTeamProducts = teamProducts.some((product) => product.customerType === "team");
-          return hasTeamProducts ? team.id : null;
-        })),
+        findTeamsWithProducts(currentUser, teamsById),
       ]);
       if (cancelled) {
         return;
       }
       const userHasProducts = userProducts.some((product) => product.customerType === "user");
-      const teamIdsWithProducts = new Set<string>(teamsWithProducts.filter((id): id is string => id !== null));
       setPaymentsAvailability({
         userHasProducts,
-        teamIdsWithProducts,
+        teamsWithProducts,
         isReady: true,
       });
     });
@@ -141,10 +145,7 @@ export function DashboardAccountSettingsPage(props: {
     };
   }, [props.mockUser, teamsById, userId]);
 
-  const teamsWithProducts = useMemo(
-    () => teamsById.filter(team => paymentsAvailability.teamIdsWithProducts.has(team.id)),
-    [paymentsAvailability.teamIdsWithProducts, teamsById],
-  );
+  const teamsWithProducts = paymentsAvailability.teamsWithProducts;
 
   const shouldShowPaymentsTab = props.mockUser
     || (paymentsAvailability.isReady
@@ -222,7 +223,7 @@ export function DashboardAccountSettingsPage(props: {
       title: 'Teams',
       type: 'divider' as const,
     }] as const : [] ),
-    ...teams.map(team => ({
+    ...sidebarTeams.map(team => ({
       title: (
         <div className="flex gap-2 items-center w-full min-w-0">
           <TeamIcon team={team}/>
@@ -235,6 +236,15 @@ export function DashboardAccountSettingsPage(props: {
         <TeamPage team={team}/>
       </Suspense>,
     } as const)),
+    ...( teams.nextCursor != null ? [{
+      title: 'All teams',
+      icon: <Icon name="Users"/>,
+      type: 'item' as const,
+      id: 'teams',
+      content: <Suspense fallback={<TeamDirectorySkeleton/>}>
+        <TeamDirectoryPage />
+      </Suspense>,
+    }] as const : [] ),
     ...( project.config.clientTeamCreationEnabled ? [{
       title: 'Create a team',
       icon: <Icon name="Plus"/>,
@@ -310,6 +320,14 @@ function TeamPageSkeleton() {
   return (
     <PageLayout>
       <Skeleton className="h-[150px] w-full rounded-2xl" />
+      <Skeleton className="h-[250px] w-full rounded-2xl" />
+    </PageLayout>
+  );
+}
+
+function TeamDirectorySkeleton() {
+  return (
+    <PageLayout>
       <Skeleton className="h-[250px] w-full rounded-2xl" />
     </PageLayout>
   );

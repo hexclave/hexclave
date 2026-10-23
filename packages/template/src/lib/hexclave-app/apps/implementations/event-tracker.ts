@@ -5,6 +5,7 @@ import { buildElementsChain, ELEMENTS_CHAIN_MAX_DEPTH } from "@hexclave/shared/d
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { generateUuid, isAdBlockerNetworkError, isAnalyticsNotEnabledError } from "./session-replay";
+import type { AnalyticsEvent, AnalyticsOptions } from "./session-replay";
 
 const FLUSH_INTERVAL_MS = 10_000;
 const MAX_EVENTS_PER_BATCH = 50;
@@ -103,11 +104,7 @@ export type EventTrackerDeps = {
   sendBatch: (body: string, options: { keepalive: boolean }) => Promise<Result<Response, Error>>,
 };
 
-type TrackedEvent = {
-  event_type: "$page-view" | "$click",
-  event_at_ms: number,
-  data: Record<string, unknown>,
-};
+type TrackedEvent = AnalyticsEvent;
 
 export class EventTracker {
   private _started = false;
@@ -134,7 +131,7 @@ export class EventTracker {
   private _lastSelectionChangedAtMs: number | null = null;
   private _lastVisibilityChangeAtMs: number | null = null;
 
-  constructor(deps: EventTrackerDeps) {
+  constructor(deps: EventTrackerDeps, private readonly _options: Pick<AnalyticsOptions, "sanitizeEvent" | "ignoreClickSelector"> = {}) {
     this._deps = deps;
     this._sessionReplaySegmentId = generateUuid();
   }
@@ -179,8 +176,17 @@ export class EventTracker {
 
   private _pushEvent(event: TrackedEvent) {
     if (this._disabled) return;
+    if (this._options.sanitizeEvent != null) {
+      const sanitizedEvent = this._options.sanitizeEvent(event);
+      if (sanitizedEvent == null) return;
+      event = sanitizedEvent;
+    }
+    const eventBytes = JSON.stringify(event).length;
+    if (event.event_type === "$click" && this._deadClickTimer !== null && this._unclassifiedClicks.size < DEAD_CLICK_MAX_PENDING) {
+      this._unclassifiedClicks.add(event);
+    }
     this._events.push(event);
-    this._approxBytes += JSON.stringify(event).length;
+    this._approxBytes += eventBytes;
     if (this._events.length >= MAX_EVENTS_PER_BATCH || this._approxBytes >= MAX_APPROX_BYTES_PER_BATCH) {
       runAsynchronously(() => this._flush({ keepalive: false }));
     }
@@ -306,6 +312,7 @@ export class EventTracker {
     const target = event.target;
     if (!(target instanceof Element)) return;
     if (isInsideHexclaveUi(target)) return;
+    if (this._options.ignoreClickSelector != null && target.closest(this._options.ignoreClickSelector) != null) return;
 
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
@@ -343,11 +350,6 @@ export class EventTracker {
       },
     };
 
-    // Register for dead-click classification before buffering, so a
-    // size-triggered flush from this very push already holds the click back.
-    if (this._deadClickTimer !== null && this._unclassifiedClicks.size < DEAD_CLICK_MAX_PENDING) {
-      this._unclassifiedClicks.add(clickEvent);
-    }
     this._pushEvent(clickEvent);
   };
 

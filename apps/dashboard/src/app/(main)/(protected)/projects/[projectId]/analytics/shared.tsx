@@ -16,7 +16,7 @@ import {
 } from "@phosphor-icons/react";
 import { Alert, AlertDescription, Button } from "@/components/ui";
 import { Link } from "@/components/link";
-import { useDashboardInternalUser } from "@/lib/dashboard-user";
+import { WithDashboardUserTeam } from "@/components/with-dashboard-user-team";
 import { PLAN_LIMITS, resolvePlanId } from "@hexclave/shared/dist/plans";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
@@ -366,19 +366,16 @@ function AnalyticsEventLimitBannerContent() {
   const adminApp = useAdminApp();
   const project = adminApp.useProject();
   const planUsage = adminApp.usePlanUsage();
-  const user = useDashboardInternalUser();
-  const teams = user.useTeams();
 
-  const ownerTeam = useMemo(
-    () => teams.find(t => t.id === project.ownerTeamId),
-    [teams, project.ownerTeamId],
-  );
-
-  if (!planUsage.arePlanLimitsEnforced || ownerTeam == null) {
+  if (!planUsage.arePlanLimitsEnforced) {
     return null;
   }
 
-  return <AnalyticsEventLimitBannerInner team={ownerTeam} projectId={project.id} />;
+  return (
+    <WithDashboardUserTeam teamId={project.ownerTeamId}>
+      {(ownerTeam) => ownerTeam == null ? null : <AnalyticsEventLimitBannerInner team={ownerTeam} projectId={project.id} />}
+    </WithDashboardUserTeam>
+  );
 }
 
 /**
@@ -397,19 +394,16 @@ function SessionReplayLimitBannerContent() {
   const adminApp = useAdminApp();
   const project = adminApp.useProject();
   const planUsage = adminApp.usePlanUsage();
-  const user = useDashboardInternalUser();
-  const teams = user.useTeams();
 
-  const ownerTeam = useMemo(
-    () => teams.find(t => t.id === project.ownerTeamId),
-    [teams, project.ownerTeamId],
-  );
-
-  if (!planUsage.arePlanLimitsEnforced || ownerTeam == null) {
+  if (!planUsage.arePlanLimitsEnforced) {
     return null;
   }
 
-  return <SessionReplayLimitBannerInner team={ownerTeam} />;
+  return (
+    <WithDashboardUserTeam teamId={project.ownerTeamId}>
+      {(ownerTeam) => ownerTeam == null ? null : <SessionReplayLimitBannerInner team={ownerTeam} />}
+    </WithDashboardUserTeam>
+  );
 }
 
 function SessionReplayLimitBannerInner({ team }: { team: { useItem: (itemId: string) => { quantity: number }, useProducts: () => Array<{ id: string | null, type?: string }> } }) {

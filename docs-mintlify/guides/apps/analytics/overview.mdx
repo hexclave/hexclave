@@ -55,6 +55,34 @@ After setup, Hexclave automatically captures client-side `$page-view` and `$clic
 
 See [Replays & Clickmaps](./replays-and-clickmaps) to tune replay privacy or opt out.
 
+### Filtering automatic events
+
+Use `analytics.sanitizeEvent` to transform automatic `$page-view` and `$click` events before the SDK buffers them. Return `null` to discard an event. Use `analytics.ignoreClickSelector` to exclude clicks on matching elements and their descendants.
+
+```ts
+import { HexclaveClientApp } from "@hexclave/js";
+
+const app = new HexclaveClientApp({
+  projectId: "your-project-id",
+  publishableClientKey: "your-publishable-client-key",
+  tokenStore: "cookie",
+  analytics: {
+    ignoreClickSelector: ".no-analytics",
+    sanitizeEvent(event) {
+      if (event.event_type === "$click") return null;
+      return { ...event, data: { path: event.data.path } };
+    },
+    replays: { enabled: false },
+  },
+});
+```
+
+The sanitizer only filters automatic browser events, not session replay recordings or server-side events. Configure replay masking/blocking separately, or disable replay recording as in the example. To stop all SDK-managed analytics capture, set `analytics.enabled` to `false` when constructing the app.
+
+Construct apps with a sanitizer in the client runtime. Functions cannot be serialized across a server/client boundary; the SDK rejects JSON serialization of a sanitizer rather than silently dropping it.
+
+When using an external-auth token store, the SDK skips analytics and replay uploads while signed out instead of creating an anonymous Hexclave user. Later uploads can resume once the external provider supplies a valid session.
+
 ### Tracking every page
 
 The client app only records analytics on pages where it is loaded in the browser. If your app only imports `hexclaveClientApp` on pages that use authentication, every other page goes untracked.

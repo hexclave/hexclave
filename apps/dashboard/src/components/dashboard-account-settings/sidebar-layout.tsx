@@ -16,7 +16,8 @@ export type SidebarItem = {
   contentTitle?: React.ReactNode,
 }
 
-function useHash() {
+/** The current location hash without the leading `#`, which is the `id` of the selected sidebar item. */
+export function useHash() {
   return useSyncExternalStore(
     (onStoreChange) => {
       window.addEventListener("hashchange", onStoreChange);

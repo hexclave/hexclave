@@ -111,15 +111,17 @@ Errors:
 ## Team Methods
 
 
-### listTeams()
+### listTeams(options?)
 
-Returns: Team[]
+options: same as StackServerApp.listTeams options, without userId (limit, cursor, query, orderBy, desc)
 
-GET /api/v1/teams?user_id=me [authenticated]
+Returns: Team[] & { nextCursor: string | null }
 
-Construct Team for each item.
+GET /api/v1/teams?user_id=me [authenticated], plus the query params from options
 
-Does not error.
+Construct Team for each item. See StackServerApp.listTeams for pagination and the behavior without limit.
+
+Errors: same as StackServerApp.listTeams (400 when limit is omitted and the user is in more than 500 teams).
 
 
 ### getTeam(teamId)
@@ -128,7 +130,13 @@ teamId: string
 
 Returns: Team | null
 
-Call listTeams(), find by id, return null if not found.
+Call listTeams({ query: teamId }) and return the item whose id equals teamId, or null. Filtering on the ID (rather
+than searching the unfiltered list) is required because a page holds at most 200 teams, and an unfiltered request
+without limit fails past 500 teams.
+
+React hook variant (useTeam): look in the unfiltered first page, requested as useTeams({ limit: 200 }) (never
+without limit, which would fail for users in more than 500 teams), and only fall back to useTeams({ query: teamId,
+limit: 200 }) when the team isn't there and the first page has a nextCursor.
 
 Does not error.
 

@@ -1,4 +1,4 @@
-import { OAuthUserInfo, validateUserInfo } from "../utils";
+import { OAuthUserInfo, parseEmailVerifiedClaim, validateUserInfo } from "../utils";
 import { OAuthBaseProvider, TokenSet } from "./base";
 
 export class CustomOidcProvider extends OAuthBaseProvider {
@@ -38,7 +38,7 @@ export class CustomOidcProvider extends OAuthBaseProvider {
       displayName: rawUserInfo.name ?? rawUserInfo.preferred_username ?? null,
       email: rawUserInfo.email ?? null,
       profileImageUrl: rawUserInfo.picture ?? null,
-      emailVerified: !!rawUserInfo.email_verified,
+      emailVerified: parseEmailVerifiedClaim(rawUserInfo.email_verified),
     });
   }
 

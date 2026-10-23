@@ -120,7 +120,8 @@ export const emailConfigSchema = yupObject({
 
 export const emailConfigWithoutPasswordSchema = emailConfigSchema.pick(['type', 'host', 'port', 'username', 'sender_name', 'sender_email']);
 
-const domainSchema = yupObject({
+/** A trusted domain as the projects API returns it. */
+export const projectDomainSchema = yupObject({
   domain: schemaFields.urlSchema.defined()
     .matches(/^https?:\/\//, 'URL must start with http:// or https://')
     .meta({ openapiField: { description: 'URL. Must start with http:// or https://', exampleValue: 'https://example.com' } }),
@@ -157,7 +158,7 @@ export const projectsCrudAdminReadSchema = yupObject({
     allow_team_api_keys: schemaFields.yupBoolean().defined(),
     oauth_providers: yupArray(oauthProviderReadSchema.defined()).defined(),
     enabled_oauth_providers: yupArray(enabledOAuthProviderSchema.defined()).defined().meta({ openapiField: { hidden: true } }),
-    domains: yupArray(domainSchema.defined()).defined(),
+    domains: yupArray(projectDomainSchema.defined()).defined(),
     email_config: emailConfigSchema.defined(),
     email_theme: schemaFields.emailThemeSchema.defined(),
     create_team_on_sign_up: schemaFields.projectCreateTeamOnSignUpSchema.defined(),
@@ -185,7 +186,7 @@ export const projectsCrudClientReadSchema = yupObject({
     allow_user_api_keys: schemaFields.yupBoolean().defined(),
     allow_team_api_keys: schemaFields.yupBoolean().defined(),
     enabled_oauth_providers: yupArray(enabledOAuthProviderSchema.defined()).defined().meta({ openapiField: { hidden: true } }),
-    domains: yupArray(domainSchema.defined()).defined(),
+    domains: yupArray(projectDomainSchema.defined()).defined(),
   }).defined().meta({ openapiField: { hidden: true } }),
 }).defined();
 
@@ -213,7 +214,7 @@ export const projectsCrudAdminUpdateSchema = yupObject({
     allow_team_api_keys: schemaFields.yupBoolean().optional(),
     email_config: emailConfigSchema.optional().default(undefined),
     email_theme: schemaFields.emailThemeSchema.optional(),
-    domains: yupArray(domainSchema.defined()).optional().default(undefined),
+    domains: yupArray(projectDomainSchema.defined()).optional().default(undefined),
     oauth_providers: yupArray(oauthProviderWriteSchema.defined()).optional().default(undefined),
     create_team_on_sign_up: schemaFields.projectCreateTeamOnSignUpSchema.optional(),
     team_creator_default_permissions: yupArray(teamPermissionSchema.defined()).optional(),

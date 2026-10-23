@@ -70,7 +70,7 @@ function HostedMenuItem(props: {
 function HostedUserButtonInner() {
   const user = useUser();
   const app = useStackApp();
-  const iconClassName = "h-4 w-4 text-zinc-500 transition-colors group-hover:text-foreground dark:text-zinc-400";
+  const iconClassName = "h-4 w-4 text-zinc-500 transition-colors group-hover:text-foreground dark:text-zinc-400 dark:group-hover:text-foreground";
 
   return (
     <DropdownMenu>

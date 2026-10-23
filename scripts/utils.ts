@@ -15,7 +15,7 @@ export const PLATFORMS = {
 }
 
 export const withGeneratorLock = async <T>(fn: () => Promise<T>) => {
-  const lockFilePath = path.resolve(__dirname, "../generator-lock-file.untracked.lock");
+  const lockFilePath = path.resolve(import.meta.dirname, "../generator-lock-file.untracked.lock");
   while (true) {
     try {
       fs.writeFileSync(lockFilePath, Date.now().toString(), { flag: 'wx' });

@@ -105,13 +105,17 @@ POST /api/v1/teams { display_name, profile_image_url, creator_user_id: thisUser.
 Does not error.
 
 
-### listTeams()
+### listTeams(options?)
 
-Returns: ServerTeam[]
+options: same as StackServerApp.listTeams options, without userId (limit, cursor, query, orderBy, desc)
 
-GET /api/v1/teams?user_id={userId} [server-only]
+Returns: ServerTeam[] & { nextCursor: string | null }
 
-Does not error.
+GET /api/v1/teams?user_id={userId} [server-only], plus the query params from options
+
+See StackServerApp.listTeams for pagination and the behavior without limit.
+
+Errors: same as StackServerApp.listTeams (400 when limit is omitted and the user is in more than 500 teams).
 
 
 ### getTeam(teamId)
@@ -120,7 +124,15 @@ teamId: string
 
 Returns: ServerTeam | null
 
-Find in listTeams() by id. This is deliberately scoped to the user's own team memberships (unlike the app-level getTeam), so it returns null for teams the user is not a member of.
+Call listTeams({ query: teamId }) and return the item whose id equals teamId, or null. Filtering on the ID (rather
+than searching the unfiltered list) is required because a page holds at most 200 teams, and an unfiltered request
+without limit fails past 500 teams. The React hook variant (useTeam) works like CurrentUser.useTeam.
+
+This is deliberately scoped to the user's own team memberships (unlike the app-level getTeam), so it returns null for teams the user is not a member of.
+
+React hook variant (useTeam): look in the unfiltered first page (shared with useTeams()) first, and only fall back to
+the query lookup when the team isn't there and the first page has a nextCursor. This avoids an extra request per team
+ID for the common case of fewer than 200 teams.
 
 Does not error.
 

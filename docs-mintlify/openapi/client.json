@@ -5737,9 +5737,9 @@
             "in": "query",
             "schema": {
               "type": "integer",
-              "description": "The maximum number of items to return (capped at 200)."
+              "description": "The maximum number of items to return (capped at 200). If omitted, all matching teams are returned unpaginated; this may be capped in the future, so prefer setting `limit` and following `pagination.next_cursor`."
             },
-            "description": "The maximum number of items to return (capped at 200).",
+            "description": "The maximum number of items to return (capped at 200). If omitted, all matching teams are returned unpaginated; this may be capped in the future, so prefer setting `limit` and following `pagination.next_cursor`.",
             "required": false
           },
           {

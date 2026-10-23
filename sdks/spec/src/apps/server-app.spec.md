@@ -195,20 +195,35 @@ Does not error.
 
 Arguments:
   options.userId: string? - filter by user membership
+  options.limit: number? - max results, 1 to 200. If omitted, all teams are returned, but the backend returns 400 when more than 500 teams match. Do not substitute a default; send limit only when the caller passed one.
+  options.cursor: string? - nextCursor of the previous page. Requires limit (the backend returns 400 otherwise).
+  options.query: string? - free-text search; exact match on team ID (if it is a UUID), substring match on display name
+  options.orderBy: "createdAt"? - sort field (sent as order_by=created_at)
+  options.desc: bool? - descending order (default ascending)
 
-Returns: ServerTeam[]
+Returns: ServerTeam[] & { nextCursor: string | null }
 
 Request:
   GET /api/v1/teams [server-only]
-  Query params: user_id?
-
-Note: This endpoint does NOT support pagination parameters like limit/cursor.
-Use optional user_id filter to get teams a specific user belongs to.
+  Query params: user_id?, limit?, cursor?, query?, order_by?, desc?
 
 Response:
-  { items: [ServerTeamCrud, ...] }
+  {
+    items: [ServerTeamCrud, ...],
+    is_paginated: bool,
+    pagination?: { next_cursor: string | null }
+  }
 
-Does not error.
+nextCursor is pagination.next_cursor, or null if absent. Treat it as opaque (pass it back unchanged); it stays valid
+even if the team it was derived from is deleted later, so cached pages can be refetched after any team mutation. Without limit, the backend returns every
+matching team with is_paginated: false and no pagination, as long as at most 500 teams match; past that it returns
+400. Implementations should still read pagination.next_cursor whenever it is present.
+Languages that can't attach a property to an array may instead expose listTeams() returning only the items, plus a
+page-returning variant (e.g. Swift's listTeamsPage, returning { items, nextCursor }).
+
+Errors:
+  400 Bad Request: limit was omitted and more than 500 teams match. Surface it to the caller; don't retry with a
+  default limit, as that would silently truncate the list.
 
 
 ## createTeam(options)
