@@ -115,6 +115,12 @@ export type StackClientApp<HasTokenStore extends boolean = boolean, ProjectId ex
     acceptTeamInvitation(code: string): Promise<Result<undefined, KnownErrors["VerificationCodeError"] | KnownErrors["TeamInvitationEmailMismatch"]>>,
     getTeamInvitationDetails(code: string): Promise<Result<{ teamDisplayName: string }, KnownErrors["VerificationCodeError"] | KnownErrors["TeamInvitationEmailMismatch"]>>,
     verifyEmail(code: string): Promise<Result<undefined, KnownErrors["VerificationCodeError"]>>,
+    /**
+     * Pass `requirePasswordIfSet: true` to make the verification fail with `EmailVerificationRequiresPassword`
+     * if the account has a password (unless the current user is that account), then retry with `password`.
+     * This stops someone from signing up with another person's e-mail and having them verify it.
+     */
+    verifyEmail(code: string, options: { requirePasswordIfSet?: boolean, password?: string }): Promise<Result<undefined, KnownErrors["VerificationCodeError"] | KnownErrors["EmailVerificationRequiresPassword"] | KnownErrors["PasswordConfirmationMismatch"]>>,
     signInWithMagicLink(code: string, options?: { noRedirect?: boolean }): Promise<Result<undefined, KnownErrors["VerificationCodeError"] | KnownErrors["InvalidTotpCode"]>>,
     signInWithMfa(otp: string, code: string, options?: { noRedirect?: boolean }): Promise<Result<undefined, KnownErrors["VerificationCodeError"] | KnownErrors["InvalidTotpCode"]>>,
 

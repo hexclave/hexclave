@@ -4,9 +4,11 @@ import { getSoleTenancyFromProjectBranch } from "@/lib/tenancies";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createVerificationCodeHandler } from "@/route-handlers/verification-code-handler";
 import { VerificationCodeType } from "@/generated/prisma/client";
+import { KnownErrors } from "@hexclave/shared";
 import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
-import { emailSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { emailSchema, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { comparePassword } from "@hexclave/shared/dist/utils/hashes";
 
 export const contactChannelVerificationCodeHandler = createVerificationCodeHandler({
   metadata: {
@@ -28,6 +30,40 @@ export const contactChannelVerificationCodeHandler = createVerificationCodeHandl
   method: yupObject({
     email: emailSchema.defined(),
   }),
+  requestBody: yupObject({
+    // Anyone can sign up with someone else's e-mail and a password of their choice, then hope that the
+    // real owner clicks the verification link we send them. To stop that, clients can ask us to require
+    // the account's password before verifying. This is opt-in so older clients keep working.
+    require_password_if_set: yupBoolean().optional(),
+    password: yupString().optional(),
+  }),
+  async validate(tenancy, method, data, body, user) {
+    if (!body.require_password_if_set && body.password === undefined) {
+      return;
+    }
+    // Someone signed in as this account already proved they own it
+    if (user?.id === data.user_id) {
+      return;
+    }
+
+    const prisma = await getPrismaClientForTenancy(tenancy);
+    const passwordAuthMethod = await prisma.passwordAuthMethod.findFirst({
+      where: {
+        tenancyId: tenancy.id,
+        projectUserId: data.user_id,
+      },
+    });
+    if (!passwordAuthMethod) {
+      return;
+    }
+
+    if (body.password === undefined) {
+      throw new KnownErrors.EmailVerificationRequiresPassword();
+    }
+    if (!await comparePassword(body.password, passwordAuthMethod.passwordHash)) {
+      throw new KnownErrors.PasswordConfirmationMismatch();
+    }
+  },
   response: yupObject({
     statusCode: yupNumber().oneOf([200]).defined(),
     bodyType: yupString().oneOf(["success"]).defined(),

@@ -809,16 +809,18 @@ Errors:
     message: "The MFA code is incorrect."
 
 
-## verifyEmail(code)
+## verifyEmail(code, options?)
 
 Arguments:
   code: string - from email verification link
+  options.requirePasswordIfSet: bool? - if the account has a password and the current user isn't that account, fail with EmailVerificationRequiresPassword unless options.password is given. Built-in verification pages always pass true, so that someone who signed up with another person's email can't get them to verify it
+  options.password: string? - the account's password; checked whenever it is given
 
 Returns: void
 
 Request:
-  POST /api/v1/contact-channels/verify
-  Body: { code: string }
+  POST /api/v1/contact-channels/verify [authenticated if signed in]
+  Body: { code: string, require_password_if_set?: bool, password?: string }
 
 Implementation:
 1. Send request
@@ -828,6 +830,12 @@ Errors:
   VerificationCodeError
     code: "verification_code_error"
     message: "The verification code is invalid or expired."
+  EmailVerificationRequiresPassword
+    code: "email_verification_requires_password"
+    message: "This account has a password. Enter the account's password to verify this e-mail."
+  PasswordConfirmationMismatch
+    code: "password_confirmation_mismatch"
+    message: "Passwords do not match."
 
 
 ## acceptTeamInvitation(code, options?)
