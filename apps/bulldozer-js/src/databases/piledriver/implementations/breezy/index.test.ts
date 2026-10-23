@@ -159,6 +159,30 @@ describe("Breezy Piledriver", () => {
     }
   });
 
+  it("saves heap objects containing very wide arrays and objects", async () => {
+    // A million items is far past the ~130k elements that once overflowed the stack on Node's main
+    // thread, and still past the limit inside vitest's worker threads, which have a larger stack.
+    const width = 1_000_000;
+    const wideArray = new Array<number>(width).fill(0);
+    const wideObject = Object.fromEntries(wideArray.map((value, index) => [`k${index}`, value]));
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const database = declareBreezyPiledriverDatabase({ path, dbId: crypto.randomUUID() });
+    try {
+      for (const wide of [wideArray, wideObject]) {
+        const rootKey = new TextEncoder().encode("root").buffer;
+        await database.setRootObject(rootKey, asHeapObject({ wide }));
+        const { object } = await database.getRootObject(rootKey);
+        if (typeof object !== "object" || object === null || !(isPiledriverHeapObjectSymbol in object)) {
+          throw new Error("Expected a heap object root");
+        }
+        expect(await object.get()).toEqual({ wide });
+      }
+    } finally {
+      await database.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("persists directly published heap objects before reporting the root consistent", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };

@@ -40,9 +40,9 @@ export function plannedHeapReferenceKeys(value: PlannedPiledriverObject): ArrayB
     if (isPlannedHeapReferenceSymbol in node) {
       references.push(node.key);
     } else if (Array.isArray(node)) {
-      pending.push(...node);
+      for (const child of node) pending.push(child);
     } else {
-      pending.push(...Object.values(node));
+      for (const child of Object.values(node)) pending.push(child);
     }
   }
   return references;
