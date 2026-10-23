@@ -126,6 +126,39 @@ describe("Breezy Piledriver", () => {
     }
   });
 
+  it("leaves no partial writes behind when LMDB throws midway through a root write", async () => {
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    // LMDB rejects keys over 1978 bytes, but only when the root itself is written, which is after
+    // the write has already bumped `child`'s reference count. If that bump survived the failure,
+    // `child` would look referenced forever (or, in the mirror case, unreferenced while still live).
+    const tooLongRootKey = new Uint8Array(2000).fill(1).buffer;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const child = asHeapObject({ value: "child" });
+    await writer.setRootObject(rootKey, { child });
+    // Matching LMDB's message makes sure the write got as far as the root put; an earlier
+    // validation error would make this test pass without exercising the rollback.
+    await expect(writer.setRootObject(tooLongRootKey, { child })).rejects.toThrow("maximum key size");
+    await writer.deleteRootObject(rootKey);
+    await writer.close();
+
+    // GC only collects garbage from before the current process started, so "restart" first.
+    const cutoff = Date.now() + 1;
+    const collector = declareBreezyPiledriverDatabase(lmdbOptions, {
+      garbageCollectionProcessStartedAtMillis: cutoff + 1,
+    });
+    try {
+      // Nothing references `child` anymore, so it must be collected.
+      const result = await collector.collectGarbage(cutoff);
+      expect(result.objects.deleted).toBe(1);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(0);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
   it("persists directly published heap objects before reporting the root consistent", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };

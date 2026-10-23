@@ -142,8 +142,20 @@ export function declareBreezyPiledriverDatabase(
     if (existing === undefined) deltas.set(id, { key, count });
     else existing.count += count;
   };
+  /**
+   * Runs `action` as one all-or-nothing LMDB transaction.
+   *
+   * We use `childTransaction` because it is the only async lmdb-js transaction that rolls back when
+   * the callback throws. Plain `transaction()` keeps every write made before the throw, so an error
+   * after a refcount write but before the root write would leave refcounts that disagree with the
+   * root, and GC could later delete live data. `transactionSync()` also rolls back, but it commits on
+   * the main thread and stalled the server for seconds under load.
+   *
+   * lmdb-js disables `childTransaction` when `useWritemap` or caching is on, so Breezy can't enable
+   * either without replacing this rollback guarantee.
+   */
   const transact = async (action: (version: number, writes: Promise<boolean>[]) => void) => {
-    const transaction = await lmdbRoot.transaction(() => {
+    const transaction = await lmdbRoot.childTransaction(() => {
       const version = lmdbRoot.getWriteTxnId();
       const pending: Promise<boolean>[] = [];
       action(version, pending);
