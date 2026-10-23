@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as lmdb from "lmdb";
+import { wait } from "@hexclave/shared/dist/utils/promises";
 import { describe, expect, it } from "vitest";
 import { declareLmdbLowLevelDatabase } from "./lmdb.js";
 
@@ -391,6 +392,95 @@ describe("LMDB low-level database", () => {
       expect(text((await store.get(buffer("parent"))).buffer)).toBe("first");
       expect(text((await store.get(buffer("child"))).buffer)).toBe("second");
     } finally {
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("commits a batch whose writes require a very deep shared combined-seq chain", async () => {
+    // Piledriver GC's pattern: every write requires `latest`, then `latest = combineSeqs(latest, write)`.
+    // Deep enough to overflow the stack with a recursive walk, and O(writes × depth) with per-write walks.
+    const path = await tempLmdbPath();
+    const db = declareLmdbLowLevelDatabase({ path, dbId: "deep-chain" });
+    try {
+      const store = db.declareKvStore("store");
+      const beforeVersion = db.getDebugInfo().currentVersion;
+      const writeCount = 20_000;
+
+      let latest = db.initialSeq;
+      for (let i = 0; i < writeCount; i++) {
+        const { seq } = await store.setAll([{ key: buffer(`key-${i}`), value: buffer(`value-${i}`) }], { requiresSeq: latest });
+        latest = db.combineSeqs(latest, seq);
+      }
+      await db.waitUntilAvailable(latest);
+
+      expect(db.getDebugInfo().currentVersion).toBe(beforeVersion + 1);
+      expect(text((await store.get(buffer("key-0"))).buffer)).toBe("value-0");
+      expect(text((await store.get(buffer(`key-${writeCount - 1}`))).buffer)).toBe(`value-${writeCount - 1}`);
+    } finally {
+      await db.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("holds a batch until a still-pending dependency from an earlier batch, reached through several combined seqs, commits", async () => {
+    const path = await tempLmdbPath();
+    const db = declareLmdbLowLevelDatabase({ path, dbId: "pending-outside-dependency" });
+    // Hold the first LMDB transaction (the batch containing `earlier`) until the test releases it,
+    // so `earlier` is still pending, and outside the batch, when the dependent writes are committed.
+    const root = db.getDebugInfo().root;
+    const originalTransaction = root.transaction.bind(root);
+    const firstTransaction = {
+      started: (): void => { throw new Error("first transaction started before its promise was created"); },
+      release: (): void => { throw new Error("first transaction released before its promise was created"); },
+    };
+    const firstTransactionStarted = new Promise<void>(resolve => {
+      firstTransaction.started = resolve;
+    });
+    const firstTransactionReleased = new Promise<void>(resolve => {
+      firstTransaction.release = resolve;
+    });
+    let transactionCount = 0;
+    root.transaction = async <T>(action: () => T) => {
+      if (transactionCount++ === 0) {
+        firstTransaction.started();
+        await firstTransactionReleased;
+      }
+      return await originalTransaction(action);
+    };
+    try {
+      const store = db.declareKvStore("store");
+      const beforeVersion = db.getDebugInfo().currentVersion;
+
+      const earlier = await store.setAll([{ key: buffer("earlier"), value: buffer("earlier") }]);
+      await firstTransactionStarted;
+
+      const sibling = await store.setAll([{ key: buffer("sibling"), value: buffer("sibling") }]);
+      const left = db.combineSeqs(earlier.seq, sibling.seq);
+      const right = db.combineSeqs(sibling.seq, earlier.seq);
+      const first = await store.setAll([{ key: buffer("first"), value: buffer("first") }], { requiresSeq: db.combineSeqs(left, right) });
+      const second = await store.setAll([{ key: buffer("second"), value: buffer("second") }], { requiresSeq: left });
+      let dependentsAvailable = false;
+      const dependentsAvailability = db.waitUntilAvailable(db.combineSeqs(first.seq, second.seq)).then(() => {
+        dependentsAvailable = true;
+      });
+
+      // Several flush intervals: the dependents' batch must still be waiting on `earlier`.
+      await wait(100);
+      expect(dependentsAvailable).toBe(false);
+      expect(transactionCount).toBe(1);
+      expect((await store.get(buffer("first"))).buffer).toBeNull();
+      expect((await store.get(buffer("second"))).buffer).toBeNull();
+
+      firstTransaction.release();
+      await dependentsAvailability;
+      expect(db.getDebugInfo().currentVersion).toBe(beforeVersion + 2);
+      expect(text((await store.get(buffer("earlier"))).buffer)).toBe("earlier");
+      expect(text((await store.get(buffer("first"))).buffer)).toBe("first");
+      expect(text((await store.get(buffer("second"))).buffer)).toBe("second");
+    } finally {
+      // close() drains pending commits, so a failed assertion above must not leave the first one held.
+      firstTransaction.release();
+      await db.close();
       await rm(path, { recursive: true, force: true });
     }
   });
