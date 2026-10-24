@@ -183,6 +183,39 @@ describe("Breezy Piledriver", () => {
     }
   }, 60_000);
 
+  it("saves a deep chain of new heap objects created in one write", async () => {
+    // Recursive planning overflowed at ~750 levels on Node's main thread and ~5.6k inside vitest.
+    const depth = 20_000;
+    let chain = asHeapObject({ leaf: true });
+    for (let i = 0; i < depth; i++) chain = asHeapObject({ next: chain });
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(rootKey, chain);
+    await writer.close();
+
+    // Read back from a fresh instance so the values come from LMDB, not the writer's heap cache.
+    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    try {
+      let node = (await reader.getRootObject(rootKey)).object;
+      let levels = 0;
+      while (typeof node === "object" && node !== null && isPiledriverHeapObjectSymbol in node) {
+        const value = await node.get();
+        if (typeof value !== "object" || value === null || !("next" in value)) {
+          expect(value).toEqual({ leaf: true });
+          break;
+        }
+        node = value.next;
+        levels++;
+      }
+      expect(levels).toBe(depth);
+    } finally {
+      await reader.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("persists directly published heap objects before reporting the root consistent", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
