@@ -7,6 +7,7 @@ import { declareInstantAvailabilityLowLevelDatabase } from "../low-level/impleme
 import { declareLmdbLowLevelDatabase } from "../low-level/implementations/lmdb.js";
 import type { DatabaseSeq } from "../index.js";
 import { declareBasePiledriverDatabase } from "../piledriver/implementations/base.js";
+import { declareBufferedPiledriverDatabase } from "../piledriver/implementations/buffered.js";
 import { declareInMemoryPiledriverDatabase } from "../piledriver/implementations/in-memory.js";
 import type { PiledriverObject } from "../piledriver/index.js";
 import { ConcatTreeList } from "../piledriver/data-structures/concat-tree-list.js";
@@ -60,6 +61,33 @@ const rows = (snapshot: Awaited<ReturnType<typeof initializedSnapshot>>, tableId
   asRows(snapshot.listRowsInGroup({ tableId, groupKey, range }));
 const set = async (snapshot: Awaited<ReturnType<typeof initializedSnapshot>>, tableId: string, rowIdentifier: string, newRowData: PiledriverObject | undefined) =>
   (await snapshot.setOrDeleteRow({ tableId, rowIdentifier, newRowData })).newSnapshot;
+
+describe("Bulldozer row validation", () => {
+  it("rejects rows Piledriver can't save before they reach the snapshot, so later writes still save", async () => {
+    // Prod buffers Piledriver writes in memory. A bad row that got into that in-memory state would
+    // make every later save fail too (each write builds on the previous state), so it must be
+    // rejected here, before any state changes.
+    const db = declareBulldozerDatabase(declareBufferedPiledriverDatabase(declareInMemoryPiledriverDatabase(crypto.randomUUID())), {
+      migrations: [[{ type: "initTable", tableId: "store", table: defineStoredTable(), inputTables: {} }]],
+    });
+    await db.applyRemainingMigrations();
+    // Reflect.set stores the value without the type checker seeing it, like a cast would.
+    const rowWith = (value: unknown) => {
+      const row: { [key: string]: PiledriverObject } = {};
+      Reflect.set(row, "field", value);
+      return row;
+    };
+    await expect(db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "bad", newRowData: rowWith(new Date(0)) })))
+      .rejects.toThrow("Cannot save a value of type Date");
+    await expect(db.withSnapshotConsistent(s => s.setOrDeleteRows({ tableId: "store", rows: [{ rowIdentifier: "bad-batch", newRowData: rowWith(1n) }] })))
+      .rejects.toThrow("Cannot save a value of type bigint");
+
+    await db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "good", newRowData: { field: "ok" } }));
+    const { snapshot } = await db.getSnapshot();
+    expect((await rows(snapshot, "store")).map(row => row.rowIdentifier)).toEqual(["good"]);
+    await db.close();
+  });
+});
 
 describe.each(["base", "in-memory"] as const)("Bulldozer (%s)", backend => {
   it("persists an empty snapshot for zero migrations", async () => {

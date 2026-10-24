@@ -1,5 +1,6 @@
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { isPiledriverHeapObjectSymbol, PiledriverHeapObject, PiledriverObject } from "../../index.js";
+import { cannotSaveError, unsavableTypeName } from "../../savable-values.js";
 import { plannedHeapReference, PlannedPiledriverObject } from "./codec.js";
 
 export type PlannedHeapObject = {
@@ -87,6 +88,9 @@ export function planHeapObjects<Dependency>(
     newHeapObjectsFound: PiledriverHeapObject[],
     plainObjectsOnCurrentPath: Set<object>,
   ): PlannedPiledriverObject => {
+    // A backstop for writes that don't come through Bulldozer's checked entry points.
+    const unsavableType = unsavableTypeName(value);
+    if (unsavableType !== null) throw cannotSaveError(unsavableType);
     if (value === null || typeof value !== "object") return value;
     if (isPiledriverHeapObjectSymbol in value) return keyReferenceFor(value, newHeapObjectsFound);
 

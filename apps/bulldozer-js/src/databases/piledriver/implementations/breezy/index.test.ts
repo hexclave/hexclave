@@ -254,6 +254,46 @@ describe("Breezy Piledriver", () => {
     }
   });
 
+  it("rejects values that can't be saved as JSON instead of silently changing them", async () => {
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const database = declareBreezyPiledriverDatabase({ path, dbId: crypto.randomUUID() });
+    const rootKey = new TextEncoder().encode("root").buffer;
+    // Callers can pass these despite the types (e.g. through a cast or untyped JSON handling). Each
+    // one used to be silently dropped, saved as `{}`, or fail later with a confusing TypeError.
+    const invalidValues = new Map<string, unknown>([
+      ["a function", () => "f"],
+      ["undefined", undefined],
+      ["a bigint", 1n],
+      ["a symbol", Symbol("s")],
+      ["an array with a hole", [1, , 3]],
+      ["a Date", new Date(0)],
+      ["a Map", new Map([["k", 1]])],
+      ["a class instance", new (class Point { x = 1; })()],
+    ]);
+    try {
+      for (const [description, invalid] of invalidValues) {
+        // Reflect.set stores the value without the type checker seeing it, like a cast would.
+        const value: { [key: string]: PiledriverObject } = {};
+        Reflect.set(value, "field", invalid);
+        await expect(database.setRootObject(rootKey, asHeapObject(value)), description).rejects.toThrow("Cannot save");
+        await expect(database.getRootObject(rootKey), description).rejects.toThrow("Root object not found");
+      }
+
+      // Objects without a prototype are still plain JSON-like data.
+      const withoutPrototype: { [key: string]: PiledriverObject } = Object.create(null);
+      withoutPrototype.field = "ok";
+      await database.setRootObject(rootKey, asHeapObject(withoutPrototype));
+      const { object } = await database.getRootObject(rootKey);
+      if (typeof object !== "object" || object === null || !(isPiledriverHeapObjectSymbol in object)) {
+        throw new Error("Expected a heap object root");
+      }
+      expect(await object.get()).toEqual({ field: "ok" });
+    } finally {
+      await database.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
   it("persists directly published heap objects before reporting the root consistent", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };

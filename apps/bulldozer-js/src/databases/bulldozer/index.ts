@@ -8,6 +8,7 @@ import { AugmentedTreeMap, AugmentedTreeMultiMap } from "../piledriver/data-stru
 import { ConcatTreeList } from "../piledriver/data-structures/concat-tree-list.js";
 import { PiledriverGarbageCollectionResult } from "../piledriver/gc.js";
 import { isPiledriverHeapObjectSymbol, PiledriverDatabase, PiledriverDatabaseDebugSnapshot, PiledriverObject, piledriverObjectEquals } from "../piledriver/index.js";
+import { assertSavable } from "../piledriver/savable-values.js";
 
 // Code-unit comparison; localeCompare would persist trees whose order depends on the runtime locale.
 function compareStrings(a: string, b: string) {
@@ -583,6 +584,9 @@ class BulldozerDatabaseSnapshot {
     if (!(options.tableId in this.tablesState.tables)) throw new Error(`Table ${options.tableId} does not exist`);
     const setOrDeleteRow = this.tablesState.tables[options.tableId].table.setOrDeleteRow;
     if (!setOrDeleteRow) throw new Error("Table is not mutable");
+    // Reject unsavable rows before they enter any snapshot: with the buffered Piledriver wrapper, a
+    // row that only fails later, while saving, stays in memory and makes every later save fail too.
+    if (options.newRowData !== undefined) assertSavable(options.newRowData);
 
     const result = await this._applyTableMutation({
       operation: "setOrDeleteRow",
@@ -652,6 +656,8 @@ class BulldozerDatabaseSnapshot {
     for (const row of options.rows) {
       if (seenIdentifiers.has(row.rowIdentifier)) throw new Error(`Duplicate row identifier ${row.rowIdentifier} in batch for table ${options.tableId}`);
       seenIdentifiers.add(row.rowIdentifier);
+      // Same as setOrDeleteRow: reject unsavable rows before any snapshot contains them.
+      if (row.newRowData !== undefined) assertSavable(row.newRowData);
     }
 
     const result = await this._applyTableMutation({
