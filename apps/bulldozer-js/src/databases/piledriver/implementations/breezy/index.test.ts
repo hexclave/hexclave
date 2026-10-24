@@ -1,11 +1,13 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import * as lmdb from "lmdb";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { declareLmdbLowLevelDatabase } from "../../../low-level/implementations/lmdb.js";
 import type { LowLevelKvStore } from "../../../low-level/index.js";
-import { asHeapObject, isPiledriverHeapObjectSymbol, type PiledriverDatabase } from "../../index.js";
+import { asHeapObject, isPiledriverHeapObjectSymbol, type PiledriverDatabase, type PiledriverObject } from "../../index.js";
 import { declareBreezyPiledriverDatabase } from "./index.js";
 
 const parseJson = (value: ArrayBuffer) => JSON.parse(new TextDecoder().decode(value));
@@ -215,6 +217,42 @@ describe("Breezy Piledriver", () => {
       await rm(path, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it("packs newly written heap objects densely into LMDB pages", async () => {
+    // LMDB keeps keys sorted in fixed-size pages. Inserting a key that belongs in the middle of a full
+    // page splits it into two half-empty pages, so out-of-order inserts waste disk on prod's ~300 GiB
+    // file. A tree with fanout 4 has parents and children interleaved in key order, like real writes.
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const dbId = crypto.randomUUID();
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const tree = (depth: number): PiledriverObject => asHeapObject(depth === 0
+      ? { leaf: "x".repeat(40) }
+      : { children: Array.from({ length: 4 }, () => tree(depth - 1)) });
+    const writer = declareBreezyPiledriverDatabase({ path, dbId });
+    await writer.setRootObject(rootKey, tree(6));
+    await writer.close();
+
+    const environment = lmdb.open({ path, maxDbs: 1024 });
+    try {
+      const heapStore = environment.openDB<Buffer, Buffer>({ name: `${dbId}:dump:heap`, encoding: "binary", keyEncoding: "binary", useVersions: true });
+      const stats = heapStore.getStats();
+      const numberStat = (name: string) => {
+        const value: unknown = Reflect.get(stats, name);
+        return typeof value === "number" ? value : throwErr(`LMDB stats are missing ${name}`);
+      };
+      // Each LMDB entry also takes an 8-byte node header and a 2-byte slot, and each page a 16-byte
+      // header, so a perfectly packed page is 100% full by this measure.
+      let usedBytes = 0;
+      for (const { key, value } of heapStore.getRange()) usedBytes += key.byteLength + value.byteLength + 10;
+      expect(numberStat("entryCount")).toBe(5461);
+      const leafPageFill = usedBytes / (numberStat("treeLeafPageCount") * (numberStat("pageSize") - 16));
+      // Measured: ~0.50 when inserting in planner order, ~0.91 when inserting in key order.
+      expect(leafPageFill).toBeGreaterThan(0.75);
+    } finally {
+      await environment.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
 
   it("persists directly published heap objects before reporting the root consistent", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));

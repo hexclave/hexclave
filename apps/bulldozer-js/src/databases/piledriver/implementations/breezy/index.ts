@@ -13,6 +13,18 @@ import { planHeapObjects } from "./heap-plan.js";
 const breezyPiledriverProcessStartedAtMillis = Date.now();
 const gcSchemaVersion = 3;
 
+/**
+ * Returns `items` sorted by their LMDB key, for writing in that order.
+ *
+ * LMDB keeps keys sorted in fixed-size pages. A key that belongs in the middle of a full page splits
+ * it into two half-empty pages, while keys arriving in ascending order just fill the last page. The
+ * planner reserves keys parents-first but saves children first, so unsorted writes left heap pages
+ * about half empty. Write order inside one transaction doesn't change what is committed.
+ */
+const ascendingByKey = <T>(items: T[], keyOf: (item: T) => Uint8Array) => {
+  return [...items].sort((a, b) => Buffer.compare(keyOf(a), keyOf(b)));
+};
+
 export type BreezyPiledriverLmdbOptions = { path: string, dbId?: string, compression?: boolean };
 export type BreezyPiledriverDatabaseOptions = { disableHeapReadCache?: boolean, garbageCollectionProcessStartedAtMillis?: number };
 
@@ -218,7 +230,7 @@ export function declareBreezyPiledriverDatabase(
       });
       if (previous !== null && previous.referenceCount !== 0 && referenceCount === 0) becameZero++;
     }
-    for (const change of changes) {
+    for (const change of ascendingByKey(changes, change => change.key)) {
       writes.push(lmdbMetadata.put(change.key, change.value, version));
       if (change.candidateToAdd !== null) writes.push(lmdbCandidates.put(change.candidateToAdd, Buffer.alloc(0), version));
       if (change.candidateToRemove !== null) writes.push(lmdbCandidates.remove(change.candidateToRemove));
@@ -238,7 +250,9 @@ export function declareBreezyPiledriverDatabase(
         if (lmdbHeap.doesExist(Buffer.from(object.key))) throw new Error("Reserved Piledriver heap key already exists");
       }
       changeReferenceDeltas(deltas.values(), null, transactionVersion, writes);
-      for (const object of objects) writes.push(lmdbHeap.put(Buffer.from(object.key), Buffer.from(object.buffer), transactionVersion));
+      for (const object of ascendingByKey(objects, object => new Uint8Array(object.key))) {
+        writes.push(lmdbHeap.put(Buffer.from(object.key), Buffer.from(object.buffer), transactionVersion));
+      }
     });
     return toSeq(version);
   };
