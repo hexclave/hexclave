@@ -210,17 +210,19 @@ export function declareBreezyPiledriverDatabase(
     let becameZero = 0;
     const changes: Array<{ key: Buffer, value: Buffer, candidateToAdd: Buffer | null, candidateToRemove: Buffer | null }> = [];
     for (const { key, count } of deltas) {
-      if (count === 0) continue;
+      const isCreatedByThisWrite = heapKeysCreatedByThisWrite.has(encodeBase64(new Uint8Array(key)));
+      // A zero delta changes nothing, except for a new object: it still needs its record.
+      if (count === 0 && !isCreatedByThisWrite) continue;
       const metadataKey = Buffer.from(key);
       const stored = lmdbMetadata.get(metadataKey);
       const previous = stored === undefined ? null : parseMetadata(stored);
-      // Breezy creates a record the first time something points at a new object, so a missing record
+      // Breezy creates a record in the same transaction that saves a new object, so a missing record
       // is expected only for objects this write created. Any other object without a record (or with
       // one from an older GC generation) was saved before refcount GC existed and its true count is
       // unknown. Like base's "legacy-immortal" rule, skip it so it's never deleted: a count started
       // here could reach zero while older parents still point at it.
       const isLegacyObject = previous === null
-        ? !heapKeysCreatedByThisWrite.has(encodeBase64(new Uint8Array(key)))
+        ? !isCreatedByThisWrite
         : previous.generation !== activeGcGeneration();
       if (isLegacyObject) continue;
       if (previous === null && count < 0) throw new Error("Assertion error: Piledriver GC cannot decrement a heap object created by the same write");
@@ -232,10 +234,13 @@ export function declareBreezyPiledriverDatabase(
       const replacement: ReferenceMetadata = previous === null
         ? { schemaVersion: gcSchemaVersion, generation: activeGcGeneration(), referenceCount, createdAtMillis, lastDereferencedAtMillis, deletion: null }
         : { ...previous, referenceCount, lastDereferencedAtMillis };
+      // A new object that starts at zero is one only the root will point at. It becomes a GC
+      // candidate right away, so if the root write fails it's collected like any other garbage.
+      const becomesCandidate = referenceCount === 0 && (previous === null || previous.referenceCount !== 0);
       changes.push({
         key: metadataKey,
         value: Buffer.from(JSON.stringify(replacement)),
-        candidateToAdd: previous !== null && previous.referenceCount !== 0 && referenceCount === 0 ? candidateKey(key, lastDereferencedAtMillis ?? previous.createdAtMillis) : null,
+        candidateToAdd: becomesCandidate ? candidateKey(key, lastDereferencedAtMillis ?? replacement.createdAtMillis) : null,
         candidateToRemove: previous?.referenceCount === 0 && referenceCount !== 0 ? candidateKey(key, previous.lastDereferencedAtMillis ?? previous.createdAtMillis) : null,
       });
       if (previous !== null && previous.referenceCount !== 0 && referenceCount === 0) becameZero++;
@@ -250,6 +255,9 @@ export function declareBreezyPiledriverDatabase(
   const publishHeapObjects = async (objects: Array<{ key: ArrayBuffer, buffer: ArrayBuffer, referenceKeys: ArrayBuffer[] }>) => {
     if (objects.length === 0) return initialSeq;
     const deltas = new Map<string, ReferenceDelta>();
+    // Every new object gets its record here, in the same transaction that saves it. A zero delta
+    // creates the record for objects nothing new points at; the root write then adds its reference.
+    for (const object of objects) addReferenceDelta(deltas, object.key, 0);
     for (const object of objects) for (const key of object.referenceKeys) addReferenceDelta(deltas, key, 1);
     const version = await transact((transactionVersion, writes) => {
       const heapKeys = new Set<string>();
@@ -266,12 +274,12 @@ export function declareBreezyPiledriverDatabase(
     });
     return toSeq(version);
   };
-  const mutateRoot = async (key: ArrayBuffer, next: ArrayBuffer | null, previous: ArrayBuffer | null, dereferencedAtMillis: number, heapKeysCreatedByThisWrite: ReadonlySet<string>) => {
+  const mutateRoot = async (key: ArrayBuffer, next: ArrayBuffer | null, previous: ArrayBuffer | null, dereferencedAtMillis: number) => {
     const deltas = new Map<string, ReferenceDelta>();
     for (const [id, reference] of aggregateSerializedReferences(next)) deltas.set(id, { ...reference });
     for (const reference of aggregateSerializedReferences(previous).values()) addReferenceDelta(deltas, reference.key, -reference.count);
     const version = await transact((transactionVersion, writes) => {
-      changeReferenceDeltas(deltas.values(), dereferencedAtMillis, transactionVersion, writes, heapKeysCreatedByThisWrite);
+      changeReferenceDeltas(deltas.values(), dereferencedAtMillis, transactionVersion, writes, noHeapKeysCreated);
       writes.push(next === null ? lmdbRoots.remove(Buffer.from(key)) : lmdbRoots.put(Buffer.from(key), Buffer.from(next), transactionVersion));
     });
     return { seq: toSeq(version) };
@@ -294,8 +302,8 @@ export function declareBreezyPiledriverDatabase(
    * Plans the complete graph, then publishes every newly created heap object atomically.
    *
    * Planning replaces heap objects with key-only references, so serialization performs no cache
-   * lookups or IO. A crash before the root is published may leak the unreachable subgraph; that
-   * deliberate tradeoff keeps the normal publication path small and fast.
+   * lookups or IO. If the root write then fails, the new objects are already GC candidates, so the
+   * next GC after a restart collects them.
    */
   const serializeAndPublish = async (value: PiledriverObject) => {
     const plan = planHeapObjects(
@@ -317,10 +325,7 @@ export function declareBreezyPiledriverDatabase(
     for (const item of plan.heapObjects) {
       heapCache.remember(item.object, { key: item.key, seq: publishedSeq });
     }
-    return {
-      serializedRoot: serializeKnown(plan.root),
-      createdHeapKeys: new Set(plan.heapObjects.map(item => encodeBase64(new Uint8Array(item.key)))),
-    };
+    return serializeKnown(plan.root);
   };
 
   const readPreviousRoot = async (key: ArrayBuffer) => {
@@ -436,13 +441,12 @@ export function declareBreezyPiledriverDatabase(
       return await withMutationLock(async () => {
         await initializeGc();
         const previous = await readPreviousRoot(key);
-        const { serializedRoot, createdHeapKeys } = await serializeAndPublish(value);
+        const serializedRoot = await serializeAndPublish(value);
         const written = await mutateRoot(
           key,
           serializedRoot,
           previous.buffer,
           Math.max(Date.now(), processStartedAtMillis),
-          createdHeapKeys,
         );
         lastRootWriteSeq = written.seq;
         return written;
@@ -457,7 +461,6 @@ export function declareBreezyPiledriverDatabase(
           null,
           previous.buffer,
           Math.max(Date.now(), processStartedAtMillis),
-          noHeapKeysCreated,
         );
         lastRootWriteSeq = deleted.seq;
         return deleted;

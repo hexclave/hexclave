@@ -337,6 +337,38 @@ describe("Breezy Piledriver", () => {
     }
   });
 
+  it("collects the new heap objects of a root write that failed after saving them", async () => {
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const keptRootKey = new TextEncoder().encode("kept").buffer;
+    const reusedRootKey = new TextEncoder().encode("reused").buffer;
+    // Too long for LMDB, so the write fails only at the root put, after its new heap objects are saved.
+    const tooLongRootKey = new Uint8Array(2000).fill(1).buffer;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(keptRootKey, { kept: asHeapObject({ value: "kept" }) });
+    const orphan = asHeapObject({ child: asHeapObject({ value: "orphaned child" }) });
+    await expect(writer.setRootObject(tooLongRootKey, { orphan })).rejects.toThrow("maximum key size");
+    // A heap object from a failed write can still be reused by a later write that succeeds.
+    const reused = asHeapObject({ value: "reused" });
+    await expect(writer.setRootObject(tooLongRootKey, { reused })).rejects.toThrow("maximum key size");
+    await writer.setRootObject(reusedRootKey, { reused });
+    await writer.close();
+
+    const cutoff = Date.now() + 1;
+    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    try {
+      const result = await collector.collectGarbage(cutoff);
+      expect(result.objects.deleted).toBe(2);
+      expect((await debugSnapshot(collector)).heap.map(entry => entry.serializedJson)).toEqual(expect.arrayContaining([{ value: "kept" }, { value: "reused" }]));
+      expect((await debugSnapshot(collector)).heap).toHaveLength(2);
+      const reusedRoot = (await collector.getRootObject(reusedRootKey)).object;
+      expect(reusedRoot).toEqual({ reused: expect.anything() });
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
   it("atomically collects an unreachable graph and follows its cascade", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
