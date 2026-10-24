@@ -369,6 +369,34 @@ describe("Breezy Piledriver", () => {
     }
   });
 
+  it("finishes writes and garbage collection already in progress before closing", async () => {
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const garbageRootKey = new TextEncoder().encode("garbage").buffer;
+    const setup = declareBreezyPiledriverDatabase(lmdbOptions);
+    await setup.setRootObject(garbageRootKey, { garbage: asHeapObject({ value: "garbage" }) });
+    await setup.deleteRootObject(garbageRootKey);
+    await setup.close();
+
+    const cutoff = Date.now() + 1;
+    const database = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    const write = database.setRootObject(rootKey, { child: asHeapObject({ value: "written while closing" }) });
+    const garbageCollection = database.collectGarbage(cutoff);
+    // Not awaited before closing: close() itself must wait for both. Closing twice is allowed.
+    await Promise.all([database.close(), database.close()]);
+    await write;
+    expect((await garbageCollection).objects.deleted).toBe(1);
+
+    const reopened = declareBreezyPiledriverDatabase(lmdbOptions);
+    try {
+      expect((await debugSnapshot(reopened)).heap.map(entry => entry.serializedJson)).toEqual([{ value: "written while closing" }]);
+    } finally {
+      await reopened.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
   it("atomically collects an unreachable graph and follows its cascade", async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };

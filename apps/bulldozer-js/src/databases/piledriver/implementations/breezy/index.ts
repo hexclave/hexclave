@@ -339,7 +339,12 @@ export function declareBreezyPiledriverDatabase(
     return read(lmdbRoots, key);
   };
   let garbageCollectionRunning = false;
-  const collectGarbage = async (cutoffTimestampMillis: number, maxObjects = 1000) => {
+  const garbageCollectionsInProgress = new Set<Promise<unknown>>();
+  let closing: Promise<void> | null = null;
+  const throwIfClosing = () => {
+    if (closing !== null) throw new Error("Breezy Piledriver database is closed");
+  };
+  const collectGarbageUntracked = async (cutoffTimestampMillis: number, maxObjects = 1000) => {
     const startedAtMillis = Date.now();
     const startedAt = performance.now();
     const initializationStartedAt = performance.now();
@@ -430,6 +435,29 @@ export function declareBreezyPiledriverDatabase(
     }
   };
 
+  const collectGarbage = async (cutoffTimestampMillis: number, maxObjects?: number) => {
+    throwIfClosing();
+    const collection = collectGarbageUntracked(cutoffTimestampMillis, maxObjects);
+    garbageCollectionsInProgress.add(collection);
+    try {
+      return await collection;
+    } finally {
+      garbageCollectionsInProgress.delete(collection);
+    }
+  };
+  /**
+   * Waits for writes and garbage collections already in progress, then closes LMDB. Closing LMDB
+   * under them made them fail midway. New operations started after this is called throw.
+   */
+  const close = async () => {
+    closing ??= withMutationLock(async () => {
+      // Each collection's own caller gets its result or error; here we only wait for it to stop.
+      await Promise.allSettled(garbageCollectionsInProgress);
+      await lmdbRoot.close();
+    });
+    await closing;
+  };
+
   return {
     getDebugInfo: () => ({ backend: "piledriver-breezy", constructorArguments: { lmdbOptions, options }, lmdbRoot, lmdbRoots, lmdbHeap, lmdbMetadata, lmdbCandidates, lmdbGcState, processStartedAtMillis, heapObjectsByObject, heapObjectsByHeapKeyBase64: heapCache.objectsByKey, heapKeysAndSeqByHeapObjects: heapCache.locations, heapReadCacheDisabled: options.disableHeapReadCache === true }),
     async getRootObject(key) {
@@ -438,6 +466,7 @@ export function declareBreezyPiledriverDatabase(
       return { object: decodePiledriverObject(stored.buffer, heapKey => heapCache.resolve(heapKey, stored.seq)), seq: stored.seq };
     },
     async setRootObject(key, value) {
+      throwIfClosing();
       return await withMutationLock(async () => {
         await initializeGc();
         const previous = await readPreviousRoot(key);
@@ -453,6 +482,7 @@ export function declareBreezyPiledriverDatabase(
       });
     },
     async deleteRootObject(key) {
+      throwIfClosing();
       return await withMutationLock(async () => {
         await initializeGc();
         const previous = await readPreviousRoot(key);
@@ -469,7 +499,7 @@ export function declareBreezyPiledriverDatabase(
     getGarbageCollectionProcessStartedAtMillis: () => processStartedAtMillis,
     collectGarbage,
     combineSeqs: (...seqs) => combineSeqs(seqs),
-    close: async () => await lmdbRoot.close(),
+    close,
     waitUntilAvailable,
     async waitUntilDurable(seq) {
       await waitUntilAvailable(seq);
