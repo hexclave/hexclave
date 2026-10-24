@@ -148,6 +148,7 @@ export function declareBreezyPiledriverDatabase(
     return result;
   };
   type ReferenceDelta = { key: ArrayBuffer, count: number };
+  const noHeapKeysCreated: ReadonlySet<string> = new Set();
   const addReferenceDelta = (deltas: Map<string, ReferenceDelta>, key: ArrayBuffer, count: number) => {
     const id = encodeBase64(new Uint8Array(key));
     const existing = deltas.get(id);
@@ -203,6 +204,7 @@ export function declareBreezyPiledriverDatabase(
     dereferencedAtMillis: number | null,
     version: number,
     writes: Promise<boolean>[],
+    heapKeysCreatedByThisWrite: ReadonlySet<string>,
   ) => {
     const createdAtMillis = Math.max(Date.now(), processStartedAtMillis);
     let becameZero = 0;
@@ -212,8 +214,16 @@ export function declareBreezyPiledriverDatabase(
       const metadataKey = Buffer.from(key);
       const stored = lmdbMetadata.get(metadataKey);
       const previous = stored === undefined ? null : parseMetadata(stored);
-      if (previous === null && count < 0) throw new Error("Piledriver GC cannot decrement an object without reference metadata");
-      if (previous !== null && previous.generation !== activeGcGeneration()) throw new Error("Piledriver GC reference metadata belongs to an inactive generation");
+      // Breezy creates a record the first time something points at a new object, so a missing record
+      // is expected only for objects this write created. Any other object without a record (or with
+      // one from an older GC generation) was saved before refcount GC existed and its true count is
+      // unknown. Like base's "legacy-immortal" rule, skip it so it's never deleted: a count started
+      // here could reach zero while older parents still point at it.
+      const isLegacyObject = previous === null
+        ? !heapKeysCreatedByThisWrite.has(encodeBase64(new Uint8Array(key)))
+        : previous.generation !== activeGcGeneration();
+      if (isLegacyObject) continue;
+      if (previous === null && count < 0) throw new Error("Assertion error: Piledriver GC cannot decrement a heap object created by the same write");
       const referenceCount = (previous?.referenceCount ?? 0) + count;
       if (!Number.isSafeInteger(referenceCount) || referenceCount < 0) throw new Error("Piledriver GC reference count would become invalid");
       const lastDereferencedAtMillis = count < 0
@@ -249,19 +259,19 @@ export function declareBreezyPiledriverDatabase(
         heapKeys.add(heapKeyBase64);
         if (lmdbHeap.doesExist(Buffer.from(object.key))) throw new Error("Reserved Piledriver heap key already exists");
       }
-      changeReferenceDeltas(deltas.values(), null, transactionVersion, writes);
+      changeReferenceDeltas(deltas.values(), null, transactionVersion, writes, heapKeys);
       for (const object of ascendingByKey(objects, object => new Uint8Array(object.key))) {
         writes.push(lmdbHeap.put(Buffer.from(object.key), Buffer.from(object.buffer), transactionVersion));
       }
     });
     return toSeq(version);
   };
-  const mutateRoot = async (key: ArrayBuffer, next: ArrayBuffer | null, previous: ArrayBuffer | null, dereferencedAtMillis: number) => {
+  const mutateRoot = async (key: ArrayBuffer, next: ArrayBuffer | null, previous: ArrayBuffer | null, dereferencedAtMillis: number, heapKeysCreatedByThisWrite: ReadonlySet<string>) => {
     const deltas = new Map<string, ReferenceDelta>();
     for (const [id, reference] of aggregateSerializedReferences(next)) deltas.set(id, { ...reference });
     for (const reference of aggregateSerializedReferences(previous).values()) addReferenceDelta(deltas, reference.key, -reference.count);
     const version = await transact((transactionVersion, writes) => {
-      changeReferenceDeltas(deltas.values(), dereferencedAtMillis, transactionVersion, writes);
+      changeReferenceDeltas(deltas.values(), dereferencedAtMillis, transactionVersion, writes, heapKeysCreatedByThisWrite);
       writes.push(next === null ? lmdbRoots.remove(Buffer.from(key)) : lmdbRoots.put(Buffer.from(key), Buffer.from(next), transactionVersion));
     });
     return { seq: toSeq(version) };
@@ -307,7 +317,10 @@ export function declareBreezyPiledriverDatabase(
     for (const item of plan.heapObjects) {
       heapCache.remember(item.object, { key: item.key, seq: publishedSeq });
     }
-    return serializeKnown(plan.root);
+    return {
+      serializedRoot: serializeKnown(plan.root),
+      createdHeapKeys: new Set(plan.heapObjects.map(item => encodeBase64(new Uint8Array(item.key)))),
+    };
   };
 
   const readPreviousRoot = async (key: ArrayBuffer) => {
@@ -367,7 +380,7 @@ export function declareBreezyPiledriverDatabase(
           const heapValue = lmdbHeap.get(heapKeyBuffer) ?? throwErr("Piledriver GC found metadata for a missing heap object");
           const references = [...aggregateSerializedReferences(arrayBuffer(heapValue)).values()];
           const deltas = references.map(reference => ({ key: reference.key, count: -reference.count }));
-          result.objects.childObjectsBecameUnreferenced += changeReferenceDeltas(deltas, eligibleAtMillis, version, writes);
+          result.objects.childObjectsBecameUnreferenced += changeReferenceDeltas(deltas, eligibleAtMillis, version, writes, noHeapKeysCreated);
           result.references.outgoingEdgesProcessed += references.reduce((sum, reference) => sum + reference.count, 0);
           writes.push(lmdbHeap.remove(heapKeyBuffer), lmdbMetadata.remove(heapKeyBuffer), lmdbCandidates.remove(indexedCandidate));
 
@@ -423,12 +436,13 @@ export function declareBreezyPiledriverDatabase(
       return await withMutationLock(async () => {
         await initializeGc();
         const previous = await readPreviousRoot(key);
-        const serialized = await serializeAndPublish(value);
+        const { serializedRoot, createdHeapKeys } = await serializeAndPublish(value);
         const written = await mutateRoot(
           key,
-          serialized,
+          serializedRoot,
           previous.buffer,
           Math.max(Date.now(), processStartedAtMillis),
+          createdHeapKeys,
         );
         lastRootWriteSeq = written.seq;
         return written;
@@ -443,6 +457,7 @@ export function declareBreezyPiledriverDatabase(
           null,
           previous.buffer,
           Math.max(Date.now(), processStartedAtMillis),
+          noHeapKeysCreated,
         );
         lastRootWriteSeq = deleted.seq;
         return deleted;

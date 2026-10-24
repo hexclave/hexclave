@@ -97,33 +97,51 @@ describe("Breezy Piledriver", () => {
     }
   });
 
-  it("rolls back root replacement and deletion when the old reference cannot be decremented", async () => {
+  it("keeps writing past heap objects saved before refcounts existed, and never deletes them", async () => {
+    // Objects saved before refcount-based GC existed have no reference-metadata record, and their
+    // true reference count is unknown. Like base, Breezy must treat them as "never delete": skip
+    // their count changes and never start a count for them (a count started at zero could later
+    // reach zero while older parents still point at them, and GC would delete live data).
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const otherRootKey = new TextEncoder().encode("other").buffer;
     const database = declareBreezyPiledriverDatabase(lmdbOptions);
     const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
+    const metadata = inspector.declareKvStore("piledriver-gc-reference-metadata-v3");
+    let legacyKeyBase64: string;
     try {
-      const rootKey = new TextEncoder().encode("root").buffer;
-      const child = asHeapObject({ value: "still visible" });
-      const written = await database.setRootObject(rootKey, child);
-      await database.waitUntilAvailable(written.seq);
-
-      const metadata = inspector.declareKvStore("piledriver-gc-reference-metadata-v3");
+      await database.setRootObject(rootKey, asHeapObject({ value: "legacy" }));
       const entries = await listEntries(metadata);
       expect(entries).toHaveLength(1);
+      legacyKeyBase64 = encodeBase64(new Uint8Array(entries[0].key));
       const removed = await metadata.deleteAll([entries[0].key]);
       await inspector.waitUntilAvailable(removed.seq);
 
-      await expect(database.setRootObject(rootKey, { replacement: true })).rejects.toThrow("without reference metadata");
-      await expect(database.deleteRootObject(rootKey)).rejects.toThrow("without reference metadata");
-      const { object } = await database.getRootObject(rootKey);
-      if (typeof object !== "object" || object === null || !(isPiledriverHeapObjectSymbol in object)) {
-        throw new Error("Expected the original heap object root");
-      }
-      expect(await object.get()).toEqual({ value: "still visible" });
+      // Point at the legacy object from a second root, both directly and through a new (refcounted)
+      // parent, then drop both roots' pointers to it.
+      const legacyObject = (await database.getRootObject(rootKey)).object;
+      await database.setRootObject(otherRootKey, { legacy: legacyObject, parent: asHeapObject({ child: legacyObject }) });
+      await database.setRootObject(rootKey, { replacement: true });
+      await database.deleteRootObject(otherRootKey);
+      const legacyMetadata = (await listEntries(metadata)).filter(entry => encodeBase64(new Uint8Array(entry.key)) === legacyKeyBase64);
+      expect(legacyMetadata).toEqual([]);
     } finally {
       await inspector.close();
       await database.close();
+    }
+
+    const cutoff = Date.now() + 1;
+    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    try {
+      // The new parent is normal garbage and gets collected; deleting it skips the legacy child's
+      // (missing) count, so the legacy object is all that remains.
+      const result = await collector.collectGarbage(cutoff);
+      expect(result.objects.deleted).toBe(1);
+      expect((await debugSnapshot(collector)).heap.map(entry => entry.keyBase64)).toEqual([legacyKeyBase64]);
+      expect((await collector.getRootObject(rootKey)).object).toEqual({ replacement: true });
+    } finally {
+      await collector.close();
       await rm(path, { recursive: true, force: true });
     }
   });
