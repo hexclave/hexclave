@@ -1,5 +1,5 @@
 import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
-import { isPiledriverHeapObjectSymbol } from "./index.js";
+import { isPiledriverHeapObjectSymbol, type PiledriverHeapObject } from "./index.js";
 
 /**
  * Piledriver saves JSON-like values: strings, numbers, booleans, null, arrays, plain objects, and heap
@@ -47,10 +47,17 @@ export function cannotSaveError(typeName: string) {
  */
 export const maximumSavedNestingDepth = 1000;
 
+const isHeapObject = (value: object): value is PiledriverHeapObject => isPiledriverHeapObjectSymbol in value;
+
 /**
  * Throws if `value`, or anything nested inside it, can't be saved: an unsupported type, or nesting
- * deeper than `maximumSavedNestingDepth`. Heap objects are skipped: rows from callers don't contain
- * them, and the ones Bulldozer builds itself hold only already-checked values.
+ * deeper than `maximumSavedNestingDepth`.
+ *
+ * A heap object the caller made is saved along with the row, so its value is checked too, as the
+ * next level down (so one that contains itself hits the depth limit, like a plain object would).
+ * Real rows don't contain heap objects: Bulldozer wraps rows in them only for storage, and unwraps
+ * them again when reading. A heap object read from the database holds an already-saved value, so
+ * it's left unloaded.
  */
 export function assertSavable(value: unknown) {
   const pending: { value: unknown, depth: number }[] = [{ value, depth: 1 }];
@@ -63,12 +70,17 @@ export function assertSavable(value: unknown) {
     const next = pending.pop() ?? throwErr("pending is non-empty");
     const typeName = unsavableTypeName(next.value);
     if (typeName !== null) throw cannotSaveError(typeName);
-    if (typeof next.value !== "object" || next.value === null || isPiledriverHeapObjectSymbol in next.value) continue;
+    if (typeof next.value !== "object" || next.value === null) continue;
     if (next.depth > maximumSavedNestingDepth) {
       throw new HexclaveAssertionError(`Cannot save a value nested more than ${maximumSavedNestingDepth} levels deep (or one that contains itself) in Piledriver`, { maximumSavedNestingDepth });
     }
     if ((deepestDepthByVisitedObject.get(next.value) ?? 0) >= next.depth) continue;
     deepestDepthByVisitedObject.set(next.value, next.depth);
+    if (isHeapObject(next.value)) {
+      const localValue = next.value.getValueIfLocallyCreated();
+      if (localValue.status === "locally-created") pending.push({ value: localValue.value, depth: next.depth + 1 });
+      continue;
+    }
     for (const child of Array.isArray(next.value) ? next.value : Object.values(next.value)) pending.push({ value: child, depth: next.depth + 1 });
   }
 }

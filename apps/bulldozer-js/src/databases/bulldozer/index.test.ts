@@ -9,7 +9,7 @@ import type { DatabaseSeq } from "../index.js";
 import { declareBasePiledriverDatabase } from "../piledriver/implementations/base.js";
 import { declareBufferedPiledriverDatabase } from "../piledriver/implementations/buffered.js";
 import { declareInMemoryPiledriverDatabase } from "../piledriver/implementations/in-memory.js";
-import type { PiledriverObject } from "../piledriver/index.js";
+import { asHeapObject, type PiledriverObject } from "../piledriver/index.js";
 import { ConcatTreeList } from "../piledriver/data-structures/concat-tree-list.js";
 import { stringCompare } from "@hexclave/shared/dist/utils/strings";
 import {
@@ -81,6 +81,9 @@ describe("Bulldozer row validation", () => {
       .rejects.toThrow("Cannot save a value of type Date");
     await expect(db.withSnapshotConsistent(s => s.setOrDeleteRows({ tableId: "store", rows: [{ rowIdentifier: "bad-batch", newRowData: rowWith(1n) }] })))
       .rejects.toThrow("Cannot save a value of type bigint");
+    // A heap object the caller made is saved along with the row, so what's inside it is checked too.
+    await expect(db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "bad-heap-object", newRowData: { field: asHeapObject(rowWith(new Date(0))) } })))
+      .rejects.toThrow("Cannot save a value of type Date");
 
     await db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "good", newRowData: { field: "ok" } }));
     const { snapshot } = await db.getSnapshot();
@@ -105,6 +108,11 @@ describe("Bulldozer row validation", () => {
       .rejects.toThrow("nested more than 1000 levels deep");
     await expect(db.withSnapshotConsistent(s => s.setOrDeleteRows({ tableId: "store", rows: [{ rowIdentifier: "too-deep-batch", newRowData: nestedRow(5_000) }] })))
       .rejects.toThrow("nested more than 1000 levels deep");
+    // A heap object that contains itself is caught the same way as a plain object that does.
+    const selfContaining: { [key: string]: PiledriverObject } = {};
+    selfContaining.self = asHeapObject(selfContaining);
+    await expect(db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "contains-itself", newRowData: { field: selfContaining } })))
+      .rejects.toThrow("nested more than 1000 levels deep (or one that contains itself)");
 
     // The row object itself is the first level, so 999 levels inside it is exactly at the limit.
     await db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "deepest-allowed", newRowData: nestedRow(999) }));
