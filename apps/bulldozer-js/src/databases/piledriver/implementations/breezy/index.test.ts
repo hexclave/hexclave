@@ -1,5 +1,5 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
-import { registerErrorSink, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { registerErrorSink, throwErr, unregisterErrorSink } from "@hexclave/shared/dist/utils/errors";
 import * as lmdb from "lmdb";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -496,8 +496,6 @@ describe("Breezy Piledriver", () => {
     // Piledriver only writes valid UTF-8, so invalid bytes mean the value was damaged after it was
     // written (disk, filesystem or LMDB). Reads keep working, with the bad bytes shown as U+FFFD, and
     // the report says where the value is and how to repair it.
-    const reports: { location: string, error: unknown }[] = [];
-    registerErrorSink((location, error) => reports.push({ location, error }));
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const dbId = crypto.randomUUID();
     const rootKey = new TextEncoder().encode("root").buffer;
@@ -520,6 +518,11 @@ describe("Breezy Piledriver", () => {
     await lmdbRoot.close();
     if (damagedKeyBase64 === null) throw new Error("Expected to find the stored value");
 
+    const reports: { location: string, error: unknown }[] = [];
+    const recordReport = (location: string, error: unknown) => {
+      reports.push({ location, error });
+    };
+    registerErrorSink(recordReport);
     const reader = declareBreezyPiledriverDatabase({ path, dbId });
     try {
       const root = (await reader.getRootObject(rootKey)).object;
@@ -534,6 +537,7 @@ describe("Breezy Piledriver", () => {
         extraData: { storedAt: `heap object ${damagedKeyBase64}`, howToFix: expect.arrayContaining([expect.stringContaining("bulldozer-payments-init")]) },
       });
     } finally {
+      unregisterErrorSink(recordReport);
       await reader.close();
       await rm(path, { recursive: true, force: true });
     }
