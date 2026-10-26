@@ -51,18 +51,24 @@ function mcpRow(overrides: Partial<{
 }
 
 describe("aiLogMatches", () => {
+  it("accepts omitted Option fields from the SDK", () => {
+    expect(aiLogMatches(aiRow(), {})).toBe(true);
+    expect(aiLogMatches(aiRow(), { isAuthenticated: false })).toBe(false);
+    expect(mcpLogMatches(mcpRow(), {}, NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(mcpRow(), { toolNames: ["different-tool"] }, NOW_MICROS)).toBe(false);
+  });
   it("combines exact categorical filters", () => {
     const row = aiRow();
     expect(aiLogMatches(row, {
-      systemPromptId: "docs-ask-ai",
-      modelId: "openai/gpt-test",
+      systemPromptIds: ["docs-ask-ai"],
+      modelIds: ["openai/gpt-test"],
       mode: "generate",
       isAuthenticated: true,
       hasError: false,
     })).toBe(true);
     expect(aiLogMatches(row, {
-      systemPromptId: "command-center-ask-ai",
-      modelId: undefined,
+      systemPromptIds: ["command-center-ask-ai"],
+      modelIds: undefined,
       mode: undefined,
       isAuthenticated: undefined,
       hasError: undefined,
@@ -71,8 +77,8 @@ describe("aiLogMatches", () => {
 
   it("treats only non-empty error messages as errors", () => {
     const filters = {
-      systemPromptId: undefined,
-      modelId: undefined,
+      systemPromptIds: undefined,
+      modelIds: undefined,
       mode: undefined,
       isAuthenticated: undefined,
       hasError: false,
@@ -84,33 +90,33 @@ describe("aiLogMatches", () => {
 
 describe("mcpLogMatches", () => {
   function filters(overrides: Partial<{
-    toolName: string | undefined,
+    toolNames: string[] | undefined,
     hasError: boolean | undefined,
-    qaState: string | undefined,
-    humanReviewState: string | undefined,
+    qaStates: string[] | undefined,
+    humanReviewStates: string[] | undefined,
   }> = {}) {
     return {
-      toolName: undefined,
+      toolNames: undefined,
       hasError: undefined,
-      qaState: undefined,
-      humanReviewState: undefined,
+      qaStates: undefined,
+      humanReviewStates: undefined,
       ...overrides,
     };
   }
 
   it("separates pending reviews from timed-out and errored reviews", () => {
-    expect(mcpLogMatches(mcpRow(), filters({ qaState: "pending" }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(mcpRow(), filters({ qaStates: ["pending"] }), NOW_MICROS)).toBe(true);
 
     const timedOut = mcpRow({
       createdAt: timestamp(NOW_MICROS - QA_REVIEW_FAILED_THRESHOLD_MICROS - 1n),
       qaReviewRequestedAt: timestamp(NOW_MICROS - QA_REVIEW_FAILED_THRESHOLD_MICROS - 1n),
     });
-    expect(mcpLogMatches(timedOut, filters({ qaState: "review-failed" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(timedOut, filters({ qaState: "pending" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(timedOut, filters({ qaStates: ["review-failed"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(timedOut, filters({ qaStates: ["pending"] }), NOW_MICROS)).toBe(false);
 
     const errored = mcpRow({ qaErrorMessage: "review provider failed" });
-    expect(mcpLogMatches(errored, filters({ qaState: "error" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(errored, filters({ qaState: "review-failed" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(errored, filters({ qaStates: ["error"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(errored, filters({ qaStates: ["review-failed"] }), NOW_MICROS)).toBe(false);
   });
 
   it("uses the most recent review request when deciding whether a retry timed out", () => {
@@ -118,30 +124,30 @@ describe("mcpLogMatches", () => {
       createdAt: timestamp(NOW_MICROS - QA_REVIEW_FAILED_THRESHOLD_MICROS - 1n),
       qaReviewRequestedAt: timestamp(NOW_MICROS - 1n),
     });
-    expect(mcpLogMatches(oldCallWithRecentRetry, filters({ qaState: "pending" }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(oldCallWithRecentRetry, filters({ qaStates: ["pending"] }), NOW_MICROS)).toBe(true);
   });
 
   it("maps QA scores to pass, warning, and fail bands", () => {
-    expect(mcpLogMatches(mcpRow({ qaOverallScore: 80 }), filters({ qaState: "pass" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(mcpRow({ qaOverallScore: 79 }), filters({ qaState: "warn" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(mcpRow({ qaOverallScore: 49 }), filters({ qaState: "fail" }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(mcpRow({ qaOverallScore: 80 }), filters({ qaStates: ["pass"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(mcpRow({ qaOverallScore: 79 }), filters({ qaStates: ["warn"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(mcpRow({ qaOverallScore: 49 }), filters({ qaStates: ["fail"] }), NOW_MICROS)).toBe(true);
   });
 
   it("puts a row with both a score and a review error in `error` only, matching how the grid renders it", () => {
     const scoredButErrored = mcpRow({ qaOverallScore: 92, qaErrorMessage: "reviewer crashed after scoring" });
-    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "error" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "pass" }), NOW_MICROS)).toBe(false);
-    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "warn" }), NOW_MICROS)).toBe(false);
-    expect(mcpLogMatches(scoredButErrored, filters({ qaState: "fail" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(scoredButErrored, filters({ qaStates: ["error"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(scoredButErrored, filters({ qaStates: ["pass"] }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(scoredButErrored, filters({ qaStates: ["warn"] }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(scoredButErrored, filters({ qaStates: ["fail"] }), NOW_MICROS)).toBe(false);
   });
 
   it("distinguishes required, reviewed, and not-reviewed human states", () => {
     const required = mcpRow({ qaNeedsHumanReview: true });
     const reviewed = mcpRow({ qaNeedsHumanReview: true, humanReviewedAt: timestamp(NOW_MICROS) });
-    expect(mcpLogMatches(required, filters({ humanReviewState: "required" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(required, filters({ humanReviewState: "not-reviewed" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(reviewed, filters({ humanReviewState: "reviewed" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(reviewed, filters({ humanReviewState: "required" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(required, filters({ humanReviewStates: ["required"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(required, filters({ humanReviewStates: ["not-reviewed"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(reviewed, filters({ humanReviewStates: ["reviewed"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(reviewed, filters({ humanReviewStates: ["required"] }), NOW_MICROS)).toBe(false);
   });
 
   it("combines tool, call status, QA, and human-review filters", () => {
@@ -150,24 +156,35 @@ describe("mcpLogMatches", () => {
       humanReviewedAt: timestamp(NOW_MICROS),
     });
     expect(mcpLogMatches(row, filters({
-      toolName: "ask_hexclave",
+      toolNames: ["ask_hexclave"],
       hasError: false,
-      qaState: "pass",
-      humanReviewState: "reviewed",
+      qaStates: ["pass"],
+      humanReviewStates: ["reviewed"],
     }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(row, filters({ toolName: "other_tool" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(row, filters({ toolNames: ["other_tool"] }), NOW_MICROS)).toBe(false);
   });
 
   it("finds AI-scanned feature requests without treating malformed flags as matches", () => {
     const featureRequest = mcpRow({
       qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request", severity: "low", explanation: "Asked for SAML, which is unsupported" }]),
     });
-    expect(mcpLogMatches(featureRequest, filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(true);
-    expect(mcpLogMatches(mcpRow({ qaFlagsJson: "malformed" }), filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(false);
-    expect(mcpLogMatches(mcpRow(), filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(featureRequest, filters({ qaStates: ["feature-request"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(mcpRow({ qaFlagsJson: "malformed" }), filters({ qaStates: ["feature-request"] }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(mcpRow(), filters({ qaStates: ["feature-request"] }), NOW_MICROS)).toBe(false);
     // Same parser as the browser: a flag the feature-request tab would refuse to render must not
     // match the filter either, or the tab would show a blank row for it.
     const typeOnly = mcpRow({ qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request" }]) });
-    expect(mcpLogMatches(typeOnly, filters({ qaState: "feature-request" }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(typeOnly, filters({ qaStates: ["feature-request"] }), NOW_MICROS)).toBe(false);
+  });
+
+  it("matches a row against any value of a list filter, and treats an empty list as no filter", () => {
+    const passing = mcpRow({ qaOverallScore: 92 });
+    expect(mcpLogMatches(passing, filters({ qaStates: ["fail", "pass"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(passing, filters({ qaStates: ["fail", "warn"] }), NOW_MICROS)).toBe(false);
+    expect(mcpLogMatches(passing, filters({ qaStates: [] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(passing, filters({ toolNames: ["other_tool", "ask_hexclave"] }), NOW_MICROS)).toBe(true);
+    expect(mcpLogMatches(passing, filters({ toolNames: [] }), NOW_MICROS)).toBe(true);
+    expect(aiLogMatches(aiRow(), { modelIds: ["a/b", "openai/gpt-test"], systemPromptIds: [] })).toBe(true);
+    expect(aiLogMatches(aiRow(), { modelIds: ["a/b"] })).toBe(false);
   });
 });

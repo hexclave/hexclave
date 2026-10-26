@@ -6,18 +6,15 @@ import { toDate } from "../utils";
 import { formatPacificTableTime } from "../lib/pacific-time";
 import { canReportP95, extent, formatMilliseconds, MIN_P95_SAMPLE_COUNT, nearestRankPercentile, percentage } from "../lib/stats";
 import { FEATURE_REQUEST_FLAG_TYPE } from "../lib/feature-request-flag";
+import { CALL_STATUS_OPTIONS, HUMAN_REVIEW_OPTIONS, QA_STATE_OPTIONS, stringOptions } from "../lib/filter-options";
 import {
   countActiveMcpFilters,
   DEFAULT_MCP_ANALYTICS_FILTERS,
   filterMcpCalls,
-  MCP_TIME_RANGES,
   type McpAnalyticsFilters,
-  parseHumanReviewState,
-  parseQaState,
-  parseStatusFilter,
-  parseTimeRange,
 } from "../lib/mcp-analytics-filters";
-import { Badge, BarRow, Button, Card, chartColors, cn, EmptyState, FieldLabel, MetricCard, Pill, Select } from "./design";
+import { MultiFilter, TimeRangeFilter } from "./FilterFields";
+import { Badge, BarRow, Button, chartColors, cn, EmptyState, Metric, MetricStrip, Panel, PanelGrid, PanelRow, PanelSection } from "./design";
 
 const ACTIVITY_CHART_DAYS = 14;
 
@@ -34,8 +31,8 @@ export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: 
   // Tool options come from the loaded rows rather than a hardcoded list: the
   // MCP server's tool set changes without this app being redeployed, and an
   // option nobody can match is worse than a missing one.
-  const toolNames = useMemo(
-    () => Array.from(new Set(allRows.map(row => row.toolName))).sort(stringCompare),
+  const toolOptions = useMemo(
+    () => stringOptions(Array.from(new Set(allRows.map(row => row.toolName))).sort(stringCompare)),
     [allRows],
   );
 
@@ -148,58 +145,13 @@ export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: 
 
   return (
     <div className="space-y-6">
-      <div className="sticky top-0 z-10 rounded-xl border border-black/[0.06] bg-card shadow-sm ring-1 ring-black/[0.04] backdrop-blur-xl dark:border-white/[0.06] dark:ring-white/[0.04]">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
-          <div className="flex items-center gap-1.5">
-            <FieldLabel>Range</FieldLabel>
-            {MCP_TIME_RANGES.map(range => (
-              <Pill key={range} active={filters.timeRange === range} onClick={() => setFilter("timeRange", range)}>
-                {range}
-              </Pill>
-            ))}
-          </div>
-          <label className="grid grid-cols-[auto_10rem] items-center gap-1.5">
-            <FieldLabel>Tool</FieldLabel>
-            <Select value={filters.toolName} onChange={event => setFilter("toolName", event.target.value)}>
-              <option value="">All tools</option>
-              {toolNames.map(tool => (
-                <option key={tool} value={tool}>{tool}</option>
-              ))}
-            </Select>
-          </label>
-          <label className="grid grid-cols-[auto_6rem] items-center gap-1.5">
-            <FieldLabel>Status</FieldLabel>
-            <Select value={filters.status} onChange={event => setFilter("status", parseStatusFilter(event.target.value))}>
-              <option value="all">All</option>
-              <option value="ok">OK</option>
-              <option value="error">Error</option>
-            </Select>
-          </label>
-          <label className="grid grid-cols-[auto_9rem] items-center gap-1.5">
-            <FieldLabel>QA review</FieldLabel>
-            <Select value={filters.qaState} onChange={event => setFilter("qaState", parseQaState(event.target.value))}>
-              <option value="all">All reviews</option>
-              <option value="pass">Pass (80+)</option>
-              <option value="warn">Warn (50–79)</option>
-              <option value="fail">Fail (&lt;50)</option>
-              <option value="feature-request">Feature request</option>
-              <option value="pending">Pending</option>
-              <option value="review-failed">Review failed</option>
-              <option value="error">Review error</option>
-            </Select>
-          </label>
-          <label className="grid grid-cols-[auto_8rem] items-center gap-1.5">
-            <FieldLabel>Human review</FieldLabel>
-            <Select
-              value={filters.humanReviewState}
-              onChange={event => setFilter("humanReviewState", parseHumanReviewState(event.target.value))}
-            >
-              <option value="all">All</option>
-              <option value="required">Required</option>
-              <option value="reviewed">Reviewed</option>
-              <option value="not-reviewed">Not reviewed</option>
-            </Select>
-          </label>
+      <Panel className="sticky top-0 z-10">
+        <PanelRow>
+          <TimeRangeFilter value={filters.timeRange} onChange={range => setFilter("timeRange", range)} />
+          <MultiFilter label="Tool" mono controlClassName="w-36" options={toolOptions} selected={filters.toolNames} onChange={selected => setFilter("toolNames", selected)} />
+          <MultiFilter label="Status" controlClassName="w-28" options={CALL_STATUS_OPTIONS} selected={filters.statuses} onChange={selected => setFilter("statuses", selected)} />
+          <MultiFilter label="QA review" options={QA_STATE_OPTIONS} selected={filters.qaStates} onChange={selected => setFilter("qaStates", selected)} />
+          <MultiFilter label="Human review" options={HUMAN_REVIEW_OPTIONS} selected={filters.humanReviewStates} onChange={selected => setFilter("humanReviewStates", selected)} />
           <div className="ml-auto flex items-center gap-2">
             {activeFilterCount > 0 && (
               <Button variant="ghost" size="xs" onClick={() => setFilters(DEFAULT_MCP_ANALYTICS_FILTERS)}>
@@ -210,156 +162,158 @@ export function Analytics({ rows: allRows, qaEntries, hasMoreHistory }: { rows: 
               {stats.total.toLocaleString()} of {allRows.length.toLocaleString()} calls
             </span>
           </div>
-        </div>
-      </div>
+        </PanelRow>
+      </Panel>
 
-      {/* Key Metrics */}
-      <div className="grid grid-cols-4 gap-4">
-        <MetricCard
-          label={activeFilterCount > 0 ? "Matching Calls" : "Loaded Calls"}
-          value={stats.total.toLocaleString()}
-          subtitle={
-            activeFilterCount > 0
-              ? `of ${allRows.length.toLocaleString()} loaded`
-              : hasMoreHistory ? "More history is available" : "Complete loaded history"
-          }
-          tooltip="MCP calls currently loaded in this browser, narrowed by the filters above. Use MCP Review to load older history when more is available."
-        />
-        <MetricCard
-          label="Avg QA Score"
-          value={stats.reviewed === 0 ? "—" : stats.avgScore.toString()}
-          valueClassName={
-            stats.reviewed === 0 ? "text-muted-foreground" :
-              stats.avgScore >= 80 ? "text-emerald-600 dark:text-emerald-400" :
-                stats.avgScore >= 50 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"
-          }
-          subtitle={reviewRate == null ? "No calls to review" : `${stats.reviewed} scored · ${reviewRate}% of calls`}
-          tooltip="Arithmetic mean of qaOverallScore for calls with a completed automated QA score. Unreviewed calls are excluded."
-        />
-        <MetricCard
-          label="Needs Review"
-          value={stats.needsReview.toString()}
-          valueClassName={stats.needsReview > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}
-          subtitle={`${stats.humanReviewed} manually completed`}
-          tooltip="Calls flagged by automated QA that have not yet been marked as human-reviewed."
-        />
-        <MetricCard
-          label="Published Q&A"
-          value={stats.publishedCount.toString()}
-          subtitle={`${stats.draftCount} draft${stats.draftCount === 1 ? "" : "s"}`}
-          tooltip="Published entries in the MCP knowledge base. Draft entries are shown separately."
-        />
-      </div>
+      <Panel>
+        <MetricStrip layout="4">
+          <Metric
+            label={activeFilterCount > 0 ? "Matching Calls" : "Loaded Calls"}
+            value={stats.total.toLocaleString()}
+            subtitle={
+              activeFilterCount > 0
+                ? `of ${allRows.length.toLocaleString()} loaded`
+                : hasMoreHistory ? "More history is available" : "Complete loaded history"
+            }
+            tooltip="MCP calls currently loaded in this browser, narrowed by the filters above. Use MCP Review to load older history when more is available."
+          />
+          <Metric
+            label="Avg QA Score"
+            value={stats.reviewed === 0 ? "—" : stats.avgScore.toString()}
+            valueClassName={
+              stats.reviewed === 0 ? "text-muted-foreground" :
+                stats.avgScore >= 80 ? "text-emerald-600 dark:text-emerald-400" :
+                  stats.avgScore >= 50 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"
+            }
+            subtitle={reviewRate == null ? "No calls to review" : `${stats.reviewed} scored · ${reviewRate}% of calls`}
+            tooltip="Arithmetic mean of qaOverallScore for calls with a completed automated QA score. Unreviewed calls are excluded."
+          />
+          <Metric
+            label="Needs Review"
+            value={stats.needsReview.toString()}
+            valueClassName={stats.needsReview > 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}
+            subtitle={`${stats.humanReviewed} manually completed`}
+            tooltip="Calls flagged by automated QA that have not yet been marked as human-reviewed."
+          />
+          <Metric
+            label="Published Q&A"
+            tooltipAlign="right"
+            value={stats.publishedCount.toString()}
+            subtitle={`${stats.draftCount} draft${stats.draftCount === 1 ? "" : "s"}`}
+            tooltip="Published entries in the MCP knowledge base. Draft entries are shown separately."
+          />
+        </MetricStrip>
 
-      <Card title={`MCP call activity · last ${ACTIVITY_CHART_DAYS} days`}>
-        <McpCallActivity
-          total={stats.activity.total}
-          buckets={stats.activity.dayBuckets}
-          maxCount={stats.activity.maxDayCount}
-          nonEmptyDayCount={stats.activity.nonEmptyDayCount}
-          firstCallAt={stats.activity.firstCallAt}
-          lastCallAt={stats.activity.lastCallAt}
-        />
-      </Card>
+        <PanelSection title={`MCP call activity · last ${ACTIVITY_CHART_DAYS} days`}>
+          <McpCallActivity
+            total={stats.activity.total}
+            buckets={stats.activity.dayBuckets}
+            maxCount={stats.activity.maxDayCount}
+            nonEmptyDayCount={stats.activity.nonEmptyDayCount}
+            firstCallAt={stats.activity.firstCallAt}
+            lastCallAt={stats.activity.lastCallAt}
+          />
+        </PanelSection>
 
-      <div className="grid grid-cols-2 gap-4">
-        {/* QA Score Distribution */}
-        <Card title="QA score distribution">
-          {stats.reviewed === 0 ? (
-            <EmptyState>No completed QA scores</EmptyState>
-          ) : (
-            <div className="space-y-2">
-              {stats.scoreBuckets.map(bucket => {
-                const pct = percentage(bucket.count, stats.reviewed) ?? 0;
-                return (
-                  <BarRow
-                    key={bucket.label}
-                    label={bucket.label}
-                    labelClassName="w-16"
-                    barClassName={bucket.color}
-                    pct={pct}
-                    value={`${pct}%`}
-                    extra={<span className="w-14 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{bucket.count} scored</span>}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </Card>
+        <PanelGrid>
+          {/* QA Score Distribution */}
+          <PanelSection title="QA score distribution">
+            {stats.reviewed === 0 ? (
+              <EmptyState>No completed QA scores</EmptyState>
+            ) : (
+              <div className="space-y-2">
+                {stats.scoreBuckets.map(bucket => {
+                  const pct = percentage(bucket.count, stats.reviewed) ?? 0;
+                  return (
+                    <BarRow
+                      key={bucket.label}
+                      label={bucket.label}
+                      labelClassName="w-16"
+                      barClassName={bucket.color}
+                      pct={pct}
+                      value={`${pct}%`}
+                      extra={<span className="w-14 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{bucket.count} scored</span>}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </PanelSection>
 
-        {/* Top Flag Types */}
-        <Card title="QA reviews with each flag">
-          {stats.topFlags.length === 0 ? (
-            <EmptyState>No flags in completed reviews</EmptyState>
-          ) : (
-            <div className="space-y-2">
-              {stats.topFlags.map(([type, count]) => {
-                const pct = percentage(count, stats.reviewed) ?? 0;
-                return (
-                  <BarRow
-                    key={type}
-                    label={type}
-                    labelClassName="w-32 font-mono"
-                    barClassName={chartColors.orange}
-                    pct={pct}
-                    value={`${pct}%`}
-                    extra={<span className="w-14 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{count} reviews</span>}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </Card>
+          {/* Top Flag Types */}
+          <PanelSection title="QA reviews with each flag">
+            {stats.topFlags.length === 0 ? (
+              <EmptyState>No flags in completed reviews</EmptyState>
+            ) : (
+              <div className="space-y-2">
+                {stats.topFlags.map(([type, count]) => {
+                  const pct = percentage(count, stats.reviewed) ?? 0;
+                  return (
+                    <BarRow
+                      key={type}
+                      label={type}
+                      labelClassName="w-32 font-mono"
+                      barClassName={chartColors.orange}
+                      pct={pct}
+                      value={`${pct}%`}
+                      extra={<span className="w-14 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{count} reviews</span>}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </PanelSection>
 
-        {/* Response Time */}
-        <Card title="MCP latency summary">
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Average</span>
-              <span className="font-mono tabular-nums">{formatMilliseconds(stats.avgDuration)}</span>
+          {/* Response Time */}
+          <PanelSection title="MCP latency summary">
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Average</span>
+                <span className="font-mono tabular-nums">{formatMilliseconds(stats.avgDuration)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">p95</span>
+                <span className="font-mono tabular-nums">
+                  {canReportP95(stats.durationSampleCount) ? formatMilliseconds(stats.p95Duration) : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Max</span>
+                <span className="font-mono tabular-nums">{formatMilliseconds(stats.maxDuration)}</span>
+              </div>
+              <p className="pt-1 text-[10px] text-muted-foreground">
+                {canReportP95(stats.durationSampleCount)
+                  ? `${stats.durationSampleCount} duration samples`
+                  : `p95 requires ${MIN_P95_SAMPLE_COUNT} samples · ${stats.durationSampleCount} available`}
+              </p>
             </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">p95</span>
-              <span className="font-mono tabular-nums">
-                {canReportP95(stats.durationSampleCount) ? formatMilliseconds(stats.p95Duration) : "—"}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Max</span>
-              <span className="font-mono tabular-nums">{formatMilliseconds(stats.maxDuration)}</span>
-            </div>
-            <p className="pt-1 text-[10px] text-muted-foreground">
-              {canReportP95(stats.durationSampleCount)
-                ? `${stats.durationSampleCount} duration samples`
-                : `p95 requires ${MIN_P95_SAMPLE_COUNT} samples · ${stats.durationSampleCount} available`}
-            </p>
-          </div>
-        </Card>
+          </PanelSection>
 
-        {/* Tool Usage */}
-        <Card title="MCP calls by tool">
-          {stats.toolUsage.length === 0 ? (
-            <EmptyState>No calls yet</EmptyState>
-          ) : (
-            <div className="space-y-2">
-              {stats.toolUsage.map(([tool, count]) => {
-                const pct = percentage(count, stats.total) ?? 0;
-                return (
-                  <BarRow
-                    key={tool}
-                    label={<Badge color="purple" mono>{tool}</Badge>}
-                    labelClassName="w-40"
-                    barClassName={chartColors.purple}
-                    pct={pct}
-                    value={`${pct}%`}
-                    extra={<span className="w-12 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{count} calls</span>}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </Card>
-      </div>
+          {/* Tool Usage */}
+          <PanelSection title="MCP calls by tool">
+            {stats.toolUsage.length === 0 ? (
+              <EmptyState>No calls yet</EmptyState>
+            ) : (
+              <div className="space-y-2">
+                {stats.toolUsage.map(([tool, count]) => {
+                  const pct = percentage(count, stats.total) ?? 0;
+                  return (
+                    <BarRow
+                      key={tool}
+                      label={<Badge color="purple" mono>{tool}</Badge>}
+                      labelClassName="w-40"
+                      barClassName={chartColors.purple}
+                      pct={pct}
+                      value={`${pct}%`}
+                      extra={<span className="w-12 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{count} calls</span>}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </PanelSection>
+        </PanelGrid>
+      </Panel>
     </div>
   );
 }

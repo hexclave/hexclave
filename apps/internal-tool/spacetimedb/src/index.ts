@@ -362,6 +362,36 @@ export const myVisibleFeedbackLog = spacetimedb.view(
   }
 );
 
+// Full-history SQL views use query plans, avoiding an eager copy of every log
+// into a JavaScript array. Both shard predicates must hold; without a member
+// session they contradict each other, even if another shard is introduced.
+export const queryAiUsage = spacetimedb.view(
+  { name: 'query_ai_usage', public: true },
+  t.array(aiQueryLog.rowType),
+  (ctx) => {
+    const memberShard = hasMemberSession(ctx) ? 0 : 1;
+    return ctx.from.aiQueryLog.where(row => row.shard.eq(0).and(row.shard.eq(memberShard))).build();
+  }
+);
+
+export const queryMcpCalls = spacetimedb.view(
+  { name: 'query_mcp_calls', public: true },
+  t.array(mcpCallLog.rowType),
+  (ctx) => {
+    const memberShard = hasMemberSession(ctx) ? 0 : 1;
+    return ctx.from.mcpCallLog.where(row => row.shard.eq(0).and(row.shard.eq(memberShard))).build();
+  }
+);
+
+export const queryFeedback = spacetimedb.view(
+  { name: 'query_feedback', public: true },
+  t.array(feedbackLog.rowType),
+  (ctx) => {
+    const memberShard = hasMemberSession(ctx) ? 0 : 1;
+    return ctx.from.feedbackLog.where(row => row.shard.eq(0).and(row.shard.eq(memberShard))).build();
+  }
+);
+
 const publishedQaRow = t.object('PublishedQaRow', {
   id: t.u64(),
   question: t.string(),
@@ -432,7 +462,8 @@ function requireMemberSession(ctx: {
   }
 }
 
-type PageArgs = { beforeCreatedAtMicros: bigint | undefined, beforeId: bigint | undefined, limit: number };
+// SDK Option fields may be omitted as well as explicitly undefined.
+type PageArgs = { beforeCreatedAtMicros?: bigint, beforeId?: bigint, limit: number };
 const MAX_FILTER_VALUE_LENGTH = 256;
 
 function cursorOf(now: Timestamp, args: PageArgs): PageCursor {
@@ -461,6 +492,21 @@ function requireAllowedFilter(value: string | undefined, label: string, allowed:
   }
 }
 
+// Bounds per-row matching work: every listed value is compared against every scanned row.
+const MAX_FILTER_LIST_LENGTH = 64;
+
+function requireValidExactListFilter(values: readonly string[] | undefined, label: string): void {
+  if (values == null) return;
+  if (values.length > MAX_FILTER_LIST_LENGTH) throw new SenderError(`${label} may list at most ${MAX_FILTER_LIST_LENGTH} values`);
+  for (const value of values) requireValidExactFilter(value, label);
+}
+
+function requireAllowedListFilter(values: readonly string[] | undefined, label: string, allowed: readonly string[]): void {
+  if (values == null) return;
+  if (values.length > allowed.length) throw new SenderError(`${label} may list at most ${allowed.length} values`);
+  for (const value of values) requireAllowedFilter(value, label, allowed);
+}
+
 function requireMaxLength(value: string | undefined, label: string, maxLength: number): void {
   if (value != null && value.length > maxLength) {
     throw new SenderError(`${label} must be at most ${maxLength} characters`);
@@ -476,17 +522,17 @@ const basePageParams = {
 const mcpPageParams = {
   ...basePageParams,
   createdAtOrAfterMicros: t.u64().optional(),
-  toolName: t.string().optional(),
+  toolNames: t.array(t.string()).optional(),
   hasError: t.bool().optional(),
-  qaState: t.string().optional(),
-  humanReviewState: t.string().optional(),
+  qaStates: t.array(t.string()).optional(),
+  humanReviewStates: t.array(t.string()).optional(),
 };
 
 const aiQueryPageParams = {
   ...basePageParams,
   createdAtOrAfterMicros: t.u64().optional(),
-  systemPromptId: t.string().optional(),
-  modelId: t.string().optional(),
+  systemPromptIds: t.array(t.string()).optional(),
+  modelIds: t.array(t.string()).optional(),
   mode: t.string().optional(),
   isAuthenticated: t.bool().optional(),
   hasError: t.bool().optional(),
@@ -518,9 +564,9 @@ export const page_mcp_call_log = spacetimedb.procedure(
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
     const limit = requireValidLimit(args.limit);
-    requireValidExactFilter(args.toolName, 'toolName');
-    requireAllowedFilter(args.qaState, 'qaState', ['pending', 'review-failed', 'error', 'pass', 'warn', 'fail', 'feature-request']);
-    requireAllowedFilter(args.humanReviewState, 'humanReviewState', ['required', 'reviewed', 'not-reviewed']);
+    requireValidExactListFilter(args.toolNames, 'toolNames');
+    requireAllowedListFilter(args.qaStates, 'qaStates', ['pending', 'review-failed', 'error', 'pass', 'warn', 'fail', 'feature-request']);
+    requireAllowedListFilter(args.humanReviewStates, 'humanReviewStates', ['required', 'reviewed', 'not-reviewed']);
     const nowMicros = ctx.timestamp.microsSinceUnixEpoch;
     return toPage(pageByCreatedAt(
       sliceScannerFor(tx.db.mcpCallLog.shardCreatedAt),
@@ -541,8 +587,8 @@ export const page_ai_query_log = spacetimedb.procedure(
   (ctx, args) => ctx.withTx((tx) => {
     requireMemberSession({ sender: ctx.sender, db: tx.db });
     const limit = requireValidLimit(args.limit);
-    requireValidExactFilter(args.systemPromptId, 'systemPromptId');
-    requireValidExactFilter(args.modelId, 'modelId');
+    requireValidExactListFilter(args.systemPromptIds, 'systemPromptIds');
+    requireValidExactListFilter(args.modelIds, 'modelIds');
     requireAllowedFilter(args.mode, 'mode', ['stream', 'generate']);
     return toPage(pageByCreatedAt(
       sliceScannerFor(tx.db.aiQueryLog.shardCreatedAt),

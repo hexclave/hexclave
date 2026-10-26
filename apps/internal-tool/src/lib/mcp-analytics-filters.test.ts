@@ -7,12 +7,8 @@ import {
   DEFAULT_MCP_ANALYTICS_FILTERS,
   filterMcpCalls,
   type McpAnalyticsFilters,
-  parseHumanReviewState,
-  parseQaState,
-  parseStatusFilter,
-  parseTimeRange,
-  rangeStartMillis,
 } from "./mcp-analytics-filters";
+import { rangeStartMillis } from "./filter-options";
 
 const NOW_MILLIS = Date.UTC(2026, 0, 15, 12, 0, 0);
 const HOUR_MILLIS = 60 * 60 * 1000;
@@ -58,34 +54,16 @@ describe("rangeStartMillis", () => {
   });
 });
 
-describe("parsers", () => {
-  it("accept every value the page procedure accepts", () => {
-    expect(parseTimeRange("30d")).toBe("30d");
-    expect(parseStatusFilter("error")).toBe("error");
-    expect(parseQaState("feature-request")).toBe("feature-request");
-    expect(parseQaState("all")).toBe("all");
-    expect(parseHumanReviewState("not-reviewed")).toBe("not-reviewed");
-    expect(parseHumanReviewState("all")).toBe("all");
-  });
-
-  // A select rendering an option the filter cannot honour would silently show
-  // unfiltered data, so every parser fails loudly instead of falling back.
-  it("throw on anything else", () => {
-    expect(() => parseTimeRange("90d")).toThrow(/Unexpected time range/);
-    expect(() => parseStatusFilter("warn")).toThrow(/Unexpected status filter/);
-    expect(() => parseQaState("passed")).toThrow(/Unexpected QA state filter/);
-    expect(() => parseHumanReviewState("done")).toThrow(/Unexpected human review state filter/);
-  });
-});
-
 describe("countActiveMcpFilters", () => {
   it("counts nothing for the defaults", () => {
     expect(countActiveMcpFilters(DEFAULT_MCP_ANALYTICS_FILTERS)).toBe(0);
   });
 
   it("counts each non-default dimension", () => {
-    expect(countActiveMcpFilters(filters({ timeRange: "24h", status: "error", qaState: "fail" }))).toBe(3);
-    expect(countActiveMcpFilters(filters({ toolName: "ask_hexclave", humanReviewState: "required" }))).toBe(2);
+    expect(countActiveMcpFilters(filters({ timeRange: "24h", statuses: new Set(["error"]), qaStates: new Set(["fail"]) }))).toBe(3);
+    // Both statuses selected filters nothing, so it must not count as an active filter.
+    expect(countActiveMcpFilters(filters({ statuses: new Set(["ok", "error"]) }))).toBe(0);
+    expect(countActiveMcpFilters(filters({ toolNames: new Set(["ask_hexclave"]), humanReviewStates: new Set(["required"]) }))).toBe(2);
   });
 });
 
@@ -107,14 +85,14 @@ describe("filterMcpCalls", () => {
 
   it("filters by tool name", () => {
     const rows = [row({ toolName: "ask_hexclave" }), row({ toolName: "give_feedback" })];
-    const kept = filterMcpCalls(rows, filters({ toolName: "give_feedback" }), NOW_MILLIS);
+    const kept = filterMcpCalls(rows, filters({ toolNames: new Set(["give_feedback"]) }), NOW_MILLIS);
     expect(kept.map(r => r.toolName)).toEqual(["give_feedback"]);
   });
 
   it("separates errored calls from healthy ones", () => {
     const rows = [row({ toolName: "ok" }), row({ toolName: "bad", errorMessage: "upstream 504" })];
-    expect(filterMcpCalls(rows, filters({ status: "error" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["bad"]);
-    expect(filterMcpCalls(rows, filters({ status: "ok" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["ok"]);
+    expect(filterMcpCalls(rows, filters({ statuses: new Set(["error"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["bad"]);
+    expect(filterMcpCalls(rows, filters({ statuses: new Set(["ok"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["ok"]);
   });
 
   it("buckets QA scores the same way the module does", () => {
@@ -123,15 +101,15 @@ describe("filterMcpCalls", () => {
       row({ toolName: "warn", qaOverallScore: 79 }),
       row({ toolName: "fail", qaOverallScore: 49 }),
     ];
-    expect(filterMcpCalls(rows, filters({ qaState: "pass" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["pass"]);
-    expect(filterMcpCalls(rows, filters({ qaState: "warn" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["warn"]);
-    expect(filterMcpCalls(rows, filters({ qaState: "fail" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["fail"]);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["pass"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["pass"]);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["warn"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["warn"]);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["fail"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["fail"]);
   });
 
   it("treats a row with a review error as `error`, not `pending`", () => {
     const rows = [row({ qaErrorMessage: "model timed out" })];
-    expect(filterMcpCalls(rows, filters({ qaState: "error" }), NOW_MILLIS)).toHaveLength(1);
-    expect(filterMcpCalls(rows, filters({ qaState: "pending" }), NOW_MILLIS)).toHaveLength(0);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["error"]) }), NOW_MILLIS)).toHaveLength(1);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["pending"]) }), NOW_MILLIS)).toHaveLength(0);
   });
 
   // This is the one bucket that changes with nothing but the passage of time,
@@ -140,12 +118,12 @@ describe("filterMcpCalls", () => {
     const thresholdMillis = Number(QA_REVIEW_FAILED_THRESHOLD_MICROS / 1000n);
     const rows = [row({ createdAtMillis: NOW_MILLIS - thresholdMillis - 1000 })];
 
-    expect(filterMcpCalls(rows, filters({ qaState: "pending" }), NOW_MILLIS)).toHaveLength(0);
-    expect(filterMcpCalls(rows, filters({ qaState: "review-failed" }), NOW_MILLIS)).toHaveLength(1);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["pending"]) }), NOW_MILLIS)).toHaveLength(0);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["review-failed"]) }), NOW_MILLIS)).toHaveLength(1);
 
     const justAfterInsert = NOW_MILLIS - thresholdMillis;
-    expect(filterMcpCalls(rows, filters({ qaState: "pending" }), justAfterInsert)).toHaveLength(1);
-    expect(filterMcpCalls(rows, filters({ qaState: "review-failed" }), justAfterInsert)).toHaveLength(0);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["pending"]) }), justAfterInsert)).toHaveLength(1);
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["review-failed"]) }), justAfterInsert)).toHaveLength(0);
   });
 
   it("finds capability-gap flags", () => {
@@ -155,7 +133,7 @@ describe("filterMcpCalls", () => {
       // Type alone is not a renderable flag; it must not count as a feature request here either.
       row({ toolName: "type-only", qaOverallScore: 74, qaFlagsJson: JSON.stringify([{ type: "unsupported_feature_request" }]) }),
     ];
-    const kept = filterMcpCalls(rows, filters({ qaState: "feature-request" }), NOW_MILLIS);
+    const kept = filterMcpCalls(rows, filters({ qaStates: new Set(["feature-request"]) }), NOW_MILLIS);
     expect(kept.map(r => r.toolName)).toEqual(["gap"]);
   });
 
@@ -165,9 +143,20 @@ describe("filterMcpCalls", () => {
       row({ toolName: "done", qaNeedsHumanReview: true, humanReviewedAt: timestamp(NOW_MILLIS) }),
       row({ toolName: "untouched" }),
     ];
-    expect(filterMcpCalls(rows, filters({ humanReviewState: "required" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["required"]);
-    expect(filterMcpCalls(rows, filters({ humanReviewState: "reviewed" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["done"]);
-    expect(filterMcpCalls(rows, filters({ humanReviewState: "not-reviewed" }), NOW_MILLIS).map(r => r.toolName)).toEqual(["required", "untouched"]);
+    expect(filterMcpCalls(rows, filters({ humanReviewStates: new Set(["required"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["required"]);
+    expect(filterMcpCalls(rows, filters({ humanReviewStates: new Set(["reviewed"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["done"]);
+    expect(filterMcpCalls(rows, filters({ humanReviewStates: new Set(["not-reviewed"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["required", "untouched"]);
+  });
+
+  it("matches any selected value within a dimension", () => {
+    const rows = [
+      row({ toolName: "pass", qaOverallScore: 90 }),
+      row({ toolName: "warn", qaOverallScore: 60 }),
+      row({ toolName: "fail", qaOverallScore: 10 }),
+    ];
+    expect(filterMcpCalls(rows, filters({ qaStates: new Set(["pass", "fail"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["pass", "fail"]);
+    expect(filterMcpCalls(rows, filters({ toolNames: new Set(["warn", "fail"]) }), NOW_MILLIS).map(r => r.toolName)).toEqual(["warn", "fail"]);
+    expect(filterMcpCalls(rows, filters({ statuses: new Set(["ok", "error"]) }), NOW_MILLIS)).toHaveLength(3);
   });
 
   it("applies every dimension together", () => {
@@ -179,7 +168,7 @@ describe("filterMcpCalls", () => {
     ];
     const kept = filterMcpCalls(
       rows,
-      filters({ timeRange: "30d", toolName: "ask_hexclave", qaState: "fail", humanReviewState: "required" }),
+      filters({ timeRange: "30d", toolNames: new Set(["ask_hexclave"]), qaStates: new Set(["fail"]), humanReviewStates: new Set(["required"]) }),
       NOW_MILLIS,
     );
     expect(kept).toHaveLength(1);

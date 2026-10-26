@@ -5,9 +5,14 @@ import { format } from "date-fns";
 import { clsx } from "clsx";
 import type { QaEntriesRow } from "../types";
 import { toDate } from "../utils";
-import { Alert, Badge, Button, type ButtonVariant, EmptyState, FieldLabel, Input, ModalDialog, Pill, Textarea } from "./design";
+import { Alert, Badge, Button, type ButtonVariant, EmptyState, FieldLabel, Input, ModalDialog, Panel, PanelRow, Textarea } from "./design";
+import { MultiFilter } from "./FilterFields";
 
-type KbFilter = "all" | "published" | "draft";
+const KB_STATUS_OPTIONS = [
+  { value: "published", label: "Published" },
+  { value: "draft", label: "Draft" },
+] as const;
+type KbStatus = typeof KB_STATUS_OPTIONS[number]["value"];
 
 export function KnowledgeBase({ rows, connectionState, connectionErrorMessage, onSave, onDelete }: {
   rows: QaEntriesRow[];
@@ -16,17 +21,15 @@ export function KnowledgeBase({ rows, connectionState, connectionErrorMessage, o
   onSave: (qaId: bigint, question: string, answer: string, publish: boolean) => Promise<void> | void;
   onDelete: (qaId: bigint) => Promise<void> | void;
 }) {
-  const [filter, setFilter] = useState<KbFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<ReadonlySet<KbStatus>>(new Set());
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<bigint | null>(null);
 
   const kbRows = useMemo(() => {
     let result = rows;
 
-    if (filter === "published") {
-      result = result.filter(r => r.published);
-    } else if (filter === "draft") {
-      result = result.filter(r => !r.published);
+    if (statusFilter.size > 0) {
+      result = result.filter(r => statusFilter.has(r.published ? "published" : "draft"));
     }
 
     if (search) {
@@ -42,34 +45,35 @@ export function KnowledgeBase({ rows, connectionState, connectionErrorMessage, o
       const bTime = b.lastPublishedAt ? Number(toDate(b.lastPublishedAt)) : Number(toDate(b.createdAt));
       return bTime - aTime;
     });
-  }, [rows, filter, search]);
+  }, [rows, statusFilter, search]);
 
   const publishedCount = rows.filter(r => r.published).length;
   const draftCount = rows.filter(r => !r.published).length;
 
   return (
     <div>
-      {/* Filters */}
-      <div className="mb-4 space-y-2">
-        <Input
-          type="text"
-          placeholder="Search questions and answers..."
-          className="h-9 px-3 text-sm"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        <div className="flex gap-2 items-center">
-          <Pill active={filter === "all"} onClick={() => setFilter("all")}>
-            All ({publishedCount + draftCount})
-          </Pill>
-          <Pill active={filter === "published"} onClick={() => setFilter("published")}>
-            Published ({publishedCount})
-          </Pill>
-          <Pill active={filter === "draft"} onClick={() => setFilter("draft")}>
-            Drafts ({draftCount})
-          </Pill>
-        </div>
-      </div>
+      <Panel className="mb-4">
+        <PanelRow className="gap-x-2">
+          <Input
+            type="search"
+            aria-label="Search Q&A entries"
+            placeholder="Search questions and answers…"
+            className="min-w-64 flex-1"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <MultiFilter
+            label="Status"
+            controlClassName="w-32"
+            options={KB_STATUS_OPTIONS.map(option => ({
+              ...option,
+              label: `${option.label} · ${option.value === "published" ? publishedCount : draftCount}`,
+            }))}
+            selected={statusFilter}
+            onChange={setStatusFilter}
+          />
+        </PanelRow>
+      </Panel>
 
       {/* List */}
       {connectionState === "error" ? (
@@ -84,7 +88,7 @@ export function KnowledgeBase({ rows, connectionState, connectionErrorMessage, o
           <p className="mt-1 text-xs">Add one with the "+ Add Q&A" button above</p>
         </EmptyState>
       ) : (
-        <div className="space-y-3">
+        <Panel>
           {kbRows.map(row => (
             <KbCard
               key={String(row.id)}
@@ -101,7 +105,7 @@ export function KnowledgeBase({ rows, connectionState, connectionErrorMessage, o
               }}
             />
           ))}
-        </div>
+        </Panel>
       )}
     </div>
   );
@@ -181,10 +185,6 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
     }
   };
 
-  const cardTint = row.published
-    ? "border-emerald-500/25 bg-emerald-500/[0.06]"
-    : "border-amber-500/25 bg-amber-500/[0.06]";
-
   const hasUnsavedChanges = editQuestion !== row.question || editAnswer !== row.answer;
   const saveAction = hasUnsavedChanges
     ? { label: "Save Draft", publish: false, isDraft: true }
@@ -196,7 +196,7 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
 
   if (isEditing) {
     return (
-      <div className={clsx("space-y-3 rounded-xl border p-4 backdrop-blur-xl", cardTint)}>
+      <div className="space-y-3 bg-foreground/[0.02] p-4">
         <label className="block">
           <FieldLabel className="mb-1 block">Question</FieldLabel>
           <Input
@@ -233,9 +233,8 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
   }
 
   return (
-    <div className={clsx("overflow-hidden rounded-xl border backdrop-blur-xl", cardTint)}>
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-inherit px-4 py-2">
+    <div className="flex items-start gap-4 px-4 py-3">
+      <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center gap-2">
           {row.published
             ? <Badge color="green" size="xs">&#10003; Published</Badge>
@@ -252,36 +251,32 @@ function KbCard({ row, isEditing, onStartEdit, onCancelEdit, onSave, onDelete }:
             <span className="text-[10px] text-muted-foreground">by {row.lastEditedBy}</span>
           )}
         </div>
-        <div className="flex items-center gap-1">
-          <Button size="xs" variant="ghost" onClick={onStartEdit} disabled={busy != null}>
-            Edit
-          </Button>
-          {row.published ? (
-            <Button size="xs" variant="ghost" onClick={() => setPending("unpublish")} disabled={busy != null}>
-              {busy === "unpublish" ? "Unpublishing…" : "Unpublish"}
-            </Button>
-          ) : (
-            <Button size="xs" variant="ghost" onClick={() => setPending("publish")} disabled={busy != null}>
-              {busy === "publish" ? "Publishing…" : "Publish"}
-            </Button>
-          )}
-          <Button
-            size="xs"
-            variant="ghost"
-            className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
-            onClick={() => setPending("delete")}
-            disabled={busy != null}
-          >
-            {busy === "delete" ? "Deleting…" : "Delete"}
-          </Button>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div className="space-y-1 px-4 py-3">
         {errorBanner}
         <p className="text-sm font-medium text-foreground">{row.question}</p>
-        <p className="line-clamp-3 whitespace-pre-wrap text-xs text-muted-foreground">{row.answer}</p>
+        <p className="line-clamp-2 whitespace-pre-wrap text-xs text-muted-foreground">{row.answer}</p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button size="xs" variant="ghost" onClick={onStartEdit} disabled={busy != null}>
+            Edit
+        </Button>
+        {row.published ? (
+          <Button size="xs" variant="ghost" onClick={() => setPending("unpublish")} disabled={busy != null}>
+            {busy === "unpublish" ? "Unpublishing…" : "Unpublish"}
+          </Button>
+        ) : (
+          <Button size="xs" variant="ghost" onClick={() => setPending("publish")} disabled={busy != null}>
+            {busy === "publish" ? "Publishing…" : "Publish"}
+          </Button>
+        )}
+        <Button
+          size="xs"
+          variant="ghost"
+          className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+          onClick={() => setPending("delete")}
+          disabled={busy != null}
+        >
+          {busy === "delete" ? "Deleting…" : "Delete"}
+        </Button>
       </div>
 
       {pending === "publish" && (

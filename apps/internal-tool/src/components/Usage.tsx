@@ -9,28 +9,26 @@ import type { AiQueryLogRow } from "../types";
 import { toDate } from "../utils";
 import { canReportP95, extent, MIN_P95_SAMPLE_COUNT, nearestRankPercentile, percentage } from "../lib/stats";
 import { type HistoryPagingProps } from "./LoadOlderButton";
+import { emptyUsageFilters, hasUsageFilters, KNOWN_REQUESTED_TOOLS, matchesUsageFilters, parseUsageRow, usageFilterKey } from "../lib/usage-filters";
+import { UsageInvestigationFilters } from "./UsageInvestigationFilters";
+import { aiUsageScopeMatcher, type AiUsageScopeFilters, countActiveAiUsageScopeFilters, DEFAULT_AI_USAGE_SCOPE_FILTERS, toAiUsageTableFilters } from "../lib/ai-usage-filters";
+import { AUTH_OPTIONS, type AuthState, CALL_STATUS_OPTIONS, MODE_OPTIONS, stringOptions } from "../lib/filter-options";
+import { MultiFilter, TimeRangeFilter } from "./FilterFields";
 import { UsageDataGrid } from "./UsageDataGrid";
 import {
   Alert,
-  Badge,
   BarRow,
   Button,
   Card,
   chartColors,
   cn,
   EmptyState,
-  FieldLabel,
-  Input,
-  MetricCard,
-  Pill,
-  Select,
+  Metric,
+  MetricStrip,
+  Panel,
+  PanelGrid,
+  PanelSection,
 } from "./design";
-
-type TimeRange = "24h" | "7d" | "30d" | "all";
-type AuthFilter = "all" | "authed" | "anon";
-type ModeFilter = "all" | "stream" | "generate";
-type StatusFilter = "all" | "ok" | "error";
-const TIME_RANGES: readonly TimeRange[] = ["24h", "7d", "30d", "all"];
 
 type Props = {
   view: "overview" | "logs",
@@ -58,63 +56,32 @@ const ALL_SYSTEM_PROMPTS = [
   "rewrite-template-source",
 ];
 
-function parseModeFilter(value: string): ModeFilter {
-  if (value === "all" || value === "stream" || value === "generate") return value;
-  throw new Error(`Unexpected mode filter: ${value}`);
-}
-
-function parseTimeRange(value: string): TimeRange {
-  if (value === "24h" || value === "7d" || value === "30d" || value === "all") return value;
-  throw new Error(`Unexpected time range: ${value}`);
-}
-
-function parseAuthFilter(value: string): AuthFilter {
-  if (value === "all" || value === "authed" || value === "anon") return value;
-  throw new Error(`Unexpected auth filter: ${value}`);
-}
-
-function parseStatusFilter(value: string): StatusFilter {
-  if (value === "all" || value === "ok" || value === "error") return value;
-  throw new Error(`Unexpected status filter: ${value}`);
-}
-
 function usageRowId(row: AiQueryLogRow): string {
   return String(row.id);
 }
 
-function rangeStartMicros(range: TimeRange): bigint | undefined {
-  if (range === "all") return undefined;
-  const hours = range === "24h" ? 24 : range === "7d" ? 7 * 24 : 30 * 24;
-  return BigInt(new Date().getTime() - hours * 60 * 60 * 1000) * 1000n;
-}
-
 export function Usage({ view, rows, connectionState, connectionErrorMessage, onSelect, queryFilteredPage, hasMoreHistory, isLoadingOlder, onLoadOlder }: Props) {
-  const [timeRange, setTimeRange] = useState<TimeRange>("7d");
-  const [systemPromptFilter, setSystemPromptFilter] = useState<Set<string>>(new Set());
-  const [modelFilter, setModelFilter] = useState<Set<string>>(new Set());
-  const [modeFilter, setModeFilter] = useState<ModeFilter>("all");
-  const [authFilter, setAuthFilter] = useState<AuthFilter>("all");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [logTimeRange, setLogTimeRange] = useState<TimeRange>("all");
-  const [logSystemPrompt, setLogSystemPrompt] = useState("");
-  const [logModel, setLogModel] = useState("");
-  const [logMode, setLogMode] = useState<ModeFilter>("all");
-  const [logAuth, setLogAuth] = useState<AuthFilter>("all");
-  const [logStatus, setLogStatus] = useState<StatusFilter>("all");
+  const [investigation, setInvestigation] = useState(emptyUsageFilters);
+  const investigationActive = hasUsageFilters(investigation);
+  const investigationKey = usageFilterKey(investigation);
+  // Overview and request log keep separate scopes (the Overview defaults to the last week, the log to
+  // everything), but render one shared filter row bound to whichever view is showing.
+  const [overviewScope, setOverviewScope] = useState<AiUsageScopeFilters>({ ...DEFAULT_AI_USAGE_SCOPE_FILTERS, timeRange: "7d" });
+  const [logScope, setLogScope] = useState<AiUsageScopeFilters>(DEFAULT_AI_USAGE_SCOPE_FILTERS);
+  const scope = view === "overview" ? overviewScope : logScope;
+  const setScope = view === "overview" ? setOverviewScope : setLogScope;
+  const setScopeFilter = <Key extends keyof AiUsageScopeFilters>(key: Key, value: AiUsageScopeFilters[Key]) => {
+    setScope(current => ({ ...current, [key]: value }));
+  };
+  const timeRange = overviewScope.timeRange;
   const [logSnapshotVersion, setLogSnapshotVersion] = useState(0);
 
-  const hasLogFilters = logTimeRange !== "all" || logSystemPrompt !== "" || logModel !== "" || logMode !== "all" || logAuth !== "all" || logStatus !== "all";
-  const logFilters = useMemo<AiUsageTableFilters>(() => ({
-    createdAtOrAfterMicros: rangeStartMicros(logTimeRange),
-    systemPromptId: logSystemPrompt === "" ? undefined : logSystemPrompt,
-    modelId: logModel === "" ? undefined : logModel,
-    mode: logMode === "all" ? undefined : logMode,
-    isAuthenticated: logAuth === "all" ? undefined : logAuth === "authed",
-    hasError: logStatus === "all" ? undefined : logStatus === "error",
-  }), [logAuth, logMode, logModel, logSnapshotVersion, logStatus, logSystemPrompt, logTimeRange]);
-  const logQueryKey = [logTimeRange, logSystemPrompt, logModel, logMode, logAuth, logStatus, logSnapshotVersion].join("\u0000");
+  const hasLogFilters = countActiveAiUsageScopeFilters(logScope) > 0;
+  // logSnapshotVersion is a dependency on purpose: bumping it recomputes the range start ("now").
+  const logFilters = useMemo(() => toAiUsageTableFilters(logScope, Date.now()), [logScope, logSnapshotVersion]);
+  const logQueryKey = JSON.stringify([logScope.timeRange, logFilters.systemPromptIds, logFilters.modelIds, logFilters.mode ?? null, logFilters.isAuthenticated ?? null, logFilters.hasError ?? null, logSnapshotVersion]);
   const filteredPages = useFilteredLogPages({
-    enabled: view === "logs" && hasLogFilters,
+    enabled: view === "logs" && hasLogFilters && !investigationActive,
     queryKey: logQueryKey,
     filters: logFilters,
     fetchPage: queryFilteredPage,
@@ -140,20 +107,9 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
   }, [timeRange, now]);
 
   const filtered = useMemo(() => {
-    return rows.filter(r => {
-      const ts = toDate(r.createdAt).getTime();
-      if (ts < rangeStart) return false;
-      if (systemPromptFilter.size > 0 && !systemPromptFilter.has(r.systemPromptId)) return false;
-      if (modelFilter.size > 0 && !modelFilter.has(r.modelId)) return false;
-      if (modeFilter !== "all" && r.mode !== modeFilter) return false;
-      if (authFilter === "authed" && !r.isAuthenticated) return false;
-      if (authFilter === "anon" && r.isAuthenticated) return false;
-      const isError = r.errorMessage != null && r.errorMessage !== "";
-      if (statusFilter === "ok" && isError) return false;
-      if (statusFilter === "error" && !isError) return false;
-      return true;
-    });
-  }, [rows, rangeStart, systemPromptFilter, modelFilter, modeFilter, authFilter, statusFilter]);
+    const matchesScope = aiUsageScopeMatcher(overviewScope, now);
+    return rows.filter(r => matchesScope(r) && matchesUsageFilters(r, investigation));
+  }, [rows, overviewScope, now, investigation]);
 
   const stats = useMemo(() => {
     const totalCalls = filtered.length;
@@ -223,12 +179,9 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
     for (const r of filtered) {
       sysPromptCounts.set(r.systemPromptId, (sysPromptCounts.get(r.systemPromptId) ?? 0) + 1);
       modelCounts.set(r.modelId, (modelCounts.get(r.modelId) ?? 0) + 1);
-      try {
-        const parsedTools: unknown = JSON.parse(r.requestedToolsJson);
-        if (!Array.isArray(parsedTools)) continue;
-        const tools = new Set(parsedTools.filter((tool): tool is string => typeof tool === "string"));
-        for (const tool of tools) toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
-      } catch { /* skip */ }
+      for (const tool of parseUsageRow(r).requestedTools) {
+        toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
+      }
     }
     const sysPromptDist = Array.from(sysPromptCounts.entries()).sort((a, b) => b[1] - a[1]);
     const modelDist = Array.from(modelCounts.entries()).sort((a, b) => b[1] - a[1]);
@@ -273,28 +226,45 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
       cacheHitBySystemPrompt,
       latencyBuckets,
     };
-  }, [filtered, rangeStart, now]);
+  }, [filtered, rangeStart, now, timeRange]);
 
-  const allSystemPrompts = useMemo(() => {
+  const systemPromptOptions = useMemo(() => {
     const seen = new Set<string>(ALL_SYSTEM_PROMPTS);
     for (const r of rows) seen.add(r.systemPromptId);
-    return Array.from(seen).sort();
+    return stringOptions(Array.from(seen).sort());
   }, [rows]);
 
-  const allModels = useMemo(() => {
+  const modelOptions = useMemo(() => {
     const seen = new Set<string>();
     for (const r of rows) seen.add(r.modelId);
-    return Array.from(seen).sort();
+    return stringOptions(Array.from(seen).sort());
   }, [rows]);
 
-  function toggle(set: Set<string>, val: string, setter: (s: Set<string>) => void) {
-    const next = new Set(set);
-    if (next.has(val)) next.delete(val);
-    else next.add(val);
-    setter(next);
+  const toolOptions = useMemo(() => {
+    const requested = new Set(KNOWN_REQUESTED_TOOLS);
+    const called = new Set<string>();
+    for (const row of rows) {
+      const parsed = parseUsageRow(row);
+      for (const tool of parsed.requestedTools) requested.add(tool);
+      for (const tool of parsed.calledTools) called.add(tool);
+    }
+    return { requested: [...requested].sort(), called: [...called].sort() };
+  }, [rows]);
+
+  // These fields are not supported by the server paging procedure. While any are
+  // active, use the shared loaded history so Load all history expands the results.
+  const investigationLogRows = useMemo(() => {
+    const matchesScope = aiUsageScopeMatcher(logScope, now);
+    return rows.filter(row => matchesUsageFilters(row, investigation) && matchesScope(row));
+  }, [rows, investigation, logScope, now]);
+  const useServerFilters = hasLogFilters && !investigationActive;
+  const logRows = investigationActive ? investigationLogRows : useServerFilters ? filteredPages.rows : rows;
+
+  function clearFilters() {
+    setOverviewScope(DEFAULT_AI_USAGE_SCOPE_FILTERS);
+    setLogScope(DEFAULT_AI_USAGE_SCOPE_FILTERS);
   }
 
-  const advancedFilterCount = systemPromptFilter.size + modelFilter.size;
   return (
     <div className="space-y-4">
       {connectionState === "error" && (
@@ -310,293 +280,193 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
           )}
         </Alert>
       )}
-      {view === "overview" && <div className="sticky top-0 z-10 rounded-xl border border-black/[0.06] bg-card shadow-sm ring-1 ring-black/[0.04] backdrop-blur-xl dark:border-white/[0.06] dark:ring-white/[0.04]">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
-          <div className="flex items-center gap-1.5">
-            <FieldLabel>Range</FieldLabel>
-            {TIME_RANGES.map(r => (
-              <Pill key={r} active={timeRange === r} onClick={() => setTimeRange(r)}>{r}</Pill>
-            ))}
-          </div>
-          <label className="grid grid-cols-[auto_7rem] items-center gap-1.5">
-            <FieldLabel>Mode</FieldLabel>
-            <Select value={modeFilter} onChange={event => setModeFilter(parseModeFilter(event.target.value))}>
-              <option value="all">All</option>
-              <option value="stream">Stream</option>
-              <option value="generate">Generate</option>
-            </Select>
-          </label>
-          <label className="grid grid-cols-[auto_9rem] items-center gap-1.5">
-            <FieldLabel>Auth</FieldLabel>
-            <Select value={authFilter} onChange={event => setAuthFilter(parseAuthFilter(event.target.value))}>
-              <option value="all">All</option>
-              <option value="authed">Authenticated</option>
-              <option value="anon">Anonymous</option>
-            </Select>
-          </label>
-          <label className="grid grid-cols-[auto_6rem] items-center gap-1.5">
-            <FieldLabel>Status</FieldLabel>
-            <Select value={statusFilter} onChange={event => setStatusFilter(parseStatusFilter(event.target.value))}>
-              <option value="all">All</option>
-              <option value="ok">OK</option>
-              <option value="error">Error</option>
-            </Select>
-          </label>
-          <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
-            {connectionState === "connected" ? `${filtered.length} of ${rows.length} calls` : connectionState}
-          </span>
-        </div>
-
-        <details className="group border-t border-black/[0.06] dark:border-white/[0.06]">
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.03] hover:text-foreground hover:transition-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring">
-            <span className="text-[8px] transition-transform group-open:rotate-90">▶</span>
-            Prompt and model filters
-            {advancedFilterCount > 0 && <Badge color="blue" size="xs">{advancedFilterCount} active</Badge>}
-          </summary>
-          <div className="space-y-2 border-t border-black/[0.04] px-3 py-2.5 dark:border-white/[0.04]">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <FieldLabel className="w-24">System prompt</FieldLabel>
-              {allSystemPrompts.map(sp => (
-                <Pill
-                  key={sp}
-                  mono
-                  active={systemPromptFilter.has(sp)}
-                  onClick={() => toggle(systemPromptFilter, sp, setSystemPromptFilter)}
-                >
-                  {sp}
-                </Pill>
-              ))}
-            </div>
-            {allModels.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <FieldLabel className="w-24">Model</FieldLabel>
-                {allModels.map(m => (
-                  <Pill
-                    key={m}
-                    mono
-                    active={modelFilter.has(m)}
-                    onClick={() => toggle(modelFilter, m, setModelFilter)}
-                  >
-                    {m}
-                  </Pill>
-                ))}
-              </div>
-            )}
-          </div>
-        </details>
-      </div>}
+      <UsageInvestigationFilters
+        filters={investigation}
+        onChange={setInvestigation}
+        requestedTools={toolOptions.requested}
+        calledTools={toolOptions.called}
+        onPreset={() => {
+          clearFilters();
+          const anonOnly = { ...DEFAULT_AI_USAGE_SCOPE_FILTERS, auth: new Set<AuthState>(["anon"]) };
+          setOverviewScope(anonOnly);
+          setLogScope(anonOnly);
+          setInvestigation({ ...emptyUsageFilters(), toolCalls: new Set(["succeeded"]) });
+        }}
+        onClear={clearFilters}
+        hasOtherFilters={countActiveAiUsageScopeFilters(scope) > 0}
+        rowCount={rows.length}
+        hasMoreHistory={hasMoreHistory}
+        isLoadingOlder={isLoadingOlder}
+        onLoadOlder={onLoadOlder}
+        connected={connectionState === "connected"}
+        summary={view === "overview"
+          ? (connectionState === "connected" ? `${filtered.length.toLocaleString()} of ${rows.length.toLocaleString()} calls in scope` : connectionState)
+          // Only worth saying when it is true and surprising: a filtered list is a point-in-time
+          // snapshot, so new calls do not stream into it. The unfiltered list is live, as expected.
+          : useServerFilters ? "Snapshot results" : undefined}
+        actions={view === "logs" && useServerFilters
+          ? <Button onClick={() => setLogSnapshotVersion(version => version + 1)} disabled={filteredPages.isLoading}>Refresh</Button>
+          : undefined}
+      >
+        <TimeRangeFilter value={scope.timeRange} onChange={range => setScopeFilter("timeRange", range)} />
+        <MultiFilter label="System prompt" mono controlClassName="w-36" options={systemPromptOptions} selected={scope.systemPromptIds} onChange={selected => setScopeFilter("systemPromptIds", selected)} />
+        <MultiFilter label="Model" mono controlClassName="w-36" options={modelOptions} selected={scope.modelIds} onChange={selected => setScopeFilter("modelIds", selected)} />
+        <MultiFilter label="Mode" controlClassName="w-24" options={MODE_OPTIONS} selected={scope.modes} onChange={selected => setScopeFilter("modes", selected)} />
+        <MultiFilter label="Auth" controlClassName="w-28" options={AUTH_OPTIONS} selected={scope.auth} onChange={selected => setScopeFilter("auth", selected)} />
+        <MultiFilter label="Status" controlClassName="w-24" options={CALL_STATUS_OPTIONS} selected={scope.statuses} onChange={selected => setScopeFilter("statuses", selected)} />
+      </UsageInvestigationFilters>
 
       {view === "overview" && (
         <>
-          {/* Metric cards */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-9">
-            <MetricCard
-              label="Calls in Window"
-              value={stats.totalCalls.toLocaleString()}
-              subtitle={hasMoreHistory ? "Loaded history only" : "All available history loaded"}
-              tooltip="AI requests matching the active filters among the history currently loaded in this browser."
-            />
-            <MetricCard
-              label="Errors"
-              value={stats.errorCalls.toLocaleString()}
-              valueClassName={stats.errorCalls > 0 ? "text-red-600 dark:text-red-400" : undefined}
-              subtitle={stats.totalCalls === 0 ? "No calls in window" : `${percentage(stats.errorCalls, stats.totalCalls)}% of filtered calls`}
-              tooltip="Requests that failed. Counted as rows where errorMessage is non-empty (upstream provider error, timeout, or client abort)."
-            />
-            <MetricCard
-              label="Input Tokens"
-              value={stats.inputTokens.toLocaleString()}
-              tooltip="Sum of provider-reported prompt tokens across filtered requests. Cached reads and cache writes are subsets reported separately."
-            />
-            <MetricCard
-              label="Output Tokens"
-              value={stats.outputTokens.toLocaleString()}
-              tooltip="Sum of generated tokens across all filtered requests."
-            />
-            <MetricCard
-              label="Cache Hit %"
-              value={stats.inputTokens > 0 ? `${Math.min(100, Math.round((stats.cachedInputTokens / stats.inputTokens) * 100))}%` : "—"}
-              valueClassName={stats.inputTokens > 0 && stats.cachedInputTokens / stats.inputTokens > 0.5 ? "text-emerald-600 dark:text-emerald-400" : undefined}
-              tooltip="Share of input tokens served from cache vs. processed fresh. Computed as sum(cachedInputTokens) / sum(inputTokens). Higher = caching is doing its job."
-            />
-            <MetricCard
-              label="Total Cost"
-              value={stats.pricedCalls === 0 ? "—" : formatUsd(stats.totalCost)}
-              subtitle={`${stats.pricedCalls} of ${stats.totalCalls} calls priced`}
-              tooltip="Sum of available OpenRouter total_cost values. Calls whose generation usage has not been refined yet are excluded rather than assumed to be priced."
-            />
-            <MetricCard
-              label="Cache Savings"
-              value={stats.cacheSavingsReportedCalls === 0 ? "—" : formatSignedUsd(stats.cacheSavingsUsd)}
-              valueClassName={stats.cacheSavingsReportedCalls === 0 ? undefined : stats.cacheSavingsUsd >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}
-              subtitle={`${stats.cacheSavingsReportedCalls} of ${stats.totalCalls} calls reported`}
-              tooltip="Sum of cache_discount values across filtered requests. Positive (green) means caching net-saved money; negative (red) means cold-start writes outweighed reads. Filter by systemPromptId to judge whether caching is worth keeping on a specific flow."
-            />
-            <MetricCard
-              label="Avg Duration"
-              value={stats.avgDuration == null ? "—" : `${stats.avgDuration.toLocaleString()}ms`}
-              tooltip="Mean wall-clock time per request, in milliseconds."
-            />
-            <MetricCard
-              label="p95 Duration"
-              value={!canReportP95(stats.durationSampleCount) || stats.p95Duration == null ? "—" : `${stats.p95Duration.toLocaleString()}ms`}
-              subtitle={!canReportP95(stats.durationSampleCount) ? `${stats.durationSampleCount} of ${MIN_P95_SAMPLE_COUNT} required samples` : `${stats.durationSampleCount} samples`}
-              tooltip="Nearest-rank 95th percentile request duration. At least 95% of filtered requests completed at or below this value."
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <Card title="Request activity">
-              <RequestActivity
-                totalCalls={stats.totalCalls}
-                buckets={stats.timeBuckets}
-                maxCalls={stats.maxCalls}
-                nonEmptyBucketCount={stats.nonEmptyTimeBucketCount}
-                firstCallAt={stats.firstCallAt}
-                lastCallAt={stats.lastCallAt}
+          <Panel>
+            <MetricStrip layout="3-then-9">
+              <Metric
+                label="Calls"
+                value={stats.totalCalls.toLocaleString()}
+                subtitle={hasMoreHistory ? "Loaded history only" : "All available history loaded"}
+                tooltip="AI requests matching the active filters among the history currently loaded in this browser."
               />
-            </Card>
+              <Metric
+                label="Errors"
+                value={stats.errorCalls.toLocaleString()}
+                valueClassName={stats.errorCalls > 0 ? "text-red-600 dark:text-red-400" : undefined}
+                subtitle={stats.totalCalls === 0 ? "No calls in window" : `${percentage(stats.errorCalls, stats.totalCalls)}% of filtered calls`}
+                tooltip="Requests that failed. Counted as rows where errorMessage is non-empty (upstream provider error, timeout, or client abort)."
+              />
+              <Metric
+                label="Input Tokens"
+                value={stats.inputTokens.toLocaleString()}
+                tooltip="Sum of provider-reported prompt tokens across filtered requests. Cached reads and cache writes are subsets reported separately."
+              />
+              <Metric
+                label="Output Tokens"
+                value={stats.outputTokens.toLocaleString()}
+                tooltip="Sum of generated tokens across all filtered requests."
+              />
+              <Metric
+                label="Cache Hit %"
+                value={stats.inputTokens > 0 ? `${Math.min(100, Math.round((stats.cachedInputTokens / stats.inputTokens) * 100))}%` : "—"}
+                valueClassName={stats.inputTokens > 0 && stats.cachedInputTokens / stats.inputTokens > 0.5 ? "text-emerald-600 dark:text-emerald-400" : undefined}
+                tooltip="Share of input tokens served from cache vs. processed fresh. Computed as sum(cachedInputTokens) / sum(inputTokens). Higher = caching is doing its job."
+              />
+              <Metric
+                label="Total Cost"
+                value={stats.pricedCalls === 0 ? "—" : formatUsd(stats.totalCost)}
+                subtitle={`${stats.pricedCalls} of ${stats.totalCalls} calls priced`}
+                tooltip="Sum of available OpenRouter total_cost values. Calls whose generation usage has not been refined yet are excluded rather than assumed to be priced."
+              />
+              <Metric
+                label="Cache Savings"
+                value={stats.cacheSavingsReportedCalls === 0 ? "—" : formatSignedUsd(stats.cacheSavingsUsd)}
+                valueClassName={stats.cacheSavingsReportedCalls === 0 ? undefined : stats.cacheSavingsUsd >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}
+                subtitle={`${stats.cacheSavingsReportedCalls} of ${stats.totalCalls} calls reported`}
+                tooltip="Sum of cache_discount values across filtered requests. Positive (green) means caching net-saved money; negative (red) means cold-start writes outweighed reads. Filter by systemPromptId to judge whether caching is worth keeping on a specific flow."
+              />
+              <Metric
+                label="Avg Duration"
+                value={stats.avgDuration == null ? "—" : `${stats.avgDuration.toLocaleString()}ms`}
+                tooltip="Mean wall-clock time per request, in milliseconds."
+              />
+              <Metric
+                label="p95 Duration"
+                tooltipAlign="right"
+                value={!canReportP95(stats.durationSampleCount) || stats.p95Duration == null ? "—" : `${stats.p95Duration.toLocaleString()}ms`}
+                subtitle={!canReportP95(stats.durationSampleCount) ? `${stats.durationSampleCount} of ${MIN_P95_SAMPLE_COUNT} required samples` : `${stats.durationSampleCount} samples`}
+                tooltip="Nearest-rank 95th percentile request duration. At least 95% of filtered requests completed at or below this value."
+              />
+            </MetricStrip>
 
-            <Card title="Token mix">
-              <CompositionBar items={[
-                { label: "Input", value: stats.inputTokens, color: chartColors.cyan },
-                { label: "Output", value: stats.outputTokens, color: chartColors.emerald },
-              ]} />
-            </Card>
+            <PanelGrid>
+              <PanelSection title="Request activity">
+                <RequestActivity
+                  totalCalls={stats.totalCalls}
+                  buckets={stats.timeBuckets}
+                  maxCalls={stats.maxCalls}
+                  nonEmptyBucketCount={stats.nonEmptyTimeBucketCount}
+                  firstCallAt={stats.firstCallAt}
+                  lastCallAt={stats.lastCallAt}
+                />
+              </PanelSection>
 
-            <Card title="Input cache coverage">
-              <CompositionBar items={[
-                { label: "Fresh", value: Math.max(0, stats.inputTokens - stats.cachedInputTokens), color: chartColors.neutral },
-                { label: "Cached", value: Math.min(stats.inputTokens, stats.cachedInputTokens), color: chartColors.green },
-              ]} />
-              <p className="mt-3 text-[10px] text-muted-foreground">
-                {stats.cacheCreationTokens.toLocaleString()} input tokens written to cache in this window.
-              </p>
-            </Card>
+              <PanelSection title="Token mix">
+                <CompositionBar items={[
+                  { label: "Input", value: stats.inputTokens, color: chartColors.cyan },
+                  { label: "Output", value: stats.outputTokens, color: chartColors.emerald },
+                ]} />
+              </PanelSection>
 
-            <Card title="Cache Hit % by System Prompt">
-              {stats.cacheHitBySystemPrompt.length === 0 ? (
-                <EmptyState>No data</EmptyState>
-              ) : (
-                <div className="space-y-1.5">
-                  {stats.cacheHitBySystemPrompt.map(entry => (
-                    <BarRow
-                      key={entry.id}
-                      title={entry.id}
-                      label={entry.id}
-                      labelClassName="w-40 font-mono"
-                      barClassName={
-                        entry.hitPct >= 50 ? chartColors.emerald : entry.hitPct >= 20 ? chartColors.amber : chartColors.red
-                      }
-                      pct={entry.hitPct}
-                      value={`${entry.hitPct}%`}
-                      extra={<span className="w-12 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{entry.calls} calls</span>}
-                    />
-                  ))}
+              <PanelSection title="Input cache coverage">
+                <CompositionBar items={[
+                  { label: "Fresh", value: Math.max(0, stats.inputTokens - stats.cachedInputTokens), color: chartColors.neutral },
+                  { label: "Cached", value: Math.min(stats.inputTokens, stats.cachedInputTokens), color: chartColors.green },
+                ]} />
+                <p className="mt-3 text-[10px] text-muted-foreground">
+                  {stats.cacheCreationTokens.toLocaleString()} input tokens written to cache in this window.
+                </p>
+              </PanelSection>
+
+              <PanelSection title="Cache Hit % by System Prompt">
+                {stats.cacheHitBySystemPrompt.length === 0 ? (
+                  <EmptyState>No data</EmptyState>
+                ) : (
+                  <div className="space-y-1.5">
+                    {stats.cacheHitBySystemPrompt.map(entry => (
+                      <BarRow
+                        key={entry.id}
+                        title={entry.id}
+                        label={entry.id}
+                        labelClassName="w-40 font-mono"
+                        barClassName={
+                          entry.hitPct >= 50 ? chartColors.emerald : entry.hitPct >= 20 ? chartColors.amber : chartColors.red
+                        }
+                        pct={entry.hitPct}
+                        value={`${entry.hitPct}%`}
+                        extra={<span className="w-12 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{entry.calls} calls</span>}
+                      />
+                    ))}
+                  </div>
+                )}
+              </PanelSection>
+
+              <PanelSection title="Requests by system prompt">
+                <DistributionBars items={stats.sysPromptDist} color={chartColors.purple} total={stats.totalCalls} />
+              </PanelSection>
+
+              <PanelSection title="Requests by model">
+                <DistributionBars items={stats.modelDist} color={chartColors.indigo} total={stats.totalCalls} />
+              </PanelSection>
+
+              <PanelSection title="Requests declaring each tool">
+                <DistributionBars items={stats.toolDist} color={chartColors.orange} total={stats.totalCalls} />
+              </PanelSection>
+
+              <PanelSection title="Latency distribution">
+                <div className="space-y-2">
+                  {stats.durationSampleCount === 0 ? <EmptyState>No duration data</EmptyState> : stats.latencyBuckets.map(b => {
+                    const pct = percentage(b.count, stats.durationSampleCount) ?? 0;
+                    return (
+                      <BarRow
+                        key={b.label}
+                        label={b.label}
+                        labelClassName="w-20"
+                        barClassName={chartColors.pink}
+                        pct={pct}
+                        value={`${pct}%`}
+                        extra={<span className="w-12 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{b.count} calls</span>}
+                      />
+                    );
+                  })}
                 </div>
-              )}
-            </Card>
-
-            <Card title="Requests by system prompt">
-              <DistributionBars items={stats.sysPromptDist} color={chartColors.purple} total={stats.totalCalls} />
-            </Card>
-
-            <Card title="Requests by model">
-              <DistributionBars items={stats.modelDist} color={chartColors.indigo} total={stats.totalCalls} />
-            </Card>
-
-            <Card title="Requests declaring each tool">
-              <DistributionBars items={stats.toolDist} color={chartColors.orange} total={stats.totalCalls} />
-            </Card>
-
-            <Card title="Latency distribution">
-              <div className="space-y-2">
-                {stats.durationSampleCount === 0 ? <EmptyState>No duration data</EmptyState> : stats.latencyBuckets.map(b => {
-                  const pct = percentage(b.count, stats.durationSampleCount) ?? 0;
-                  return (
-                    <BarRow
-                      key={b.label}
-                      label={b.label}
-                      labelClassName="w-20"
-                      barClassName={chartColors.pink}
-                      pct={pct}
-                      value={`${pct}%`}
-                      extra={<span className="w-12 text-right font-mono text-[10px] tabular-nums text-muted-foreground">{b.count} calls</span>}
-                    />
-                  );
-                })}
-              </div>
-            </Card>
-          </div>
+              </PanelSection>
+            </PanelGrid>
+          </Panel>
         </>
       )}
 
       {/* Call list */}
       {view === "logs" && (
         <>
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-black/[0.06] bg-card p-3 shadow-sm ring-1 ring-black/[0.04] dark:border-white/[0.06] dark:ring-white/[0.04]">
-            <label className="grid grid-cols-[auto_6rem] items-center gap-1.5">
-              <FieldLabel>Range</FieldLabel>
-              <Select value={logTimeRange} onChange={event => setLogTimeRange(parseTimeRange(event.target.value))}>
-                <option value="all">All time</option>
-                <option value="24h">24 hours</option>
-                <option value="7d">7 days</option>
-                <option value="30d">30 days</option>
-              </Select>
-            </label>
-            <label className="grid min-w-52 flex-1 grid-cols-[auto_1fr] items-center gap-1.5">
-              <FieldLabel>System prompt</FieldLabel>
-              <Select value={logSystemPrompt} onChange={event => setLogSystemPrompt(event.target.value)}>
-                <option value="">All prompts</option>
-                {allSystemPrompts.map(prompt => <option key={prompt} value={prompt}>{prompt}</option>)}
-              </Select>
-            </label>
-            <label className="grid min-w-48 flex-1 grid-cols-[auto_1fr] items-center gap-1.5">
-              <FieldLabel>Model</FieldLabel>
-              <Select value={logModel} onChange={event => setLogModel(event.target.value)}>
-                <option value="">All models</option>
-                {allModels.map(model => <option key={model} value={model}>{model}</option>)}
-              </Select>
-            </label>
-            <label className="grid grid-cols-[auto_6rem] items-center gap-1.5">
-              <FieldLabel>Mode</FieldLabel>
-              <Select value={logMode} onChange={event => setLogMode(parseModeFilter(event.target.value))}>
-                <option value="all">All</option>
-                <option value="stream">Stream</option>
-                <option value="generate">Generate</option>
-              </Select>
-            </label>
-            <label className="grid grid-cols-[auto_7rem] items-center gap-1.5">
-              <FieldLabel>Auth</FieldLabel>
-              <Select value={logAuth} onChange={event => setLogAuth(parseAuthFilter(event.target.value))}>
-                <option value="all">All</option>
-                <option value="authed">Authenticated</option>
-                <option value="anon">Anonymous</option>
-              </Select>
-            </label>
-            <label className="grid grid-cols-[auto_6rem] items-center gap-1.5">
-              <FieldLabel>Status</FieldLabel>
-              <Select value={logStatus} onChange={event => setLogStatus(parseStatusFilter(event.target.value))}>
-                <option value="all">All</option>
-                <option value="ok">OK</option>
-                <option value="error">Error</option>
-              </Select>
-            </label>
-            {hasLogFilters && <Button variant="ghost" onClick={() => {
-              setLogTimeRange("all");
-              setLogSystemPrompt("");
-              setLogModel("");
-              setLogMode("all");
-              setLogAuth("all");
-              setLogStatus("all");
-            }}>Clear filters</Button>}
-            {hasLogFilters && <Button onClick={() => setLogSnapshotVersion(version => version + 1)} disabled={filteredPages.isLoading}>Refresh results</Button>}
-            {/* Only worth saying when it is true and surprising: a filtered list
-                is a point-in-time snapshot, so new calls do not stream into it.
-                The unfiltered list is live, which is what people expect. */}
-            {hasLogFilters && <span className="ml-auto text-[10px] text-muted-foreground">Snapshot results</span>}
-          </div>
-          {filteredPages.error != null && (
+          {useServerFilters && filteredPages.error != null && (
             <Alert>
               <div className="flex items-center justify-between gap-3">
                 <span>{filteredPages.error}</span>
@@ -606,24 +476,24 @@ export function Usage({ view, rows, connectionState, connectionErrorMessage, onS
           )}
           {/* A failed first page also has zero rows; only the retry alert above should speak for
               it, not a "nothing matched" card that reads like a genuine empty result. */}
-          {(hasLogFilters ? filteredPages.rows : rows).length === 0 && !filteredPages.isLoading ? (
-            filteredPages.error != null ? null : (
+          {logRows.length === 0 && !(useServerFilters && filteredPages.isLoading) ? (
+            useServerFilters && filteredPages.error != null ? null : (
               <Card>
                 <EmptyState className="py-12">
-                  <p className="text-lg">{hasLogFilters ? "No requests match these filters" : "No AI requests logged yet"}</p>
-                  {hasLogFilters && filteredPages.hasMore && <Button className="mt-3" onClick={() => runAsynchronously(filteredPages.loadMore)}>Continue searching</Button>}
+                  <p className="text-lg">{hasLogFilters || investigationActive ? "No requests match these filters" : "No AI requests logged yet"}</p>
+                  {useServerFilters && filteredPages.hasMore && <Button className="mt-3" onClick={() => runAsynchronously(filteredPages.loadMore)}>Continue searching</Button>}
                 </EmptyState>
               </Card>
             )
           ) : (
             <UsageDataGrid
-              rows={hasLogFilters ? filteredPages.rows : rows}
+              rows={logRows}
               onSelect={onSelect}
-              resetKey={hasLogFilters ? logQueryKey : "live"}
-              hasMoreHistory={hasLogFilters ? filteredPages.hasMore : hasMoreHistory}
-              isLoadingOlder={hasLogFilters ? filteredPages.isLoadingMore : isLoadingOlder}
-              onLoadOlder={hasLogFilters ? filteredPages.loadMore : onLoadOlder}
-              isLoading={hasLogFilters && filteredPages.isLoading}
+              resetKey={JSON.stringify([logQueryKey, investigationKey])}
+              hasMoreHistory={useServerFilters ? filteredPages.hasMore : hasMoreHistory}
+              isLoadingOlder={useServerFilters ? filteredPages.isLoadingMore : isLoadingOlder}
+              onLoadOlder={useServerFilters ? filteredPages.loadMore : onLoadOlder}
+              isLoading={useServerFilters && filteredPages.isLoading}
             />
           )}
         </>

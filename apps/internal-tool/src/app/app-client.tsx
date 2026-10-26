@@ -10,6 +10,7 @@ import { FeedbackDetail } from "../components/FeedbackDetail";
 import { FeedbackList } from "../components/FeedbackList";
 import { FeatureRequests } from "../components/FeatureRequests";
 import { KnowledgeBase } from "../components/KnowledgeBase";
+import { SqlConsole } from "../components/SqlConsole";
 import { Usage } from "../components/Usage";
 import { UsageDetail } from "../components/UsageDetail";
 import { Button } from "../components/design";
@@ -270,6 +271,12 @@ export default function App() {
                   setTab("calls");
                 }}
               />
+            </main>
+          )}
+
+          {tab === "sql" && (
+            <main className="flex-1 overflow-y-auto p-6">
+              <SqlConsole />
             </main>
           )}
 

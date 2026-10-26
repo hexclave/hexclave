@@ -1,4 +1,5 @@
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import type { HistoryLoadOptions } from "../lib/load-history";
 import { clsx } from "clsx";
 import { Button } from "./design";
 
@@ -6,7 +7,7 @@ import { Button } from "./design";
 export type HistoryPagingProps = {
   hasMoreHistory: boolean,
   isLoadingOlder: boolean,
-  onLoadOlder: () => Promise<void>,
+  onLoadOlder: (options?: HistoryLoadOptions) => Promise<void>,
 };
 
 export function NextPageButton({

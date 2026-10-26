@@ -18,14 +18,14 @@ import { formatPacificTableTime, formatPacificTimestamp } from "../lib/pacific-t
 import type { McpCallLogRow } from "../types";
 import { toDate } from "../utils";
 import { InternalDataGridFooter } from "./InternalDataGridFooter";
-import { Alert, Badge, Button, EmptyState } from "./design";
+import { Alert, Badge, Button, EmptyState, Panel, PanelRow } from "./design";
 
 const featureRequestFilters: McpReviewTableFilters = {
   createdAtOrAfterMicros: undefined,
-  toolName: undefined,
+  toolNames: [],
   hasError: undefined,
-  qaState: "feature-request",
-  humanReviewState: undefined,
+  qaStates: ["feature-request"],
+  humanReviewStates: [],
 };
 
 function getRowId(row: McpCallLogRow): string {
@@ -161,15 +161,17 @@ export function FeatureRequests({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-black/[0.06] bg-card px-4 py-3 shadow-sm ring-1 ring-black/[0.04] dark:border-white/[0.06] dark:ring-white/[0.04]">
-        <div>
-          <p className="text-sm font-medium text-foreground">AI-scanned capability gaps</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">Snapshot results from completed MCP QA reviews.</p>
-        </div>
-        <Button onClick={() => runAsynchronously(pages.refresh)} disabled={pages.isLoading || connectionState !== "connected"}>
-          Refresh results
-        </Button>
-      </div>
+      <Panel>
+        <PanelRow className="justify-between">
+          <div>
+            <p className="text-sm font-medium text-foreground">AI-scanned capability gaps</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">Snapshot results from completed MCP QA reviews.</p>
+          </div>
+          <Button onClick={() => runAsynchronously(pages.refresh)} disabled={pages.isLoading || connectionState !== "connected"}>
+            Refresh
+          </Button>
+        </PanelRow>
+      </Panel>
 
       {pages.error != null && (
         <Alert>
@@ -181,12 +183,12 @@ export function FeatureRequests({
       )}
 
       {pages.error == null && pages.rows.length === 0 && !pages.isLoading ? (
-        <div className="rounded-xl border border-black/[0.06] bg-card dark:border-white/[0.06]">
+        <Panel>
           <EmptyState className="py-14">
             <p className="font-medium text-foreground">No feature requests detected</p>
             <p className="mt-1">Requests appear here after MCP QA verifies an unsupported capability.</p>
           </EmptyState>
-        </div>
+        </Panel>
       ) : pages.rows.length > 0 || pages.isLoading ? (
         <DataGrid
           columns={columns}

@@ -335,7 +335,7 @@ services:
   # ================= SpacetimeDB =================
 
   spacetimedb:
-    image: clockworklabs/spacetime:v2.1.0
+    image: clockworklabs/spacetime:v2.10.1
     pull_policy: always
     ports:
       - "${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}39:3000"

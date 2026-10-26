@@ -109,7 +109,7 @@
     "resend": "^6.0.1",
     "semver": "^7.6.3",
     "sharp": "^0.35.3",
-    "spacetimedb": "^2.1.0",
+    "spacetimedb": "^2.10.1",
     "stripe": "^18.3.0",
     "svix": "^1.89.0",
     "vite": "^6.1.0",

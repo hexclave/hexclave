@@ -5,7 +5,7 @@ import { AccountMenu } from "./AccountMenu";
 import { ThemeToggle } from "./ThemeToggle";
 import { Resizer, cn, useResizableWidth } from "./design";
 
-export type AppTab = "overview" | "calls" | "feature-requests" | "knowledge" | "usage" | "feedback";
+export type AppTab = "overview" | "calls" | "feature-requests" | "knowledge" | "usage" | "feedback" | "sql";
 
 const SIDEBAR_WIDTH_STORAGE_KEY = "internal-tool-sidebar-width";
 const MCP_ITEMS: ReadonlyArray<{ id: AppTab, label: string }> = [
@@ -26,7 +26,8 @@ export function isAppTab(value: string): value is AppTab {
     || value === "feature-requests"
     || value === "knowledge"
     || value === "usage"
-    || value === "feedback";
+    || value === "feedback"
+    || value === "sql";
 }
 
 export function appTabLabel(tab: AppTab): string {
@@ -36,6 +37,7 @@ export function appTabLabel(tab: AppTab): string {
     case "feature-requests": { return "Feature Requests"; }
     case "knowledge": { return "Knowledge Base"; }
     case "usage": { return "AI Usage"; }
+    case "sql": { return "SQL Console"; }
     case "feedback": { return "Feedback"; }
   }
 }
@@ -70,6 +72,13 @@ function TabIcon({ tab }: { tab: AppTab }) {
       return (
         <svg aria-hidden="true" viewBox="0 0 20 20" className={iconClasses}>
           <path d="M3.5 4.5h5A1.5 1.5 0 0 1 10 6v10a2 2 0 0 0-2-2H3.5V4.5ZM16.5 4.5h-5A1.5 1.5 0 0 0 10 6v10a2 2 0 0 1 2-2h4.5V4.5Z" />
+        </svg>
+      );
+    }
+    case "sql": {
+      return (
+        <svg aria-hidden="true" viewBox="0 0 20 20" className={iconClasses}>
+          <path d="m4 6 4 4-4 4M11 14h5" />
         </svg>
       );
     }
@@ -195,7 +204,11 @@ export function AppSidebar({
       </div>
 
       <nav aria-label="Internal tool sections" className="flex flex-1 flex-col gap-4 overflow-y-auto p-2 lg:p-3">
-        <NavigationItem id="overview" label="Overview" activeTab={activeTab} onNavigate={onNavigate} />
+        {/* SQL Console reads every log, not just Unified AI, so it sits with Overview at the top level. */}
+        <div className="space-y-1">
+          <NavigationItem id="overview" label="Overview" activeTab={activeTab} onNavigate={onNavigate} />
+          <NavigationItem id="sql" label="SQL Console" activeTab={activeTab} onNavigate={onNavigate} />
+        </div>
         <div className="mx-2 border-t border-black/[0.05] dark:border-white/[0.05] lg:hidden" />
         <NavigationGroup label="MCP" items={MCP_ITEMS} activeTab={activeTab} onNavigate={onNavigate} />
         <NavigationGroup label="Unified AI" items={UNIFIED_AI_ITEMS} activeTab={activeTab} onNavigate={onNavigate} />
