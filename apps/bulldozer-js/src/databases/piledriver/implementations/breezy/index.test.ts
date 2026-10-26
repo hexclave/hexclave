@@ -430,6 +430,34 @@ describe("Breezy Piledriver", () => {
     }
   });
 
+  it("finishes heap reads already in progress before closing, and rejects ones started after", async () => {
+    // Reads pause every so often to let other requests run (see the next test). Closing LMDB during a
+    // pause made the read fail when it resumed.
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const valueCount = 2_500;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(rootKey, { items: Array.from({ length: valueCount + 1 }, (_, i) => asHeapObject({ i })) });
+    await writer.close();
+
+    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    try {
+      const root = (await reader.getRootObject(rootKey)).object;
+      if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root || !Array.isArray(root.items)) throw new Error("Expected the root to hold the items");
+      const heapObjects = root.items.map(item => typeof item === "object" && item !== null && isPiledriverHeapObjectSymbol in item ? item : throwErr("Expected a heap object"));
+      const unreadHeapObject = heapObjects.pop() ?? throwErr("Expected one heap object kept unread");
+      const reads = heapObjects.map(heapObject => heapObject.get());
+      const closing = reader.close();
+      await expect(unreadHeapObject.get()).rejects.toThrow("Breezy Piledriver database is closed");
+      await expect(reader.getRootObject(rootKey)).rejects.toThrow("Breezy Piledriver database is closed");
+      await closing;
+      expect(await Promise.all(reads)).toEqual(Array.from({ length: valueCount }, (_, i) => ({ i })));
+    } finally {
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
   it("lets other work run during a long read instead of holding the event loop until it ends", async () => {
     // LMDB reads are synchronous, so a read walking many heap objects never waits on real IO. Until the
     // event loop gets a turn, other requests can't run and JavaScript can't free the objects the read

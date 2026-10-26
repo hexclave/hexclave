@@ -91,14 +91,25 @@ export function declareBreezyPiledriverDatabase(
   const heapLoadsBetweenPauses = 1000;
   let heapLoadsSinceLastPause = 0;
   const letWaitingRequestsRun = () => new Promise<void>(resolve => setImmediate(resolve));
-  const loadHeapObject = async (key: ArrayBuffer, keyBase64: string) => {
-    if (++heapLoadsSinceLastPause >= heapLoadsBetweenPauses) {
-      heapLoadsSinceLastPause = 0;
-      await letWaitingRequestsRun();
-    }
+  const readHeapObject = (key: ArrayBuffer, keyBase64: string) => {
     const stored = read(lmdbHeap, key);
     if (stored.buffer === null) throw new Error(`Assertion error: Heap object with base64 key "${keyBase64}" not found`);
     return decodePiledriverObject(stored.buffer, childKey => heapCache.resolve(childKey, stored.seq), `heap object ${keyBase64}`);
+  };
+  // close() waits for these, so a paused load never resumes after LMDB is closed. A load that doesn't
+  // pause runs start to finish without letting anything else run, so close() can't happen during it.
+  const pausedHeapLoads = new Set<Promise<PiledriverObject>>();
+  const loadHeapObject = async (key: ArrayBuffer, keyBase64: string) => {
+    throwIfClosing();
+    if (++heapLoadsSinceLastPause < heapLoadsBetweenPauses) return readHeapObject(key, keyBase64);
+    heapLoadsSinceLastPause = 0;
+    const pausedLoad = letWaitingRequestsRun().then(() => readHeapObject(key, keyBase64));
+    pausedHeapLoads.add(pausedLoad);
+    try {
+      return await pausedLoad;
+    } finally {
+      pausedHeapLoads.delete(pausedLoad);
+    }
   };
   const heapCache = createPiledriverHeapCache({ disabled: options.disableHeapReadCache === true, load: loadHeapObject });
   let lastRootWriteSeq = initialSeq;
@@ -459,13 +470,14 @@ export function declareBreezyPiledriverDatabase(
     }
   };
   /**
-   * Waits for writes and garbage collections already in progress, then closes LMDB. Closing LMDB
-   * under them made them fail midway. New operations started after this is called throw.
+   * Waits for writes, garbage collections and heap reads already in progress, then closes LMDB.
+   * Closing LMDB under them made them fail midway. New operations started after this is called
+   * throw, so nothing new can start while this waits.
    */
   const close = async () => {
     closing ??= withMutationLock(async () => {
-      // Each collection's own caller gets its result or error; here we only wait for it to stop.
-      await Promise.allSettled(garbageCollectionsInProgress);
+      // Each operation's own caller gets its result or error; here we only wait for it to stop.
+      await Promise.allSettled([...garbageCollectionsInProgress, ...pausedHeapLoads]);
       await lmdbRoot.close();
     });
     await closing;
@@ -474,6 +486,7 @@ export function declareBreezyPiledriverDatabase(
   return {
     getDebugInfo: () => ({ backend: "piledriver-breezy", constructorArguments: { lmdbOptions, options }, lmdbRoot, lmdbRoots, lmdbHeap, lmdbMetadata, lmdbCandidates, lmdbGcState, processStartedAtMillis, heapObjectsByObject, heapObjectsByHeapKeyBase64: heapCache.objectsByKey, heapKeysAndSeqByHeapObjects: heapCache.locations, heapReadCacheDisabled: options.disableHeapReadCache === true }),
     async getRootObject(key) {
+      throwIfClosing();
       const stored = read(lmdbRoots, key);
       if (stored.buffer === null) throw new Error("Root object not found");
       return { object: decodePiledriverObject(stored.buffer, heapKey => heapCache.resolve(heapKey, stored.seq), `root ${encodeBase64(new Uint8Array(key))}`), seq: stored.seq };
