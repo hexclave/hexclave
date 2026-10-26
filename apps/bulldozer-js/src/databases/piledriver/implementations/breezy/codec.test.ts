@@ -34,7 +34,7 @@ describe("Breezy codec", () => {
   // could save (~3,000 levels) overflowed the smaller stack budget of a freshly started reader.
   it.each([["object", 5_000], ["array", 2_500]] as const)("round-trips %ss nested %i levels deep", async (wrap, depth) => {
     const leaf = { special: [NaN, -0, Infinity, -Infinity], reference: plannedHeapReference(new Uint8Array([7]).buffer), text: "leaf" };
-    const decoded = decodePiledriverObject(encodePiledriverObject(nest(depth, wrap, leaf)), fakeHeapObject);
+    const decoded = decodePiledriverObject(encodePiledriverObject(nest(depth, wrap, leaf)), fakeHeapObject, "test value");
     const { levels, leaf: decodedLeaf } = unwrapLevels(decoded, wrap);
     expect(levels).toBe(depth);
     if (typeof decodedLeaf !== "object" || decodedLeaf === null || Array.isArray(decodedLeaf) || isPiledriverHeapObjectSymbol in decodedLeaf) throw new Error("Expected the leaf object");
@@ -49,7 +49,7 @@ describe("Breezy codec", () => {
   it("reads stored values nested far deeper than any process can write", () => {
     const depth = 100_000;
     const stored = new TextEncoder().encode('["array",['.repeat(depth) + "1" + "]]".repeat(depth)).buffer;
-    expect(unwrapLevels(decodePiledriverObject(stored, noHeapObjects), "array")).toEqual({ levels: depth, leaf: 1 });
+    expect(unwrapLevels(decodePiledriverObject(stored, noHeapObjects, "test value"), "array")).toEqual({ levels: depth, leaf: 1 });
   });
 
   it("keeps the stored format unchanged", () => {
@@ -58,7 +58,7 @@ describe("Breezy codec", () => {
   });
 
   it("restores own properties named __proto__ instead of changing the prototype", () => {
-    const decoded = decodePiledriverObject(new TextEncoder().encode('{"__proto__":{"polluted":true}}').buffer, noHeapObjects);
+    const decoded = decodePiledriverObject(new TextEncoder().encode('{"__proto__":{"polluted":true}}').buffer, noHeapObjects, "test value");
     expect(Object.getPrototypeOf(decoded)).toBe(Object.prototype);
     expect(Object.keys(decoded as object)).toEqual(["__proto__"]);
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined();

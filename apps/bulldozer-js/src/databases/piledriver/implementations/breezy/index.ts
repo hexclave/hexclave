@@ -98,7 +98,7 @@ export function declareBreezyPiledriverDatabase(
     }
     const stored = read(lmdbHeap, key);
     if (stored.buffer === null) throw new Error(`Assertion error: Heap object with base64 key "${keyBase64}" not found`);
-    return decodePiledriverObject(stored.buffer, childKey => heapCache.resolve(childKey, stored.seq));
+    return decodePiledriverObject(stored.buffer, childKey => heapCache.resolve(childKey, stored.seq), `heap object ${keyBase64}`);
   };
   const heapCache = createPiledriverHeapCache({ disabled: options.disableHeapReadCache === true, load: loadHeapObject });
   let lastRootWriteSeq = initialSeq;
@@ -476,7 +476,7 @@ export function declareBreezyPiledriverDatabase(
     async getRootObject(key) {
       const stored = read(lmdbRoots, key);
       if (stored.buffer === null) throw new Error("Root object not found");
-      return { object: decodePiledriverObject(stored.buffer, heapKey => heapCache.resolve(heapKey, stored.seq)), seq: stored.seq };
+      return { object: decodePiledriverObject(stored.buffer, heapKey => heapCache.resolve(heapKey, stored.seq), `root ${encodeBase64(new Uint8Array(key))}`), seq: stored.seq };
     },
     async setRootObject(key, value) {
       throwIfClosing();

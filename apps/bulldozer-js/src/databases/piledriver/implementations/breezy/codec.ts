@@ -7,12 +7,15 @@
  * module defines the format while the database implementation owns IO and sequence ordering.
  */
 import { decodeBase64, encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
-import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { captureError, HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { PiledriverHeapObject, PiledriverObject } from "../../index.js";
 import { defineOwnProperty, fillSlot, type PendingSlot } from "./pending-slots.js";
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+// Piledriver only ever writes valid UTF-8, so the strict decoder fails only on bytes that changed after
+// they were written. The forgiving one replaces such bytes with U+FFFD instead of failing.
+const strictDecoder = new TextDecoder("utf-8", { fatal: true });
+const forgivingDecoder = new TextDecoder();
 const isPlannedHeapReferenceSymbol = Symbol("piledriver-planned-heap-reference");
 
 type PlannedHeapReference = {
@@ -51,6 +54,49 @@ export function plannedHeapReferenceKeys(value: PlannedPiledriverObject): ArrayB
 }
 
 /**
+ * What to do when `bulldozer-js:piledriver-damaged-stored-value` is reported. Sent with the report so
+ * the alert itself says how to act on it.
+ */
+const howToFixDamagedStoredValue = [
+  "1. Many reports at once, right after a deploy or config change: LMDB compression probably doesn't match how the database was written. Restore the previous HEXCLAVE_BULLDOZER_JS_LMDB_COMPRESSION setting and restart.",
+  "2. A few reports: the stored bytes were damaged. Payments data comes from Postgres, so re-run apps/backend/scripts/bulldozer-payments-init.ts for the affected tenancy; it rewrites the rows, which replaces the damaged value.",
+  "3. Run POST /internal/payments/verify-data-integrity to check for other damaged values, and check the VM's disk and logs for I/O or MDB_* errors.",
+];
+
+/**
+ * Turns stored bytes into the JSON value they hold. `storedAt` says where the bytes came from, for
+ * error reports.
+ *
+ * Bytes that aren't valid UTF-8 are reported and then read with the bad bytes replaced, so the rest of
+ * the value stays readable while someone repairs it. Bytes that aren't valid JSON can't be read at all,
+ * so that fails, naming the likely cause.
+ */
+function parseStoredJson(buffer: ArrayBuffer, storedAt: string): unknown {
+  let text: string;
+  try {
+    text = strictDecoder.decode(buffer);
+  } catch (error) {
+    // The strict decoder signals invalid UTF-8 with a TypeError; anything else is unexpected.
+    if (!(error instanceof TypeError)) throw error;
+    captureError("bulldozer-js:piledriver-damaged-stored-value", new HexclaveAssertionError(
+      `Stored Piledriver value at ${storedAt} is not valid UTF-8: it was damaged after it was written, or LMDB compression doesn't match how it was written. Serving it with the bad bytes replaced`,
+      { storedAt, byteLength: buffer.byteLength, howToFix: howToFixDamagedStoredValue },
+    ));
+    text = forgivingDecoder.decode(buffer);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    // JSON.parse signals malformed input with a SyntaxError; anything else is unexpected.
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new HexclaveAssertionError(
+      `Stored Piledriver value at ${storedAt} is not valid JSON. If many values fail like this, the database was probably written with LMDB compression on and is being read with it off; otherwise the value was damaged`,
+      { storedAt, byteLength: buffer.byteLength, howToFix: howToFixDamagedStoredValue, cause: error },
+    );
+  }
+}
+
+/**
  * Decodes one stored value without loading referenced heap payloads.
  *
  * `resolveHeapObject` must return a lazy wrapper for a key. Keeping resolution synchronous here
@@ -60,10 +106,11 @@ export function plannedHeapReferenceKeys(value: PlannedPiledriverObject): ArrayB
 export function decodePiledriverObject(
   buffer: ArrayBuffer,
   resolveHeapObject: (key: ArrayBuffer) => PiledriverHeapObject,
+  storedAt: string,
 ): PiledriverObject {
   // JSON.parse itself doesn't recurse in V8, so only the conversion below needs to avoid it.
   const root: PiledriverObject[] = [null];
-  const pending: PendingSlot<unknown, PiledriverObject>[] = [{ input: JSON.parse(decoder.decode(buffer)), containerType: "array", container: root, key: 0 }];
+  const pending: PendingSlot<unknown, PiledriverObject>[] = [{ input: parseStoredJson(buffer, storedAt), containerType: "array", container: root, key: 0 }];
   while (pending.length > 0) {
     const slot = pending.pop() ?? throwErr("pending is non-empty");
     const value = slot.input;

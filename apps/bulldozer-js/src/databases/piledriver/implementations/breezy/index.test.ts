@@ -1,5 +1,5 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
-import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { registerErrorSink, throwErr } from "@hexclave/shared/dist/utils/errors";
 import * as lmdb from "lmdb";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -458,6 +458,75 @@ describe("Breezy Piledriver", () => {
       expect(valuesRead).toBe(valueCount);
       expect(valuesReadWhenOtherWorkRan).not.toBeNull();
       expect(valuesReadWhenOtherWorkRan).toBeLessThan(valueCount / 2);
+    } finally {
+      await reader.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("reports stored bytes that aren't valid UTF-8 and keeps serving the value", async () => {
+    // Piledriver only writes valid UTF-8, so invalid bytes mean the value was damaged after it was
+    // written (disk, filesystem or LMDB). Reads keep working, with the bad bytes shown as U+FFFD, and
+    // the report says where the value is and how to repair it.
+    const reports: { location: string, error: unknown }[] = [];
+    registerErrorSink((location, error) => reports.push({ location, error }));
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const dbId = crypto.randomUUID();
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const writer = declareBreezyPiledriverDatabase({ path, dbId });
+    await writer.setRootObject(rootKey, { value: asHeapObject({ secret: "SECRET-VALUE", name: "café" }) });
+    await writer.close();
+
+    // Damage one byte inside the stored string, directly in LMDB.
+    const lmdbRoot = lmdb.open({ path, maxDbs: 1024 });
+    const heap = lmdbRoot.openDB<Buffer, Uint8Array>({ name: `${dbId}:dump:heap`, encoding: "binary", keyEncoding: "binary", useVersions: true });
+    let damagedKeyBase64: string | null = null;
+    for (const { key, value, version } of [...heap.getRange({ versions: true })]) {
+      const bytes = Buffer.from(value);
+      const index = bytes.indexOf("SECRET-VALUE");
+      if (index === -1) continue;
+      bytes[index + 3] = 0xff;
+      damagedKeyBase64 = encodeBase64(new Uint8Array(key));
+      await heap.put(key, bytes, version ?? throwErr("Breezy heap entries are versioned"));
+    }
+    await lmdbRoot.close();
+    if (damagedKeyBase64 === null) throw new Error("Expected to find the stored value");
+
+    const reader = declareBreezyPiledriverDatabase({ path, dbId });
+    try {
+      const root = (await reader.getRootObject(rootKey)).object;
+      if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected a plain root");
+      const value = root.value;
+      if (typeof value !== "object" || value === null || !(isPiledriverHeapObjectSymbol in value)) throw new Error("Expected a heap object");
+      expect(await value.get()).toEqual({ secret: "SEC\uFFFDET-VALUE", name: "café" });
+      const damageReports = reports.filter(report => report.location === "bulldozer-js:piledriver-damaged-stored-value");
+      expect(damageReports).toHaveLength(1);
+      expect(damageReports[0].error).toMatchObject({
+        message: expect.stringContaining("not valid UTF-8"),
+        extraData: { storedAt: `heap object ${damagedKeyBase64}`, howToFix: expect.arrayContaining([expect.stringContaining("bulldozer-payments-init")]) },
+      });
+    } finally {
+      await reader.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("fails with the likely cause when a value was written with LMDB compression and read without it", async () => {
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const writer = declareBreezyPiledriverDatabase({ ...lmdbOptions, compression: true });
+    // lmdb-js only compresses values over 1,000 bytes.
+    await writer.setRootObject(rootKey, { value: asHeapObject({ metadata: "plan-".repeat(400) }) });
+    await writer.close();
+
+    const reader = declareBreezyPiledriverDatabase({ ...lmdbOptions, compression: false });
+    try {
+      const root = (await reader.getRootObject(rootKey)).object;
+      if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected a plain root");
+      const value = root.value;
+      if (typeof value !== "object" || value === null || !(isPiledriverHeapObjectSymbol in value)) throw new Error("Expected a heap object");
+      await expect(value.get()).rejects.toThrow(/heap object .* is not valid JSON.*compression/s);
     } finally {
       await reader.close();
       await rm(path, { recursive: true, force: true });
