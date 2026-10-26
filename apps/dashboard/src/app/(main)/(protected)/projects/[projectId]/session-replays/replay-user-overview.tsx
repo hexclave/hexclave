@@ -29,6 +29,7 @@ import type { Icon } from "@phosphor-icons/react";
 import type { ServerUser } from "@hexclave/next";
 import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
+import { firstTeamsPageOptions } from "@hexclave/shared/dist/utils/team-lists";
 import React, { useEffect, useMemo, useState } from "react";
 import { useAdminApp, useServerApp } from "../use-admin-app";
 
@@ -480,7 +481,7 @@ function SessionFacts({ replay, state, deviceType }: {
 
 function AccountFacts({ user }: { user: ServerUser }) {
   const authMethods = useAuthMethods(user);
-  const teams = user.useTeams();
+  const teams = user.useTeams(firstTeamsPageOptions);
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -503,7 +504,7 @@ function AccountFacts({ user }: { user: ServerUser }) {
         <>
           <FactSeparator />
           <Fact icon={UsersThreeIcon} label="Teams" tooltip={teams.map((t) => t.displayName).join(", ")}>
-            {teams.length === 1 ? teams[0]!.displayName : `${teams.length} teams`}
+            {teams.length === 1 ? teams[0]!.displayName : `${teams.length}${teams.nextCursor != null ? "+" : ""} teams`}
           </Fact>
         </>
       )}

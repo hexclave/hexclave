@@ -7,20 +7,10 @@
 import { useAdminApp } from '@/app/(main)/(protected)/projects/[projectId]/use-admin-app';
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui";
 import type { ServerUser } from '@hexclave/next';
-import {
-  createDefaultDataGridState,
-  DataGrid,
-  useDataSource,
-  type DataGridColumnDef,
-  type DataGridDataSource,
-  type DataGridState,
-} from "@hexclave/dashboard-ui-components";
-import { useCallback, useMemo, useRef, useState } from "react";
-import { useDebounce } from "use-debounce";
+import { type DataGridColumnDef } from "@hexclave/dashboard-ui-components";
+import { useCallback, useMemo, useRef } from "react";
+import { ServerSearchPickerTable } from "./server-search-picker-table";
 import { extendUsers } from "./user-table";
-
-const PAGE_SIZE = 25;
-const SEARCH_DEBOUNCE_MS = 300;
 
 export function UserPickerTable(props: {
   action: (user: ServerUser) => React.ReactNode,
@@ -91,66 +81,19 @@ export function UserPickerTable(props: {
     },
   ], []);
 
-  const [gridState, setGridState] = useState<DataGridState>(() =>
-    createDefaultDataGridState(columns)
-  );
-
-  // Debounce the toolbar search so we don't hit `listUsers` on every keystroke.
-  const [debouncedQuickSearch] = useDebounce(gridState.quickSearch.trim(), SEARCH_DEBOUNCE_MS);
-
-  const dataSource = useMemo<DataGridDataSource<ServerUser>>(
-    () => async function* (params) {
-      const query = typeof params.quickSearch === "string" && params.quickSearch.trim().length > 0
-        ? params.quickSearch.trim()
-        : undefined;
-      const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
-      const result = await hexclaveAdminApp.listUsers({
-        limit: PAGE_SIZE,
-        query,
-        cursor,
-      });
-      yield {
-        rows: extendUsers(result),
-        hasMore: result.nextCursor != null,
-        nextCursor: result.nextCursor ?? undefined,
-      };
-    },
-    [hexclaveAdminApp],
-  );
+  const fetchPage = useCallback(async (options: { limit: number, cursor: string | undefined, query: string | undefined }) => {
+    const result = await hexclaveAdminApp.listUsers(options);
+    return { rows: extendUsers(result), nextCursor: result.nextCursor };
+  }, [hexclaveAdminApp]);
 
   const getRowId = useCallback((row: ServerUser) => row.id, []);
 
-  const gridData = useDataSource({
-    dataSource,
-    columns,
-    getRowId,
-    sorting: gridState.sorting,
-    quickSearch: debouncedQuickSearch,
-    pagination: gridState.pagination,
-    paginationMode: "infinite",
-  });
-
   return (
-    <DataGrid
+    <ServerSearchPickerTable
       columns={columns}
-      rows={gridData.rows}
       getRowId={getRowId}
-      isLoading={gridData.isLoading}
-      isRefetching={gridData.isRefetching}
-      state={gridState}
-      onChange={setGridState}
-      paginationMode="infinite"
-      hasMore={gridData.hasMore}
-      isLoadingMore={gridData.isLoadingMore}
-      onLoadMore={gridData.loadMore}
-      fillHeight={false}
-      maxHeight={420}
-      footer={false}
-      emptyState={
-        <div className="text-center py-8">
-          <p className="text-sm text-muted-foreground">No users found</p>
-        </div>
-      }
+      fetchPage={fetchPage}
+      emptyStateLabel="No users found"
     />
   );
 }

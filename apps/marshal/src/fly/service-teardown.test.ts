@@ -18,26 +18,32 @@ const fly = vi.hoisted(() => ({
   releaseIpByAddress: vi.fn(async (_app: string, _ip: string) => {}),
 }));
 
-vi.mock("./config.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./config.js")>(),
-  getConfig: () => ({ envId: "test", fly: { orgSlug: "org", token: "token" } }),
+const flyConfiguration = { orgSlug: "org", token: "token", region: "iad", registryHost: "registry.fly.io", machinesApiUrl: "", graphqlApiUrl: "", logsApiUrl: "" };
+vi.mock("../config.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../config.js")>(),
+  getConfig: () => ({ envId: "test", fly: flyConfiguration, gcp: null }),
+  flyConfig: () => flyConfiguration,
   resolveNamespaceOrg: () => ({ orgSlug: "org", token: "token" }),
 }));
 
-vi.mock("./fly/client.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./fly/client.js")>(),
+vi.mock("./client.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./client.js")>(),
   flyClientForNamespaceOrg: () => fly,
 }));
 
-vi.mock("./reconciliation-lock.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./reconciliation-lock.js")>(),
+vi.mock("../reconciliation-lock.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../reconciliation-lock.js")>(),
   withReconciliationLease: async (_ns: string, _key: string, body: (lease: unknown) => unknown) => {
     return await body({ assertOwned: async () => {} });
   },
 }));
 
-vi.mock("./store.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./store.js")>(),
+vi.mock("../store.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../store.js")>(),
+  // No runtime pin: the namespace is a Fly namespace, the default.
+  readTenantRecord: async () => null,
+  listSpecKeys: async () => [],
+  readSpec: async () => null,
   listDomainClaimsForService: domainClaims,
   readDomainClaimVersioned: async (hostname: string) => ({ value: { ns: "ns", service_key: "web", hostname }, etag: "etag" }),
   releaseDomainClaim: async () => {},
@@ -46,7 +52,7 @@ vi.mock("./store.js", async (importOriginal) => ({
 }));
 
 import { appNameForService } from "./naming.js";
-import { deleteService } from "./services.js";
+import { deleteService } from "../services.js";
 
 const APP_NAME = appNameForService("test", "ns", "web");
 

@@ -16,7 +16,7 @@ import { Customer } from "../customers";
 import { NotificationCategory } from "../notification-categories";
 import { AdminTeamPermission, TeamPermission } from "../permissions";
 import { AdminOwnedProject, AdminProjectCreateOptions } from "../projects";
-import { EditableTeamMemberProfile, ReceivedTeamInvitation, ServerListTeamsOptions, ServerTeam, ServerTeamCreateOptions, Team, TeamCreateOptions } from "../teams";
+import { EditableTeamMemberProfile, ListTeamsOptions, ReceivedTeamInvitation, ServerListTeamsOptions, ServerTeam, ServerTeamCreateOptions, Team, TeamCreateOptions } from "../teams";
 
 const userGetterErrorMessage = "Hexclave: useUser() already returns the user object. Use `const user = useUser()` (or `const user = await app.getUser()`) instead of destructuring it like `const { user } = ...`.";
 
@@ -156,6 +156,7 @@ export type BaseUser = {
    * @deprecated
    */
   readonly oauthProviders: readonly { id: string }[],
+  readonly externalAuthProviders: readonly { id: string }[],
 }
 
 export type UserExtra = {
@@ -271,7 +272,7 @@ export type UserExtra = {
 }
 & AsyncStoreProperty<"apiKeys", [], UserApiKey[], true>
 & AsyncStoreProperty<"team", [id: string], Team | null, false>
-& AsyncStoreProperty<"teams", [], Team[], true>
+& AsyncStoreProperty<"teams", [options?: ListTeamsOptions], Team[] & { nextCursor: string | null }, true>
 & AsyncStoreProperty<"teamInvitations", [], ReceivedTeamInvitation[], true>
 & AsyncStoreProperty<"permission", [scope: Team, permissionId: string, options?: { recursive?: boolean }], TeamPermission | null, false>
 & AsyncStoreProperty<"permissions", [scope: Team, options?: { recursive?: boolean }], TeamPermission[], true>;
@@ -301,7 +302,12 @@ export type TokenPartialUser = Pick<
   | "isMultiFactorRequired"
   | "isRestricted"
   | "restrictedReason"
->
+> & {
+  /**
+   * The ID of the user's selected team, read from the `selected_team_id` claim of the access token or Convex identity.
+   */
+  readonly selectedTeamId: string | null,
+}
 
 export type SyncedPartialUser = TokenPartialUser & Pick<
   User,
@@ -355,6 +361,12 @@ export function userUpdateOptionsToCrud(options: UserUpdateOptions): CurrentUser
 
 
 export type ServerBaseUser = {
+  /**
+   * The selected team is a `ServerTeam` when non-null, so `listUsers()` returns full member details
+   * without fetching the team again.
+   */
+  readonly selectedTeam: ServerTeam | null,
+
   setPrimaryEmail(email: string | null, options?: { verified?: boolean | undefined }): Promise<void>,
 
   readonly lastActiveAt: Date,

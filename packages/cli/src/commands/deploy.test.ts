@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { evaluateDeploymentConfig, importConfigModule, importDeployModule, resolveDeployFilePath, type ServicesFunctionContext } from "../lib/deployment-config.js";
-import { collectPublicUrls, collectRequiredSecretKeys, deploymentDashboardUrl, firstFailedService, packageAndUploadSource, resolveConfigPushPath, type ServiceDeployResult } from "./deploy.js";
+import { evaluateDeploymentConfig, importDeployModule, resolveDeployFilePath, type ServicesFunctionContext } from "../lib/deployment-config.js";
+import { collectCiEnv, collectPublicUrls, collectRequiredSecretKeys, deploymentDashboardUrl, firstFailedService, packageAndUploadSource, type ServiceDeployResult } from "./deploy.js";
 
 const TEST_AUTH = {
   apiUrl: "https://api.example.com",
@@ -46,19 +46,15 @@ describe("deploy command helpers", () => {
     expect(resolveDeployFilePath(undefined, dir)).toBe(path.join(dir, "hexclave.deploy.ts"));
   });
 
-  it("loads the author-facing deploy export from deploy and config files", async () => {
+  it("loads the author-facing deploy export from a deploy file", async () => {
     const dir = makeTempDir();
     const deployFilePath = path.join(dir, "hexclave.deploy.ts");
-    const configFilePath = path.join(dir, "hexclave.config.ts");
     fs.writeFileSync(deployFilePath, 'export const deploymentGroupId = "source"; export const deploy = () => ({ services: {} });');
-    fs.writeFileSync(configFilePath, "export const config = {}; export const deploy = () => ({ services: {} });");
 
     const deployModule = await importDeployModule(deployFilePath);
-    const configModule = await importConfigModule(configFilePath);
     expect(deployModule.deploymentGroupId).toBe("source");
     expect(deployModule.legacyId).toBeUndefined();
     expect(deployModule.deploy).toBeTypeOf("function");
-    expect(configModule.deploy).toBeTypeOf("function");
   });
 
   // The deploy file is a different document from hexclave.config.ts, so a
@@ -69,14 +65,83 @@ describe("deploy command helpers", () => {
     expect(() => resolveDeployFilePath(undefined, dir)).toThrow("No deploy file found");
   });
 
-  it("resolves the config file for --config-push, and returns null when there is none", () => {
-    const dir = makeTempDir();
-    expect(resolveConfigPushPath(undefined, dir)).toBe(null);
-    fs.writeFileSync(path.join(dir, "stack.config.ts"), "export const config = {};");
-    expect(resolveConfigPushPath(undefined, dir)).toBe(path.join(dir, "stack.config.ts"));
-    fs.writeFileSync(path.join(dir, "hexclave.config.ts"), "export const config = {};");
-    expect(resolveConfigPushPath(undefined, dir)).toBe(path.join(dir, "hexclave.config.ts"));
-    expect(() => resolveConfigPushPath("missing.config.ts", dir)).toThrow("Config file not found");
+  describe("collectCiEnv", () => {
+    it("is empty outside CI", () => {
+      expect(collectCiEnv({ PATH: "/usr/bin", HOME: "/home/me" })).toEqual({});
+    });
+
+    it("passes GitLab's own variables through", () => {
+      expect(collectCiEnv({
+        CI_COMMIT_SHA: "0123456789abcdef",
+        CI_COMMIT_SHORT_SHA: "01234567",
+        CI_COMMIT_REF_NAME: "feat/x",
+        CI_COMMIT_BRANCH: "feat/x",
+        CI_SERVER_URL: "https://gitlab.com",
+        CI_PROJECT_PATH: "acme/app",
+      })).toEqual({
+        CI_COMMIT_SHA: "0123456789abcdef",
+        CI_COMMIT_SHORT_SHA: "01234567",
+        CI_COMMIT_REF_NAME: "feat/x",
+        CI_COMMIT_BRANCH: "feat/x",
+        CI_REPOSITORY_URL: "https://gitlab.com/acme/app.git",
+      });
+    });
+
+    it("translates a GitHub Actions push", () => {
+      // GITHUB_HEAD_REF is exported as an EMPTY string on a push, which is why
+      // the ?? chains cannot be trusted with the raw environment: CI_COMMIT_REF_NAME
+      // would come out blank instead of falling through to GITHUB_REF_NAME.
+      expect(collectCiEnv({
+        GITHUB_SHA: "0123456789abcdef",
+        GITHUB_HEAD_REF: "",
+        GITHUB_REF_NAME: "main",
+        GITHUB_REF_TYPE: "branch",
+        GITHUB_SERVER_URL: "https://github.com",
+        GITHUB_REPOSITORY: "acme/app",
+      })).toEqual({
+        CI_COMMIT_SHA: "0123456789abcdef",
+        CI_COMMIT_SHORT_SHA: "01234567",
+        CI_COMMIT_REF_NAME: "main",
+        CI_COMMIT_BRANCH: "main",
+        CI_REPOSITORY_URL: "https://github.com/acme/app.git",
+      });
+    });
+
+    it("reports a GitHub Actions pull request's head branch, and no CI_COMMIT_BRANCH", () => {
+      // GITHUB_REF_NAME is the merge ref on a pull request, so the commit is on
+      // no branch of its own — naming one would point at something that isn't
+      // what was built.
+      expect(collectCiEnv({
+        GITHUB_SHA: "0123456789abcdef",
+        GITHUB_HEAD_REF: "feat/x",
+        GITHUB_REF_NAME: "42/merge",
+        GITHUB_REF_TYPE: "branch",
+      })).toEqual({
+        CI_COMMIT_SHA: "0123456789abcdef",
+        CI_COMMIT_SHORT_SHA: "01234567",
+        CI_COMMIT_REF_NAME: "feat/x",
+      });
+    });
+
+    it("reports a GitHub Actions tag build as a tag", () => {
+      expect(collectCiEnv({
+        GITHUB_SHA: "0123456789abcdef",
+        GITHUB_REF_NAME: "v1.2.3",
+        GITHUB_REF_TYPE: "tag",
+      })).toEqual({
+        CI_COMMIT_SHA: "0123456789abcdef",
+        CI_COMMIT_SHORT_SHA: "01234567",
+        CI_COMMIT_REF_NAME: "v1.2.3",
+        CI_COMMIT_TAG: "v1.2.3",
+      });
+    });
+
+    it("lets an explicitly set CI_ variable win over the GitHub translation", () => {
+      expect(collectCiEnv({
+        CI_COMMIT_SHA: "handwritten",
+        GITHUB_SHA: "0123456789abcdef",
+      })).toMatchObject({ CI_COMMIT_SHA: "handwritten", CI_COMMIT_SHORT_SHA: "01234567" });
+    });
   });
 
   it("returns one final URL for each successfully deployed public service", () => {

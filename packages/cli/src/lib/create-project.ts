@@ -27,8 +27,7 @@ export async function createProjectInteractively(
     })).trim();
   }
 
-  const teams = await user.listTeams();
-  const team = await resolveTeam(teams, {
+  const team = await resolveTeam(user, {
     teamId: opts.teamId,
     createTeam: async (teamDisplayName) => await user.createTeam({ displayName: teamDisplayName }),
   });

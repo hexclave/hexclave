@@ -1,14 +1,13 @@
 import { recordExternalDbSyncDeletion } from "@/lib/external-db-sync";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
-import { Prisma } from "@/generated/prisma/client";
 import { KnownErrors } from "@hexclave/shared";
 import { adaptSchema, clientOrHigherAuthTypeSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 
 export const DELETE = createSmartRouteHandler({
   metadata: {
     summary: "Sign out of the current session",
-    description: "Sign out of the current session and invalidate the refresh token",
+    description: "Sign out and invalidate the current Hexclave or delegated external session",
     tags: ["Sessions"],
   },
   request: yupObject({
@@ -31,31 +30,39 @@ export const DELETE = createSmartRouteHandler({
       throw new KnownErrors.AccessTokenExpired(new Date(), undefined, undefined, undefined);
     }
 
-    try {
-      const prisma = await getPrismaClientForTenancy(tenancy);
-
+    const prisma = await getPrismaClientForTenancy(tenancy);
+    const refreshToken = await globalPrismaClient.projectUserRefreshToken.findFirst({
+      where: {
+        tenancyId: tenancy.id,
+        id: refreshTokenId,
+      },
+    });
+    if (refreshToken != null) {
       await recordExternalDbSyncDeletion(globalPrismaClient, {
         tableName: "ProjectUserRefreshToken",
         tenancyId: tenancy.id,
         refreshTokenId,
       });
 
-      const result = await globalPrismaClient.projectUserRefreshToken.deleteMany({
+      await globalPrismaClient.projectUserRefreshToken.deleteMany({
         where: {
           tenancyId: tenancy.id,
           id: refreshTokenId,
         },
       });
-      // If no records were deleted, throw the same error as before
-      if (result.count === 0) {
+    } else {
+      const externalSessionUpdate = await prisma.externalAuthSession.updateMany({
+        where: {
+          tenancyId: tenancy.id,
+          id: refreshTokenId,
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: new Date(),
+        },
+      });
+      if (externalSessionUpdate.count === 0) {
         throw new KnownErrors.RefreshTokenNotFoundOrExpired();
-      }
-    } catch (e) {
-      // TODO make this less hacky, use a transaction to delete-if-exists instead of try-catch
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2025") {
-        throw new KnownErrors.RefreshTokenNotFoundOrExpired();
-      } else {
-        throw e;
       }
     }
 

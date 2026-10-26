@@ -84,12 +84,10 @@ vi.mock("../../use-admin-app", () => ({
 
 vi.mock("@/lib/dashboard-user", () => ({
   useDashboardInternalUser: () => ({
-    useTeams: () => [
-      {
-        id: planUsageState.ownerTeamId,
-        createCheckoutUrl: createCheckoutUrlMock,
-      },
-    ],
+    useTeam: (teamId: string) => teamId === planUsageState.ownerTeamId ? {
+      id: planUsageState.ownerTeamId,
+      createCheckoutUrl: createCheckoutUrlMock,
+    } : null,
   }),
 }));
 

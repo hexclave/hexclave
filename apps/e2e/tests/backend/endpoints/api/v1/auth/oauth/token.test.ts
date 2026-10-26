@@ -113,6 +113,7 @@ describe("with grant_type === 'authorization_code'", async () => {
           "client_metadata": null,
           "client_read_only_metadata": null,
           "display_name": null,
+          "external_auth_providers": [],
           "has_password": false,
           "id": "<stripped UUID>",
           "is_anonymous": false,

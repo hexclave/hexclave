@@ -14,6 +14,13 @@ import { aiLogMatches, mcpLogMatches } from './log-filters';
 import { DEMO_SEED_PREFIX } from './demo-seed';
 import { MAX_MCP_ACTOR_FIELD_LENGTH, MAX_MCP_CONTEXT_LENGTH } from './mcp-call-limits';
 
+// Injected at publish time by scripts/spacetime-auth-config.mjs (non-secret).
+// SpacetimeDB validates the JWT signature via OIDC discovery on the token's
+// issuer; these constants pin WHICH issuers/audience this module trusts, so a
+// valid token from any other OIDC provider cannot be replayed here. The
+// trusted issuer is the internal tool itself — it serves the discovery
+// document + JWKS and mints user tokens only for approved reviewers (see
+// ../../src/lib/server/internal-auth.ts and spacetimedb-token.ts).
 const ALLOWED_ISSUERS: readonly string[] = ['__SPACETIMEDB_ALLOWED_ISSUERS__'];
 const EXPECTED_AUDIENCE = '__SPACETIMEDB_EXPECTED_AUDIENCE__';
 
@@ -30,6 +37,11 @@ type SenderAuthLike = Readonly<{
   }> | null,
 }>;
 
+// Holding a token from the trusted issuer IS the authorization: the internal
+// tool only mints user tokens for approved reviewers (`isAiChatReviewer` in
+// their client read-only metadata, checked by `requireInternalAiChatReviewer`),
+// plus service tokens for its own server-side calls. Any token holder may read
+// and write everything here.
 function isProjectMember(senderAuth: SenderAuthLike): boolean {
   if (senderAuth.isInternal) {
     // Scheduled reducers / module-internal calls are already trusted.

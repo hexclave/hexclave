@@ -21,7 +21,8 @@ function normalizeHash(hash: string) {
   return hash.startsWith("#") ? hash.slice(1) : hash;
 }
 
-function useHash() {
+/** The current location hash without the leading `#`, which is the `id` of the selected sidebar item. */
+export function useHash() {
   // IF_PLATFORM tanstack-start
   return useLocation({ select: (location) => normalizeHash(location.hash) });
   // ELSE_PLATFORM

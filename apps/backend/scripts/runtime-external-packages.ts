@@ -12,6 +12,9 @@ export const backendRuntimeExternalPackages: readonly string[] = [
   "@prisma/client/runtime/client",
   "@prisma/client/runtime/edge",
   "@sentry/node",
+  // Loads the native pprof addon via `bindings`, which resolves the .node file relative to the
+  // package directory, so it can't be folded into the bundle either.
+  "@google-cloud/profiler",
   "bcrypt",
   "oidc-provider",
   "pg",

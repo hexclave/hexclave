@@ -19,6 +19,16 @@ describe("session replay options", () => {
 });
 
 describe("analytics option JSON conversion", () => {
+  it("refuses to serialize a sanitizer rather than silently losing its filtering", () => {
+    expect(() => analyticsOptionsToJson({ sanitizeEvent: (event) => event })).toThrow("Construct this app in the client runtime instead");
+  });
+
+  it("round-trips click exclusion selectors", () => {
+    expect(analyticsOptionsFromJson(JSON.parse(JSON.stringify(analyticsOptionsToJson({
+      ignoreClickSelector: ".private",
+      replays: { blockClass: /private/u },
+    }))))?.ignoreClickSelector).toBe(".private");
+  });
   it("preserves top-level analytics options when serializing replay block classes", () => {
     const json = analyticsOptionsToJson({
       enabled: false,

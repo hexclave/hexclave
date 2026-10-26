@@ -5,7 +5,7 @@ export { getConvexProvidersConfig } from "./integrations/convex";
 // (per-specifier JSDoc on re-exports does not).
 export type { HexclaveConfig, StackConfig } from "@hexclave/shared/config";
 export { defineHexclaveConfig, defineStackConfig } from "@hexclave/shared/config";
-// The author-facing types for the config file's `deploy` export.
+// The author-facing types for the deploy file's `deploy` export.
 export type {
   HexclaveDeploymentConfig,
   HexclaveDeploymentContext,
@@ -18,8 +18,8 @@ export type {
   HexclaveServiceOutputs,
 } from "@hexclave/shared/config";
 
+export type { AnalyticsEvent, AnalyticsOptions, AnalyticsReplayOptions } from "./lib/hexclave-app/apps/implementations/session-replay";
 // IF_PLATFORM react-like
-export type { AnalyticsOptions, AnalyticsReplayOptions } from "./lib/hexclave-app/apps/implementations/session-replay";
 // Hexclave aliases and legacy Stack* names — @deprecated JSDoc lives on the original
 // declarations in the source files (so it survives dts bundling).
 export { HexclaveHandler, StackHandler } from "./components-page/hexclave-handler";

@@ -6,7 +6,7 @@ import { getInternalUser } from "../lib/app.js";
 import { resolveSessionAuth } from "../lib/auth.js";
 import { CliError } from "../lib/errors.js";
 import { isNonInteractiveEnv } from "../lib/interactive.js";
-import { resolveTeam } from "../lib/resolve-team.js";
+import { listAllTeams, resolveTeam } from "../lib/resolve-team.js";
 
 type TeamOptions = {
   teamId?: string,
@@ -36,7 +36,7 @@ async function withTeamPermissionError<T>(operation: string, callback: () => Pro
 }
 
 async function getTeam(user: CurrentInternalUser, options: TeamOptions): Promise<Team> {
-  return await resolveTeam(await user.listTeams(), options);
+  return await resolveTeam(user, options);
 }
 
 async function getUser(): Promise<CurrentInternalUser> {
@@ -200,7 +200,7 @@ export function registerTeamCommand(program: Command) {
     .description("List your teams")
     .action(async () => {
       const user = await getUser();
-      printTeams(program, await user.listTeams());
+      printTeams(program, await listAllTeams(user));
     });
 
   team

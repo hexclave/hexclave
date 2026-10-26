@@ -8,10 +8,12 @@ export {
   HexclaveClientInterface
 } from "./interface/client-interface";
 export {
+  getWorkOSVerificationUrls,
+} from "./interface/external-auth";
+export {
   HexclaveServerInterface
 } from "./interface/server-interface";
 export {
   KnownError,
   KnownErrors
 } from "./known-errors";
-

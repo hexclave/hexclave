@@ -141,6 +141,50 @@ import.meta.vitest?.test("isValidHostnameWithWildcards", ({ expect }) => {
   expect(isValidHostnameWithWildcards("*.example..com")).toBe(false);
 });
 
+/**
+ * Like `isValidHostnameWithWildcards`, but additionally accepts an optional numeric `:<port>` suffix, which is what
+ * `wildcardUrlSchema` accepts for trusted domain base URLs (e.g. `*.example.com:4250`).
+ */
+export function isValidHostWithWildcards(host: string) {
+  // Bracketed IPv6 literals contain colons themselves; only a colon after the closing bracket separates the port
+  const portSeparatorIndex = host.startsWith('[')
+    ? (host.includes(']:') ? host.lastIndexOf(':') : -1)
+    : host.lastIndexOf(':');
+  if (portSeparatorIndex === -1) {
+    return isValidHostnameWithWildcards(host);
+  }
+  const hostname = host.slice(0, portSeparatorIndex);
+  const port = host.slice(portSeparatorIndex + 1);
+  // Leading zeroes are rejected because URL parsing normalizes ports, so a pattern like `:04250` would never match
+  const numericPort = Number(port);
+  if (!/^\d{1,5}$/.test(port) || numericPort < 1 || numericPort > 65535 || String(numericPort) !== port) return false;
+  return isValidHostnameWithWildcards(hostname);
+}
+import.meta.vitest?.test("isValidHostWithWildcards", ({ expect }) => {
+  expect(isValidHostWithWildcards("example.com")).toBe(true);
+  expect(isValidHostWithWildcards("example.com:4250")).toBe(true);
+  expect(isValidHostWithWildcards("localhost:3000")).toBe(true);
+  expect(isValidHostWithWildcards("*.example.com:4250")).toBe(true);
+  expect(isValidHostWithWildcards("*.*.ts.net:4250")).toBe(true);
+  expect(isValidHostWithWildcards("**.example.com:8080")).toBe(true);
+  expect(isValidHostWithWildcards("[::1]")).toBe(true);
+  expect(isValidHostWithWildcards("[::1]:3000")).toBe(true);
+
+  expect(isValidHostWithWildcards("")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:")).toBe(false);
+  expect(isValidHostWithWildcards(":4250")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:abc")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:*")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:70000")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:04250")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:0")).toBe(false);
+  expect(isValidHostWithWildcards("example.com:4250/path")).toBe(false);
+  expect(isValidHostWithWildcards("https://example.com:4250")).toBe(false);
+  expect(isValidHostWithWildcards("*.example..com:4250")).toBe(false);
+  expect(isValidHostWithWildcards("[::1]:")).toBe(false);
+  expect(isValidHostWithWildcards("[::1]:abc")).toBe(false);
+});
+
 export function matchHostnamePattern(pattern: string, hostname: string): boolean {
   // If no wildcards, it's an exact match
   if (!pattern.includes('*')) {

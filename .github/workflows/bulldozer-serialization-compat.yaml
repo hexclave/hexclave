@@ -102,12 +102,11 @@ jobs:
         with:
           node-version: 24.x
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          # Both checkouts live in subdirectories, so there's no package.json at the workspace root;
-          # read the pnpm version from the current checkout's package.json (`packageManager`).
-          package_json_file: current/package.json
+      - name: Activate integrity-pinned pnpm
+        working-directory: current
+        run: |
+          corepack enable pnpm
+          corepack install
 
       - name: Install and build @hexclave/shared (current)
         working-directory: current

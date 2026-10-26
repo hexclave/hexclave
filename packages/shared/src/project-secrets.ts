@@ -4,7 +4,7 @@
 // the feature that consumes them — no API returns a value.
 //
 // Deployments are currently the only consumer (`secret()` env vars in the
-// `services` export of hexclave.config.ts name a key in this store), which is
+// `deploy` export of hexclave.deploy.ts name a key in this store), which is
 // why the store is scoped to the PROJECT rather than to a tenancy: infrastructure
 // credentials are shared across branches by design, and a per-organization copy
 // of an API key would be meaningless. Keep this module free of

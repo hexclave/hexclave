@@ -348,6 +348,7 @@ The access token is a JWT with these claims:
 | name | displayName | string or null |
 | email | primaryEmail | string or null |
 | email_verified | primaryEmailVerified | boolean |
+| selected_team_id | selectedTeamId [JS-ONLY] | string or null |
 | is_anonymous | isAnonymous | boolean |
 | is_restricted | isRestricted | boolean |
 | restricted_reason | restrictedReason | object or null |

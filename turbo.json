@@ -138,6 +138,16 @@
       "persistent": true,
       "cache": false
     },
+    "@hexclave/backend#codegen-prisma": {
+      "cache": false
+    },
+    "@hexclave/backend#dev": {
+      "persistent": true,
+      "cache": false,
+      "dependsOn": [
+        "@hexclave/backend#codegen-prisma"
+      ]
+    },
     "//#build-packages:watch": {
       "persistent": true,
       "cache": false
@@ -148,7 +158,10 @@
     },
     "//#generate-openapi-docs:watch": {
       "persistent": true,
-      "cache": false
+      "cache": false,
+      "dependsOn": [
+        "@hexclave/backend#codegen-prisma"
+      ]
     },
     "//#generate-setup-prompt-docs:watch": {
       "persistent": true,

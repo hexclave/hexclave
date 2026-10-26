@@ -31,8 +31,10 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - name: Activate integrity-pinned pnpm
+        run: |
+          corepack enable pnpm
+          corepack install
 
       # Even just starting the Docker Compose as a daemon is slow because we have to download and build the images
       # so, we run it in the background

@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { flyVolumeName } from "./config.js";
 import { computeRevision } from "./revision.js";
-import { candidateVolumes, machineConfigForSlot, selectCanonicalVolume, specIsPublic, specVolume, validateServiceSpec } from "./services.js";
-import type { FlyVolume } from "./fly/client.js";
+import { specIsPublic, specVolume, validateServiceSpec } from "./services.js";
 
 const TEST_DATA_KEY = Buffer.from("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "hex");
 
@@ -58,7 +56,7 @@ describe("persistent volume spec validation", () => {
   });
 
   it("rejects a volume on a serverless service", () => {
-    // A Fly volume attaches to one machine, so a fleet would give each instance its own
+    // A persistent disk attaches to one machine, so a fleet would give each instance its own
     // separate disk rather than shared storage.
     expect(() => validateServiceSpec(spec({ type: "serverless", max_instances: 2, persistent_volumes: { data: { path: "/data", size_gb: 1 } } })))
       .toThrow(/config\.type must be "server"/);
@@ -72,7 +70,7 @@ describe("persistent volume spec validation", () => {
     }))).toThrow(/at most 1 volume/);
   });
 
-  it("rejects volume ids that would not survive the Fly volume name mapping", () => {
+  it("rejects volume ids that would not survive the persistent disk name mapping", () => {
     for (const volumeId of ["Data", "1data", "my-volume", "_data", "", "x".repeat(27)]) {
       expect(() => validateServiceSpec(spec({ persistent_volumes: { [volumeId]: { path: "/data", size_gb: 1 } } })), `id ${JSON.stringify(volumeId)}`)
         .toThrow(/invalid persistent volume id/);
@@ -86,7 +84,7 @@ describe("persistent volume spec validation", () => {
     }
   });
 
-  it("rejects sizes outside the Fly volume bounds", () => {
+  it("rejects sizes outside the persistent disk bounds", () => {
     for (const sizeGb of [0, -1, 501, 1.5, "10", null]) {
       expect(() => validateServiceSpec(spec({ persistent_volumes: { data: { path: "/data", size_gb: sizeGb } } })), `size ${JSON.stringify(sizeGb)}`)
         .toThrow(/config\.persistent_volumes\.data\.size_gb/);
@@ -109,71 +107,6 @@ describe("persistent volume spec validation", () => {
     // The backend omits the key rather than sending null, but a hand-rolled client shouldn't
     // get a confusing type error for the obvious spelling.
     expect("persistent_volumes" in validateServiceSpec(spec({ persistent_volumes: null })).config).toBe(false);
-  });
-});
-
-describe("volume selection", () => {
-  function volume(overrides: Partial<FlyVolume> & { id: string, name: string }): FlyVolume {
-    return { size_gb: 10, state: "created", attached_machine_id: null, ...overrides } as FlyVolume;
-  }
-
-  it("selects the volume whose name matches the configured id", () => {
-    const volumes = [
-      volume({ id: "vol_other", name: flyVolumeName("uploads") }),
-      volume({ id: "vol_data", name: flyVolumeName("data") }),
-    ];
-    expect(selectCanonicalVolume(volumes, "data")?.id).toBe("vol_data");
-    expect(selectCanonicalVolume(volumes, "uploads")?.id).toBe("vol_other");
-    // An id with no disk yet selects nothing rather than adopting someone else's.
-    expect(selectCanonicalVolume(volumes, "cache")).toBeNull();
-  });
-
-  it("prefers an attached volume, then the lowest id, among same-named duplicates", () => {
-    // Fly does not enforce unique volume names, so a crashed apply can leave two. The choice
-    // must be deterministic or two applies would mount divergent disks.
-    const volumes = [
-      volume({ id: "vol_c", name: flyVolumeName("data") }),
-      volume({ id: "vol_a", name: flyVolumeName("data") }),
-      volume({ id: "vol_b", name: flyVolumeName("data"), attached_machine_id: "machine" }),
-    ];
-    expect(candidateVolumes(volumes, "data").map((candidate) => candidate.id)).toEqual(["vol_b", "vol_a", "vol_c"]);
-  });
-
-  it("never selects a volume that is being destroyed", () => {
-    const volumes = [
-      volume({ id: "vol_dying", name: flyVolumeName("data"), state: "destroying" }),
-      volume({ id: "vol_pending", name: flyVolumeName("data"), state: "pending_destruction" }),
-    ];
-    expect(selectCanonicalVolume(volumes, "data")).toBeNull();
-  });
-});
-
-describe("machine autostop policy", () => {
-  function autostopFor(config: Record<string, unknown>, slot = 0): string {
-    const machine = machineConfigForSlot({
-      imageRef: "example/image",
-      spec: validateServiceSpec(spec(config)),
-      revision: "revision",
-      ns: "namespace",
-      key: "service",
-      slot,
-      env: {},
-      volumeId: null,
-    });
-    return (machine.services as { autostop: string }[])[0].autostop;
-  }
-
-  it("suspends a server and stops a serverless", () => {
-    // A server resumes with its memory intact; Fly leaves an attached volume untouched across
-    // suspend/resume, and MACHINE_GUEST's 512MB is well inside suspend's 2GB advisory limit.
-    expect(autostopFor({ type: "server" })).toBe("suspend");
-    expect(autostopFor({ type: "serverless", min_instances: 0, max_instances: 2 })).toBe("stop");
-  });
-
-  it("never autostops a pinned instance", () => {
-    // Slot 0 of a min_instances: 1 serverless is always-on, so neither policy applies.
-    expect(autostopFor({ type: "serverless", min_instances: 1, max_instances: 2 }, 0)).toBe("off");
-    expect(autostopFor({ type: "serverless", min_instances: 1, max_instances: 2 }, 1)).toBe("stop");
   });
 });
 

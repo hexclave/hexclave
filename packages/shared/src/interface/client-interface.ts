@@ -28,6 +28,7 @@ import { TeamApiKeysCrud, UserApiKeysCrud, teamApiKeysCreateInputSchema, teamApi
 import { ProjectPermissionsCrud } from './crud/project-permissions';
 import { AdminUserProjectsCrud, ClientProjectsCrud } from './crud/projects';
 import { SessionsCrud } from './crud/sessions';
+import type { ExternalAuthProviderId } from "./external-auth";
 import { TeamInvitationCrud } from './crud/team-invitation';
 import { TeamMemberProfilesCrud } from './crud/team-member-profiles';
 import { TeamPermissionsCrud } from './crud/team-permissions';
@@ -95,6 +96,10 @@ type BotChallengeInput = {
   phase?: "invisible" | "visible",
   unavailable?: true,
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
 
 const botChallengeKnownErrors = [
   KnownErrors.BotChallengeRequired,
@@ -1258,6 +1263,59 @@ export class HexclaveClientInterface {
     });
   }
 
+  async exchangeExternalAuthToken(
+    providerId: ExternalAuthProviderId,
+    token: string,
+  ): Promise<Result<{ accessToken: string, sessionId: string, userId: string, isNewUser: boolean }, KnownErrors["ExternalAuthProviderNotConfigured"] | KnownErrors["InvalidExternalAuthToken"] | KnownErrors["SignUpNotEnabled"] | KnownErrors["SignUpRejected"]>> {
+    const res = await this.sendClientRequestAndCatchKnownError(
+      "/auth/external/token",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          provider_id: providerId,
+          token,
+        }),
+      },
+      null,
+      [
+        KnownErrors.ExternalAuthProviderNotConfigured,
+        KnownErrors.InvalidExternalAuthToken,
+        KnownErrors.SignUpNotEnabled,
+        KnownErrors.SignUpRejected,
+      ],
+    );
+    if (res.status === "error") {
+      return Result.error(res.error);
+    }
+    let body: unknown;
+    try {
+      body = await res.data.json();
+    } catch (error) {
+      throw new HexclaveAssertionError("External auth token exchange returned an unparseable success response", { cause: error });
+    }
+    if (
+      !isRecord(body)
+      || typeof body.access_token !== "string"
+      || body.access_token.length === 0
+      || typeof body.session_id !== "string"
+      || body.session_id.length === 0
+      || typeof body.user_id !== "string"
+      || body.user_id.length === 0
+      || typeof body.is_new_user !== "boolean"
+    ) {
+      throw new HexclaveAssertionError("External auth token exchange returned a malformed success response");
+    }
+    return Result.ok({
+      accessToken: body.access_token,
+      sessionId: body.session_id,
+      userId: body.user_id,
+      isNewUser: body.is_new_user,
+    });
+  }
+
   async signUpWithCredential(
     email: string,
     password: string,
@@ -1848,14 +1906,27 @@ export class HexclaveClientInterface {
     return result.items;
   }
 
-  async listCurrentUserTeams(session: InternalSession): Promise<TeamsCrud["Client"]["Read"][]> {
+  async listCurrentUserTeams(session: InternalSession, options?: {
+    orderBy?: 'createdAt',
+    desc?: boolean,
+    cursor?: string,
+    limit?: number,
+    query?: string,
+  }): Promise<TeamsCrud["Client"]["List"]> {
     const response = await this.sendClientRequest(
-      "/teams?user_id=me",
+      `/teams?${new URLSearchParams(filterUndefined({
+        user_id: "me",
+        // SDK option uses camelCase `createdAt`; backend uses snake_case.
+        order_by: options?.orderBy === 'createdAt' ? 'created_at' : options?.orderBy,
+        desc: options?.desc !== undefined ? String(options.desc) : undefined,
+        cursor: options?.cursor,
+        limit: options?.limit?.toString(),
+        query: options?.query,
+      }))}`,
       {},
       session,
     );
-    const result = await response.json() as TeamsCrud["Client"]["List"];
-    return result.items;
+    return await response.json();
   }
 
   async getClientProject(): Promise<Result<ClientProjectsCrud['Client']['Read'], KnownErrors["ProjectNotFound"]>> {

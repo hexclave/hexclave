@@ -1,6 +1,6 @@
 import { SmartRequest } from "@/route-handlers/smart-request";
 import { getEnvVariable, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
-import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, StatusError } from "@hexclave/shared/dist/utils/errors";
 import { Client, Receiver } from "@upstash/qstash";
 
 export const upstash = new Client({
@@ -8,10 +8,29 @@ export const upstash = new Client({
   token: getEnvVariable("STACK_QSTASH_TOKEN", ""),
 });
 
-export const upstashReceiver = new Receiver({
-  currentSigningKey: getEnvVariable("STACK_QSTASH_CURRENT_SIGNING_KEY", ""),
-  nextSigningKey: getEnvVariable("STACK_QSTASH_NEXT_SIGNING_KEY", ""),
-});
+function getQstashSigningKey(name: string): string {
+  const value = getEnvVariable(name, "");
+  if (value === "") {
+    throw new HexclaveAssertionError(`${name} (or its HEXCLAVE_ equivalent) is not configured, so QStash request signatures cannot be verified.`);
+  }
+  if (!value.startsWith("sig_")) {
+    throw new HexclaveAssertionError(`${name} (or its HEXCLAVE_ equivalent) is misconfigured: QStash signing keys must start with "sig_".`);
+  }
+  return value;
+}
+
+// Constructed lazily (rather than at module load) because this module is also imported for the
+// QStash `Client`, and deployments that never receive QStash callbacks shouldn't fail to boot.
+// Without this validation, a missing or malformed key would make every verification fail and
+// surface as a misleading "Invalid Upstash signature" 400 instead of a server misconfiguration.
+let upstashReceiver: Receiver | undefined;
+function getUpstashReceiver(): Receiver {
+  upstashReceiver ??= new Receiver({
+    currentSigningKey: getQstashSigningKey("STACK_QSTASH_CURRENT_SIGNING_KEY"),
+    nextSigningKey: getQstashSigningKey("STACK_QSTASH_NEXT_SIGNING_KEY"),
+  });
+  return upstashReceiver;
+}
 
 export async function ensureUpstashSignature(fullReq: SmartRequest): Promise<void> {
   const upstashSignature = fullReq.headers["upstash-signature"]?.[0];
@@ -35,7 +54,7 @@ export async function ensureUpstashSignature(fullReq: SmartRequest): Promise<voi
     url.hostname = "localhost";
   }
 
-  const isValid = await upstashReceiver.verify({
+  const isValid = await getUpstashReceiver().verify({
     signature: upstashSignature,
     url: url.toString(),
     body: new TextDecoder().decode(fullReq.bodyBuffer),

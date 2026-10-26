@@ -170,10 +170,56 @@ async function main() {
   }
 
   await recurse(`[bulldozer] verifying data integrity across all payments tables`, async () => {
-    await fetchBulldozerServerJson<{ success: true }>({
-      method: "POST",
-      path: "/internal/payments/verify-data-integrity",
-    });
+    type VerificationIssue = {
+      phase: string,
+      code: string,
+      message: string,
+      context?: Record<string, string | number | boolean | null>,
+    };
+    type VerificationResponse = {
+      success: boolean,
+      done: boolean,
+      next_cursor: string | null,
+      steps_taken: number,
+      errors: VerificationIssue[],
+      errors_truncated: boolean,
+      skipped_checks: VerificationIssue[],
+    };
+    const findings: VerificationIssue[] = [];
+    let continuation: string | undefined;
+    let pageCount = 0;
+    while (true) {
+      if (++pageCount > 10_000) throw new Error("Bulldozer integrity verifier exceeded the maximum page count");
+      const response = await fetchBulldozerServerJson<VerificationResponse>({
+        method: "POST",
+        path: "/internal/payments/verify-data-integrity",
+        body: {
+          step_count: 500,
+          ...(continuation === undefined ? {} : { continue: continuation }),
+        },
+      });
+      findings.push(...response.errors);
+      for (const finding of response.skipped_checks) {
+        console.error(`[bulldozer] skipped ${finding.phase}/${finding.code}: ${finding.message}`, finding.context ?? {});
+      }
+      if (response.errors_truncated) {
+        console.error("[bulldozer] integrity verifier truncated findings");
+      }
+      for (const finding of response.errors) {
+        console.error(`[bulldozer] ${finding.phase}/${finding.code}: ${finding.message}`, finding.context ?? {});
+      }
+      if (response.done) break;
+      if (response.next_cursor === null) {
+        throw new Error("Bulldozer integrity verifier returned no cursor before completion");
+      }
+      if (response.next_cursor === continuation) {
+        throw new Error("Bulldozer integrity verifier returned a non-advancing cursor");
+      }
+      continuation = response.next_cursor;
+    }
+    if (findings.length > 0) {
+      throw new Error(`Bulldozer integrity verification found ${findings.length} issue(s)`);
+    }
   });
 
   const endAt = Math.min(startAt + count, projects.length);
@@ -310,44 +356,51 @@ async function main() {
                 }
               }
 
-              const teams = await expectStatusCode(200, `/api/v1/teams?user_id=${user.id}`, {
-                method: "GET",
-                headers: {
-                  "x-stack-project-id": projectId,
-                  "x-stack-access-type": "admin",
-                  "x-stack-development-override-key": getEnvVariable("STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY"),
-                },
-              });
-
-              for (const team of teams.items) {
-                await recurse(`[team ${team.id}] ${team.name}`, async (recurse) => {
-                  const teamPermissions = await expectStatusCode(200, `/api/v1/team-permissions?team_id=${team.id}`, {
-                    method: "GET",
-                    headers: {
-                      "x-stack-project-id": projectId,
-                      "x-stack-access-type": "admin",
-                      "x-stack-development-override-key": getEnvVariable("STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY"),
-                    },
-                  });
-                  for (const teamPermission of teamPermissions.items) {
-                    // `any` because these endpoint response types aren't imported here,
-                    // and this script is intentionally tolerant of response shape changes.
-                    if (!teamPermissionDefinitions.items.some((p: any) => p.id === teamPermission.id)) {
-                      throw new HexclaveAssertionError(deindent`
-                          Team permission ${teamPermission.id} not found in team permission definitions.
-                        `);
-                    }
-                  }
+              // Teams are paginated (at most 200 per request), so verify them one page at a time.
+              let teamsCursor: string | null = null;
+              do {
+                const teamsParams = new URLSearchParams({ user_id: user.id, limit: "200" });
+                if (teamsCursor != null) teamsParams.set("cursor", teamsCursor);
+                const teams = await expectStatusCode(200, `/api/v1/teams?${teamsParams.toString()}`, {
+                  method: "GET",
+                  headers: {
+                    "x-stack-project-id": projectId,
+                    "x-stack-access-type": "admin",
+                    "x-stack-development-override-key": getEnvVariable("STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY"),
+                  },
                 });
 
-                if (paymentsVerifier && !verifiedTeams.has(team.id)) {
-                  await paymentsVerifier.verifyCustomerPayments({
-                    customerType: "team",
-                    customerId: team.id,
+                for (const team of teams.items) {
+                  await recurse(`[team ${team.id}] ${team.name}`, async (recurse) => {
+                    const teamPermissions = await expectStatusCode(200, `/api/v1/team-permissions?team_id=${team.id}`, {
+                      method: "GET",
+                      headers: {
+                        "x-stack-project-id": projectId,
+                        "x-stack-access-type": "admin",
+                        "x-stack-development-override-key": getEnvVariable("STACK_SEED_INTERNAL_PROJECT_SUPER_SECRET_ADMIN_KEY"),
+                      },
+                    });
+                    for (const teamPermission of teamPermissions.items) {
+                      // `any` because these endpoint response types aren't imported here,
+                      // and this script is intentionally tolerant of response shape changes.
+                      if (!teamPermissionDefinitions.items.some((p: any) => p.id === teamPermission.id)) {
+                        throw new HexclaveAssertionError(deindent`
+                            Team permission ${teamPermission.id} not found in team permission definitions.
+                          `);
+                      }
+                    }
                   });
-                  verifiedTeams.add(team.id);
+
+                  if (paymentsVerifier && !verifiedTeams.has(team.id)) {
+                    await paymentsVerifier.verifyCustomerPayments({
+                      customerType: "team",
+                      customerId: team.id,
+                    });
+                    verifiedTeams.add(team.id);
+                  }
                 }
-              }
+                teamsCursor = teams.pagination?.next_cursor ?? null;
+              } while (teamsCursor != null);
 
               if (paymentsVerifier) {
                 await paymentsVerifier.verifyCustomerPayments({
@@ -426,4 +479,3 @@ main().catch((...args) => {
   console.error(...args);
   process.exit(1);
 });
-

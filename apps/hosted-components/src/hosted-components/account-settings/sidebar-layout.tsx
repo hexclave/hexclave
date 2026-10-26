@@ -13,7 +13,8 @@ export type SidebarItem = {
   contentTitle?: React.ReactNode,
 }
 
-function useHash() {
+/** The current location hash without the leading `#`, which is the `id` of the selected sidebar item. */
+export function useHash() {
   return useLocation({
     select: (location) => location.hash.startsWith("#") ? location.hash.slice(1) : location.hash,
   });
@@ -34,7 +35,7 @@ export function SidebarLayout(props: { items: SidebarItem[], title?: ReactNode, 
   );
 }
 
-function setHash(hash: string) {
+export function setHash(hash: string) {
   if (window.location.hash === hash) {
     return;
   }

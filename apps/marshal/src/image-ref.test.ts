@@ -15,7 +15,7 @@ describe("recording which bytes an image reference turned out to mean", () => {
     // A built service's reference already carries the digest the build pushed.
     // Re-pinning it to what the platform reports is a no-op in practice, but it
     // must not produce a reference with two digests in it.
-    expect(pinToDigest(`registry.fly.io/app@${"sha256:" + "a".repeat(64)}`, DIGEST)).toBe(`registry.fly.io/app@${DIGEST}`);
+    expect(pinToDigest(`us-central1-docker.pkg.dev/project/runtime/app@${"sha256:" + "a".repeat(64)}`, DIGEST)).toBe(`us-central1-docker.pkg.dev/project/runtime/app@${DIGEST}`);
   });
 
   it("does not mistake a registry PORT for a tag", () => {

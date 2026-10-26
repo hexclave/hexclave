@@ -3,6 +3,7 @@ import { MarshalApiError, getMarshalClientOrThrow, getMarshalDeploymentsConfigOr
 import { Tenancy } from "@/lib/tenancies";
 import { PrismaClientTransaction, getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
+import { deploymentDnsRecordsToZoneFile } from "@hexclave/shared/dist/deployments";
 import { adaptSchema, serverOrHigherAuthTypeSchema, userSpecifiedIdSchema, yupArray, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
 
@@ -61,6 +62,10 @@ export const GET = createSmartRouteHandler({
       hostname: yupString().defined(),
       is_primary: yupBoolean().defined(),
       verified: yupBoolean().defined(),
+      // Finer-grained than `verified`: "issuing" is the window where the runtime has
+      // accepted the DNS but the certificate authority has not finished, which without this
+      // field is indistinguishable from the user having created no records at all.
+      status: yupString().oneOf(["awaiting_dns", "issuing", "verified"]).defined(),
       // True while the service has never been deployed: the runtime hasn't
       // been told about the domain yet, and the DNS targets (the app's IPs)
       // only exist once it has, so no records can be shown.
@@ -70,6 +75,9 @@ export const GET = createSmartRouteHandler({
         name: yupString().defined(),
         value: yupString().defined(),
       }).defined()).defined(),
+      // `dns_records` rendered as a BIND zone file, for importing into a DNS provider instead
+      // of creating each record by hand. Null exactly when there are no records.
+      bind_zone_file: yupString().nullable().defined(),
     }).defined(),
   }),
   handler: async ({ auth, params }) => {
@@ -87,8 +95,10 @@ export const GET = createSmartRouteHandler({
           hostname: params.hostname,
           is_primary: domain.isPrimary,
           verified: false,
+          status: "awaiting_dns",
           pending_first_deploy: true,
           dns_records: [],
+          bind_zone_file: null,
         },
       } as const;
     }
@@ -96,10 +106,8 @@ export const GET = createSmartRouteHandler({
     const client = getMarshalClientOrThrow();
     let result;
     try {
-      // Strictly a read: it returns the current certificate state + DNS records
-      // without touching Fly. It must NOT be putDomain — a PUT repoints the
-      // hostname, so polling this endpoint would silently steal the domain from
-      // whichever service currently holds it.
+      // Safe for polling: Marshal may promote this tenancy's pending TXT proof, but it cannot
+      // repoint an already claimed hostname. A PUT can repoint, so it must not be used here.
       result = await client.getDomain(marshalNamespaceForTenancy(auth.tenancy), params.hostname);
     } catch (e) {
       if (e instanceof MarshalApiError && e.status === 404) {
@@ -123,8 +131,10 @@ export const GET = createSmartRouteHandler({
             hostname: params.hostname,
             is_primary: domain.isPrimary,
             verified: false,
+            status: "awaiting_dns",
             pending_first_deploy: true,
             dns_records: [],
+            bind_zone_file: null,
           },
         } as const;
       }
@@ -147,8 +157,10 @@ export const GET = createSmartRouteHandler({
           hostname: params.hostname,
           is_primary: domain.isPrimary,
           verified: false,
+          status: "awaiting_dns",
           pending_first_deploy: true,
           dns_records: [],
+          bind_zone_file: null,
         },
       } as const;
     }
@@ -158,6 +170,9 @@ export const GET = createSmartRouteHandler({
       data: { verified: result.verified },
     });
 
+    // Once verified there is nothing left for the user to create; while pending, the records
+    // include both Hexclave's ownership TXT proof and the shared frontend routing record.
+    const dnsRecords = result.verified ? [] : result.dns_records;
     return {
       statusCode: 200,
       bodyType: "json",
@@ -165,10 +180,10 @@ export const GET = createSmartRouteHandler({
         hostname: params.hostname,
         is_primary: domain.isPrimary,
         verified: result.verified,
+        status: result.status,
         pending_first_deploy: false,
-        // Once verified there is nothing left for the user to create; while
-        // pending, the records include the ACME pre-issuance challenge.
-        dns_records: result.verified ? [] : result.dns_records,
+        dns_records: dnsRecords,
+        bind_zone_file: deploymentDnsRecordsToZoneFile(params.hostname, dnsRecords),
       },
     };
   },

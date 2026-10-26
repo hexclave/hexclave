@@ -74,6 +74,11 @@ export type SubscriptionInvoiceRow = {
   status: string | null,
   amountTotal: number | null,
   hostedInvoiceUrl: string | null,
+  paidAtMillis?: number | null,
+  markedUncollectibleAtMillis?: number | null,
+  voidedAtMillis?: number | null,
+  currency?: string | null,
+  amountPaid?: number | null,
   createdAtMillis: number,
 };
 
@@ -87,6 +92,9 @@ export type OneTimePurchaseRow = {
   product: ProductSnapshot,
   quantity: number,
   stripePaymentIntentId: string | null,
+  amountReceived?: number | null,
+  currency?: string | null,
+  paidAtMillis?: number | null,
   revokedAtMillis: number | null,
   refundedAtMillis: number | null,
   creationSource: PurchaseCreationSource,

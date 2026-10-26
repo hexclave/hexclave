@@ -6,6 +6,14 @@ import { HexclaveAssertionError, captureError } from '@hexclave/shared/dist/util
 import { Result } from '@hexclave/shared/dist/utils/results';
 import { Sandbox } from '@vercel/sandbox';
 import { Freestyle as FreestyleClient } from 'freestyle';
+import {
+  DEFAULT_FREESTYLE_SNAPSHOT_ID,
+  executeJavascriptInFreestyleVm,
+  isExecuteResult,
+} from './freestyle-vm-js-execution';
+import type { ExecuteResult } from './js-execution-types';
+
+export type { ExecuteResult } from './js-execution-types';
 
 export type ExecuteJavascriptOptions = {
   /** Cancels provider setup, command execution, and fallback attempts. */
@@ -32,10 +40,6 @@ export type ExecuteJavascriptOptions = {
   logSafeCode?: string,
 };
 
-export type ExecuteResult =
-  | { status: "ok", data: unknown }
-  | { status: "error", error: { message: string, stack?: string, cause?: unknown } };
-
 type JsEngine = {
   name: string,
   execute: (code: string, options: ExecuteJavascriptOptions) => Promise<ExecuteResult>,
@@ -56,26 +60,96 @@ function createFreestyleEngine(): JsEngine {
           const prefix = getEnvVariable("NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX", "81");
           baseUrl = `http://localhost:${prefix}22`;
         }
+        return await executeJavascriptWithLocalFreestyleMock(baseUrl, code, options);
       }
 
       const freestyle = new FreestyleClient({
         apiKey,
         baseUrl,
       });
-
-      const response = await awaitWithAbortSignal(freestyle.serverless.runs.create({
+      const snapshotId = getEnvVariable(
+        "STACK_FREESTYLE_SNAPSHOT_ID",
+        DEFAULT_FREESTYLE_SNAPSHOT_ID,
+      );
+      return await executeJavascriptInFreestyleVm({
+        snapshotId,
         code,
-        nodeModules: options.nodeModules ?? {},
-        timeout: options.executionTimeoutMs,
-      }), options.signal);
-
-      if (response.result === undefined) {
-        throw new HexclaveAssertionError("Freestyle execution returned undefined result", { response, innerCode: options.logSafeCode ?? code, innerOptions: options });
-      }
-
-      return response.result as ExecuteResult;
+        nodeModules: new Map(Object.entries(options.nodeModules ?? {})),
+        executionTimeoutMs: options.executionTimeoutMs,
+        signal: options.signal,
+        scheduleCleanup: runAsynchronouslyAndWaitUntil,
+        onCleanupError: (vmId, error) => {
+          captureError("js-execution-freestyle-vm-cleanup-failed", new HexclaveAssertionError(
+            "Failed to delete Freestyle VM after JavaScript execution",
+            { cause: error, vmId },
+          ));
+        },
+        createVm: async (createOptions) => {
+          const { vm } = await freestyle.vms.create(createOptions);
+          return {
+            id: vm.id,
+            makeDirectory: async (path) => {
+              await vm.fs.mkdir(path);
+            },
+            writeTextFile: async (path, content, signal) => {
+              await vm.fs.writeTextFile(path, content, { signal });
+            },
+            readTextFile: async (path, signal) => {
+              return await vm.fs.readTextFile(path, { signal });
+            },
+            openPty: async (ptyOptions) => {
+              return await vm.pty.open(ptyOptions);
+            },
+            delete: async () => {
+              await vm.delete();
+            },
+          };
+        },
+      });
     },
   };
+}
+
+async function executeJavascriptWithLocalFreestyleMock(
+  baseUrl: string,
+  code: string,
+  options: ExecuteJavascriptOptions,
+): Promise<ExecuteResult> {
+  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/execute/v3/script`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      script: code,
+      config: {
+        nodeModules: options.nodeModules ?? {},
+        timeout: options.executionTimeoutMs,
+      },
+    }),
+    signal: options.signal,
+  });
+  if (!response.ok) {
+    throw new HexclaveAssertionError("Local Freestyle mock execution failed", {
+      statusCode: response.status,
+      innerCode: options.logSafeCode ?? code,
+      innerOptions: options,
+    });
+  }
+  const body: unknown = await response.json();
+  if (typeof body !== "object" || body === null || !("result" in body)) {
+    throw new HexclaveAssertionError("Local Freestyle mock returned no result", {
+      innerCode: options.logSafeCode ?? code,
+      innerOptions: options,
+    });
+  }
+  const result = body.result;
+  if (!isExecuteResult(result)) {
+    throw new HexclaveAssertionError("Local Freestyle mock returned a malformed result", {
+      result,
+      innerCode: options.logSafeCode ?? code,
+      innerOptions: options,
+    });
+  }
+  return result;
 }
 
 function createVercelSandboxEngine(): JsEngine {
@@ -335,25 +409,4 @@ async function runWithoutFallback(code: string, options: ExecuteJavascriptOption
     options.signal?.throwIfAborted();
     throw new HexclaveAssertionError("Freestyle rendering service unavailable when running without fallback", { cause: error, innerCode: options.logSafeCode ?? code, innerOptions: options });
   }
-}
-
-async function awaitWithAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (signal == null) {
-    return await promise;
-  }
-  signal.throwIfAborted();
-  return await new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
 }

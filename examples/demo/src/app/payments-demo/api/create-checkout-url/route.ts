@@ -30,8 +30,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Sign in before creating a checkout URL." }, { status: 401 });
   }
   const body = readBody(await request.json());
-  const teams = await user.listTeams();
-  const team = teams.find((candidate) => candidate.id === body.teamId);
+  const team = await user.getTeam(body.teamId);
   if (team == null) {
     return NextResponse.json({ error: "Current user is not a member of that team." }, { status: 403 });
   }

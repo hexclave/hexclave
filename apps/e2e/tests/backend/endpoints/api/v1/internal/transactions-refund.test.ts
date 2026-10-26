@@ -1028,6 +1028,7 @@ async function createLiveModeSubscriptionWithRenewal(): Promise<{
   const startWebhook = await Payments.sendStripeWebhook({
     id: `evt_renewal_refund_start_${idSuffix}`,
     type: "invoice.payment_succeeded",
+    created: Math.floor(Date.now() / 1000),
     account: accountId,
     data: {
       object: {
@@ -1042,6 +1043,7 @@ async function createLiveModeSubscriptionWithRenewal(): Promise<{
   const renewalWebhook = await Payments.sendStripeWebhook({
     id: `evt_renewal_refund_cycle_${idSuffix}`,
     type: "invoice.payment_succeeded",
+    created: Math.floor(Date.now() / 1000),
     account: accountId,
     data: {
       object: {

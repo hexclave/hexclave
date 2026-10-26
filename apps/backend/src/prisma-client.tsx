@@ -123,11 +123,15 @@ async function resolveConnectionStringWithOrbStack(connectionString: string): Pr
   return connectionString;
 }
 
-let actualGlobalConnectionString: string = globalVar.__hexclave_actual_global_connection_string ??= await resolveConnectionStringWithOrbStack(originalGlobalConnectionString);
+export const globalPrismaConnectionString: string = globalVar.__hexclave_actual_global_connection_string ??= await resolveConnectionStringWithOrbStack(originalGlobalConnectionString);
 let actualReplicaConnectionString: string = globalVar.__hexclave_actual_replica_connection_string ??= await resolveConnectionStringWithOrbStack(originalReplicaConnectionString);
 
 export type PrismaClientWithReplica<T extends PrismaClient = PrismaClient> = Omit<T, "$on"> & {
   $replica: () => Omit<T, "$on">,
+  // You should always never use $primary. Usually, the primary blocks writes until they have been replicated to the
+  // replica. This is only useful in rare cases, for example when we aren't writing for the blocked write because the
+  // previous transaction to the primary was aborted (eg. due to an error or a conflict). Ask Konsti if you're confused.
+  $primary: () => Omit<T, "$on">,
 };
 
 
@@ -372,9 +376,9 @@ function extendWithFakeReadReplica<T extends PrismaClient>(client: T): PrismaCli
 export const { client: globalPrismaClient, schema: globalPrismaSchema }: {
   client: PrismaClientWithReplica<PrismaClient>,
   schema: string,
-} = actualGlobalConnectionString
+} = globalPrismaConnectionString
   ? (() => {
-    const { client, schema } = getPostgresPrismaClient(actualGlobalConnectionString, "primary");
+    const { client, schema } = getPostgresPrismaClient(globalPrismaConnectionString, "primary");
     return {
       client: actualReplicaConnectionString ? extendWithReadReplicas(client, actualReplicaConnectionString) : extendWithFakeReadReplica(client),
       schema,

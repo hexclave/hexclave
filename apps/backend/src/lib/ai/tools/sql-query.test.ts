@@ -1,3 +1,4 @@
+import type { SmartRequestAuth } from "@/route-handlers/smart-request";
 import { describe, expect, it } from "vitest";
 import { getTools } from ".";
 import { createSqlQueryTool } from "./sql-query";
@@ -19,10 +20,37 @@ describe("createSqlQueryTool", () => {
 });
 
 describe("getTools", () => {
-  it("exposes queryAnalytics even without auth so the model sees the auth requirement instead of a missing tool", async () => {
+  it("does not register queryAnalytics without a target project", async () => {
     const tools = await getTools(["sql-query"], {
       auth: null,
       targetProjectId: null,
+    });
+
+    expect(tools).not.toHaveProperty("queryAnalytics");
+  });
+
+  it("does not fall back to the caller's own project analytics when no target project is given", async () => {
+    // Client-level auth for a customer project, as sent by anyone holding that
+    // project's publishable client key. The AI endpoint accepts this auth level.
+    const customerProjectClientAuth = {
+      project: { id: "proj_customer" },
+      branchId: "main",
+      tenancy: { project: { id: "proj_customer" }, branchId: "main" },
+      type: "client",
+    } as unknown as SmartRequestAuth;
+
+    const tools = await getTools(["sql-query"], {
+      auth: customerProjectClientAuth,
+      targetProjectId: null,
+    });
+
+    expect(tools).not.toHaveProperty("queryAnalytics");
+  });
+
+  it("registers queryAnalytics when a target project is present", async () => {
+    const tools = await getTools(["sql-query"], {
+      auth: null,
+      targetProjectId: "proj_managed",
     });
 
     expect(tools).toHaveProperty("queryAnalytics");

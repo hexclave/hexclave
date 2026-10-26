@@ -15,6 +15,30 @@ function formatClickhouseDateTimeParam(date: Date): string {
   return date.toISOString().slice(0, 19);
 }
 
+// Deduplicates row versions with argMax rather than FINAL: tiny projects spread across monthly
+// parts each cost whole granules of other tenants' rows, and FINAL merge-sorting all of them
+// across parts exceeded the 512 MB query cap. argMax only holds the matching user ids in memory,
+// and grouping by id across partitions still collapses users whose signed_up_at moved partition.
+export function getProjectTotalUsersQuery(table: string): string {
+  return `
+    SELECT
+      projectId,
+      countIf(isDeleted = 0 AND isAnonymous = 0) AS totalUsers
+    FROM (
+      SELECT
+        project_id AS projectId,
+        argMax(sync_is_deleted, sync_sequence_id) AS isDeleted,
+        argMax(is_anonymous, sync_sequence_id) AS isAnonymous
+      FROM ${table}
+      WHERE project_id IN {projectIds:Array(String)}
+        AND branch_id = {branchId:String}
+      GROUP BY project_id, id
+    )
+    GROUP BY projectId
+    HAVING totalUsers > 0
+  `;
+}
+
 type ProjectMetrics = {
   total_users: number,
   daily_signups: { date: string, activity: number }[],
@@ -122,17 +146,7 @@ export const GET = createSmartRouteHandler({
       const clickhouseClient = getClickhouseAdminClientForMetrics();
       const [totalResult, signupResult] = await Promise.all([
         clickhouseClient.query({
-          query: `
-            SELECT
-              project_id AS projectId,
-              count() AS totalUsers
-            FROM analytics_internal.users FINAL
-            WHERE project_id IN {projectIds:Array(String)}
-              AND branch_id = {branchId:String}
-              AND sync_is_deleted = 0
-              AND is_anonymous = 0
-            GROUP BY project_id
-          `,
+          query: getProjectTotalUsersQuery("analytics_internal.users"),
           query_params: {
             projectIds,
             branchId: DEFAULT_BRANCH_ID,

@@ -25,6 +25,7 @@ import { parseManualTransactionsListQuery } from "./manual-transactions-http.js"
 import { instrumentation, traceSpan } from "./otel.js";
 import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf } from "./payments/schema/index.js";
 import type { CustomerType, Json, ManualTransactionRow, SubscriptionRow, TransactionRow } from "./payments/schema/types.js";
+import { handleVerifyDataIntegrityRequest, verifyDataIntegrity } from "./payments/verify-data-integrity.js";
 import { initSentry, resolveBulldozerSentryEnvironment } from "./sentry.js";
 
 const sentryEnabled = initSentry();
@@ -991,6 +992,7 @@ const app = new Elysia({ adapter: node() })
     await bulldozerDb.waitUntilCurrentStateDurable();
     return ok();
   }))
+  .post("/internal/payments/verify-data-integrity", ({ body }) => handler("verify-data-integrity", async () => await handleVerifyDataIntegrityRequest(body, request => verifyDataIntegrity(bulldozerDb, request))))
   .post("/internal/piledriver-gc", ({ body }) => handler("piledriver-gc", async () => {
     const request = readObjectBody(body);
     const cutoffTimestampMillis = readNonNegativeSafeIntegerField(request, "cutoffTimestampMillis");
@@ -1005,7 +1007,6 @@ const app = new Elysia({ adapter: node() })
       request.maxObjects === undefined ? undefined : readPositiveSafeIntegerField(request, "maxObjects"),
     );
   }))
-  .post("/internal/payments/verify-data-integrity", () => handler("verify-data-integrity", async () => ok()))
   .get("/v1/:tenancyId/transactions", ({ params, query }) => handler("list-transactions", async () => {
     const parsedLimit = Number.parseInt(typeof query.limit === "string" ? query.limit : "50", 10);
     const result = await listTransactions({
@@ -1111,7 +1112,18 @@ const app = new Elysia({ adapter: node() })
   .post("/v1/:tenancyId/test-mode/subscriptions/:subscriptionId/end", () => notImplemented("end-test-mode-subscription"))
   .post("/v1/:tenancyId/test-mode/one-time-purchases", () => notImplemented("create-test-mode-one-time-purchase"))
   .post("/v1/:tenancyId/test-mode/subscriptions/:subscriptionId/switch", () => notImplemented("switch-test-mode-subscription"))
-  .listen(port, (server) => {
+  .listen({
+    port,
+    // In prod, bulldozer-js sits behind a Google Cloud load balancer that keeps idle backend
+    // connections open for 600s and reuses them. With Node's default 5s keepAliveTimeout, Node
+    // closed idle connections first, and a request the LB sent on one as it was closing was reset
+    // before Node read it; the LB then returned a 503 ("upstream connect error or disconnect/reset
+    // before headers. reset reason: connection termination", LB log statusDetails
+    // backend_connection_closed_before_data_sent_to_client). Outliving the LB's 600s makes the LB
+    // the side that closes idle connections, and it never closes one it is about to use.
+    // Google's recommended value is 620s. @elysia/node forwards `node` into http.createServer.
+    node: { keepAliveTimeout: 620_000 },
+  }, (server) => {
     // @elysia/node 1.4.6 does not assign the server to app.server, so
     // Elysia.stop() throws even though the callback's server is running.
     stopHttpServer = () => server.stop();

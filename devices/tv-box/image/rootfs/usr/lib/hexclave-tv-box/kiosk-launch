@@ -1,0 +1,78 @@
+#!/bin/sh
+set -eu
+
+url_file=/run/hexclave-tv-box/kiosk-url
+cookie_dir=/var/lib/hexclave-tv-box/browser
+cache_dir=/run/hexclave-tv-box-browser-cache
+data_dir="$cookie_dir/data"
+config_dir="$cookie_dir/config"
+timezone_file=/var/lib/hexclave-tv-box/identity/timezone
+wayland_runtime_dir=/run/hexclave-tv-box-wayland
+
+install -d -m 0700 "$cookie_dir" "$cache_dir" "$data_dir" "$config_dir"
+if [ ! -d "$wayland_runtime_dir" ] || [ -L "$wayland_runtime_dir" ]; then
+  printf '%s\n' 'TV Box Wayland runtime directory is unavailable.' >&2
+  exit 1
+fi
+if [ "$(stat -c %u "$wayland_runtime_dir")" != "$(id -u)" ]; then
+  printf '%s\n' 'TV Box Wayland runtime directory has the wrong owner.' >&2
+  exit 1
+fi
+if [ "$(stat -c %a "$wayland_runtime_dir")" != 700 ]; then
+  printf '%s\n' 'TV Box Wayland runtime directory has unsafe permissions.' >&2
+  exit 1
+fi
+if [ ! -w "$wayland_runtime_dir" ] || [ ! -x "$wayland_runtime_dir" ]; then
+  printf '%s\n' 'TV Box Wayland runtime directory is not usable.' >&2
+  exit 1
+fi
+for _attempt in $(seq 1 60); do
+  if [ -s "$url_file" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ ! -s "$url_file" ]; then
+  printf '%s\n' 'TV Box kiosk URL was not prepared.' >&2
+  exit 1
+fi
+
+if [ -s "$timezone_file" ]; then
+  TZ=$(tr -d '\r\n' < "$timezone_file")
+  case "$TZ" in
+    /*|*..*) printf '%s\n' 'Invalid TV Box timezone.' >&2; exit 1 ;;
+  esac
+  export TZ
+fi
+
+export COG_PLATFORM_WL_VIEW_FULLSCREEN=1
+# Both the compositor and Cog's Wayland backend select default/left_ptr.
+# Scope the private transparent theme to this process tree, including the
+# native startup cursor, without modifying desktop cursors or hosted /tv.
+export XCURSOR_PATH=/usr/share/hexclave-tv-box/cursors
+if [ ! -r "$XCURSOR_PATH/default/cursors/left_ptr" ] || [ ! -s "$XCURSOR_PATH/default/cursors/left_ptr" ]; then
+  printf '%s\n' 'TV Box transparent cursor asset is unavailable.' >&2
+  exit 1
+fi
+# PAM establishes the renderer's logind session after systemd applies the
+# service environment. Reassert the systemd-owned private directory here so
+# Cage never inherits a cleared or replaced XDG_RUNTIME_DIR from PAM.
+export XDG_RUNTIME_DIR="$wayland_runtime_dir"
+# pam_systemd may also publish a desktop session bus under /run/user/<uid>.
+# This appliance has no desktop session services, and WebKit otherwise tries
+# to expose that separate runtime tree through its bubblewrap D-Bus proxy.
+# Keep WebKit's process sandbox enabled while declining the unused bus.
+unset DBUS_SESSION_BUS_ADDRESS
+export XDG_CACHE_HOME="$cache_dir"
+# WebKit derives its non-ephemeral network-session data directory from XDG.
+# Keep browser identity with the explicit cookie jar on the persistent state
+# partition; cache remains disposable under /run. Pairing/factory reset clears
+# this exact browser directory, so persistence never survives an explicit reset.
+export XDG_DATA_HOME="$data_dir"
+export XDG_CONFIG_HOME="$config_dir"
+url=$(tr -d '\r\n' < "$url_file")
+
+exec /usr/bin/python3 -m hexclave_tv_box.kiosk_supervisor \
+  --health-file="$cookie_dir/kiosk-health" \
+  --cookie-jar="$cookie_dir/cookies.sqlite" \
+  "$url"

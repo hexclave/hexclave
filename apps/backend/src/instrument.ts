@@ -6,6 +6,7 @@ import { BatchSpanProcessor, NoopSpanProcessor } from "@opentelemetry/sdk-trace-
 import { PrismaInstrumentation } from "@prisma/instrumentation";
 import * as Sentry from "@sentry/node";
 import backendPackageJson from "../package.json";
+import { createGoogleCloudTraceSpanProcessor } from "./google-cloud-trace";
 import { createBackendInstrumentationPlan } from "./instrumentation-plan";
 import { initPerfStats } from "./lib/dev-perf-stats";
 import { getSentryRelease } from "./sentry-release";
@@ -29,17 +30,25 @@ export function registerBackendInstrumentation() {
   const sentryDsn = getEnvVariable("NEXT_PUBLIC_SENTRY_DSN", "");
   const plan = createBackendInstrumentationPlan({
     ci: getEnvVariable("CI", ""),
+    googleCloudTraceSampleRate: getEnvVariable("HEXCLAVE_GOOGLE_CLOUD_TRACE_SAMPLE_RATE", ""),
     nodeEnvironment,
+    otelResourceAttributes: getEnvVariable("OTEL_RESOURCE_ATTRIBUTES", ""),
     otlpEndpoint: getEnvVariable("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
     otlpTracesEndpoint: getEnvVariable("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ""),
     portPrefix,
     sentryDsn,
     sentryTracesSampleRate: sentryBaseConfig.tracesSampleRate,
   });
-  const openTelemetrySpanProcessors = plan.otlpTracesEndpoint == null
-    ? plan.sentryEnabled ? [] : [new NoopSpanProcessor()]
-    : [new BatchSpanProcessor(new OTLPTraceExporter({ url: plan.otlpTracesEndpoint }))];
-  const openTelemetryInstrumentations = plan.sentryEnabled || plan.otlpTracesEndpoint == null
+  const exportingSpanProcessors = [
+    ...plan.otlpTracesEndpoint == null ? [] : [new BatchSpanProcessor(new OTLPTraceExporter({ url: plan.otlpTracesEndpoint }))],
+    ...plan.googleCloudTrace == null ? [] : [createGoogleCloudTraceSpanProcessor(plan.googleCloudTrace)],
+  ];
+  // Passing any span processor makes Sentry build a BasicTracerProvider (with its
+  // own SentrySpanProcessor first) instead of its default SentryTracerProvider.
+  const openTelemetrySpanProcessors = exportingSpanProcessors.length > 0
+    ? exportingSpanProcessors
+    : plan.sentryEnabled ? [] : [new NoopSpanProcessor()];
+  const openTelemetryInstrumentations = plan.sentryEnabled || exportingSpanProcessors.length === 0
     ? []
     : [
       new PrismaInstrumentation(),
@@ -50,7 +59,7 @@ export function registerBackendInstrumentation() {
   initPerfStats();
 
   // Sentry owns the one global OpenTelemetry provider in every environment.
-  // When Sentry is disabled but an OTLP destination exists, register the Node and
+  // When Sentry is disabled but an OTLP or Cloud Trace destination exists, register the Node and
   // Prisma instrumentations explicitly. With no exporter, the no-op processor keeps
   // request context available without paying to patch every instrumented library.
   Sentry.init({

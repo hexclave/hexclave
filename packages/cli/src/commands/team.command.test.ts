@@ -19,8 +19,16 @@ type TestTeam = {
 };
 
 type TestUser = {
-  listTeams: () => Promise<TestTeam[]>,
+  getTeam: (teamId: string) => Promise<TestTeam | null>,
+  listTeams: () => Promise<TestTeam[] & { nextCursor: string | null }>,
 };
+
+function createUser(teams: TestTeam[]) {
+  return {
+    getTeam: vi.fn(async (teamId: string) => teams.find((team) => team.id === teamId) ?? null),
+    listTeams: vi.fn(async () => Object.assign([...teams], { nextCursor: null })),
+  };
+}
 
 const mockState = vi.hoisted(() => ({
   user: null as TestUser | null,
@@ -67,9 +75,8 @@ afterEach(() => {
 describe("team command parsing", () => {
   it("parses the team id on members remove", async () => {
     const team = createTeam("team-1", "Acme");
-    mockState.user = {
-      listTeams: vi.fn(async () => [team]),
-    };
+    const user = createUser([team]);
+    mockState.user = user;
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await createProgram().parseAsync([
@@ -86,6 +93,8 @@ describe("team command parsing", () => {
     ]);
 
     expect(team.removeUser).toHaveBeenCalledWith("user-2");
+    expect(user.getTeam).toHaveBeenCalledWith("team-1");
+    expect(user.listTeams).not.toHaveBeenCalled();
     expect(logSpy.mock.calls).toMatchInlineSnapshot(`
       [
         [
@@ -97,9 +106,8 @@ describe("team command parsing", () => {
 
   it("parses the team id on invitations list", async () => {
     const team = createTeam("team-1", "Acme");
-    mockState.user = {
-      listTeams: vi.fn(async () => [team]),
-    };
+    const user = createUser([team]);
+    mockState.user = user;
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await createProgram().parseAsync([
@@ -113,6 +121,7 @@ describe("team command parsing", () => {
     ]);
 
     expect(team.listInvitations).toHaveBeenCalledTimes(1);
+    expect(user.listTeams).not.toHaveBeenCalled();
     expect(logSpy.mock.calls).toMatchInlineSnapshot(`
       [
         [

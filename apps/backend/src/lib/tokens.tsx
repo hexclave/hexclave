@@ -2,6 +2,7 @@ import { usersCrudHandlers } from '@/app/api/latest/users/crud';
 import { withExternalDbSyncUpdate } from '@/lib/external-db-sync';
 import { getPrismaClientForTenancy, globalPrismaClient } from '@/prisma-client';
 import { KnownErrors } from '@hexclave/shared';
+import type { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
 import type { RestrictedReason } from "@hexclave/shared/dist/schema-fields";
 import { restrictedReasonSchema, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { AccessTokenPayload } from '@hexclave/shared/dist/sessions';
@@ -238,6 +239,55 @@ type GenerateAccessTokenOptions = RefreshTokenOptions & {
   apiUrl: string,
 };
 
+async function generateAccessTokenForUser(options: {
+  tenancy: Tenancy,
+  projectUserId: string,
+  sessionId: string,
+  user: UsersCrud["Admin"]["Read"],
+  apiUrl: string,
+  expirationTime?: string | Date,
+}) {
+  const payload: Omit<AccessTokenPayload, "iss" | "aud" | "iat"> = {
+    sub: options.projectUserId,
+    project_id: options.tenancy.project.id,
+    branch_id: options.tenancy.branchId,
+    refresh_token_id: options.sessionId,
+    role: 'authenticated',
+    name: options.user.display_name,
+    email: options.user.primary_email,
+    email_verified: options.user.primary_email_verified,
+    selected_team_id: options.user.selected_team_id,
+    signed_up_at: Math.floor(options.user.signed_up_at_millis / 1000),
+    is_anonymous: options.user.is_anonymous,
+    is_restricted: options.user.is_restricted,
+    restricted_reason: options.user.restricted_reason,
+    requires_totp_mfa: options.user.requires_totp_mfa,
+  };
+
+  try {
+    await accessTokenSchema.validate({
+      projectId: options.tenancy.project.id,
+      userId: options.projectUserId,
+      branchId: options.tenancy.branchId,
+      refreshTokenId: options.sessionId,
+      exp: 0,
+      isAnonymous: options.user.is_anonymous,
+      isRestricted: options.user.is_restricted,
+      restrictedReason: options.user.restricted_reason,
+    });
+  } catch (error) {
+    captureError("generated-access-token-payload-does-not-fit-the-access-token-schema", new HexclaveAssertionError("Generated access token payload does not fit the accessTokenSchema. This is a bug — the token data is inconsistent.", { cause: error, payload }));
+  }
+
+  const userType = getUserType(options.user.is_anonymous, options.user.is_restricted);
+  return await signJWT({
+    issuer: getIssuer(options.tenancy.project.id, userType, options.apiUrl),
+    audience: getAudience(options.tenancy.project.id, userType),
+    expirationTime: options.expirationTime ?? getEnvVariable("STACK_ACCESS_TOKEN_EXPIRATION_TIME", "10min"),
+    payload,
+  });
+}
+
 /**
  * Validates a refresh token and returns the user if valid.
  * This function has NO side effects - it doesn't log events or update timestamps.
@@ -366,45 +416,140 @@ export async function generateAccessTokenFromRefreshTokenIfValid(options: Genera
     }
   );
 
-  const payload: Omit<AccessTokenPayload, "iss" | "aud" | "iat"> = {
-    sub: options.refreshTokenObj.projectUserId,
-    project_id: options.tenancy.project.id,
-    branch_id: options.tenancy.branchId,
-    refresh_token_id: options.refreshTokenObj.id,
-    role: 'authenticated',
-    name: user.display_name,
-    email: user.primary_email,
-    email_verified: user.primary_email_verified,
-    selected_team_id: user.selected_team_id,
-    signed_up_at: Math.floor(user.signed_up_at_millis / 1000),
-    is_anonymous: user.is_anonymous,
-    is_restricted: user.is_restricted,
-    restricted_reason: user.restricted_reason,
-    requires_totp_mfa: user.requires_totp_mfa,
-  };
+  return await generateAccessTokenForUser({
+    tenancy: options.tenancy,
+    projectUserId: options.refreshTokenObj.projectUserId,
+    sessionId: options.refreshTokenObj.id,
+    user,
+    apiUrl: options.apiUrl,
+  });
+}
 
-  // Validate the payload matches the accessTokenSchema before signing, to catch inconsistencies early
-  try {
-    await accessTokenSchema.validate({
-      projectId: options.tenancy.project.id,
-      userId: options.refreshTokenObj.projectUserId,
-      branchId: options.tenancy.branchId,
-      refreshTokenId: options.refreshTokenObj.id,
-      exp: 0, // placeholder, actual exp is set by signJWT
-      isAnonymous: user.is_anonymous,
-      isRestricted: user.is_restricted,
-      restrictedReason: user.restricted_reason,
-    });
-  } catch (error) {
-    captureError("generated-access-token-payload-does-not-fit-the-access-token-schema", new HexclaveAssertionError("Generated access token payload does not fit the accessTokenSchema. This is a bug — the token data is inconsistent.", { cause: error, payload }));
+export async function generateAccessTokenForExternalAuthSession(options: {
+  tenancy: Tenancy,
+  externalAuthSession: {
+    id: string,
+    revokedAt: Date | null,
+  },
+  providerTokenExpiresAt: Date,
+  apiUrl: string,
+}) {
+  if (options.externalAuthSession.revokedAt != null) {
+    return null;
   }
 
-  const userType = getUserType(user.is_anonymous, user.is_restricted);
-  return await signJWT({
-    issuer: getIssuer(options.tenancy.project.id, userType, options.apiUrl),
-    audience: getAudience(options.tenancy.project.id, userType),
-    expirationTime: getEnvVariable("STACK_ACCESS_TOKEN_EXPIRATION_TIME", "10min"),
-    payload,
+  const prisma = await getPrismaClientForTenancy(options.tenancy);
+  const canonicalSession = await prisma.externalAuthSession.findFirst({
+    where: {
+      tenancyId: options.tenancy.id,
+      id: options.externalAuthSession.id,
+      revokedAt: null,
+    },
+    include: {
+      externalAuthMethod: {
+        include: {
+          authMethod: true,
+        },
+      },
+    },
+  });
+  if (canonicalSession == null) {
+    return null;
+  }
+  const projectUserId = canonicalSession.externalAuthMethod.authMethod.projectUserId;
+
+  let user: UsersCrud["Admin"]["Read"];
+  try {
+    user = await usersCrudHandlers.adminRead({
+      tenancy: options.tenancy,
+      user_id: projectUserId,
+      allowedErrorTypes: [KnownErrors.UserNotFound],
+    });
+  } catch (error) {
+    // External source-of-truth users can disappear before their local session projection is cleaned up.
+    if (KnownErrors.UserNotFound.isInstance(error)) {
+      return null;
+    }
+    throw error;
+  }
+  const now = new Date();
+  const sessionUpdate = await prisma.externalAuthSession.updateMany({
+    where: {
+      tenancyId: options.tenancy.id,
+      id: options.externalAuthSession.id,
+      revokedAt: null,
+    },
+    data: {
+      lastActiveAt: now,
+    },
+  });
+  if (sessionUpdate.count === 0) {
+    return null;
+  }
+  const userUpdate = await prisma.projectUser.updateMany({
+    where: {
+      tenancyId: options.tenancy.id,
+      projectUserId,
+    },
+    data: withExternalDbSyncUpdate({
+      lastActiveAt: now,
+    }),
+  });
+  if (userUpdate.count === 0) {
+    return null;
+  }
+
+  const ipInfo = await getEndUserIpInfoForEvent();
+  const billingTeamId = getBillingTeamId(options.tenancy.project);
+  await logEvent(
+    [SystemEventTypes.SessionActivity],
+    {
+      projectId: options.tenancy.project.id,
+      branchId: options.tenancy.branchId,
+      userId: projectUserId,
+      sessionId: options.externalAuthSession.id,
+      isAnonymous: user.is_anonymous,
+      teamId: undefined,
+    },
+    { billingTeamId },
+  );
+  await logEvent(
+    [SystemEventTypes.TokenRefresh],
+    {
+      projectId: options.tenancy.project.id,
+      branchId: options.tenancy.branchId,
+      userId: projectUserId,
+      refreshTokenId: options.externalAuthSession.id,
+      isAnonymous: user.is_anonymous,
+      teamId: undefined,
+      ipInfo,
+    },
+    {
+      refreshTokenId: options.externalAuthSession.id,
+      billingTeamId,
+    },
+  );
+
+  return await generateAccessTokenForUser({
+    tenancy: options.tenancy,
+    projectUserId,
+    sessionId: options.externalAuthSession.id,
+    user,
+    apiUrl: options.apiUrl,
+    // External sessions are re-exchanged on demand, so keep their tokens short-lived and roughly
+    // bounded by the provider credential that authorized it. However, we enforce a 30s minimum:
+    // some providers (eg. Clerk) hand out tokens that live only ~60s and their SDKs serve cached
+    // tokens until shortly before expiry, so tying our expiry strictly to theirs could produce
+    // tokens the SDK immediately considers stale (it requires fresh tokens to live at least 20s)
+    // and degenerate into a hot re-exchange loop. This means our token can outlive the provider
+    // token by up to 30s, which is acceptable — the provider session itself was verified just now.
+    expirationTime: new Date(Math.max(
+      new Date().getTime() + 30 * 1000,
+      Math.min(
+        options.providerTokenExpiresAt.getTime(),
+        new Date().getTime() + 5 * 60 * 1000,
+      ),
+    )),
   });
 }
 

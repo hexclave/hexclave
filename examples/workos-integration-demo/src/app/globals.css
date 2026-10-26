@@ -1,0 +1,43 @@
+:root {
+  color-scheme: dark;
+  background: #08111f;
+  color: #e6edf7;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+a { color: #7dd3fc; }
+button, input { font: inherit; }
+button {
+  border: 0;
+  border-radius: 10px;
+  background: #38bdf8;
+  color: #042033;
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0.7rem 1rem;
+}
+button:disabled { cursor: wait; opacity: 0.55; }
+main { margin: 0 auto; max-width: 1120px; padding: 3rem 1.25rem; }
+.eyebrow { color: #7dd3fc; font-size: 0.75rem; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; }
+h1 { font-size: clamp(2rem, 5vw, 3.6rem); line-height: 1; margin: 0.5rem 0 1rem; }
+.lede { color: #a9bad0; max-width: 720px; }
+.status { border: 1px solid #29405b; border-radius: 999px; display: inline-flex; gap: 0.5rem; margin: 1rem 0; padding: 0.45rem 0.8rem; }
+.status strong { color: #7dd3fc; }
+.error { background: #451a26; border: 1px solid #fb7185; border-radius: 10px; color: #fecdd3; padding: 0.8rem 1rem; }
+.panels { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 1rem; }
+.panel { background: linear-gradient(145deg, #102239, #0c1829); border: 1px solid #29405b; border-radius: 18px; padding: 1.25rem; }
+.panel h2 { margin: 0 0 0.25rem; }
+.panel-kicker { color: #8ea6c1; font-size: 0.85rem; margin: 0 0 1rem; }
+dl { display: grid; gap: 0.7rem; margin: 0; }
+dt { color: #8ea6c1; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; }
+dd { margin: -0.4rem 0 0; overflow-wrap: anywhere; }
+.claims { border-top: 1px solid #29405b; margin-top: 1rem; padding-top: 1rem; }
+.claims code { color: #bae6fd; font-size: 0.82rem; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.25rem; }
+.secondary { background: #1e3652; color: #dbeafe; }
+.auth-form { display: grid; gap: 0.8rem; max-width: 460px; }
+label { color: #a9bad0; display: grid; gap: 0.35rem; }
+input { background: #08111f; border: 1px solid #395573; border-radius: 9px; color: #e6edf7; padding: 0.7rem; }
+@media (max-width: 720px) { .panels { grid-template-columns: 1fr; } main { padding-top: 2rem; } }

@@ -10,7 +10,7 @@ import { DataGrid, useDataGridUrlState, useDataSource, type DataGridColumnDef } 
 import { yupString } from "@hexclave/shared/dist/schema-fields";
 import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { typedEntries } from "@hexclave/shared/dist/utils/objects";
-import { isValidHostnameWithWildcards } from "@hexclave/shared/dist/utils/urls";
+import { isValidHostWithWildcards } from "@hexclave/shared/dist/utils/urls";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import React, { useMemo, useState } from "react";
@@ -76,7 +76,7 @@ function EditDialog(props: {
       .test({
         name: 'domain',
         message: (params) => `Invalid domain`,
-        test: (value) => value == null || isValidHostnameWithWildcards(value)
+        test: (value) => value == null || isValidHostWithWildcards(value)
       })
       .test({
         name: 'unique-domain',
@@ -233,6 +233,7 @@ function EditDialog(props: {
                 <li><code>api-*.example.com</code> - matches api-v1.example.com, api-prod.example.com, etc.</li>
                 <li><code>*.*.org</code> - matches mail.example.org, but not example.org</li>
               </ul>
+              <p><strong className="text-foreground">Ports:</strong> Append a port to only match that port (e.g. <code>*.example.com:4250</code>).</p>
             </div>
           </DesignAlert>
           <InputField

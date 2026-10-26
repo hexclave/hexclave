@@ -1,0 +1,308 @@
+---
+title: External authentication
+description: Connect WorkOS, Better Auth, or Clerk to Hexclave
+---
+
+Hexclave can exchange a token issued by WorkOS AuthKit, Better Auth, or Clerk for a Hexclave session. The provider remains the authority for the provider session; Hexclave verifies the token and creates or resumes the corresponding external-auth session.
+
+## Configure a provider
+
+Enable one of the external-auth integrations in the project dashboard and configure its issuer and JWKS settings:
+
+| Provider | Required settings |
+| --- | --- |
+| WorkOS AuthKit | WorkOS client ID. Hexclave derives the issuer and JWKS URL from the client ID; an issuer override is available for compatible deployments. |
+| Better Auth | Issuer, audience, and JWKS URL. |
+| Clerk | Issuer. Hexclave derives the JWKS URL from the issuer. Authorized parties are optional; when configured, the token's `azp` claim must match one of the configured origins. |
+
+The repository includes standalone examples for each provider:
+
+- [`examples/workos-integration-demo`](https://github.com/hexclave/stack-auth/tree/dev/examples/workos-integration-demo)
+- [`examples/better-auth-integration-demo`](https://github.com/hexclave/stack-auth/tree/dev/examples/better-auth-integration-demo)
+- [`examples/clerk-integration-demo`](https://github.com/hexclave/stack-auth/tree/dev/examples/clerk-integration-demo)
+
+## Token claims
+
+Every provider token must contain:
+
+- `sub`: the provider user identifier
+- `sid`: the provider session identifier
+- `exp`: the token expiration time
+
+`email`, `name`, and `email_verified` are optional. Hexclave maps valid `email` and `name` claims when it creates the user. It marks the email verified only when `email_verified` is `true`.
+
+The default claim sets differ by provider:
+
+| Provider | Present by default | Profile claims |
+| --- | --- | --- |
+| WorkOS AuthKit | `sub`, `sid`, `exp` | `email` and `name` are not present in the access token by default. |
+| Better Auth | `sub`, `sid`, `exp` | `email` and `name` are included by default. |
+| Clerk | `sub`, `sid`, `exp` | `email` and `name` are not included by default in the default session token. |
+
+To map Clerk profile data, add the claims to Clerk's session token. See [Add profile claims to the Clerk session token](#add-profile-claims-to-the-clerk-session-token). To map WorkOS profile data, add the claims with a WorkOS JWT template. See [Add profile claims to the WorkOS access token](#add-profile-claims-to-the-workos-access-token).
+
+Claims are mapped only when the Hexclave user is first created. Later exchanges do not overwrite the user's existing display name or email, so adding claims later does not update users that already exist. A provider email is stored as unverified unless the provider asserts `email_verified: true` (the boolean, not the string `"true"`); it never enables Hexclave password or OTP authentication.
+
+## Set up Clerk in a Next.js app
+
+This walkthrough assumes a Next.js app that already uses [`@clerk/nextjs`](https://clerk.com/docs/nextjs/getting-started/quickstart) for sign-in. Clerk keeps owning the session; Hexclave asks Clerk for the current session token and exchanges it for a short-lived Hexclave access token, so there is no separate Hexclave sign-in step.
+
+<Steps>
+  <Step title="Enable and configure the integration">
+    In the project dashboard, enable **Clerk Integration** and fill in the provider configuration:
+
+    - **Issuer**: your Clerk instance's Frontend API URL, for example `https://<your-instance>.clerk.accounts.dev`. It must exactly match the `iss` claim of the Clerk token.
+    - **Authorized parties** (optional): the origins your app runs on, for example `http://localhost:3000`. When set, the token's `azp` claim must match one of them.
+  </Step>
+  <Step title="Add profile claims to the Clerk session token">
+    See [the section below](#add-profile-claims-to-the-clerk-session-token). Skip this step if you do not need the user's email and name in Hexclave.
+  </Step>
+  <Step title="Connect Hexclave to the Clerk session">
+    Create a `HexclaveClientApp` whose token store reads from Clerk, and use it wherever you need the Hexclave user:
+
+    ```tsx
+    "use client";
+
+    import { useAuth, useClerk } from "@clerk/nextjs";
+    import { HexclaveClientApp, clerkTokenStore } from "@hexclave/next";
+    import { useEffect, useMemo, useState } from "react";
+
+    export function HexclaveUserCard() {
+      const clerk = useClerk();
+      // `clerk.loaded` does not trigger a re-render, so use the reactive `isLoaded`.
+      const { isLoaded } = useAuth();
+      const [userId, setUserId] = useState<string | null>(null);
+
+      const app = useMemo(() => {
+        if (!isLoaded) return null;
+        return new HexclaveClientApp({
+          baseUrl: process.env.NEXT_PUBLIC_HEXCLAVE_API_URL,
+          projectId: process.env.NEXT_PUBLIC_HEXCLAVE_PROJECT_ID,
+          // Only needed if the project enables "Require publishable client keys".
+          publishableClientKey: process.env.NEXT_PUBLIC_HEXCLAVE_PUBLISHABLE_CLIENT_KEY,
+          tokenStore: clerkTokenStore({
+            getSessionId: () => clerk.session?.id ?? null,
+            getToken: async () => await clerk.session?.getToken() ?? null,
+            subscribe: callback => clerk.addListener(callback),
+          }),
+          // Clerk drives sign-in, so Hexclave must not redirect to its own pages.
+          automaticSideEffects: false,
+        });
+      }, [clerk, isLoaded]);
+
+      useEffect(() => {
+        if (app == null) return;
+        let active = true;
+        const refresh = async () => {
+          const user = clerk.session == null ? null : await app.getUser();
+          if (active) setUserId(user?.id ?? null);
+        };
+        void refresh();
+        // Re-check whenever Clerk's session changes (sign-in, sign-out, token refresh).
+        const unsubscribe = clerk.addListener(() => void refresh());
+        return () => {
+          active = false;
+          unsubscribe();
+        };
+      }, [app, clerk]);
+
+      return <p>{userId == null ? "Signed out" : `Hexclave user ${userId}`}</p>;
+    }
+    ```
+
+    The `NEXT_PUBLIC_HEXCLAVE_*` values come from your project; the API URL is `http://localhost:8102` against a local development environment.
+
+    The SDK keeps the token store's `subscribe` subscription for as long as the token store lives and never unsubscribes it, so each `HexclaveClientApp` you create leaves one Clerk listener behind. Mount this component once near the root of your app (not in a route that remounts) so that only one app is created.
+  </Step>
+</Steps>
+
+<Note>
+  `@clerk/nextjs` 7 removed `<SignedIn>` and `<SignedOut>`. Use `<Show when="signed-in">` and `<Show when="signed-out">` to switch the UI by sign-in state. `ClerkProvider` also needs `clerkMiddleware`; see Clerk's quickstart for the middleware setup.
+</Note>
+
+### Add profile claims to the Clerk session token
+
+Clerk's default session token contains no profile claims, so Hexclave creates the user without an email or name. Add them in the Clerk dashboard under **Sessions → Customize session token**:
+
+```json
+{
+  "email": "{{user.primary_email_address}}",
+  "name": "{{user.full_name}}"
+}
+```
+
+The `clerkTokenStore` calls `getToken()` without a template name, so it receives the session token. A separate Clerk JWT template is not used unless you pass its name to `getToken`.
+
+<Warning>
+  Hexclave maps `email` and `name` only when it creates the user. After you change the claims:
+
+  1. Delete the existing Hexclave user for that Clerk account on the project's **Users** page.
+  2. Sign out of Clerk and sign in again, or sign up with a different email.
+
+  Clerk only adds the claims to newly issued tokens, and without step 1 the existing Hexclave user keeps its empty profile. Deleting a user also removes its authentication methods, team memberships and other project data, so only do this for a disposable test identity or project.
+</Warning>
+
+## Set up WorkOS in a Next.js app
+
+This walkthrough assumes a Next.js app that already uses [`@workos-inc/authkit-nextjs`](https://workos.com/docs/authkit/nextjs) for sign-in. WorkOS keeps owning the session; Hexclave asks your app for the current WorkOS access token and exchanges it for a short-lived Hexclave access token, so there is no separate Hexclave sign-in step.
+
+<Steps>
+  <Step title="Enable and configure the integration">
+    In the project dashboard, enable **WorkOS Integration** and fill in the provider configuration:
+
+    - **Client ID**: your WorkOS client ID (`client_...`). Hexclave derives the issuer (`https://api.workos.com/user_management/<client-id>`) and the JWKS URL from it. The token's `iss` claim must match that issuer, and its `client_id` claim must equal the client ID.
+    - **Issuer override** (optional): only for a WorkOS deployment whose tokens carry a different `iss`. The JWKS URL is always derived from the client ID.
+
+    Hexclave never needs your WorkOS API key; only the AuthKit SDK in your app uses it.
+  </Step>
+  <Step title="Add profile claims to the WorkOS access token">
+    See [the section below](#add-profile-claims-to-the-workos-access-token). Skip this step if you do not need the user's email and name in Hexclave.
+  </Step>
+  <Step title="Expose the WorkOS access token to the browser">
+    AuthKit keeps the session in an `httpOnly` cookie, so browser code cannot read the access token. Add a route that returns the current token and session ID. `withAuth()` refreshes the token when it is close to expiring:
+
+    ```ts title="app/api/auth/provider-session/route.ts"
+    import { withAuth } from "@workos-inc/authkit-nextjs";
+    import { NextResponse } from "next/server";
+
+    export async function GET() {
+      const { accessToken, sessionId } = await withAuth();
+      if (accessToken == null || sessionId == null) {
+        return NextResponse.json({ error: "Not signed in" }, { status: 401 });
+      }
+      // The response carries a live bearer token, so it must never be served from a cache.
+      return NextResponse.json({ accessToken, sessionId }, { headers: { "Cache-Control": "no-store" } });
+    }
+    ```
+
+    This route returns a live access token to the signed-in user's own browser. Keep it same-origin, keep `Cache-Control: no-store`, and do not log its response.
+  </Step>
+  <Step title="Connect Hexclave to the WorkOS session">
+    Create a `HexclaveClientApp` whose token store reads from that route:
+
+    ```tsx
+    "use client";
+
+    import { HexclaveClientApp, workosTokenStore } from "@hexclave/next";
+    import { useEffect, useState } from "react";
+
+    async function fetchProviderSession(): Promise<{ accessToken: string, sessionId: string } | null> {
+      const response = await fetch("/api/auth/provider-session");
+      if (response.status === 401) return null;
+      if (!response.ok) throw new Error(`The WorkOS session endpoint returned ${response.status}`);
+      return await response.json();
+    }
+
+    export function HexclaveUserCard({ signedIn }: { signedIn: boolean }) {
+      const [userId, setUserId] = useState<string | null>(null);
+
+      useEffect(() => {
+        if (!signedIn) {
+          setUserId(null);
+          return;
+        }
+        let active = true;
+        let currentSessionId: string | null = null;
+        const app = new HexclaveClientApp({
+          baseUrl: process.env.NEXT_PUBLIC_HEXCLAVE_API_URL,
+          projectId: process.env.NEXT_PUBLIC_HEXCLAVE_PROJECT_ID,
+          // Only needed if the project enables "Require publishable client keys".
+          publishableClientKey: process.env.NEXT_PUBLIC_HEXCLAVE_PUBLISHABLE_CLIENT_KEY,
+          tokenStore: workosTokenStore({
+            getSessionId: () => currentSessionId,
+            // Fetch the token every time: AuthKit refreshes it server-side, and the SDK
+            // asks again when the exchanged Hexclave token expires.
+            getToken: async () => {
+              const session = await fetchProviderSession();
+              currentSessionId = session?.sessionId ?? null;
+              return session?.accessToken ?? null;
+            },
+          }),
+          // WorkOS drives sign-in, so Hexclave must not redirect to its own pages.
+          automaticSideEffects: false,
+        });
+
+        const load = async () => {
+          const session = await fetchProviderSession();
+          currentSessionId = session?.sessionId ?? null;
+          const user = session == null ? null : await app.getUser();
+          if (active) setUserId(user?.id ?? null);
+        };
+        void load();
+        return () => {
+          active = false;
+        };
+      }, [signedIn]);
+
+      return <p>{userId == null ? "Signed out" : `Hexclave user ${userId}`}</p>;
+    }
+    ```
+
+    Pass `signedIn` from a server component, and key the component by the WorkOS session ID so that switching to a different WorkOS account rebuilds it instead of reusing the previous account's cached Hexclave session: `const { user, sessionId } = await withAuth();` followed by `<HexclaveUserCard key={sessionId} signedIn={user != null} />`. The `NEXT_PUBLIC_HEXCLAVE_*` values come from your project; the API URL is `http://localhost:8102` against a local development environment.
+  </Step>
+</Steps>
+
+<Note>
+  The AuthKit callback URL (`WORKOS_REDIRECT_URI`) must be registered in the WorkOS dashboard and match exactly. `authkitMiddleware` must also run for the routes that call `withAuth()`; see WorkOS's Next.js quickstart for the middleware setup.
+</Note>
+
+### Add profile claims to the WorkOS access token
+
+The default WorkOS access token contains `sub`, `sid`, `client_id`, `iss`, `exp`, `iat`, `auth_time` and `jti`, plus `org_id`, `role` and `permissions` when they apply. It has no profile claims, so Hexclave creates the user without an email or name. Add them with a JWT template in the WorkOS dashboard under **Authentication → Features → JWT Template**:
+
+```json
+{
+  "email": {{ user.email }},
+  "name": "{{ user.first_name || '' }} {{ user.last_name || '' }}"
+}
+```
+
+`email` and `name` are not reserved claim names, so the template can set them. WorkOS rejects the reserved names `iss`, `sub`, `exp`, `iat`, `nbf` and `jti`.
+
+<Warning>
+  Hexclave maps `email` and `name` only when it creates the user. After you change the template:
+
+  1. Delete the existing Hexclave user for that WorkOS account on the project's **Users** page.
+  2. Sign out and sign in again, so that WorkOS issues a token from the new template.
+
+  Without step 1 the existing Hexclave user keeps its empty profile. Deleting a user also removes its authentication methods, team memberships and other project data, so only do this for a disposable test identity or project.
+</Warning>
+
+After signing in again, the claim-name helper described under [Troubleshooting](#the-hexclave-user-has-no-email-or-name) lists `email` and `name`, and the new Hexclave user has both. The email is stored as unverified unless the token also has `email_verified: true` as a boolean.
+
+## Troubleshooting
+
+### The Hexclave user has no email or name
+
+First check which claims Clerk actually sends. This helper lists the claim names (not the values) of the current Clerk token:
+
+```tsx
+async function listClerkClaimNames(clerk: { session?: { getToken(): Promise<string | null> } | null }) {
+  const token = await clerk.session?.getToken();
+  const payload = token?.split(".")[1];
+  if (payload == null) return [];
+  const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "="));
+  return Object.keys(JSON.parse(json)).sort();
+}
+```
+
+With Clerk's defaults this returns `azp, exp, fva, iat, iss, nbf, sid, sts, sub, v`, which has no `email` or `name`. Once the session token is customized and you have signed in again, `email` and `name` appear in the list.
+
+- If `email` and `name` are missing, the Clerk session token customization was not saved or the token predates it. Sign out and sign in again.
+- If they are present but the Hexclave user is still empty, the user was created before you added the claims. Delete the Hexclave user and sign in again.
+
+For WorkOS, decode the token returned by your `provider-session` route the same way. Without a JWT template it lists `auth_time, client_id, exp, iat, iss, jti, sid, sub` (plus `org_id`, `role` and `permissions` when they apply). The same two checks apply: if `email` and `name` are missing, the JWT template was not saved or the token predates it; if they are present, delete the existing Hexclave user and sign in again.
+
+### The WorkOS token is rejected
+
+The exchange fails when the token's `iss` does not equal the issuer derived from the configured client ID, or when its `client_id` claim differs from that client ID. Check that the client ID in the dashboard belongs to the same WorkOS environment (staging or production) that issues your tokens. If your WorkOS deployment issues tokens with a different `iss`, set the **Issuer override**.
+
+### The Hexclave panel never leaves its loading state
+
+Build the `HexclaveClientApp` only after Clerk reports `isLoaded` from `useAuth()`. `clerk.loaded` is a plain property on a long-lived object, so reading it in `useMemo` does not re-run when Clerk finishes loading.
+
+## Sessions and sign-out
+
+A fresh, valid provider JWT can re-establish a revoked Hexclave external session. This allows a provider session that is still active to be exchanged again without creating a second Hexclave user.
+
+External users must sign out through their provider. Calling Hexclave's own `signOut()` for an externally authenticated session throws rather than revoking only the Hexclave session. The prebuilt UI therefore hides the unsupported Hexclave sign-out control for external sessions.

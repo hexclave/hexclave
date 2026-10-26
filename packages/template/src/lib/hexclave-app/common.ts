@@ -1,4 +1,5 @@
 import { ProviderType } from "@hexclave/shared/dist/utils/oauth";
+import type { ExternalAuthProviderId } from "@hexclave/shared/dist/interface/external-auth";
 import type { GenericQueryCtx, UserIdentity } from "convex/server";
 export type {
   DefaultHandlerUrlTarget,
@@ -86,6 +87,37 @@ export type RequestLike = {
     | Record<string, string | null>,
 };
 
+export type ExternalTokenStore = {
+  readonly type: "external",
+  readonly providerId: ExternalAuthProviderId,
+  getSessionId?(): string | null,
+  getToken(): Promise<string | null>,
+  /** The adapter retains this subscription for its own lifetime and does not unsubscribe it. */
+  subscribe?(callback: () => void): () => void,
+};
+
+type ExternalTokenStoreOptions = Omit<ExternalTokenStore, "type" | "providerId">;
+
+function createExternalTokenStore(providerId: ExternalAuthProviderId, options: ExternalTokenStoreOptions): ExternalTokenStore {
+  return {
+    ...options,
+    type: "external",
+    providerId,
+  };
+}
+
+export function clerkTokenStore(options: ExternalTokenStoreOptions): ExternalTokenStore {
+  return createExternalTokenStore("clerk-integration", options);
+}
+
+export function betterAuthTokenStore(options: ExternalTokenStoreOptions): ExternalTokenStore {
+  return createExternalTokenStore("better-auth-integration", options);
+}
+
+export function workosTokenStore(options: ExternalTokenStoreOptions): ExternalTokenStore {
+  return createExternalTokenStore("workos-integration", options);
+}
+
 export type TokenStoreInit<HasTokenStore extends boolean = boolean> =
   HasTokenStore extends true ? (
     | "cookie"
@@ -93,6 +125,7 @@ export type TokenStoreInit<HasTokenStore extends boolean = boolean> =
     | "memory"
     | RequestLike
     | { accessToken: string, refreshToken: string }
+    | ExternalTokenStore
   )
   : HasTokenStore extends false ? null
   : TokenStoreInit<true> | TokenStoreInit<false>;

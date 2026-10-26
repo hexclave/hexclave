@@ -15,8 +15,8 @@
 // exact-match-then-project-wide — cheap while this table is small, but it needs
 // a partial unique index for the NULL case, which Prisma can't express.
 //
-// Deployments are the only consumer today (`secret()` env vars in the config
-// file's `services` export name a key here), but nothing in this module knows
+// Deployments are the only consumer today (`secret()` env vars in the deploy
+// file's `deploy` export name a key here), but nothing in this module knows
 // that; keep it that way.
 
 import { globalPrismaClient } from "@/prisma-client";

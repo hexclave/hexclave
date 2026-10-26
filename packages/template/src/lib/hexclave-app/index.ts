@@ -79,13 +79,17 @@ export type {
 } from "./internal-api-keys";
 
 export {
+  betterAuthTokenStore,
+  clerkTokenStore,
   hexclaveAppInternalsSymbol,
+  workosTokenStore,
 } from "./common";
 export {
   getPagePrompt,
 } from "./url-targets";
 export type {
   GetCurrentUserOptions,
+  ExternalTokenStore,
   /** @deprecated Use GetCurrentUserOptions instead */
   GetCurrentUserOptions as GetUserOptions,
   HandlerUrlOptions,

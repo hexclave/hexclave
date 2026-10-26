@@ -1,6 +1,7 @@
 "use client";
 
 import { TeamSearchTable } from "@/components/data-table/team-search-table";
+import { getExternalAuthProviderLabel } from "@/components/data-table/user-table";
 import { DesignCategoryTabs, DesignEditableGrid, DesignMenu, type DesignCategoryTabItem, type DesignEditableGridItem, type DesignMenuActionItem } from "@/components/design-components";
 import { EditableInput } from "@/components/editable-input";
 import { FormDialog, SmartFormDialog } from "@/components/form-dialog";
@@ -52,6 +53,7 @@ import { normalizeCountryCode } from "@hexclave/shared/dist/schema-fields";
 import { fromNow } from "@hexclave/shared/dist/utils/dates";
 import { captureError, HexclaveAssertionError, throwErr } from '@hexclave/shared/dist/utils/errors';
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import { teamsPageSize } from "@hexclave/shared/dist/utils/team-lists";
 
 import { usePathname, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
@@ -1088,7 +1090,27 @@ function UserTeamsSection({ user }: { user: ServerUser }) {
   const hexclaveAdminApp = useAdminApp();
   const router = useRouter();
   const [sortDesc, setSortDesc] = useState<boolean | undefined>(undefined);
-  const teams = user.useTeams(sortDesc === undefined ? undefined : { orderBy: 'createdAt', desc: sortDesc });
+  const sortOptions = useMemo(() => sortDesc === undefined ? undefined : { orderBy: 'createdAt' as const, desc: sortDesc }, [sortDesc]);
+  // The first page comes from the hook so it refreshes after team mutations; later pages (the backend returns at
+  // most 200 teams per request) are fetched on scroll and dropped whenever the first page changes.
+  const firstPage = user.useTeams({ ...sortOptions, limit: teamsPageSize });
+  const [laterPages, setLaterPages] = useState<{ after: typeof firstPage, teams: ServerTeam[], nextCursor: string | null } | null>(null);
+  const loadedLaterPages = laterPages?.after === firstPage ? laterPages : null;
+  const teams = useMemo(() => loadedLaterPages == null ? firstPage : [...firstPage, ...loadedLaterPages.teams], [firstPage, loadedLaterPages]);
+  const nextCursor = loadedLaterPages == null ? firstPage.nextCursor : loadedLaterPages.nextCursor;
+  const [isLoadingMoreTeams, setIsLoadingMoreTeams] = useState(false);
+  const loadMoreTeams = useCallback(() => {
+    if (nextCursor == null || isLoadingMoreTeams) return;
+    runAsynchronouslyWithAlert(async () => {
+      setIsLoadingMoreTeams(true);
+      try {
+        const page = await user.listTeams({ ...sortOptions, limit: teamsPageSize, cursor: nextCursor });
+        setLaterPages({ after: firstPage, teams: [...loadedLaterPages?.teams ?? [], ...page], nextCursor: page.nextCursor });
+      } finally {
+        setIsLoadingMoreTeams(false);
+      }
+    });
+  }, [firstPage, isLoadingMoreTeams, loadedLaterPages, nextCursor, sortOptions, user]);
   const [addTeamDialogOpen, setAddTeamDialogOpen] = useState(false);
   const [teamToRemove, setTeamToRemove] = useState<ServerTeam | null>(null);
 
@@ -1195,6 +1217,9 @@ function UserTeamsSection({ user }: { user: ServerUser }) {
           const entry = model.find((s) => s.columnId === "createdAt");
           setSortDesc(entry ? entry.direction === "desc" : undefined);
         }}
+        hasMore={nextCursor != null}
+        isLoadingMore={isLoadingMoreTeams}
+        onLoadMore={loadMoreTeams}
         actions={
           <Button
             variant="outline"
@@ -1212,6 +1237,8 @@ function UserTeamsSection({ user }: { user: ServerUser }) {
           </DialogHeader>
           <TeamSearchTable
             action={(team) => {
+              // Only the loaded pages of the user's teams are known here; for a team past them we show "Add", and
+              // the backend rejects the request with TEAM_MEMBERSHIP_ALREADY_EXISTS (shown as an alert) if needed.
               const alreadyMember = teams.find((t) => t.id === team.id) !== undefined;
               return (
                 <Button
@@ -1586,6 +1613,31 @@ function OAuthProvidersSection({ user }: OAuthProvidersSectionProps) {
         }
       />
     </>
+  );
+}
+
+function ExternalAuthProvidersSection({ user }: { user: ServerUser }) {
+  const externalAuthProviders = user.externalAuthProviders;
+  const columns: DataGridColumnDef<ServerUser["externalAuthProviders"][number]>[] = [
+    {
+      id: "provider",
+      header: "Provider",
+      width: 180,
+      flex: 1,
+      sortable: false,
+      renderCell: ({ row }) => getExternalAuthProviderLabel(row.id),
+    },
+  ];
+
+  return (
+    <UserPageTableSection
+      title="External authentication"
+      urlStateKey="userexternalauth"
+      columns={columns}
+      rows={externalAuthProviders}
+      getRowId={(provider) => provider.id}
+      emptyLabel="No external authentication providers"
+    />
   );
 }
 
@@ -1982,6 +2034,7 @@ function UserPage({ user }: { user: ServerUser }) {
               <div className="flex flex-col gap-6">
                 <ContactChannelsSection user={user} />
                 <OAuthProvidersSection user={user} />
+                <ExternalAuthProvidersSection user={user} />
                 <FraudSection user={user} />
               </div>
             </Suspense>

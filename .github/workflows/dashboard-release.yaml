@@ -44,8 +44,10 @@ jobs:
         with:
           node-version: '24.x'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - name: Activate integrity-pinned pnpm
+        run: |
+          corepack enable pnpm
+          corepack install
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -130,7 +132,8 @@ jobs:
               fi
               platform_key="${asset_name#dashboard-${VERSION}-}"
               platform_key="${platform_key%.tar.zst}"
-              platform_live_shas="$(jq --arg key "$platform_key" --arg sha "$live_asset_sha" '. + {($key): $sha}' <<<"$platform_live_shas")"
+              # -c keeps the JSON on one line; `key=value` lines in $GITHUB_OUTPUT can't span multiple lines.
+              platform_live_shas="$(jq -c --arg key "$platform_key" --arg sha "$live_asset_sha" '. + {($key): $sha}' <<<"$platform_live_shas")"
             done
           else
             gh release create "$TAG" "${assets[@]}" \

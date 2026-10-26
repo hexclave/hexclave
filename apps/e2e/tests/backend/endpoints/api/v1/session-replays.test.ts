@@ -851,6 +851,29 @@ it("client access cannot call single session replay endpoint, but server access 
   expect(serverRes.body.id).toBe(recordingId);
 });
 
+it("admin session replay endpoints reject non-UUID ids and cursors with a 400 instead of a database error", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Auth.fastSignUp();
+
+  // The id/cursor columns are Postgres UUIDs, so passing a malformed value
+  // through to Prisma used to surface as a 500 (22P02 invalid input syntax).
+  const malformed = "0a1b2c3d-not-a-uuid";
+  const validId = randomUUID();
+  const paths = [
+    `/api/v1/session-replays/${malformed}`,
+    `/api/v1/session-replays/${malformed}/events`,
+    `/api/v1/session-replays/${malformed}/chunks`,
+    `/api/v1/session-replays/${validId}/chunks?cursor=${malformed}`,
+    `/api/v1/session-replays/${malformed}/chunks/${validId}/events`,
+    `/api/v1/session-replays/${validId}/chunks/${malformed}/events`,
+    `/api/v1/session-replays?cursor=${malformed}`,
+  ];
+  for (const path of paths) {
+    const res = await niceBackendFetch(path, { method: "GET", accessType: "admin" });
+    expect({ path, status: res.status, code: res.body?.code }).toEqual({ path, status: 400, code: "SCHEMA_ERROR" });
+  }
+});
+
 it("admin list session replays rejects unknown cursor", async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Auth.fastSignUp();

@@ -545,6 +545,9 @@ const shouldSetupOnlyIfFitting = deindent`
 const shouldSetupAlways = deindent`
   100%. Always set up the app, there is no reason not to use it.
 `;
+const shouldSetupOnlyIfExistingProvider = (providerName: string) => deindent`
+  0%. Only when the project already uses ${providerName} for sign-in and the user wants to keep it as the source of truth for sessions. Never recommend this together with Hexclave authentication as a replacement for it.
+`;
 const shouldSetupAppPrompt: Record<PublicAppSetupPromptId, string> = {
   "authentication": deindent`
     80%. When there is no authentication in the project already.
@@ -568,6 +571,9 @@ const shouldSetupAppPrompt: Record<PublicAppSetupPromptId, string> = {
   "vercel": shouldSetupOnlyIfFitting,
   "clickmaps": shouldSetupAlways,
   "session-replays": shouldSetupAlways,
+  "clerk-integration": shouldSetupOnlyIfExistingProvider("Clerk"),
+  "better-auth-integration": shouldSetupOnlyIfExistingProvider("Better Auth"),
+  "workos-integration": shouldSetupOnlyIfExistingProvider("WorkOS AuthKit"),
 };
 
 const appSetupPrompt: Record<PublicAppSetupPromptId, string> =
@@ -761,13 +767,47 @@ const appSetupPrompt: Record<PublicAppSetupPromptId, string> =
     This app exists as a purely decorative checklist to help you integrate Hexclave projects with Vercel. See [Vercel integration](https://docs.hexclave.com/guides/integrations/vercel/overview).
   `,
   "analytics": deindent`
-    The analytics app does not require any additional setup after enabling it. It will automatically start recording events, replays, and clickmaps after the app has been enabled in any of Hexclave's SDKs.
+    Once the app is enabled, the \`HexclaveClientApp\` records page views, clicks, session replays, and clickmaps in the browser. It only does so on pages where it actually runs, so a page that never loads the module that creates the client app records no analytics.
+
+    IMPORTANT: Call \`hexclaveClientApp.initAnalytics()\` in browser code that runs on **every** page of the app, not only on pages that use authentication. Put the call at the top level of a module that every page loads, such as the root layout, the app's entry file, or a script tag shared by all pages:
+
+    \`\`\`ts
+    import { hexclaveClientApp } from "./hexclave/client";
+
+    hexclaveClientApp.initAnalytics();
+    \`\`\`
+
+    In Next.js, the root layout is a server component, so do the call inside a client component that is rendered from the root layout:
+
+    \`\`\`tsx src/components/hexclave-analytics.tsx
+    "use client";
+
+    import { hexclaveClientApp } from "@/hexclave/client";
+
+    hexclaveClientApp.initAnalytics();
+
+    export function HexclaveAnalytics() {
+      return null;
+    }
+    \`\`\`
+
+    Then render \`<HexclaveAnalytics />\` inside the \`<body>\` of \`src/app/layout.tsx\`. In multi-page apps without a shared layout (for example, plain HTML pages), add the call to every page.
+
+    \`initAnalytics()\` is synchronous and returns nothing. It throws if the client app is configured so that it never records analytics (\`analytics: { enabled: false }\`, \`automaticSideEffects: false\`, or \`tokenStore: null\`), and logs an error if the Analytics app is not enabled on the project. If you see one of these errors, fix the configuration rather than wrapping the call in a try-catch. See [Analytics](https://docs.hexclave.com/guides/apps/analytics/overview).
   `,
   "clickmaps": deindent`
-    Clickmaps use the same SDK analytics event pipeline as the Analytics app. Enable Analytics/clickmaps and make sure SDK analytics capture is not disabled; no separate code setup is needed for basic click tracking. See [Analytics](https://docs.hexclave.com/guides/apps/analytics/overview).
+    Clickmaps use the same SDK analytics event pipeline as the Analytics app. Enable Analytics/clickmaps, make sure SDK analytics capture is not disabled, and make sure \`hexclaveClientApp.initAnalytics()\` is called on every page as described in the Analytics app setup; no separate code setup is needed for basic click tracking. See [Analytics](https://docs.hexclave.com/guides/apps/analytics/overview).
   `,
   "session-replays": deindent`
-    The Session Replays app does not require any additional setup after enabling the Analytics app. See [Analytics](https://docs.hexclave.com/guides/apps/analytics/overview) for more information.
+    Session replays use the same SDK analytics pipeline as the Analytics app. Enable the Analytics app and make sure \`hexclaveClientApp.initAnalytics()\` is called on every page as described in the Analytics app setup; no other code is needed. See [Analytics](https://docs.hexclave.com/guides/apps/analytics/overview) for more information.
+  `,  "clerk-integration": deindent`
+    This app lets Clerk keep owning the sign-in session while Hexclave exchanges the Clerk token for a Hexclave session, so there is no separate Hexclave sign-in step. Enable it, then configure the provider in the dashboard: set the issuer (your Clerk Frontend API URL) and optionally the authorized parties. In the app, create a \`HexclaveClientApp\` whose \`tokenStore\` reads from the Clerk session and set \`automaticSideEffects: false\` so Hexclave does not redirect to its own pages. The provider token must contain \`sub\`, \`sid\`, and \`exp\`. See [External authentication](https://docs.hexclave.com/guides/integrations/external-auth/overview).
+  `,
+  "better-auth-integration": deindent`
+    This app lets Better Auth keep owning the sign-in session while Hexclave exchanges the Better Auth token for a Hexclave session, so there is no separate Hexclave sign-in step. Enable it, then configure the provider in the dashboard: set the issuer, audience, and JWKS URL. In the app, create a \`HexclaveClientApp\` whose \`tokenStore\` reads from the Better Auth session and set \`automaticSideEffects: false\` so Hexclave does not redirect to its own pages. The provider token must contain \`sub\`, \`sid\`, and \`exp\`. See [External authentication](https://docs.hexclave.com/guides/integrations/external-auth/overview).
+  `,
+  "workos-integration": deindent`
+    This app lets WorkOS AuthKit keep owning the sign-in session while Hexclave exchanges the WorkOS AuthKit token for a Hexclave session, so there is no separate Hexclave sign-in step. Enable it, then configure the provider in the dashboard: set the WorkOS client ID. In the app, create a \`HexclaveClientApp\` whose \`tokenStore\` reads from the WorkOS AuthKit session and set \`automaticSideEffects: false\` so Hexclave does not redirect to its own pages. The provider token must contain \`sub\`, \`sid\`, and \`exp\`. See [External authentication](https://docs.hexclave.com/guides/integrations/external-auth/overview).
   `,
 };
 export const appSetupPrompts = deindent`

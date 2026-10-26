@@ -146,9 +146,9 @@ export type AdminProject = {
 
   /**
    * Lists the project's deployment services (definitions as synced from the
-   * config file's `services` export by `hexclave deploy`, merged with their
+   * deploy file's `deploy` export by `hexclave deploy`, merged with their
    * operational state: deploy status, env vars, domains). Definitions are
-   * read-only through the SDK — the config file is the source of truth.
+   * read-only through the SDK — the deploy file is the source of truth.
    */
   listDeploymentServices(this: AdminProject): Promise<AdminDeploymentServiceJson[]>,
 

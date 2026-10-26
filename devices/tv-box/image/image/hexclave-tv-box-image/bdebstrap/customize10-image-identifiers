@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+boot_label=$(uuidgen | sed 's/-.*//' | tr 'a-f' 'A-F')
+boot_uuid=$(printf '%s' "$boot_label" | sed 's/^\(....\)\(....\)$/\1-\2/')
+root_uuid=$(uuidgen)
+
+cat > "${IGconf_image_outputdir}/tvbox_image_uuids" <<EOF
+BOOT_LABEL=$boot_label
+BOOT_UUID=$boot_uuid
+ROOT_UUID=$root_uuid
+EOF

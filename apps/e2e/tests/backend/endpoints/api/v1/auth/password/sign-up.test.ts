@@ -40,6 +40,7 @@ it("should sign up new users", async ({ expect }) => {
         "client_metadata": null,
         "client_read_only_metadata": null,
         "display_name": null,
+        "external_auth_providers": [],
         "has_password": true,
         "id": "<stripped UUID>",
         "is_anonymous": false,

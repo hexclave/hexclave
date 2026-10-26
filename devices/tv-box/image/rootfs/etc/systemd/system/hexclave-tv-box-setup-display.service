@@ -1,0 +1,32 @@
+[Unit]
+Description=Hexclave TV Box local setup display
+Requires=hexclave-tv-box-network.service
+After=hexclave-tv-box-network.service
+Conflicts=getty@tty1.service hexclave-tv-box-kiosk.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+StartLimitAction=reboot
+
+[Service]
+Type=simple
+User=hexclave-tv-portal
+Group=hexclave-tv-portal
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m hexclave_tv_box.setup_display
+Restart=on-failure
+RestartSec=2
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
