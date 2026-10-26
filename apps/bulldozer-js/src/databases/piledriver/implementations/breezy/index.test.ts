@@ -240,7 +240,7 @@ describe("Breezy Piledriver", () => {
   it("reads deeply nested values back after a restart", async () => {
     // A process that has been running a while optimizes its code and uses less stack per call, so it
     // could save nesting that a freshly started process then overflowed on while reading it back.
-    const depth = 5_000;
+    const depth = 20_000;
     let value: PiledriverObject = "leaf";
     for (let i = 0; i < depth; i++) value = { m: value };
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));

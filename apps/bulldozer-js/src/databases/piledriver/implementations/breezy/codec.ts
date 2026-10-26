@@ -156,34 +156,50 @@ export function decodePiledriverObject(
  *
  * Planning owns traversal, cycle detection, key assignment, and causal dependencies. Keeping those
  * concerns out of the codec makes this operation a synchronous conversion to the persisted format.
+ *
+ * Writes the JSON text itself, with a loop, instead of calling JSON.stringify on the whole value:
+ * JSON.stringify recurses, and the depth where it overflows differs by machine (~6,000 levels on an
+ * M-series Mac, under 5,000 on Linux CI). Only single strings, numbers and keys go through
+ * JSON.stringify, so the text is exactly what JSON.stringify would have written.
  */
 export function encodePiledriverObject(value: PlannedPiledriverObject): ArrayBuffer {
-  const root: unknown[] = [null];
-  const pending: PendingSlot<PlannedPiledriverObject, unknown>[] = [{ input: value, containerType: "array", container: root, key: 0 }];
-  while (pending.length > 0) {
-    const slot = pending.pop() ?? throwErr("pending is non-empty");
-    const node = slot.input;
+  // A step is either a value still to be written, or punctuation to write once the values before it
+  // are. Steps are popped from the end, so a container's parts are pushed last part first.
+  type Step = { kind: "value", value: PlannedPiledriverObject } | { kind: "text", text: string };
+  const comma: Step = { kind: "text", text: "," };
+  const steps: Step[] = [{ kind: "value", value }];
+  let text = "";
+  for (let step = steps.pop(); step !== undefined; step = steps.pop()) {
+    if (step.kind === "text") {
+      text += step.text;
+      continue;
+    }
+    const node = step.value;
     if (typeof node === "number") {
       // JSON would otherwise collapse NaN/infinities to null and -0 to 0.
-      if (Number.isFinite(node) && !Object.is(node, -0)) fillSlot(slot, node);
-      else fillSlot(slot, [Object.is(node, -0) ? "-0" : node.toString()]);
+      if (Number.isFinite(node) && !Object.is(node, -0)) text += JSON.stringify(node);
+      else text += JSON.stringify([Object.is(node, -0) ? "-0" : node.toString()]);
     } else if (node === null || typeof node === "string" || typeof node === "boolean") {
-      fillSlot(slot, node);
+      text += JSON.stringify(node);
     } else if (isPlannedHeapReferenceSymbol in node) {
-      fillSlot(slot, ["heap-reference", encodeBase64(new Uint8Array(node.key))]);
+      text += JSON.stringify(["heap-reference", encodeBase64(new Uint8Array(node.key))]);
     } else if (Array.isArray(node)) {
-      const items: unknown[] = node.map(() => null);
-      fillSlot(slot, ["array", items]);
-      for (let i = 0; i < node.length; i++) pending.push({ input: node[i], containerType: "array", container: items, key: i });
+      // Every real array is tagged: ["array", [items]].
+      text += '["array",[';
+      steps.push({ kind: "text", text: "]]" });
+      for (let i = node.length - 1; i >= 0; i--) {
+        steps.push({ kind: "value", value: node[i] });
+        if (i > 0) steps.push(comma);
+      }
     } else {
-      const object: { [key: string]: unknown } = {};
-      fillSlot(slot, object);
-      for (const [key, child] of Object.entries(node)) {
-        defineOwnProperty(object, key, null);
-        pending.push({ input: child, containerType: "object", container: object, key });
+      const keys = Object.keys(node);
+      text += "{";
+      steps.push({ kind: "text", text: "}" });
+      for (let i = keys.length - 1; i >= 0; i--) {
+        steps.push({ kind: "value", value: node[keys[i]] });
+        steps.push({ kind: "text", text: `${i > 0 ? "," : ""}${JSON.stringify(keys[i])}:` });
       }
     }
   }
-  // JSON.stringify does recurse, but fails at write time (~6,000 levels), so nothing unreadable is saved.
-  return encoder.encode(JSON.stringify(root[0])).buffer;
+  return encoder.encode(text).buffer;
 }

@@ -32,7 +32,9 @@ const noHeapObjects = () => {
 describe("Breezy codec", () => {
   // Recursive encode/decode used one stack frame per nesting level, so a value a warmed-up server
   // could save (~3,000 levels) overflowed the smaller stack budget of a freshly started reader.
-  it.each([["object", 5_000], ["array", 2_500]] as const)("round-trips %ss nested %i levels deep", async (wrap, depth) => {
+  // JSON.stringify recurses too, and its limit differs by machine (~6,000 levels on an M-series Mac,
+  // under 5,000 on Linux CI), so these depths are well past it everywhere.
+  it.each([["object", 20_000], ["array", 10_000]] as const)("round-trips %ss nested %i levels deep", async (wrap, depth) => {
     const leaf = { special: [NaN, -0, Infinity, -Infinity], reference: plannedHeapReference(new Uint8Array([7]).buffer), text: "leaf" };
     const decoded = decodePiledriverObject(encodePiledriverObject(nest(depth, wrap, leaf)), fakeHeapObject, "test value");
     const { levels, leaf: decodedLeaf } = unwrapLevels(decoded, wrap);

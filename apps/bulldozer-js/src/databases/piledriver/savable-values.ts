@@ -40,10 +40,10 @@ export function cannotSaveError(typeName: string) {
 /**
  * The deepest nesting a saved row may have, counting the row object itself as level 1. Real rows are
  * a few levels deep; only customer-defined JSON (product metadata) could go deeper, and thousands of
- * levels means abuse or a buggy script. Breezy can store values far deeper, but JSON.stringify fails
- * at ~6,000 levels, and that failure would happen deep in the write path, where prod's buffered
- * writer then fails every later save too. Arrays are stored as two JSON levels, so this keeps every
- * accepted row well below that.
+ * levels means abuse or a buggy script. Breezy can store values far deeper, but the base backend
+ * saves with JSON.stringify, which fails at a few thousand levels (fewer on Linux than on a Mac), and
+ * that failure would happen deep in the write path, where prod's buffered writer then fails every
+ * later save too. Arrays are stored as two JSON levels, so this keeps every accepted row well below that.
  */
 export const maximumSavedNestingDepth = 1000;
 
