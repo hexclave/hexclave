@@ -82,7 +82,20 @@ export function declareBreezyPiledriverDatabase(
     if (entry === undefined) return { buffer: null, seq: initialSeq };
     return { buffer: arrayBuffer(entry.value), seq: toSeq(entry.version ?? throwErr("Versioned LMDB entry has no transaction ID")) };
   };
+  // Node runs one piece of JavaScript at a time. LMDB reads are synchronous (they never wait on IO),
+  // so a read that loads thousands of heap objects would otherwise keep running until it's done,
+  // and every other request would wait behind it. So every 1,000 loads, counted across all reads,
+  // the read that hits the count pauses: it goes to the back of the queue, the requests already
+  // waiting run, then it continues exactly where it stopped. Heap objects never change once saved,
+  // so the pause can't make a read see different data. 1,000 loads take a few milliseconds.
+  const heapLoadsBetweenPauses = 1000;
+  let heapLoadsSinceLastPause = 0;
+  const letWaitingRequestsRun = () => new Promise<void>(resolve => setImmediate(resolve));
   const loadHeapObject = async (key: ArrayBuffer, keyBase64: string) => {
+    if (++heapLoadsSinceLastPause >= heapLoadsBetweenPauses) {
+      heapLoadsSinceLastPause = 0;
+      await letWaitingRequestsRun();
+    }
     const stored = read(lmdbHeap, key);
     if (stored.buffer === null) throw new Error(`Assertion error: Heap object with base64 key "${keyBase64}" not found`);
     return decodePiledriverObject(stored.buffer, childKey => heapCache.resolve(childKey, stored.seq));

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { declareLmdbLowLevelDatabase } from "../../../low-level/implementations/lmdb.js";
 import type { LowLevelKvStore } from "../../../low-level/index.js";
+import { ConcatTreeList } from "../../data-structures/concat-tree-list.js";
 import { asHeapObject, isPiledriverHeapObjectSymbol, type PiledriverDatabase, type PiledriverObject } from "../../index.js";
 import { declareBreezyPiledriverDatabase } from "./index.js";
 
@@ -393,6 +394,40 @@ describe("Breezy Piledriver", () => {
       expect((await debugSnapshot(reopened)).heap.map(entry => entry.serializedJson)).toEqual([{ value: "written while closing" }]);
     } finally {
       await reopened.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("lets other work run during a long read instead of holding the event loop until it ends", async () => {
+    // LMDB reads are synchronous, so a read walking many heap objects never waits on real IO. Until the
+    // event loop gets a turn, other requests can't run and JavaScript can't free the objects the read
+    // already passed (WeakRef targets stay alive until the current task ends), so memory grows with
+    // everything the read touches.
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const valueCount = 20_000;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const list = ConcatTreeList.concat(Array.from({ length: valueCount }, (_, i) => ConcatTreeList.fromEntries<PiledriverObject>([[`id${i}`, { i }]])), { arity: 2 });
+    await writer.setRootObject(rootKey, { list: list.toPiledriverObject() });
+    await writer.close();
+
+    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    try {
+      const root = (await reader.getRootObject(rootKey)).object;
+      if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected the root to be a plain object");
+      const storedList = ConcatTreeList.fromPiledriverObject<PiledriverObject>(root.list ?? throwErr("Expected the root to contain the list"), { arity: 2 });
+      let valuesRead = 0;
+      let valuesReadWhenOtherWorkRan: number | null = null;
+      setImmediate(() => {
+        valuesReadWhenOtherWorkRan = valuesRead;
+      });
+      for await (const _ of storedList.values()) valuesRead++;
+      expect(valuesRead).toBe(valueCount);
+      expect(valuesReadWhenOtherWorkRan).not.toBeNull();
+      expect(valuesReadWhenOtherWorkRan).toBeLessThan(valueCount / 2);
+    } finally {
+      await reader.close();
       await rm(path, { recursive: true, force: true });
     }
   });
