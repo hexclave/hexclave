@@ -10,7 +10,7 @@ import { createGoogleCloudTraceSpanProcessor } from "./google-cloud-trace";
 import { createBackendInstrumentationPlan } from "./instrumentation-plan";
 import { initPerfStats } from "./lib/dev-perf-stats";
 import { getSentryRelease } from "./sentry-release";
-import { prepareBackendSentryEvent, sanitizeBackendSentrySpan } from "./sentry-scrubbing";
+import { prepareBackendSentryEvent } from "./sentry-scrubbing";
 
 globalThis.global = globalThis;
 // The Elysia process is the Node runtime; set the marker before shared helpers that still ask for Next runtime metadata.
@@ -37,7 +37,6 @@ export function registerBackendInstrumentation() {
     otlpTracesEndpoint: getEnvVariable("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ""),
     portPrefix,
     sentryDsn,
-    sentryTracesSampleRate: sentryBaseConfig.tracesSampleRate,
   });
   const exportingSpanProcessors = [
     ...plan.otlpTracesEndpoint == null ? [] : [new BatchSpanProcessor(new OTLPTraceExporter({ url: plan.otlpTracesEndpoint }))],
@@ -80,8 +79,7 @@ export function registerBackendInstrumentation() {
       packageVersion: backendPackageJson.version,
     }),
     beforeSend: prepareBackendSentryEvent,
-    beforeSendSpan: sanitizeBackendSentrySpan,
-    beforeSendTransaction: prepareBackendSentryEvent,
+    beforeSendTransaction: () => null,
   });
 }
 
