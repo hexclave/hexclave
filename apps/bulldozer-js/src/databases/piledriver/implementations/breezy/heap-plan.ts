@@ -2,6 +2,7 @@ import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { isPiledriverHeapObjectSymbol, PiledriverHeapObject, PiledriverObject } from "../../index.js";
 import { cannotSaveError, unsavableTypeName } from "../../savable-values.js";
 import { plannedHeapReference, PlannedPiledriverObject } from "./codec.js";
+import { defineOwnProperty, fillSlot, type PendingSlot } from "./pending-slots.js";
 
 export type PlannedHeapObject = {
   object: PiledriverHeapObject,
@@ -13,14 +14,6 @@ export type HeapObjectPlan<Dependency> = {
   root: PlannedPiledriverObject,
   heapObjects: PlannedHeapObject[],
   dependencies: Dependency[],
-};
-
-const defineOwn = (object: { [key: string]: PlannedPiledriverObject }, key: string, value: PlannedPiledriverObject) => {
-  if (key === "__proto__") {
-    Object.defineProperty(object, key, { value, enumerable: true, configurable: true, writable: true });
-  } else {
-    object[key] = value;
-  }
 };
 
 /**
@@ -82,33 +75,55 @@ export function planHeapObjects<Dependency>(
     return state.reservedKeyReference;
   };
 
-  /** Copies a value, replacing each heap object in it with a key reference (without entering them). */
-  const replaceHeapObjectsWithKeyReferences = (
-    value: PiledriverObject,
-    newHeapObjectsFound: PiledriverHeapObject[],
-    plainObjectsOnCurrentPath: Set<object>,
-  ): PlannedPiledriverObject => {
-    // A backstop for writes that don't come through Bulldozer's checked entry points.
-    const unsavableType = unsavableTypeName(value);
-    if (unsavableType !== null) throw cannotSaveError(unsavableType);
-    if (value === null || typeof value !== "object") return value;
-    if (isPiledriverHeapObjectSymbol in value) return keyReferenceFor(value, newHeapObjectsFound);
-
-    if (plainObjectsOnCurrentPath.has(value)) throw new Error("Piledriver objects must not contain cycles");
-    plainObjectsOnCurrentPath.add(value);
-    let result: PlannedPiledriverObject;
-    if (Array.isArray(value)) {
-      result = [];
-      for (const child of value) result.push(replaceHeapObjectsWithKeyReferences(child, newHeapObjectsFound, plainObjectsOnCurrentPath));
-    } else {
-      const object: { [key: string]: PlannedPiledriverObject } = {};
-      for (const key of Object.keys(value)) {
-        defineOwn(object, key, replaceHeapObjectsWithKeyReferences(value[key], newHeapObjectsFound, plainObjectsOnCurrentPath));
+  /**
+   * Copies a value, replacing each heap object in it with a key reference (without entering them).
+   *
+   * Walks with a loop (see pending-slots.ts) in the same order recursion would: children are pushed
+   * in reverse so the first one is converted first, and heap objects are found in reading order.
+   * A "leave" step, pushed before an object's children, takes it off the current path once all of
+   * them are done, so only a real cycle (an object inside itself) is reported, not sharing.
+   */
+  const replaceHeapObjectsWithKeyReferences = (value: PiledriverObject, newHeapObjectsFound: PiledriverHeapObject[]): PlannedPiledriverObject => {
+    type Step =
+      | { kind: "convert", slot: PendingSlot<PiledriverObject, PlannedPiledriverObject> }
+      | { kind: "leave", plainObject: object };
+    const root: PlannedPiledriverObject[] = [null];
+    const steps: Step[] = [{ kind: "convert", slot: { input: value, containerType: "array", container: root, key: 0 } }];
+    const plainObjectsOnCurrentPath = new Set<object>();
+    for (let step = steps.pop(); step !== undefined; step = steps.pop()) {
+      if (step.kind === "leave") {
+        plainObjectsOnCurrentPath.delete(step.plainObject);
+        continue;
       }
-      result = object;
+      const { slot } = step;
+      const input = slot.input;
+      // A backstop for writes that don't come through Bulldozer's checked entry points.
+      const unsavableType = unsavableTypeName(input);
+      if (unsavableType !== null) throw cannotSaveError(unsavableType);
+      if (input === null || typeof input !== "object") {
+        fillSlot(slot, input);
+        continue;
+      }
+      if (isPiledriverHeapObjectSymbol in input) {
+        fillSlot(slot, keyReferenceFor(input, newHeapObjectsFound));
+        continue;
+      }
+      if (plainObjectsOnCurrentPath.has(input)) throw new Error("Piledriver objects must not contain cycles");
+      plainObjectsOnCurrentPath.add(input);
+      steps.push({ kind: "leave", plainObject: input });
+      if (Array.isArray(input)) {
+        const items: PlannedPiledriverObject[] = input.map(() => null);
+        fillSlot(slot, items);
+        for (let i = input.length - 1; i >= 0; i--) steps.push({ kind: "convert", slot: { input: input[i], containerType: "array", container: items, key: i } });
+      } else {
+        const keys = Object.keys(input);
+        const object: { [key: string]: PlannedPiledriverObject } = {};
+        for (const key of keys) defineOwnProperty(object, key, null);
+        fillSlot(slot, object);
+        for (let i = keys.length - 1; i >= 0; i--) steps.push({ kind: "convert", slot: { input: input[keys[i]], containerType: "object", container: object, key: keys[i] } });
+      }
     }
-    plainObjectsOnCurrentPath.delete(value);
-    return result;
+    return root[0];
   };
 
   // Pushed in reverse so the first heap object found is popped (prepared) first.
@@ -119,7 +134,7 @@ export function planHeapObjects<Dependency>(
   };
 
   const newHeapObjectsInRoot: PiledriverHeapObject[] = [];
-  const plannedRoot = replaceHeapObjectsWithKeyReferences(root, newHeapObjectsInRoot, new Set());
+  const plannedRoot = replaceHeapObjectsWithKeyReferences(root, newHeapObjectsInRoot);
   pushPrepareSteps(newHeapObjectsInRoot);
 
   for (let step = planningStack.pop(); step !== undefined; step = planningStack.pop()) {
@@ -134,7 +149,7 @@ export function planHeapObjects<Dependency>(
 
     state.status = "in-progress";
     const newHeapObjectsInValue: PiledriverHeapObject[] = [];
-    const preparedValue = replaceHeapObjectsWithKeyReferences(state.originalValue, newHeapObjectsInValue, new Set());
+    const preparedValue = replaceHeapObjectsWithKeyReferences(state.originalValue, newHeapObjectsInValue);
     // "mark-done" goes below the children, so it's popped only after all of them are done.
     planningStack.push({ kind: "mark-done", heapObject: step.heapObject, preparedValue });
     pushPrepareSteps(newHeapObjectsInValue);

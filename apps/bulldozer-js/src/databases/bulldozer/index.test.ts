@@ -87,6 +87,32 @@ describe("Bulldozer row validation", () => {
     expect((await rows(snapshot, "store")).map(row => row.rowIdentifier)).toEqual(["good"]);
     await db.close();
   });
+
+  it("rejects rows nested more than 1,000 levels deep before they reach the snapshot, and saves rows up to that", async () => {
+    // Customer-defined JSON (product metadata) can be nested arbitrarily. Real data is a few levels
+    // deep; thousands of levels is abuse or a buggy script, and saving it fails deep inside the write
+    // path, where prod's buffered writer would then fail every later save too.
+    const nestedRow = (depth: number) => {
+      let value: PiledriverObject = "leaf";
+      for (let i = 0; i < depth; i++) value = i % 2 === 0 ? { m: value } : [value];
+      return { field: value };
+    };
+    const db = declareBulldozerDatabase(declareBufferedPiledriverDatabase(declareInMemoryPiledriverDatabase(crypto.randomUUID())), {
+      migrations: [[{ type: "initTable", tableId: "store", table: defineStoredTable(), inputTables: {} }]],
+    });
+    await db.applyRemainingMigrations();
+    await expect(db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "too-deep", newRowData: nestedRow(1_000) })))
+      .rejects.toThrow("nested more than 1000 levels deep");
+    await expect(db.withSnapshotConsistent(s => s.setOrDeleteRows({ tableId: "store", rows: [{ rowIdentifier: "too-deep-batch", newRowData: nestedRow(5_000) }] })))
+      .rejects.toThrow("nested more than 1000 levels deep");
+
+    // The row object itself is the first level, so 999 levels inside it is exactly at the limit.
+    await db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "deepest-allowed", newRowData: nestedRow(999) }));
+    await db.withSnapshotConsistent(s => s.setOrDeleteRow({ tableId: "store", rowIdentifier: "good", newRowData: { field: "ok" } }));
+    const { snapshot } = await db.getSnapshot();
+    expect((await rows(snapshot, "store")).map(row => row.rowIdentifier).sort()).toEqual(["deepest-allowed", "good"]);
+    await db.close();
+  });
 });
 
 describe.each(["base", "in-memory"] as const)("Bulldozer (%s)", backend => {

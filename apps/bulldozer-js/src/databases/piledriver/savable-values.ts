@@ -1,4 +1,4 @@
-import { HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { isPiledriverHeapObjectSymbol } from "./index.js";
 
 /**
@@ -38,20 +38,37 @@ export function cannotSaveError(typeName: string) {
 }
 
 /**
- * Throws if `value`, or anything nested inside it, can't be saved. Heap objects are skipped: rows from
- * callers don't contain them, and the ones Bulldozer builds itself hold only already-checked values.
+ * The deepest nesting a saved row may have, counting the row object itself as level 1. Real rows are
+ * a few levels deep; only customer-defined JSON (product metadata) could go deeper, and thousands of
+ * levels means abuse or a buggy script. Breezy can store values far deeper, but JSON.stringify fails
+ * at ~6,000 levels, and that failure would happen deep in the write path, where prod's buffered
+ * writer then fails every later save too. Arrays are stored as two JSON levels, so this keeps every
+ * accepted row well below that.
+ */
+export const maximumSavedNestingDepth = 1000;
+
+/**
+ * Throws if `value`, or anything nested inside it, can't be saved: an unsupported type, or nesting
+ * deeper than `maximumSavedNestingDepth`. Heap objects are skipped: rows from callers don't contain
+ * them, and the ones Bulldozer builds itself hold only already-checked values.
  */
 export function assertSavable(value: unknown) {
-  const pending: unknown[] = [value];
-  // Values can share or (through a cast) even cycle back to the same object; visit each only once.
-  const visited = new Set<object>();
+  const pending: { value: unknown, depth: number }[] = [{ value, depth: 1 }];
+  // Values can share or (through a cast) even cycle back to the same object. Each object is checked
+  // again only if it's reached at a deeper level than before, since its children then are too. A
+  // cycle keeps getting deeper, so it ends at the depth limit.
+  const deepestDepthByVisitedObject = new Map<object, number>();
   while (pending.length > 0) {
     // `pop()` can't tell "empty" from a real `undefined` value, hence the length check above.
-    const next = pending.pop();
-    const typeName = unsavableTypeName(next);
+    const next = pending.pop() ?? throwErr("pending is non-empty");
+    const typeName = unsavableTypeName(next.value);
     if (typeName !== null) throw cannotSaveError(typeName);
-    if (typeof next !== "object" || next === null || isPiledriverHeapObjectSymbol in next || visited.has(next)) continue;
-    visited.add(next);
-    for (const child of Array.isArray(next) ? next : Object.values(next)) pending.push(child);
+    if (typeof next.value !== "object" || next.value === null || isPiledriverHeapObjectSymbol in next.value) continue;
+    if (next.depth > maximumSavedNestingDepth) {
+      throw new HexclaveAssertionError(`Cannot save a value nested more than ${maximumSavedNestingDepth} levels deep (or one that contains itself) in Piledriver`, { maximumSavedNestingDepth });
+    }
+    if ((deepestDepthByVisitedObject.get(next.value) ?? 0) >= next.depth) continue;
+    deepestDepthByVisitedObject.set(next.value, next.depth);
+    for (const child of Array.isArray(next.value) ? next.value : Object.values(next.value)) pending.push({ value: child, depth: next.depth + 1 });
   }
 }

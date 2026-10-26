@@ -237,6 +237,38 @@ describe("Breezy Piledriver", () => {
     }
   }, 60_000);
 
+  it("reads deeply nested values back after a restart", async () => {
+    // A process that has been running a while optimizes its code and uses less stack per call, so it
+    // could save nesting that a freshly started process then overflowed on while reading it back.
+    const depth = 5_000;
+    let value: PiledriverObject = "leaf";
+    for (let i = 0; i < depth; i++) value = { m: value };
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const rootKey = new TextEncoder().encode("root").buffer;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(rootKey, { deep: asHeapObject(value) });
+    await writer.close();
+
+    const reader = declareBreezyPiledriverDatabase(lmdbOptions);
+    try {
+      const root = (await reader.getRootObject(rootKey)).object;
+      if (typeof root !== "object" || root === null || Array.isArray(root) || isPiledriverHeapObjectSymbol in root) throw new Error("Expected a plain root");
+      const deep = root.deep;
+      if (typeof deep !== "object" || deep === null || !(isPiledriverHeapObjectSymbol in deep)) throw new Error("Expected a heap object");
+      let node = await deep.get();
+      let levels = 0;
+      while (typeof node === "object" && node !== null && !Array.isArray(node) && !(isPiledriverHeapObjectSymbol in node) && "m" in node) {
+        node = node.m;
+        levels++;
+      }
+      expect({ levels, leaf: node }).toEqual({ levels: depth, leaf: "leaf" });
+    } finally {
+      await reader.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
   it("packs newly written heap objects densely into LMDB pages", async () => {
     // LMDB keeps keys sorted in fixed-size pages. Inserting a key that belongs in the middle of a full
     // page splits it into two half-empty pages, so out-of-order inserts waste disk on prod's ~300 GiB

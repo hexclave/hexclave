@@ -7,7 +7,9 @@
  * module defines the format while the database implementation owns IO and sequence ordering.
  */
 import { decodeBase64, encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { PiledriverHeapObject, PiledriverObject } from "../../index.js";
+import { defineOwnProperty, fillSlot, type PendingSlot } from "./pending-slots.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -48,11 +50,6 @@ export function plannedHeapReferenceKeys(value: PlannedPiledriverObject): ArrayB
   return references;
 }
 
-const defineOwn = (object: object, key: string, value: unknown) => {
-  // Assignment would invoke Object.prototype.__proto__ instead of restoring an own property.
-  Object.defineProperty(object, key, { value, enumerable: true, configurable: true, writable: true });
-};
-
 /**
  * Decodes one stored value without loading referenced heap payloads.
  *
@@ -64,29 +61,47 @@ export function decodePiledriverObject(
   buffer: ArrayBuffer,
   resolveHeapObject: (key: ArrayBuffer) => PiledriverHeapObject,
 ): PiledriverObject {
-  const decode = (value: unknown): PiledriverObject => {
-    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
-    if (Array.isArray(value)) {
+  // JSON.parse itself doesn't recurse in V8, so only the conversion below needs to avoid it.
+  const root: PiledriverObject[] = [null];
+  const pending: PendingSlot<unknown, PiledriverObject>[] = [{ input: JSON.parse(decoder.decode(buffer)), containerType: "array", container: root, key: 0 }];
+  while (pending.length > 0) {
+    const slot = pending.pop() ?? throwErr("pending is non-empty");
+    const value = slot.input;
+    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      fillSlot(slot, value);
+    } else if (Array.isArray(value)) {
       // Every real array is tagged, leaving singleton arrays available for special numeric values.
       const tag: unknown = value[0];
       const payload: unknown = value[1];
-      if (tag === "array" && value.length === 2 && Array.isArray(payload)) return payload.map(decode);
-      if (tag === "heap-reference" && value.length === 2 && typeof payload === "string") {
-        return resolveHeapObject(decodeBase64(payload).buffer);
+      if (tag === "array" && value.length === 2 && Array.isArray(payload)) {
+        const result: PiledriverObject[] = payload.map(() => null);
+        fillSlot(slot, result);
+        for (let i = 0; i < payload.length; i++) pending.push({ input: payload[i], containerType: "array", container: result, key: i });
+      } else if (tag === "heap-reference" && value.length === 2 && typeof payload === "string") {
+        fillSlot(slot, resolveHeapObject(decodeBase64(payload).buffer));
+      } else if (value.length === 1 && tag === "NaN") {
+        fillSlot(slot, NaN);
+      } else if (value.length === 1 && tag === "Infinity") {
+        fillSlot(slot, Infinity);
+      } else if (value.length === 1 && tag === "-Infinity") {
+        fillSlot(slot, -Infinity);
+      } else if (value.length === 1 && tag === "-0") {
+        fillSlot(slot, -0);
+      } else {
+        throw new Error("Assertion error: Invalid serialized Piledriver tagged value");
       }
-      if (value.length === 1 && tag === "NaN") return NaN;
-      if (value.length === 1 && tag === "Infinity") return Infinity;
-      if (value.length === 1 && tag === "-Infinity") return -Infinity;
-      if (value.length === 1 && tag === "-0") return -0;
-      throw new Error("Assertion error: Invalid serialized Piledriver tagged value");
+    } else if (typeof value === "object") {
+      const result: { [key: string]: PiledriverObject } = {};
+      fillSlot(slot, result);
+      for (const [key, child] of Object.entries(value)) {
+        defineOwnProperty(result, key, null);
+        pending.push({ input: child, containerType: "object", container: result, key });
+      }
+    } else {
+      throw new Error(`Assertion error: Invalid serialized Piledriver value: ${typeof value}`);
     }
-    if (typeof value !== "object") throw new Error(`Assertion error: Invalid serialized Piledriver value: ${typeof value}`);
-    const result: { [key: string]: PiledriverObject } = {};
-    for (const [key, child] of Object.entries(value)) defineOwn(result, key, decode(child));
-    return result;
-  };
-
-  return decode(JSON.parse(decoder.decode(buffer)));
+  }
+  return root[0];
 }
 
 /**
@@ -96,23 +111,32 @@ export function decodePiledriverObject(
  * concerns out of the codec makes this operation a synchronous conversion to the persisted format.
  */
 export function encodePiledriverObject(value: PlannedPiledriverObject): ArrayBuffer {
-  const encode = (node: PlannedPiledriverObject): unknown => {
+  const root: unknown[] = [null];
+  const pending: PendingSlot<PlannedPiledriverObject, unknown>[] = [{ input: value, containerType: "array", container: root, key: 0 }];
+  while (pending.length > 0) {
+    const slot = pending.pop() ?? throwErr("pending is non-empty");
+    const node = slot.input;
     if (typeof node === "number") {
-      if (Number.isFinite(node) && !Object.is(node, -0)) return node;
       // JSON would otherwise collapse NaN/infinities to null and -0 to 0.
-      return [Object.is(node, -0) ? "-0" : node.toString()];
+      if (Number.isFinite(node) && !Object.is(node, -0)) fillSlot(slot, node);
+      else fillSlot(slot, [Object.is(node, -0) ? "-0" : node.toString()]);
+    } else if (node === null || typeof node === "string" || typeof node === "boolean") {
+      fillSlot(slot, node);
+    } else if (isPlannedHeapReferenceSymbol in node) {
+      fillSlot(slot, ["heap-reference", encodeBase64(new Uint8Array(node.key))]);
+    } else if (Array.isArray(node)) {
+      const items: unknown[] = node.map(() => null);
+      fillSlot(slot, ["array", items]);
+      for (let i = 0; i < node.length; i++) pending.push({ input: node[i], containerType: "array", container: items, key: i });
+    } else {
+      const object: { [key: string]: unknown } = {};
+      fillSlot(slot, object);
+      for (const [key, child] of Object.entries(node)) {
+        defineOwnProperty(object, key, null);
+        pending.push({ input: child, containerType: "object", container: object, key });
+      }
     }
-    if (node === null || typeof node === "string" || typeof node === "boolean") return node;
-    if (isPlannedHeapReferenceSymbol in node) {
-      return ["heap-reference", encodeBase64(new Uint8Array(node.key))];
-    }
-    if (Array.isArray(node)) {
-      return ["array", node.map(encode)];
-    }
-    const object: { [key: string]: unknown } = {};
-    for (const [key, child] of Object.entries(node)) defineOwn(object, key, encode(child));
-    return object;
-  };
-
-  return encoder.encode(JSON.stringify(encode(value))).buffer;
+  }
+  // JSON.stringify does recurse, but fails at write time (~6,000 levels), so nothing unreadable is saved.
+  return encoder.encode(JSON.stringify(root[0])).buffer;
 }
