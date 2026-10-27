@@ -49,7 +49,7 @@ import { type DataGridColumnDef } from "@hexclave/dashboard-ui-components";
 import { ServerContactChannel, ServerOAuthProvider, ServerTeam, ServerUser } from "@hexclave/next";
 import { KnownErrors } from "@hexclave/shared";
 import { AppId } from "@hexclave/shared/dist/apps/apps-config";
-import { normalizeCountryCode } from "@hexclave/shared/dist/schema-fields";
+import { normalizeCountryCode, phoneNumberRegex } from "@hexclave/shared/dist/schema-fields";
 import { fromNow } from "@hexclave/shared/dist/utils/dates";
 import { captureError, HexclaveAssertionError, throwErr } from '@hexclave/shared/dist/utils/errors';
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
@@ -637,6 +637,56 @@ function AddEmailDialog({ user, open, onOpenChange }: AddEmailDialogProps) {
   );
 }
 
+function AddPhoneNumberDialog({ user, open, onOpenChange }: AddEmailDialogProps) {
+  const formSchema = yup.object({
+    phoneNumber: yup.string()
+      .trim()
+      .matches(phoneNumberRegex, "Must be in E.164 format, eg. +15555550100")
+      .defined("Phone number is required")
+      .label("Phone number")
+      .meta({
+        stackFormFieldPlaceholder: "+15555550100",
+      }),
+    isVerified: yup.boolean()
+      .default(false)
+      .label("Set as verified")
+      .meta({
+        description: "Phone numbers are verified with a code sent via SMS. Only verified phone numbers can be used for SMS sign-in"
+      }),
+    isPrimary: yup.boolean()
+      .default(false)
+      .label("Set as primary")
+      .meta({
+        description: "Make this the primary phone number for the user"
+      }),
+    isUsedForAuth: yup.boolean()
+      .default(false)
+      .label("Used for sign-in")
+      .meta({
+        description: "Allow this phone number to be used for SMS sign-in, if enabled for the project and the phone number is verified."
+      }),
+  });
+
+  return (
+    <SmartFormDialog
+      title="Add Phone Number"
+      description="Add a new phone number to this user account."
+      open={open}
+      onOpenChange={onOpenChange}
+      formSchema={formSchema}
+      onSubmit={async (values) => {
+        await user.createContactChannel({
+          type: 'phone',
+          value: values.phoneNumber,
+          isVerified: values.isVerified,
+          isPrimary: values.isPrimary,
+          usedForAuth: values.isUsedForAuth
+        });
+      }}
+    />
+  );
+}
+
 type SendVerificationEmailDialogProps = {
   channel: ServerContactChannel,
   open: boolean,
@@ -824,6 +874,7 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
   const project = hexclaveAdminApp.useProject();
   const contactChannels = user.useContactChannels();
   const [isAddEmailDialogOpen, setIsAddEmailDialogOpen] = useState(false);
+  const [isAddPhoneNumberDialogOpen, setIsAddPhoneNumberDialogOpen] = useState(false);
   const [sendVerificationEmailDialog, setSendVerificationEmailDialog] = useState<{
     channel: ServerContactChannel,
     isOpen: boolean,
@@ -845,7 +896,7 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
     await channel.update({ isVerified: !channel.isVerified });
   };
 
-  const setPrimaryEmail = async (channel: ServerContactChannel) => {
+  const setAsPrimary = async (channel: ServerContactChannel) => {
     await channel.update({ isPrimary: true });
   };
 
@@ -853,10 +904,17 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
     {
       id: "value",
       accessor: "value",
-      header: "E-Mail",
+      header: "Value",
       width: 220,
       flex: 1,
       sortable: false,
+    },
+    {
+      id: "type",
+      header: "Type",
+      width: 90,
+      sortable: false,
+      renderCell: ({ row }) => row.type === "phone" ? "Phone" : "E-mail",
     },
     {
       id: "isPrimary",
@@ -900,23 +958,25 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
       align: "right",
       renderCell: ({ row }) => {
         const channel = row;
+        // These actions all send an email; phone numbers are verified by the user themselves via a code sent by SMS
+        const isEmail = channel.type === "email";
         return (
           <div className="flex justify-end">
             <ActionCell
               items={[
-                {
+                ...(isEmail ? [{
                   item: "Send sign-in invitation",
                   onClick: async () => {
                     setSendSignInInvitationDialog({ channel, isOpen: true });
                   },
-                },
-                ...(!channel.isVerified ? [{
+                }] : []),
+                ...(isEmail && !channel.isVerified ? [{
                   item: "Send verification email",
                   onClick: async () => {
                     setSendVerificationEmailDialog({ channel, isOpen: true });
                   },
                 }] : []),
-                ...(project.config.credentialEnabled ? [{
+                ...(isEmail && project.config.credentialEnabled ? [{
                   item: "Send reset password email",
                   onClick: async () => {
                     setSendResetPasswordEmailDialog({ channel, isOpen: true });
@@ -928,7 +988,7 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
                 },
                 ...(!channel.isPrimary ? [{
                   item: "Set as primary",
-                  onClick: () => { runAsynchronouslyWithAlert(() => setPrimaryEmail(channel)); },
+                  onClick: () => { runAsynchronouslyWithAlert(() => setAsPrimary(channel)); },
                 }] : []),
                 {
                   item: channel.usedForAuth ? "Disable for sign-in" : "Enable for sign-in",
@@ -953,6 +1013,11 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
         user={user}
         open={isAddEmailDialogOpen}
         onOpenChange={setIsAddEmailDialogOpen}
+      />
+      <AddPhoneNumberDialog
+        user={user}
+        open={isAddPhoneNumberDialogOpen}
+        onOpenChange={setIsAddPhoneNumberDialogOpen}
       />
 
       {sendVerificationEmailDialog && (
@@ -999,13 +1064,22 @@ function ContactChannelsSection({ user }: ContactChannelsSectionProps) {
         getRowId={(channel) => channel.id}
         emptyLabel="No contact channels"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setIsAddEmailDialogOpen(true)}
-          >
-            Add E-mail
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setIsAddEmailDialogOpen(true)}
+            >
+              Add E-mail
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setIsAddPhoneNumberDialogOpen(true)}
+            >
+              Add Phone Number
+            </Button>
+          </div>
         }
       />
     </>
