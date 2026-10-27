@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/example-workos-integration-demo",
-  "version": "1.0.133",
+  "version": "1.0.134",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack --port ${NEXT_PUBLIC_HEXCLAVE_PORT_PREFIX:-81}13",

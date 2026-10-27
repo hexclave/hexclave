@@ -180,9 +180,12 @@ export const GET = createSmartRouteHandler({
     });
 
     if (responseMode === "json") {
-      // In JSON mode the client controls the flow programmatically and PKCE
-      // already prevents CSRF, so we skip the cookie (which would require
-      // credentials: "include" and a non-wildcard CORS origin).
+      // In JSON mode we skip the cookie (which would require credentials: "include"
+      // and a non-wildcard CORS origin). The cookie only ever bound the provider leg
+      // to whichever browser hit this URL anyway, which an attacker can choose. What
+      // actually protects `token`-bound flows (link, anonymous upgrade) is that the
+      // callback defers those side effects until the outer authorization code is
+      // redeemed with the initiator's PKCE verifier; see PendingOAuthAction.
       return {
         statusCode: 200,
         bodyType: "json",

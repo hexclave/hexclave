@@ -825,9 +825,10 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
       ],
       // +1 to detect whether a next page exists without a separate count.
       take: query.limit == null ? maxListPageSize + 1 : query.limit + 1,
-      // Cursor convention (matches teams/crud.tsx): the client sends the
-      // id of the LAST row of the previous page; Prisma starts AT that id,
-      // and `skip: 1` drops it so we don't re-emit it.
+      // Cursor convention: the client sends the id of the LAST row of the
+      // previous page; Prisma starts AT that id, and `skip: 1` drops it so we
+      // don't re-emit it. (teams/crud.tsx uses an encoded keyset cursor
+      // instead, so its pages survive the cursor row being deleted.)
       ...query.cursor ? {
         skip: 1,
         cursor: {

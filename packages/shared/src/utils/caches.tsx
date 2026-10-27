@@ -132,7 +132,6 @@ export class AsyncCache<D extends any[], T> {
   readonly onStateChange = this._createKeyed("onStateChange");
   readonly isDirty = this._createKeyed("isDirty");
 }
-
 class AsyncValueCache<T> {
   private _store: AsyncStore<T>;
   private _pendingPromise: ReactPromise<T> | undefined;

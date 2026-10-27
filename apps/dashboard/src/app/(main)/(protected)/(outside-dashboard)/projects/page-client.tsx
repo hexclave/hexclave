@@ -1,6 +1,7 @@
 'use client';
 
 import { Link } from "@/components/link";
+import { WithDashboardUserTeam } from "@/components/with-dashboard-user-team";
 import { ProjectCard } from "@/components/project-card";
 import { useRouter } from "@/components/router";
 import { SearchBar } from "@/components/search-bar";
@@ -305,7 +306,6 @@ function ProjectsListPage() {
     projectIdMustMatch: "internal",
   }) ?? throwErr("Projects page expected a user because useUser was called with an explicit required user mode.");
   const rawProjects = user.useOwnedProjects();
-  const teams = user.useTeams();
   const [sort, setSort] = useState<"recency" | "name">("recency");
   const [search, setSearch] = useState<string>("");
   const [projectStatuses, setProjectStatuses] = useState<Map<string, ProjectOnboardingStatus>>(new Map());
@@ -442,10 +442,6 @@ function ProjectsListPage() {
     };
   }, [appInternals, rawProjects.length]);
 
-  const teamIdMap = useMemo(() => {
-    return new Map(teams.map((team) => [team.id, team.displayName]));
-  }, [teams]);
-
   const projectsByTeam = useMemo(() => {
     let newProjects = [...rawProjects];
     if (search) {
@@ -514,16 +510,22 @@ function ProjectsListPage() {
       </div>
 
       {projectsByTeam.map(({ teamId, projects }) => {
-        const team = teamId ? teams.find((t) => t.id === teamId) : undefined;
         return (
           <div key={teamId} className="mb-4">
             <div className="mb-2 flex items-center gap-1">
-              <Typography>
-                {teamId ? teamIdMap.get(teamId) : "No Team"}
-              </Typography>
-              {team && (
-                <TeamAddUserDialog team={team} />
-              )}
+              {/* Looked up by ID: `user.useTeams()` only holds the user's first 200 teams. */}
+              <WithDashboardUserTeam teamId={teamId}>
+                {(team) => (
+                  <>
+                    <Typography>
+                      {teamId == null ? "No Team" : team?.displayName}
+                    </Typography>
+                    {team && (
+                      <TeamAddUserDialog team={team} />
+                    )}
+                  </>
+                )}
+              </WithDashboardUserTeam>
             </div>
             <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 bg">
               {projects.map((project) => {

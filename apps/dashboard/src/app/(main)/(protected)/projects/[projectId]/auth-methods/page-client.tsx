@@ -5,7 +5,8 @@ import { ActionDialog, BrandIcons, BrowserFrame, FormControl, FormField, FormIte
 import { FormDialog } from "@/components/form-dialog";
 import { HostedAuthMethodPreview } from "@/components/hosted-auth-preview";
 import { useUpdateConfig } from "@/components/config-update";
-import { useDashboardInternalUser } from "@/lib/dashboard-user";
+import { WithDashboardUserTeam } from "@/components/with-dashboard-user-team";
+import type { Team } from "@hexclave/next";
 import {
   DesignAlert,
   DesignBadge,
@@ -194,13 +195,14 @@ function adminProviderToConfigProvider(
 
 function AddCustomOidcButton({ onClick }: { onClick: () => void }) {
   const project = useAdminApp().useProject();
-  const user = useDashboardInternalUser();
-  const teams = user.useTeams();
-  const ownerTeam = useMemo(
-    () => teams.find(t => t.id === project.ownerTeamId),
-    [teams, project.ownerTeamId],
+  return (
+    <WithDashboardUserTeam teamId={project.ownerTeamId}>
+      {(ownerTeam) => <AddCustomOidcButtonForTeam ownerTeam={ownerTeam} onClick={onClick} />}
+    </WithDashboardUserTeam>
   );
+}
 
+function AddCustomOidcButtonForTeam({ ownerTeam, onClick }: { ownerTeam: Team | null, onClick: () => void }) {
   if (ownerTeam == null) {
     return <AddCustomOidcButtonDisabled onClick={onClick} isTeamPlanOrAbove={false} />;
   }

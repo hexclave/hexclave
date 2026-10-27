@@ -1,4 +1,4 @@
-ARG NODE_VERSION=24.19.0
+ARG NODE_VERSION=24.22.1
 
 # Base
 FROM node:${NODE_VERSION} AS base
@@ -12,12 +12,12 @@ RUN apt-get update && \
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PNPM_HOME/bin:$PATH
 
-RUN corepack enable
-RUN corepack prepare pnpm@11.5.0 --activate
-# Pinned: unpinned global installs mean an upstream release can change image builds without a commit
-# here (turbo 2.10.11 changed prune's gitignore handling and broke this build).
-RUN pnpm add -g turbo@2.10.11
-RUN pnpm add -g tsx@4.23.12
+RUN npm install --global --ignore-scripts corepack@0.36.0 && corepack enable
+RUN corepack prepare pnpm@11.28.5+sha512.484563d30b4c2ad27cb48aa94ff2b302dbcebc8ff6bf28816c2589886e146ce7f76f354f3bc1a438e6f5e9768c302aa0a6f7add8232903cd4cf81426cbc14d9e --activate
+# The bootstrap tree includes locked Turbo platform binaries and enforces its own workspace policy.
+COPY docker/tools/package.json docker/tools/pnpm-lock.yaml docker/tools/pnpm-workspace.yaml /opt/hexclave-tools/
+RUN pnpm --dir /opt/hexclave-tools install --frozen-lockfile
+ENV PATH=/opt/hexclave-tools/node_modules/.bin:$PATH
 
 
 # Prune stage
@@ -25,7 +25,7 @@ FROM base AS pruner
 
 COPY . .
 
-RUN tsx ./scripts/generate-sdks.ts
+RUN node ./scripts/generate-sdks.ts
 
 # https://turbo.build/repo/docs/guides/tools/docker
 # The SDK packages generated above (packages/js, packages/next, ...) are gitignored, so prune must not
@@ -47,7 +47,7 @@ COPY .gitignore .
 COPY pnpm-workspace.yaml .
 COPY turbo.json .
 COPY configs ./configs
-COPY --from=pruner /app/scripts/postinstall-patch-next-async-debug-info.mjs ./scripts/
+COPY --from=pruner /app/scripts/postinstall-patch-next-async-debug-info.mjs /app/scripts/check-package-manager.mjs ./scripts/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
 # copy over the rest of the code for the build

@@ -3,13 +3,14 @@ import { usersCrudHandlers } from "@/app/api/latest/users/crud";
 import { Prisma } from "@/generated/prisma/client";
 import { withExternalDbSyncUpdate } from "@/lib/external-db-sync";
 import { checkApiKeySet } from "@/lib/internal-api-keys";
+import { PendingOAuthAction, applyPendingOAuthAction } from "@/lib/oauth-pending-actions";
 import { getOAuthRedirectUrisForTenancy, isAcceptedNativeAppUrl, validateRedirectUrl } from "@/lib/redirect-urls";
 import { getSoleTenancyFromProjectBranch, getTenancy } from "@/lib/tenancies";
 import { createRefreshTokenObj, decodeAccessToken, generateAccessTokenFromRefreshTokenIfValid, isRefreshTokenValid } from "@/lib/tokens";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { AuthorizationCode, AuthorizationCodeModel, Client, Falsey, RefreshToken, Token, User } from "@node-oauth/oauth2-server";
 import { KnownErrors } from "@hexclave/shared";
-import { HexclaveAssertionError, StatusError, captureError } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, StatusError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { getProjectBranchFromClientId } from ".";
 const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;
 
@@ -21,6 +22,7 @@ declare module "@node-oauth/oauth2-server" {
   interface User {
     email?: string | null;
     oauthProvider?: string;
+    pendingOAuthAction?: PendingOAuthAction;
   }
 }
 
@@ -329,6 +331,7 @@ export class OAuthModel implements AuthorizationCodeModel {
         newUser: user.newUser,
         afterCallbackRedirectUrl: user.afterCallbackRedirectUrl,
         grantedRefreshTokenId: user.refreshTokenId,
+        pendingOAuthAction: user.pendingOAuthAction,
         tenancyId: tenancy.id,
       },
     });
@@ -400,20 +403,35 @@ export class OAuthModel implements AuthorizationCodeModel {
   }
 
   async revokeAuthorizationCode(code: AuthorizationCode): Promise<boolean> {
+    let deletedCode;
     try {
-      const deletedCode = await globalPrismaClient.projectUserAuthorizationCode.delete({
+      deletedCode = await globalPrismaClient.projectUserAuthorizationCode.delete({
         where: {
           authorizationCode: code.authorizationCode,
         },
       });
-
-      return !!deletedCode;
     } catch (error) {
       if (!(error instanceof PrismaClientKnownRequestError)) {
         throw error;
       }
       return false;
     }
+
+    // The OAuth library calls this right after verifying the PKCE code_verifier and before minting any tokens,
+    // which makes it the earliest point where we know the redeemer is the party that started the flow. The
+    // delete above is the atomic single-use claim, so the action runs at most once. It also has to run before
+    // tokens are minted, as the access token's claims (e.g. is_anonymous) must reflect the applied action.
+    if (deletedCode.pendingOAuthAction != null) {
+      const tenancy = await getTenancy(deletedCode.tenancyId)
+        ?? throwErr("Tenancy of authorization code not found, but getAuthorizationCode just checked that it exists", { tenancyId: deletedCode.tenancyId });
+      await applyPendingOAuthAction({
+        tenancy,
+        projectUserId: deletedCode.projectUserId,
+        rawAction: deletedCode.pendingOAuthAction,
+      });
+    }
+
+    return true;
   }
 
   async validateRedirectUri(redirect_uri: string, client: Client): Promise<boolean> {

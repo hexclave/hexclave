@@ -8,6 +8,7 @@ import { ReactPromise, runAsynchronously } from "@hexclave/shared/dist/utils/pro
 import { use } from "@hexclave/shared/dist/utils/react";
 import { Result } from "@hexclave/shared/dist/utils/results";
 import { Store } from "@hexclave/shared/dist/utils/stores";
+import { firstTeamsPageOptions } from "@hexclave/shared/dist/utils/team-lists";
 import { deindent } from "@hexclave/shared/dist/utils/strings";
 import { getDefaultApiUrls } from "@hexclave/shared/dist/utils/urls";
 import React, { useCallback } from "react"; // THIS_LINE_PLATFORM react-like
@@ -223,6 +224,32 @@ export function createEmptyTokenStore() {
 
 
 // IF_PLATFORM react-like
+/**
+ * Hook backing `user.useTeam(teamId)`: finds the team among the user's own teams, so it's null for non-members.
+ *
+ * `/teams?user_id=me` is one of our hottest endpoints, and apps commonly render `useTeams()` and `useTeam(id)`
+ * side by side, so we first look in the first page of the unfiltered list, which shares its cache entry with the
+ * internal first-page reads (`firstTeamsPageOptions`). Only when the team isn't on that page and there are more
+ * pages do we look it up by ID via `query`. The second hook is always called (rules of hooks); when no lookup is
+ * needed it reuses the first-page cache key, which costs no extra request.
+ *
+ * The first page is requested with an explicit limit rather than as `useTeams()`: without one, the backend rejects
+ * the request for users in more than 500 teams, and an app couldn't work around that for `useTeam`.
+ */
+export function useTeamInUserTeams<T extends { id: string }>(
+  useTeams: (options: { query?: string, limit: number }) => T[] & { nextCursor: string | null },
+  teamId: string,
+): T | null {
+  const firstPage = useTeams(firstTeamsPageOptions);
+  const inFirstPage = firstPage.find((team) => team.id === teamId);
+  const needsLookup = inFirstPage === undefined && firstPage.nextCursor != null;
+  const lookup = useTeams(needsLookup ? { query: teamId, limit: firstTeamsPageOptions.limit } : firstTeamsPageOptions);
+  return React.useMemo(
+    () => inFirstPage ?? lookup.find((team) => team.id === teamId) ?? null,
+    [inFirstPage, lookup, teamId],
+  );
+}
+
 const cachePromiseByHookId = new Map<string, ReactPromise<Result<unknown>>>();
 export function useAsyncCache<D extends any[], T>(cache: AsyncCache<D, Result<T>>, dependencies: D, caller: string): T {
   // we explicitly don't want to run this hook in SSR

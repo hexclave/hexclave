@@ -1,6 +1,6 @@
 import { getAuthContactChannelWithEmailNormalization } from "@/lib/contact-channel";
 import { Tenancy } from "@/lib/tenancies";
-import { createOrUpgradeAnonymousUserWithRules, SignUpRuleOptions } from "@/lib/users";
+import { createOrUpgradeAnonymousUserWithEvaluatedSignUp, EvaluatedSignUp, evaluateSignUp, SignUpRuleOptions } from "@/lib/users";
 import { PrismaClientTransaction } from "@/prisma-client";
 import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
 import { KnownErrors } from "@hexclave/shared/dist/known-errors";
@@ -171,12 +171,77 @@ export async function linkOAuthAccountToUser(
 }
 
 /**
+ * Create a project user OAuth account with the provided data.
+ * Used for the "link" flow which doesn't go through the standard sign-up path.
+ */
+export async function createProjectUserOAuthAccountForLink(prisma: PrismaClientTransaction, params: {
+  tenancyId: string,
+  providerId: string,
+  providerAccountId: string,
+  email: string | null,
+  projectUserId: string,
+}) {
+  return await prisma.projectUserOAuthAccount.create({
+    data: {
+      configOAuthProviderId: params.providerId,
+      providerAccountId: params.providerAccountId,
+      email: params.email,
+      projectUser: {
+        connect: {
+          tenancyId_projectUserId: {
+            tenancyId: params.tenancyId,
+            projectUserId: params.projectUserId,
+          },
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Persist the provider's access token (and refresh token, if any) for an OAuth account, so they can later be
+ * served through the connected-accounts API.
+ */
+export async function storeOAuthProviderTokens(prisma: PrismaClientTransaction, params: {
+  tenancyId: string,
+  oauthAccountId: string,
+  providerTokens: {
+    accessToken: string,
+    refreshToken: string | null,
+    accessTokenExpiresAtMillis: number | null,
+    scopes: string[],
+  },
+}): Promise<void> {
+  const { tenancyId, oauthAccountId, providerTokens } = params;
+  if (providerTokens.refreshToken != null) {
+    await prisma.oAuthToken.create({
+      data: {
+        tenancyId,
+        refreshToken: providerTokens.refreshToken,
+        scopes: providerTokens.scopes,
+        oauthAccountId,
+      },
+    });
+  }
+
+  await prisma.oAuthAccessToken.create({
+    data: {
+      tenancyId,
+      accessToken: providerTokens.accessToken,
+      scopes: providerTokens.scopes,
+      expiresAt: providerTokens.accessTokenExpiresAtMillis == null ? null : new Date(providerTokens.accessTokenExpiresAtMillis),
+      oauthAccountId,
+    },
+  });
+}
+
+/**
  * Create a new user and OAuth account.
  *
  * This is used when a new OAuth sign-up should create a new user account.
  *
  * Creates:
- * - User record (via createOrUpgradeAnonymousUserWithRules)
+ * - User record (via evaluateSignUp and createOrUpgradeAnonymousUserWithEvaluatedSignUp)
  * - Auth method record
  * - OAuth account record with nested oauthAuthMethod
  *
@@ -186,25 +251,59 @@ export async function linkOAuthAccountToUser(
 export async function createOAuthUserAndAccount(
   prisma: PrismaClientTransaction,
   tenancy: Tenancy,
-  params: {
-    providerId: string,
-    providerAccountId: string,
-    email: string | null,
-    emailVerified: boolean,
-    primaryEmailAuthEnabled: boolean,
-    currentUser: UsersCrud["Admin"]["Read"] | null,
-    displayName: string | null,
-    profileImageUrl: string | null,
+  params: OAuthSignUpParams & {
     signUpRuleOptions: SignUpRuleOptions,
   }
 ): Promise<{ projectUserId: string, oauthAccountId: string }> {
-  // Check if sign up is allowed
+  const evaluatedSignUp = await evaluateOAuthSignUp(tenancy, params);
+  return await createOAuthUserAndAccountWithEvaluatedSignUp(prisma, tenancy, { ...params, evaluatedSignUp });
+}
+
+type OAuthSignUpParams = {
+  providerId: string,
+  providerAccountId: string,
+  email: string | null,
+  emailVerified: boolean,
+  primaryEmailAuthEnabled: boolean,
+  currentUser: UsersCrud["Admin"]["Read"] | null,
+  displayName: string | null,
+  profileImageUrl: string | null,
+};
+
+/**
+ * Runs the checks of `createOAuthUserAndAccount` (sign-up enabled, bot challenge, sign-up rules) without creating
+ * anything. Pass the result to `createOAuthUserAndAccountWithEvaluatedSignUp`.
+ */
+export async function evaluateOAuthSignUp(
+  tenancy: Tenancy,
+  params: Pick<OAuthSignUpParams, "email" | "emailVerified" | "currentUser"> & {
+    signUpRuleOptions: SignUpRuleOptions,
+  },
+): Promise<EvaluatedSignUp> {
+  if (!tenancy.config.auth.allowSignUp) {
+    throw new KnownErrors.SignUpNotEnabled();
+  }
+  return await evaluateSignUp(
+    tenancy,
+    params.currentUser,
+    { primary_email: params.email, primary_email_verified: params.emailVerified },
+    params.signUpRuleOptions,
+  );
+}
+
+export async function createOAuthUserAndAccountWithEvaluatedSignUp(
+  prisma: PrismaClientTransaction,
+  tenancy: Tenancy,
+  params: OAuthSignUpParams & {
+    evaluatedSignUp: EvaluatedSignUp,
+  }
+): Promise<{ projectUserId: string, oauthAccountId: string }> {
+  // Re-checked because the sign-up may have been evaluated in an earlier request (see PendingOAuthAction)
   if (!tenancy.config.auth.allowSignUp) {
     throw new KnownErrors.SignUpNotEnabled();
   }
 
-  // Create new user (or upgrade anonymous user) with sign-up rule evaluation
-  const newUser = await createOrUpgradeAnonymousUserWithRules(
+  const newUser = await createOrUpgradeAnonymousUserWithEvaluatedSignUp(
     tenancy,
     params.currentUser,
     {
@@ -215,7 +314,7 @@ export async function createOAuthUserAndAccount(
       primary_email_auth_enabled: params.primaryEmailAuthEnabled,
     },
     [],
-    params.signUpRuleOptions,
+    params.evaluatedSignUp,
   );
 
   // Create auth method

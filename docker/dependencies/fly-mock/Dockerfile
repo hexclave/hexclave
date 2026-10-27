@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:22.23.4-slim
 
 # A minimal in-memory mock of the subset of the Fly.io APIs used by Marshal
 # (apps/marshal/src/fly/client.ts): the Machines REST API, the certs/IP GraphQL

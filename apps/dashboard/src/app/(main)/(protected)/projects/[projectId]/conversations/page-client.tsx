@@ -936,11 +936,7 @@ export default function PageClient() {
 
   const resolvedSelectedUserId = selectedUserId ?? conversationDetail?.conversation.userId ?? EMPTY_USER_ID;
   const selectedUser = adminApp.useUser(resolvedSelectedUserId);
-  const userTeams = currentUser.useTeams();
-  const currentOwnerTeam = useMemo(
-    () => userTeams.find((team) => team.id === project.ownerTeamId) ?? throwErr(`Owner team for project "${project.id}" was not found in current user's teams.`),
-    [project.id, project.ownerTeamId, userTeams],
-  );
+  const currentOwnerTeam = currentUser.useTeam(project.ownerTeamId ?? throwErr(`Project "${project.id}" has no owner team.`)) ?? throwErr(`Owner team for project "${project.id}" was not found in current user's teams.`);
   const assignableTeamMembers = currentOwnerTeam.useUsers();
 
   const assigneeOptions = useMemo(() => {

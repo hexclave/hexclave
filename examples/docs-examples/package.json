@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/docs-examples",
-  "version": "1.0.133",
+  "version": "1.0.134",
   "repository": "https://github.com/hexclave/hexclave",
   "description": "",
   "private": true,
@@ -28,5 +28,5 @@
     "rimraf": "^5.0.5",
     "tailwindcss": "^3.4.1"
   },
-  "packageManager": "pnpm@11.5.0"
+  "packageManager": "pnpm@11.28.5+sha512.484563d30b4c2ad27cb48aa94ff2b302dbcebc8ff6bf28816c2589886e146ce7f76f354f3bc1a438e6f5e9768c302aa0a6f7add8232903cd4cf81426cbc14d9e"
 }

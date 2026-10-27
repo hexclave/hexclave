@@ -1,0 +1,17 @@
+# Standalone Docker bootstrap: keep these checks aligned with the root pnpm-workspace.yaml.
+# No application dependencies or their compatibility exceptions are needed here.
+packages:
+  - .
+minimumReleaseAge: 10080
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeExclude: []
+trustPolicy: no-downgrade
+trustLockfile: false
+trustPolicyExclude: []
+blockExoticSubdeps: true
+strictDepBuilds: true
+allowBuilds: {}
+verifyDepsBeforeRun: error
+ignoreScripts: false
+ignorePnpmfile: true

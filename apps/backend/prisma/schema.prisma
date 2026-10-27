@@ -456,6 +456,7 @@ model Team {
   @@unique([mirroredProjectId, mirroredBranchId, teamId])
   @@index([tenancyId, sequenceId], name: "Team_tenancyId_sequenceId_idx")
   @@index([shouldUpdateSequenceId, tenancyId], name: "Team_shouldUpdateSequenceId_idx")
+  @@index([tenancyId, createdAt, teamId], name: "Team_tenancyId_createdAt_teamId_idx")
 }
 
 // This is used for fields that are boolean but only the true value is part of a unique constraint.
@@ -981,6 +982,10 @@ model ProjectUserAuthorizationCode {
   /// Refresh token ID that should be granted when this authorization code is exchanged.
   /// NULL means no specific refresh token is preselected, so the token endpoint follows normal issuance/reuse logic.
   grantedRefreshTokenId    String? @db.Uuid
+  /// OAuth callback side effect (linking a provider account to `projectUserId`, or upgrading the anonymous
+  /// `projectUserId`) that must only be applied once this code is exchanged with a valid PKCE verifier.
+  /// See `PendingOAuthAction` in the backend for the shape. NULL means there is nothing to apply.
+  pendingOAuthAction       Json?
 
   @@id([tenancyId, authorizationCode])
 }

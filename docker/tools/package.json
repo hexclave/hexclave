@@ -1,0 +1,8 @@
+{
+  "name": "hexclave-docker-tools",
+  "private": true,
+  "packageManager": "pnpm@11.28.5+sha512.484563d30b4c2ad27cb48aa94ff2b302dbcebc8ff6bf28816c2589886e146ce7f76f354f3bc1a438e6f5e9768c302aa0a6f7add8232903cd4cf81426cbc14d9e",
+  "dependencies": {
+    "turbo": "2.10.11"
+  }
+}
