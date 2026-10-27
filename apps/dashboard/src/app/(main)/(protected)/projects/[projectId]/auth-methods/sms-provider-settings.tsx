@@ -58,7 +58,12 @@ const smsProviderFormSchema = yup.object({
     const error = getSmsSenderValueError(senderType, value);
     return error === null ? true : this.createError({ message: error });
   }),
-  webhookUrl: requiredWhenProvider("webhook", "Webhook URL").url("Must be a valid URL"),
+  webhookUrl: requiredWhenProvider("webhook", "Webhook URL").url("Must be a valid URL").test(
+    "http-or-https",
+    // The backend only delivers SMS webhooks over HTTP(S) (and only HTTPS outside of development environments)
+    "Must be an HTTP or HTTPS URL",
+    (value) => value == null || value === "" || !URL.canParse(value) || ["http:", "https:"].includes(new URL(value).protocol),
+  ),
   webhookSecret: requiredWhenProvider("webhook", "Signing secret").min(16, "Signing secret must be at least 16 characters"),
 });
 
