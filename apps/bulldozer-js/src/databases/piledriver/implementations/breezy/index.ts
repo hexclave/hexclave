@@ -21,6 +21,15 @@ const gcSchemaVersion = 3;
  * normal writes that arrive during GC; 256 per transaction raised write p50 from ~18 to ~78 ms.
  */
 const gcDeletionsPerTransaction = 64;
+/**
+ * How many child refcount updates one GC transaction may make before it stops taking more objects.
+ *
+ * The object limit alone doesn't bound the work: each deleted object decrements every child it
+ * references. Bulldozer's trees have at most 32 children per node, so a normal batch stays far below
+ * this, but a caller-made heap object can reference thousands of children. 64 objects with 5,000
+ * children each held the write lock for ~1.9 s in one transaction, stalling every write behind it.
+ */
+const gcReferenceUpdatesPerTransaction = 4096;
 
 /**
  * Returns `items` sorted by their LMDB key, for writing in that order.
@@ -397,13 +406,16 @@ export function declareBreezyPiledriverDatabase(
       return candidates;
     };
 
-    /** Deletes one zero-reference heap object and decrements its children. Must run inside `transact`. */
+    /**
+     * Deletes one zero-reference heap object and decrements its children. Must run inside `transact`.
+     * Returns how many child refcounts it updated.
+     */
     const deleteCandidate = (indexedCandidate: Buffer, version: number, writes: Promise<boolean>[]) => {
       const heapKeyBuffer = Buffer.from(indexedCandidate.subarray(8));
       const heapKey = arrayBuffer(heapKeyBuffer);
       if (!lmdbCandidates.doesExist(indexedCandidate)) {
         result.objects.candidatesSkipped++;
-        return;
+        return 0;
       }
       const storedMetadata = lmdbMetadata.get(heapKeyBuffer) ?? throwErr("Piledriver GC candidate has no reference metadata");
       const metadata = parseMetadata(storedMetadata);
@@ -429,6 +441,7 @@ export function declareBreezyPiledriverDatabase(
       if (result.samples.deletedObjectKeysBase64.length < result.samples.limitPerCategory) result.samples.deletedObjectKeysBase64.push(encodeBase64(heapKeyBuffer));
       result.reclaimed.smallestHeapPayloadBytes = Math.min(result.reclaimed.smallestHeapPayloadBytes ?? Infinity, heapValue.byteLength);
       result.reclaimed.largestHeapPayloadBytes = Math.max(result.reclaimed.largestHeapPayloadBytes ?? 0, heapValue.byteLength);
+      return references.length;
     };
 
     try {
@@ -438,16 +451,22 @@ export function declareBreezyPiledriverDatabase(
         for (const candidate of batch) {
           if (candidate.byteLength <= 8) throw new Error("Invalid Piledriver GC candidate key");
         }
-        result.objects.candidatesExamined += batch.length;
-        result.objects.candidatesQueuedFromIndex = result.objects.candidatesExamined;
-        result.scanning.candidateIndexEntriesRead += batch.length;
 
         // Two objects in one batch can point at the same child. That's safe because reads inside a
         // transaction see its own earlier writes, so the second decrement starts from the first's
         // result. A child that reaches zero becomes a candidate here and is deleted by a later batch.
         await transact((version, writes) => {
-          for (const candidate of batch) deleteCandidate(candidate, version, writes);
+          let referenceUpdates = 0;
+          for (const candidate of batch) {
+            // Checked before each object rather than after, so one object over the budget is still
+            // deleted on its own. Candidates left out stay in the index for the next batch.
+            if (referenceUpdates >= gcReferenceUpdatesPerTransaction) break;
+            result.objects.candidatesExamined++;
+            result.scanning.candidateIndexEntriesRead++;
+            referenceUpdates += deleteCandidate(candidate, version, writes);
+          }
         });
+        result.objects.candidatesQueuedFromIndex = result.objects.candidatesExamined;
       }
 
       const moreEligibleWorkMayRemain = readCandidates(1).length > 0;

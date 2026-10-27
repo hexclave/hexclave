@@ -634,7 +634,7 @@ describe("Breezy Piledriver", () => {
     }
   });
 
-  it("collects garbage spanning several GC transactions and stops at the requested limit", async () => {
+  it("collects garbage spanning several GC transactions and stops at the requested limit", { timeout: 30_000 }, async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
     const lmdbOptions = { path, dbId: crypto.randomUUID() };
     // More than one transaction's worth of deletions (64), so the limit lands mid-batch.
@@ -670,7 +670,9 @@ describe("Breezy Piledriver", () => {
   });
 });
 
-describe("Breezy Piledriver garbage collection in batches", () => {
+// These tests write hundreds of objects one awaited write at a time; the slowest take ~4 s locally,
+// too close to Vitest's 5 s default for slower CI machines.
+describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 }, () => {
   const rootKey = (name: string) => new TextEncoder().encode(name).buffer;
   const openTemporary = async () => {
     const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
@@ -686,6 +688,24 @@ describe("Breezy Piledriver garbage collection in batches", () => {
   const writeGarbage = async (database: PiledriverDatabase, count: number, valueOf: (index: number) => PiledriverObject = index => asHeapObject({ index })) => {
     for (let index = 0; index < count; index++) await database.setRootObject(rootKey(`garbage-${index}`), valueOf(index));
     for (let index = 0; index < count; index++) await database.deleteRootObject(rootKey(`garbage-${index}`));
+  };
+  /**
+   * Gives the GC candidate at `candidateIndex` (in collection order) a live reference count while it
+   * stays in the candidate index, as if a write had raced in. GC then fails when it reaches it.
+   */
+  const giveCandidateALiveReferenceCount = async (lmdbOptions: { path: string, dbId: string }, options: { candidateIndex: number, expectedCandidates: number }) => {
+    const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
+    try {
+      const metadataStore = inspector.declareKvStore("piledriver-gc-reference-metadata-v3");
+      const candidates = await listEntries(inspector.declareKvStore("piledriver-gc-zero-reference-candidates-v3"));
+      expect(candidates).toHaveLength(options.expectedCandidates);
+      const heapKey = new Uint8Array(candidates[options.candidateIndex].key).slice(8).buffer;
+      const metadata = (await metadataStore.get(heapKey)).buffer ?? throwErr("Expected metadata for a GC candidate");
+      const written = await metadataStore.setAll([{ key: heapKey, value: new TextEncoder().encode(JSON.stringify({ ...parseJson(metadata), referenceCount: 1 })).buffer }]);
+      await inspector.waitUntilAvailable(written.seq);
+    } finally {
+      await inspector.close();
+    }
   };
   const expectHeapObject = (value: PiledriverObject) => {
     if (typeof value !== "object" || value === null || !(isPiledriverHeapObjectSymbol in value)) throw new Error("Expected a heap object");
@@ -822,17 +842,7 @@ describe("Breezy Piledriver garbage collection in batches", () => {
     const writer = declareBreezyPiledriverDatabase(lmdbOptions);
     await writeGarbage(writer, 40);
     await writer.close();
-
-    const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
-    const metadataStore = inspector.declareKvStore("piledriver-gc-reference-metadata-v3");
-    const candidates = await listEntries(inspector.declareKvStore("piledriver-gc-zero-reference-candidates-v3"));
-    expect(candidates).toHaveLength(40);
-    // Give the 20th candidate in collection order a live reference count, as if a write had raced in.
-    const corruptedKey = new Uint8Array(candidates[19].key).slice(8).buffer;
-    const corrupted = (await metadataStore.get(corruptedKey)).buffer ?? throwErr("Expected metadata for a GC candidate");
-    const written = await metadataStore.setAll([{ key: corruptedKey, value: new TextEncoder().encode(JSON.stringify({ ...parseJson(corrupted), referenceCount: 1 })).buffer }]);
-    await inspector.waitUntilAvailable(written.seq);
-    await inspector.close();
+    await giveCandidateALiveReferenceCount(lmdbOptions, { candidateIndex: 19, expectedCandidates: 40 });
 
     const { cutoff, collector } = openCollector(lmdbOptions);
     try {
@@ -844,6 +854,29 @@ describe("Breezy Piledriver garbage collection in batches", () => {
       const beforeCorrupted = await collector.collectGarbage(cutoff, 19);
       expect(beforeCorrupted.objects.deleted).toBe(19);
       expect((await debugSnapshot(collector)).heap).toHaveLength(21);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("starts a new GC transaction once a batch has made enough child refcount updates", async () => {
+    // Three garbage parents with 3,000 children each fit in one 64-object batch, but the first two
+    // already make 6,000 refcount updates, past the per-transaction budget, so the third must be in a
+    // later transaction. Making the third fail shows where the split is: the two before it stay
+    // deleted. In a single transaction, all three would have rolled back.
+    const { path, lmdbOptions } = await openTemporary();
+    const childrenPerParent = 3000;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writeGarbage(writer, 3, index => asHeapObject({ children: Array.from({ length: childrenPerParent }, (_, child) => asHeapObject({ index, child })) }));
+    await writer.close();
+    await giveCandidateALiveReferenceCount(lmdbOptions, { candidateIndex: 2, expectedCandidates: 3 });
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      await expect(collector.collectGarbage(cutoff, 100_000)).rejects.toThrow("still has live references");
+      const parentsLeft = (await debugSnapshot(collector)).heap.filter(entry => JSON.stringify(entry.serializedJson).includes("\"children\""));
+      expect(parentsLeft).toHaveLength(1);
     } finally {
       await collector.close();
       await rm(path, { recursive: true, force: true });
