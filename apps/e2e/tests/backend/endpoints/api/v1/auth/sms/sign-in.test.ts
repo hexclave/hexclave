@@ -308,3 +308,127 @@ it("should enforce the SMS quota across concurrent requests", async ({ expect })
   `);
   expect((await sendSignInCodeRaw(generateTestPhoneNumber())).status).toBe(200);
 });
+
+async function sendSignInCodeWithBotChallenge(phoneNumber: string, botChallenge: Record<string, string>) {
+  return await niceBackendFetch("/api/v1/auth/sms/send-sign-in-code", {
+    method: "POST",
+    accessType: "client",
+    body: {
+      phone_number: phoneNumber,
+      ...botChallenge,
+    },
+  });
+}
+
+it("should not send a code if the bot challenge token is missing", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Auth.Sms.enableSmsSignIn();
+  const response = await sendSignInCodeWithBotChallenge(generateTestPhoneNumber(), {});
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "BOT_CHALLENGE_FAILED",
+        "details": { "message": "A passed bot challenge is required to send an SMS sign-in code." },
+        "error": "A passed bot challenge is required to send an SMS sign-in code.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "BOT_CHALLENGE_FAILED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
+it("should not send a code if the bot challenge token is invalid and no phase is given", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Auth.Sms.enableSmsSignIn();
+  const response = await sendSignInCodeWithBotChallenge(generateTestPhoneNumber(), {
+    bot_challenge_token: mockTurnstileTokens.invalid,
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "BOT_CHALLENGE_FAILED",
+        "details": { "message": "A passed bot challenge is required to send an SMS sign-in code." },
+        "error": "A passed bot challenge is required to send an SMS sign-in code.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "BOT_CHALLENGE_FAILED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
+it("should not send a code if the client claims the bot challenge is unavailable", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Auth.Sms.enableSmsSignIn();
+  const response = await sendSignInCodeWithBotChallenge(generateTestPhoneNumber(), {
+    bot_challenge_unavailable: "true",
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "BOT_CHALLENGE_FAILED",
+        "details": { "message": "A passed bot challenge is required to send an SMS sign-in code." },
+        "error": "A passed bot challenge is required to send an SMS sign-in code.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "BOT_CHALLENGE_FAILED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
+it("should require a visible bot challenge if the invisible one fails, and send the code once it passes", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Auth.Sms.enableSmsSignIn();
+  const phoneNumber = generateTestPhoneNumber();
+
+  const invisibleResponse = await sendSignInCodeWithBotChallenge(phoneNumber, {
+    bot_challenge_token: mockTurnstileTokens.invalid,
+    bot_challenge_phase: "invisible",
+  });
+  expect(invisibleResponse).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 409,
+      "body": {
+        "code": "BOT_CHALLENGE_REQUIRED",
+        "error": "An additional bot challenge is required before sign-up can continue.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "BOT_CHALLENGE_REQUIRED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+
+  const visibleFailedResponse = await sendSignInCodeWithBotChallenge(phoneNumber, {
+    bot_challenge_token: mockTurnstileTokens.invalid,
+    bot_challenge_phase: "visible",
+  });
+  expect(visibleFailedResponse).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "BOT_CHALLENGE_FAILED",
+        "details": { "message": "Visible bot challenge verification failed" },
+        "error": "Visible bot challenge verification failed",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "BOT_CHALLENGE_FAILED",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+
+  const visibleResponse = await sendSignInCodeWithBotChallenge(phoneNumber, {
+    bot_challenge_token: mockTurnstileTokens.visibleSmsSignInOk,
+    bot_challenge_phase: "visible",
+  });
+  expect(visibleResponse.status).toBe(200);
+});

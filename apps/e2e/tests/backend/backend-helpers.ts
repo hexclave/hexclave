@@ -115,6 +115,7 @@ export const mockTurnstileTokens = Object.freeze({
   visibleMagicLinkOk: "mock-turnstile-visible-ok:send_magic_link_email",
   visibleOAuthOk: "mock-turnstile-visible-ok:oauth_authenticate",
   smsSignInOk: "mock-turnstile-ok:send_sms_sign_in_code",
+  visibleSmsSignInOk: "mock-turnstile-visible-ok:send_sms_sign_in_code",
 });
 
 /**

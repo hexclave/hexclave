@@ -4,6 +4,7 @@ import { createRateLimitedSmsCode, isSmsProviderConfigured, sendSms } from "@/li
 import { botChallengeFlowRequestSchemaFields, getRequestContextAndBotChallengeAssessment } from "@/lib/turnstile";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { adaptSchema, clientOrHigherAuthTypeSchema, phoneNumberSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { KnownErrors } from "@hexclave/shared";
 import { StatusError } from "@hexclave/shared/dist/utils/errors";
 import { assertSmsSignInEnabled, ensureUserForPhoneNumberAllowsSmsOtp, smsSignInVerificationCodeHandler } from "../sign-in/verification-code-handler";
 
@@ -42,6 +43,13 @@ export const POST = createSmartRouteHandler({
     await ensureUserForPhoneNumberAllowsSmsOtp(tenancy, phoneNumber);
 
     const { requestContext, turnstileAssessment } = await getRequestContextAndBotChallengeAssessment(botChallenge, "send_sms_sign_in_code", tenancy);
+    // Other bot-challenge-protected routes only record a failed assessment and let the sign-up risk scoring deal with
+    // it later. That doesn't work here: the SMS is billed to the project as soon as we send it, so a caller that skips
+    // the challenge (no phase, or `bot_challenge_unavailable`) could otherwise pump SMS to numbers they own. We
+    // therefore require that either the invisible or the visible challenge passed before creating and sending a code.
+    if (turnstileAssessment.status !== "ok" && turnstileAssessment.visibleChallengeResult !== "ok") {
+      throw new KnownErrors.BotChallengeFailed("A passed bot challenge is required to send an SMS sign-in code.");
+    }
 
     const codeObj = await createRateLimitedSmsCode(tenancy, VerificationCodeType.SMS_ONE_TIME_PASSWORD, phoneNumber, async (transaction) => await smsSignInVerificationCodeHandler.createCode({
       transaction,
