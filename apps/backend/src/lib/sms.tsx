@@ -26,12 +26,6 @@ export function isSmsProviderConfigured(tenancy: Tenancy): boolean {
   return tenancy.config.sms.server.provider !== undefined;
 }
 
-/**
- * Sends a text message to the given phone number (in E.164 format) using the SMS provider configured for the tenancy.
- *
- * Unlike emails, SMS are sent synchronously (without an outbox/retry queue), since they are currently only used for
- * short-lived one-time codes, where a delayed delivery is not useful and the user can simply request a new code.
- */
 export type SmsPurpose = "sign_in_code" | "phone_number_verification";
 
 export type SendSmsOptions = {
@@ -41,6 +35,12 @@ export type SendSmsOptions = {
   purpose: SmsPurpose,
 };
 
+/**
+ * Sends a text message to the given phone number (in E.164 format) using the SMS provider configured for the tenancy.
+ *
+ * Unlike emails, SMS are sent synchronously (without an outbox/retry queue), since they are currently only used for
+ * short-lived one-time codes, where a delayed delivery is not useful and the user can simply request a new code.
+ */
 export async function sendSms(tenancy: Tenancy, options: SendSmsOptions): Promise<void> {
   if (!phoneNumberRegex.test(options.to)) {
     throw new HexclaveAssertionError("sendSms was called with a phone number that is not in E.164 format; it should have been validated by the caller", { to: options.to });
