@@ -700,3 +700,52 @@ it("should create a contact channel as primary and demote existing primary", asy
   expect(newPrimaryChannel.is_primary).toBe(true);
   expect(oldChannel.is_primary).toBe(false);
 });
+
+async function getPrimaryEmailChannelId() {
+  const listResponse = await niceBackendFetch("/api/v1/contact-channels?user_id=me", { accessType: "client" });
+  const channel = listResponse.body.items.find((item: { type: string, is_primary: boolean }) => item.type === "email" && item.is_primary);
+  if (channel == null) throw new Error("Expected the user to have a primary email contact channel");
+  return channel.id as string;
+}
+
+it("rejects updating an email contact channel to a malformed value without specifying the type", async ({ expect }) => {
+  await Auth.fastSignUpWithEmail();
+  const channelId = await getPrimaryEmailChannelId();
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${channelId}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: "not-an-email" },
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "Email must be a valid email address",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("treats an empty value as unchanged when updating an email contact channel without specifying the type", async ({ expect }) => {
+  const email = backendContext.value.mailbox.emailAddress;
+  await Auth.fastSignUpWithEmail();
+  const channelId = await getPrimaryEmailChannelId();
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${channelId}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: "" },
+  });
+  expect(response.status).toBe(200);
+  expect(response.body.value).toBe(email);
+});
+
+it("normalizes email values when updating an email contact channel without specifying the type", async ({ expect }) => {
+  await Auth.fastSignUpWithEmail();
+  const channelId = await getPrimaryEmailChannelId();
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${channelId}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: "New.Address@Example.COM" },
+  });
+  expect(response.status).toBe(200);
+  expect(response.body.value).toBe("new.address@example.com");
+});

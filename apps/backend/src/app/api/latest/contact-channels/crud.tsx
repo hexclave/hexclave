@@ -7,7 +7,7 @@ import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
 import { createCrudHandlers } from "@/route-handlers/crud-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { contactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
-import { phoneNumberRegex, userIdOrMeSchema, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { emailSchema, phoneNumberRegex, userIdOrMeSchema, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { createLazyProxy } from "@hexclave/shared/dist/utils/proxies";
 import { typedToLowercase, typedToUppercase } from "@hexclave/shared/dist/utils/strings";
@@ -161,7 +161,11 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
       }
       // The request schema can only validate the value against the type if both are in the request body, so we
       // validate (and normalize) against the existing type here, eg. when only the value of a phone channel changes.
-      const value = data.value === undefined ? undefined : normalizeContactChannelValue(existingType, data.value);
+      // An empty value for an email channel is a no-op rather than an error, for backwards compatibility: before phone
+      // channels existed, requests that included `type: "email"` treated `value: ""` as "unchanged".
+      const value = data.value === undefined || (existingType === "email" && data.value === "")
+        ? undefined
+        : normalizeContactChannelValue(existingType, data.value);
 
       // if usedForAuth is set to true, make sure no other account uses this channel for auth
       if (data.used_for_auth) {
@@ -291,6 +295,12 @@ function prismaContactChannelTypeToCrud(type: ContactChannelType) {
 function normalizeContactChannelValue(type: "email" | "phone", value: string): string {
   switch (type) {
     case 'email': {
+      // The request schema only validates the email format if `type` is in the same request body, which it doesn't
+      // have to be for updates. `normalizeEmail` throws an assertion error (= 500) for malformed emails, so we
+      // validate here first.
+      if (value === "" || !emailSchema.isValidSync(value)) {
+        throw new StatusError(StatusError.BadRequest, "Email must be a valid email address");
+      }
       return normalizeEmail(value);
     }
     case 'phone': {
