@@ -15,13 +15,15 @@ type: "email" | "phone"
   Type of contact channel.
 
 isPrimary: bool
-  Whether this is the user's primary email.
+  Whether this is the user's primary contact channel of its type (ie. their primary email or primary phone number).
+  A user can have one primary contact channel per type.
 
 isVerified: bool
-  Whether the email has been verified.
+  Whether the email address or phone number has been verified.
 
 usedForAuth: bool
-  Whether this email can be used for authentication (magic link, password reset, etc.).
+  Whether this contact channel can be used for authentication (magic link, OTP, and password reset for emails; SMS
+  sign-in codes for phone numbers).
 
 
 ## Methods
