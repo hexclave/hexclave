@@ -27,6 +27,8 @@ it("allows anonymous users to sign up on the internal project", async ({ expect 
         "passkey_auth_enabled": false,
         "primary_email": null,
         "primary_email_verified": false,
+        "primary_phone_number": null,
+        "primary_phone_number_verified": false,
         "profile_image_url": null,
         "requires_totp_mfa": false,
         "restricted_by_admin": false,

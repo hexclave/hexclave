@@ -34,6 +34,9 @@ const branchSchemaFuzzerConfig = [{
     otp: [{
       allowSignIn: [true, false],
     }],
+    sms: [{
+      allowSignIn: [true, false],
+    }],
     passkey: [{
       allowSignIn: [true, false],
     }],
@@ -254,6 +257,17 @@ const environmentSchemaFuzzerConfig = [{
   payments: [{
     ...branchSchemaFuzzerConfig[0].payments[0],
     testMode: [false, true],
+  }],
+  sms: [{
+    server: [{
+      provider: ["twilio", "webhook", "test"] as const,
+      twilioAccountSid: ["AC00000000000000000000000000000000", "some invalid sid"],
+      twilioAuthToken: ["some-auth-token"],
+      senderType: ["phone_number", "short_code", "alphanumeric", "messaging_service"] as const,
+      senderValue: ["+15555550100", "55123", "Acme", "not a valid sender!"],
+      webhookUrl: ["https://example.com/hexclave/sms", "not a url"],
+      webhookSecret: ["a-long-random-webhook-secret", "short"],
+    }],
   }],
   dbSync: [{
     externalDatabases: [{

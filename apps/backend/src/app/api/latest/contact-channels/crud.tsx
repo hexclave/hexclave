@@ -1,4 +1,4 @@
-import { Prisma } from "@/generated/prisma/client";
+import { ContactChannelType, Prisma } from "@/generated/prisma/client";
 import { demoteAllContactChannelsToNonPrimary, setContactChannelAsPrimaryById } from "@/lib/contact-channel";
 import { normalizeEmail } from "@/lib/emails";
 import { markProjectUserForExternalDbSync, recordExternalDbSyncDeletion, withExternalDbSyncUpdate } from "@/lib/external-db-sync";
@@ -7,7 +7,7 @@ import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
 import { createCrudHandlers } from "@/route-handlers/crud-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { contactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
-import { userIdOrMeSchema, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { phoneNumberRegex, userIdOrMeSchema, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { createLazyProxy } from "@hexclave/shared/dist/utils/proxies";
 import { typedToLowercase, typedToUppercase } from "@hexclave/shared/dist/utils/strings";
@@ -60,14 +60,7 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
     return contactChannelToCrud(contactChannel);
   },
   onCreate: async ({ auth, data }) => {
-    let value = data.value;
-    switch (data.type) {
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      case 'email': {
-        value = normalizeEmail(value);
-        break;
-      }
-    }
+    const value = normalizeContactChannelValue(data.type, data.value);
 
     if (auth.type === 'client') {
       const currentUserId = auth.user?.id || throwErr(new KnownErrors.CannotGetOwnUserWithoutUser());
@@ -150,17 +143,6 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
     }
 
 
-    let value = data.value;
-    switch (data.type) {
-      case 'email': {
-        value = value ? normalizeEmail(value) : undefined;
-        break;
-      }
-      case undefined: {
-        break;
-      }
-    }
-
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
 
     const updatedContactChannel = await retryTransaction(prisma, async (tx) => {
@@ -170,20 +152,31 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
         contactChannelId: params.contact_channel_id || throwErr("Missing contact channel id"),
       });
 
+      // `type` is accepted in the update schema for backwards compatibility, but it was never actually written (back
+      // when "email" was the only type, that made no difference). Now that there are multiple types, silently ignoring
+      // it would let a phone-formatted value be stored on an email channel, so we reject actual type changes instead.
+      const existingType = prismaContactChannelTypeToCrud(existingContactChannel.type);
+      if (data.type !== undefined && data.type !== existingType) {
+        throw new StatusError(StatusError.BadRequest, "The type of a contact channel cannot be changed. Delete it and create a new contact channel instead.");
+      }
+      // The request schema can only validate the value against the type if both are in the request body, so we
+      // validate (and normalize) against the existing type here, eg. when only the value of a phone channel changes.
+      const value = data.value === undefined ? undefined : normalizeContactChannelValue(existingType, data.value);
+
       // if usedForAuth is set to true, make sure no other account uses this channel for auth
       if (data.used_for_auth) {
         const existingWithSameChannel = await tx.contactChannel.findUnique({
           where: {
             tenancyId_type_value_usedForAuth: {
               tenancyId: auth.tenancy.id,
-              type: data.type !== undefined ? crudContactChannelTypeToPrisma(data.type) : existingContactChannel.type,
+              type: existingContactChannel.type,
               value: value !== undefined ? value : existingContactChannel.value,
               usedForAuth: 'TRUE',
             },
           },
         });
         if (existingWithSameChannel && existingWithSameChannel.id !== existingContactChannel.id) {
-          throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse(data.type ?? prismaContactChannelTypeToCrud(existingContactChannel.type));
+          throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse(existingType);
         }
       }
 
@@ -191,7 +184,7 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
         await demoteAllContactChannelsToNonPrimary(tx, {
           tenancyId: auth.tenancy.id,
           projectUserId: params.user_id,
-          type: data.type !== undefined ? crudContactChannelTypeToPrisma(data.type) : existingContactChannel.type,
+          type: existingContactChannel.type,
         });
       }
 
@@ -287,10 +280,26 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
 }));
 
 
-function crudContactChannelTypeToPrisma(type: "email") {
+function crudContactChannelTypeToPrisma(type: "email" | "phone") {
   return typedToUppercase(type);
 }
 
-function prismaContactChannelTypeToCrud(type: "EMAIL") {
+function prismaContactChannelTypeToCrud(type: ContactChannelType) {
   return typedToLowercase(type);
+}
+
+function normalizeContactChannelValue(type: "email" | "phone", value: string): string {
+  switch (type) {
+    case 'email': {
+      return normalizeEmail(value);
+    }
+    case 'phone': {
+      // Phone numbers are stored in E.164 format, which is already canonical; we only need to reject other formats
+      // (the request schema can't do this when the type isn't part of the same request, see onUpdate)
+      if (!phoneNumberRegex.test(value)) {
+        throw new StatusError(StatusError.BadRequest, "Phone number must be in E.164 format, eg. +15555550100");
+      }
+      return value;
+    }
+  }
 }

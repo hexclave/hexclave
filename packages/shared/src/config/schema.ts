@@ -10,10 +10,11 @@ import { DEFAULT_EMAIL_TEMPLATES, DEFAULT_EMAIL_THEMES, DEFAULT_EMAIL_THEME_ID }
 import * as schemaFields from "../schema-fields";
 import { productSchema, userSpecifiedIdSchema, yupBoolean, yupDate, yupMixed, yupNever, yupNumber, yupObject, yupRecord, yupString, yupTuple, yupUnion } from "../schema-fields";
 import { SUPPORTED_CURRENCIES } from "../utils/currency-constants";
-import { HexclaveAssertionError } from "../utils/errors";
+import { HexclaveAssertionError, throwErr } from "../utils/errors";
 import { allProviders, allProviderTypes } from "../utils/oauth";
 import { DeepFilterUndefined, DeepMerge, DeepRequiredOrUndefined, deepPlainClone, filterUndefined, get, getOrUndefined, has, isObjectLike, mapValues, set, typedAssign, typedEntries, typedFromEntries } from "../utils/objects";
 import { Result } from "../utils/results";
+import { getSmsSenderValueError, smsSenderTypes } from "../utils/sms";
 import { stringCompare } from "../utils/strings";
 import { CollapseObjectUnion, Expand, IntersectAll, IsUnion, typeAssert, typeAssertExtends, typeAssertIs } from "../utils/types";
 import { Config, NormalizationError, NormalizesTo, assertNormalized, getInvalidConfigReason, normalize } from "./format";
@@ -114,6 +115,11 @@ const branchAuthSchema = yupObject({
     allowSignIn: yupBoolean(),
   }),
   otp: yupObject({
+    allowSignIn: yupBoolean(),
+  }),
+  // Sign-in with a one-time code sent via SMS to a phone contact channel. Requires an SMS provider to be configured in
+  // the environment config (`sms.server`), since there is no shared SMS sender.
+  sms: yupObject({
     allowSignIn: yupBoolean(),
   }),
   passkey: yupObject({
@@ -479,6 +485,46 @@ export const environmentConfigSchema = branchConfigSchema.concat(yupObject({
   payments: branchConfigSchema.getNested("payments").concat(yupObject({
     testMode: yupBoolean(),
   })),
+
+  // SMS provider credentials are secrets, so they live in the environment config (not pushable), just like the
+  // email server credentials.
+  sms: yupObject({
+    server: yupObject({
+      // "webhook" sends each message as a signed HTTP request to the project's own endpoint, which can then deliver it
+      // through any SMS provider; see `sendSmsWithWebhook` in the backend.
+      provider: yupString().oneOf(['twilio', 'webhook', 'test']).optional(),
+      twilioAccountSid: schemaFields.smsTwilioAccountSidSchema.optional().nonEmpty(),
+      twilioAuthToken: schemaFields.smsTwilioAuthTokenSchema.optional().nonEmpty(),
+      senderType: yupString().oneOf(smsSenderTypes).optional(),
+      senderValue: schemaFields.smsSenderValueSchema.optional().nonEmpty(),
+      webhookUrl: schemaFields.urlSchema.optional(),
+      webhookSecret: schemaFields.smsWebhookSecretSchema.optional().nonEmpty(),
+    }).test(
+      "sms-provider-fields",
+      "SMS provider config is incomplete or invalid",
+      function (server) {
+        switch (server.provider) {
+          case "twilio": {
+            if ([server.twilioAccountSid, server.twilioAuthToken, server.senderType, server.senderValue].some(field => field == null || field === "")) {
+              return this.createError({ message: "Twilio SMS providers must specify twilioAccountSid, twilioAuthToken, senderType, and senderValue" });
+            }
+            const senderError = getSmsSenderValueError(server.senderType ?? throwErr("checked above"), server.senderValue ?? throwErr("checked above"));
+            return senderError === null ? true : this.createError({ message: senderError });
+          }
+          case "webhook": {
+            if ([server.webhookUrl, server.webhookSecret].some(field => field == null || field === "")) {
+              return this.createError({ message: "Webhook SMS providers must specify webhookUrl and webhookSecret" });
+            }
+            return true;
+          }
+          case "test":
+          case undefined: {
+            return true;
+          }
+        }
+      },
+    ),
+  }),
 
   dbSync: yupObject({
     externalDatabases: yupRecord(
@@ -994,6 +1040,9 @@ const organizationConfigDefaults = {
     otp: {
       allowSignIn: false,
     },
+    sms: {
+      allowSignIn: false,
+    },
     passkey: {
       allowSignIn: false,
     },
@@ -1065,6 +1114,18 @@ const organizationConfigDefaults = {
       tsxSource: "Error: Template config is missing TypeScript source code.",
       themeId: undefined,
     }), DEFAULT_EMAIL_TEMPLATES),
+  },
+
+  sms: {
+    server: {
+      provider: undefined,
+      twilioAccountSid: undefined,
+      twilioAuthToken: undefined,
+      senderType: undefined,
+      senderValue: undefined,
+      webhookUrl: undefined,
+      webhookSecret: undefined,
+    },
   },
 
   payments: {

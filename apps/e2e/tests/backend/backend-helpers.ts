@@ -10,7 +10,7 @@ import { filterUndefined, omit } from "@hexclave/shared/dist/utils/objects";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { nicify } from "@hexclave/shared/dist/utils/strings";
 import * as jose from "jose";
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomInt, randomUUID } from "node:crypto";
 import { expect } from "vitest";
 import { Context, Mailbox, NiceRequestInit, NiceResponse, STACK_BACKEND_BASE_URL, STACK_INTERNAL_PROJECT_ADMIN_KEY, STACK_INTERNAL_PROJECT_CLIENT_KEY, STACK_INTERNAL_PROJECT_ID, STACK_INTERNAL_PROJECT_SERVER_KEY, STACK_SVIX_SERVER_URL, generatedEmailSuffix, localRedirectUrl, niceFetch, updateCookiesFromResponse } from "../helpers";
 import { localhostUrl, withPortPrefix } from "../helpers/ports";
@@ -114,7 +114,47 @@ export const mockTurnstileTokens = Object.freeze({
   visibleSignUpOk: "mock-turnstile-visible-ok:sign_up_with_credential",
   visibleMagicLinkOk: "mock-turnstile-visible-ok:send_magic_link_email",
   visibleOAuthOk: "mock-turnstile-visible-ok:oauth_authenticate",
+  smsSignInOk: "mock-turnstile-ok:send_sms_sign_in_code",
 });
+
+/**
+ * Generates a random phone number for tests. Uses the unassigned country calling code +999, so it can never belong to
+ * a real person, and 12 random digits, so that tests running in parallel (and previous test runs) don't share an SMS
+ * mailbox.
+ */
+export function generateTestPhoneNumber(): string {
+  return `+999${randomInt(0, 1_000_000_000_000).toString().padStart(12, "0")}`;
+}
+
+/**
+ * The `test` SMS provider delivers SMS as emails to `<digits of phone number>@sms.hexclave.test` in Inbucket (see
+ * `sendSmsWithTestProvider` in the backend), so we can read them with the normal mailbox helpers.
+ */
+export function getSmsMailbox(phoneNumber: string): Mailbox {
+  return createMailbox(`${phoneNumber.slice(1)}@sms.hexclave.test`);
+}
+
+/**
+ * Waits until an SMS whose text contains `textSubstring` arrives for the given phone number, and returns the 6-character
+ * code in the newest such message.
+ */
+export async function waitForSmsCode(phoneNumber: string, textSubstring: string): Promise<string> {
+  const mailbox = getSmsMailbox(phoneNumber);
+  const deadlineMs = 60_000;
+  const intervalMs = 500;
+  const deadline = performance.now() + deadlineMs;
+  while (true) {
+    const messages = await mailbox.fetchMessages();
+    const message = messages.findLast((m) => m.body?.text.includes(textSubstring));
+    if (message) {
+      return message.body?.text.match(/^([A-Z0-9]{6}) is your /)?.[1] ?? throwErr("SMS did not contain a code", { message });
+    }
+    if (performance.now() >= deadline) {
+      throw new HexclaveAssertionError(`SMS containing ${JSON.stringify(textSubstring)} not found within ${deadlineMs}ms`, { phoneNumber, messages });
+    }
+    await wait(intervalMs);
+  }
+}
 
 type TurnstileTestOptions = {
   turnstileToken?: string,
@@ -624,6 +664,84 @@ export namespace Auth {
       return {
         userId: response.body.user_id,
         signInResponse: response,
+      };
+    }
+  }
+
+  export namespace Sms {
+    /**
+     * Enables SMS sign-in on the current project, using the `test` SMS provider.
+     */
+    export async function enableSmsSignIn() {
+      await Project.updateConfig({
+        "auth.sms.allowSignIn": true,
+        "sms.server.provider": "test",
+      });
+    }
+
+    export async function sendSignInCode(phoneNumber: string, options: TurnstileTestOptions = {}) {
+      const response = await niceBackendFetch("/api/v1/auth/sms/send-sign-in-code", {
+        method: "POST",
+        accessType: "client",
+        body: filterUndefined({
+          phone_number: phoneNumber,
+          bot_challenge_token: options.turnstileToken ?? mockTurnstileTokens.smsSignInOk,
+          bot_challenge_phase: options.turnstilePhase,
+        }),
+      });
+      expect(response).toMatchInlineSnapshot(`
+        NiceResponse {
+          "status": 200,
+          "body": { "nonce": <stripped field 'nonce'> },
+          "headers": Headers { <some fields may have been hidden> },
+        }
+      `);
+      const code = await waitForSmsCode(phoneNumber, "sign-in code");
+      return {
+        sendSignInCodeResponse: response,
+        // the full code that the sign-in endpoint expects is the code from the SMS concatenated with the nonce
+        fullCode: code + response.body.nonce,
+      };
+    }
+
+    export async function signInWithCode(fullCode: string) {
+      const response = await niceBackendFetch("/api/v1/auth/sms/sign-in", {
+        method: "POST",
+        accessType: "client",
+        body: {
+          code: fullCode,
+        },
+      });
+      expect(response).toMatchObject({
+        status: 200,
+        body: {
+          access_token: expect.any(String),
+          refresh_token: expect.any(String),
+          is_new_user: expect.any(Boolean),
+          user_id: expect.any(String),
+        },
+        headers: expect.anything(),
+      });
+
+      backendContext.set({
+        userAuth: {
+          accessToken: response.body.access_token,
+          refreshToken: response.body.refresh_token,
+        },
+      });
+
+      return {
+        userId: response.body.user_id,
+        signInResponse: response,
+      };
+    }
+
+    export async function signIn(phoneNumber: string) {
+      const sendSignInCodeRes = await sendSignInCode(phoneNumber);
+      const signInResult = await signInWithCode(sendSignInCodeRes.fullCode);
+      return {
+        ...sendSignInCodeRes,
+        ...signInResult,
       };
     }
   }

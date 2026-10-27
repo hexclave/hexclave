@@ -3,6 +3,7 @@ import { logSignInAttemptInBackground } from "@/lib/compliance-events";
 import { validateRedirectUrl } from "@/lib/redirect-urls";
 import { getApiUrlForRequest } from "@/lib/request-api-url";
 import { getSoleTenancyFromProjectBranch, getTenancy, Tenancy } from "@/lib/tenancies";
+import { PrismaTransaction } from "@/lib/types";
 import { globalPrismaClient } from "@/prisma-client";
 import { Prisma, VerificationCodeType } from "@/generated/prisma/client";
 import { KnownErrors } from "@hexclave/shared";
@@ -46,6 +47,7 @@ export async function claimVerificationCode(options: {
 type CreateCodeOptions<Data, Method extends {}, CallbackUrl extends string | URL | undefined, AlreadyParsed extends boolean = true> = ProjectBranchCombo<AlreadyParsed> & {
   method: Method,
   expiresInMs?: number,
+  transaction?: PrismaTransaction,
   data: Data,
   callbackUrl: CallbackUrl,
 };
@@ -291,7 +293,7 @@ export function createVerificationCodeHandler<
   });
 
   return {
-    async createCode({ method, data, callbackUrl, expiresInMs, ...params }) {
+    async createCode({ method, data, callbackUrl, expiresInMs, transaction, ...params }) {
       const { project, branchId } = parseProjectBranchCombo(params);
       const validatedData = await options.data.validate(data, {
         strict: true,
@@ -302,7 +304,7 @@ export function createVerificationCodeHandler<
         throw new KnownErrors.RedirectUrlNotWhitelisted(callbackUrl.toString());
       }
 
-      const verificationCodePrisma = await globalPrismaClient.verificationCode.create({
+      const verificationCodePrisma = await (transaction ?? globalPrismaClient).verificationCode.create({
         data: {
           projectId: project.id,
           branchId,

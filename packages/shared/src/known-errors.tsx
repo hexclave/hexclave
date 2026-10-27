@@ -1505,12 +1505,22 @@ const OAuthProviderTemporarilyUnavailable = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const SmsDeliveryFailed = createKnownErrorConstructor(
+  KnownError,
+  "SMS_DELIVERY_FAILED",
+  () => [
+    503,
+    "The SMS could not be sent. Please try again later.",
+  ] as const,
+  () => [] as const,
+);
+
 const ContactChannelAlreadyUsedForAuthBySomeoneElse = createKnownErrorConstructor(
   KnownError,
   "CONTACT_CHANNEL_ALREADY_USED_FOR_AUTH_BY_SOMEONE_ELSE",
-  (type: "email", contactChannelValue?: string, wouldWorkIfEmailWasVerified: boolean = false) => [
+  (type: "email" | "phone", contactChannelValue?: string, wouldWorkIfEmailWasVerified: boolean = false) => [
     409,
-    `This ${type} ${contactChannelValue ? `"(${contactChannelValue})"` : ""} is already used for authentication by another account${wouldWorkIfEmailWasVerified ? " but the email is not verified. Please login to your existing account with the method you used to sign up, and then verify your email to sign in with this login method." : "."}`,
+    `This ${type} ${contactChannelValue ? `"(${contactChannelValue})"` : ""} is already used for authentication by another account${wouldWorkIfEmailWasVerified ? ` but the ${type} is not verified. Please login to your existing account with the method you used to sign up, and then verify your ${type} to sign in with this login method.` : "."}`,
     {
       type,
       contact_channel_value: contactChannelValue ?? null,
@@ -2076,6 +2086,7 @@ export const KnownErrors = {
   TeamPermissionNotFound,
   OAuthProviderAccessDenied,
   OAuthProviderTemporarilyUnavailable,
+  SmsDeliveryFailed,
   ContactChannelAlreadyUsedForAuthBySomeoneElse,
   InvalidPollingCodeError,
   ApiKeyNotValid,

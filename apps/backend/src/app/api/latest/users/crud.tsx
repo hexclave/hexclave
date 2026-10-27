@@ -1,4 +1,4 @@
-import { BooleanTrue, Prisma } from "@/generated/prisma/client";
+import { BooleanTrue, ContactChannelType, Prisma } from "@/generated/prisma/client";
 import { getRenderedOrganizationConfigQuery, getRenderedProjectConfigQuery } from "@/lib/config";
 import { demoteAllContactChannelsToNonPrimary, setContactChannelAsPrimaryByValue } from "@/lib/contact-channel";
 import { normalizeEmail } from "@/lib/emails";
@@ -185,6 +185,7 @@ export const userPrismaToCrud = (
 
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   const primaryEmailContactChannel = prisma.contactChannels.find((c) => c.type === 'EMAIL' && c.isPrimary);
+  const primaryPhoneContactChannel = prisma.contactChannels.find((c) => c.type === 'PHONE' && c.isPrimary);
   const passwordAuth = prisma.authMethods.find((m) => m.passwordAuthMethod);
   const otpAuth = prisma.authMethods.find((m) => m.otpAuthMethod);
   const passkeyAuth = prisma.authMethods.find((m) => m.passkeyAuthMethod);
@@ -203,6 +204,9 @@ export const userPrismaToCrud = (
     primary_email: primaryEmailContactChannel?.value || null,
     primary_email_verified: primaryEmailVerified,
     primary_email_auth_enabled: !!primaryEmailContactChannel?.usedForAuth,
+    primary_phone_number: primaryPhoneContactChannel?.value ?? null,
+    primary_phone_number_verified: !!primaryPhoneContactChannel?.isVerified,
+    primary_phone_number_auth_enabled: !!primaryPhoneContactChannel?.usedForAuth,
     profile_image_url: prisma.profileImageUrl,
     signed_up_at_millis: getSignedUpAtMillis(prisma.signedUpAt),
     client_metadata: prisma.clientMetadata,
@@ -263,39 +267,153 @@ async function getPasswordHashFromData(data: {
   }
 }
 
-async function checkAuthData(
+/**
+ * The user object exposes the primary contact channel of each type as a set of `primary_<field>` properties (eg.
+ * `primary_email`, `primary_email_verified`, `primary_email_auth_enabled`). This table maps each contact channel type
+ * to the names of those properties, so the logic that keeps them in sync with the `ContactChannel` table can be shared
+ * between types.
+ */
+const primaryContactChannelFields = {
+  EMAIL: { crudType: "email", valueField: "primary_email" },
+  PHONE: { crudType: "phone", valueField: "primary_phone_number" },
+} as const satisfies Record<ContactChannelType, { crudType: string, valueField: string }>;
+
+async function checkPrimaryContactChannelAuthData(
   tx: PrismaTransaction,
   data: {
     tenancyId: string,
-    oldPrimaryEmail?: string | null,
-    primaryEmail?: string | null,
-    primaryEmailVerified: boolean,
-    primaryEmailAuthEnabled: boolean,
+    type: ContactChannelType,
+    oldValue?: string | null,
+    value?: string | null,
+    verified: boolean,
+    authEnabled: boolean,
   }
 ) {
-  if (!data.primaryEmail && data.primaryEmailAuthEnabled) {
-    throw new StatusError(400, "primary_email_auth_enabled cannot be true without primary_email");
+  const { crudType, valueField } = primaryContactChannelFields[data.type];
+  if (!data.value && data.authEnabled) {
+    throw new StatusError(400, `${valueField}_auth_enabled cannot be true without ${valueField}`);
   }
-  if (!data.primaryEmail && data.primaryEmailVerified) {
-    throw new StatusError(400, "primary_email_verified cannot be true without primary_email");
+  if (!data.value && data.verified) {
+    throw new StatusError(400, `${valueField}_verified cannot be true without ${valueField}`);
   }
-  if (!data.primaryEmailAuthEnabled) return;
-  if (!data.oldPrimaryEmail || data.oldPrimaryEmail !== data.primaryEmail) {
-    if (!data.primaryEmail) {
-      throw new HexclaveAssertionError("primary_email_auth_enabled cannot be true without primary_email");
+  if (!data.authEnabled) return;
+  if (!data.oldValue || data.oldValue !== data.value) {
+    if (!data.value) {
+      throw new HexclaveAssertionError(`${valueField}_auth_enabled cannot be true without ${valueField}`);
     }
     const existingChannelUsedForAuth = await tx.contactChannel.findFirst({
       where: {
         tenancyId: data.tenancyId,
-        type: 'EMAIL',
-        value: data.primaryEmail,
+        type: data.type,
+        value: data.value,
         usedForAuth: BooleanTrue.TRUE,
       }
     });
 
     if (existingChannelUsedForAuth) {
-      throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse("email", data.primaryEmail);
+      throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse(crudType, data.value);
     }
+  }
+}
+
+/**
+ * Applies an update of a user's `primary_<field>` properties (see `primaryContactChannelFields`) to the contact
+ * channels of the given type.
+ *
+ * If there is a new primary value:
+ * - if the value already exists as a contact channel for this user, upgrade it to primary
+ * - if it doesn't exist, create a new primary contact channel
+ * - demote the old primary channel to non-primary (if different from the new one)
+ *
+ * If the new primary value is null, demote the primary contact channel to non-primary (does NOT delete it).
+ */
+async function updatePrimaryContactChannel(
+  tx: PrismaTransaction,
+  options: {
+    tenancyId: string,
+    projectUserId: string,
+    type: ContactChannelType,
+    oldPrimaryChannel: Prisma.ContactChannelGetPayload<{}> | undefined,
+    // undefined = unchanged, null = remove
+    value: string | null | undefined,
+    verified: boolean | undefined,
+    authEnabled: boolean | undefined,
+  },
+) {
+  const { tenancyId, projectUserId, type, oldPrimaryChannel, value } = options;
+
+  // Use the explicitly provided value if set (even if null), otherwise fall back to the existing one
+  const effectiveValue = value !== undefined ? value : (oldPrimaryChannel?.value ?? null);
+  // If the channel is being explicitly removed (set to null), force verified and auth enabled to false
+  const isRemoving = value === null;
+  const effectiveAuthEnabled = isRemoving ? false : (options.authEnabled ?? !!oldPrimaryChannel?.usedForAuth);
+  const effectiveVerified = isRemoving ? false : (options.verified ?? !!oldPrimaryChannel?.isVerified);
+  await checkPrimaryContactChannelAuthData(tx, {
+    tenancyId,
+    type,
+    oldValue: oldPrimaryChannel?.value,
+    value: effectiveValue,
+    verified: effectiveVerified,
+    authEnabled: effectiveAuthEnabled,
+  });
+
+  if (value !== undefined) {
+    if (value === null) {
+      await demoteAllContactChannelsToNonPrimary(tx, { tenancyId, projectUserId, type });
+    } else {
+      const existingChannel = await tx.contactChannel.findFirst({
+        where: { tenancyId, projectUserId, type, value },
+      });
+
+      if (existingChannel) {
+        // Already exists as a contact channel - upgrade it to primary, preserving its verification status unless
+        // explicitly specified
+        await setContactChannelAsPrimaryByValue(tx, {
+          tenancyId,
+          projectUserId,
+          type,
+          value,
+          additionalUpdates: {
+            usedForAuth: effectiveAuthEnabled ? BooleanTrue.TRUE : null,
+            ...(options.verified !== undefined && { isVerified: options.verified }),
+          },
+        });
+      } else {
+        await demoteAllContactChannelsToNonPrimary(tx, { tenancyId, projectUserId, type });
+
+        // A new value is unverified unless explicitly specified otherwise, even if the old one was verified
+        await tx.contactChannel.create({
+          data: {
+            projectUserId,
+            tenancyId,
+            type,
+            value,
+            isVerified: options.verified ?? false,
+            isPrimary: "TRUE",
+            usedForAuth: effectiveAuthEnabled ? BooleanTrue.TRUE : null,
+          },
+        });
+      }
+    }
+    // the verification and auth status were already handled above
+    return;
+  }
+
+  if (oldPrimaryChannel && (options.verified !== undefined || options.authEnabled !== undefined)) {
+    await tx.contactChannel.update({
+      where: {
+        tenancyId_projectUserId_type_isPrimary: {
+          tenancyId,
+          projectUserId,
+          type,
+          isPrimary: "TRUE",
+        },
+      },
+      data: withExternalDbSyncUpdate({
+        ...(options.verified !== undefined && { isVerified: options.verified }),
+        ...(options.authEnabled !== undefined && { usedForAuth: effectiveAuthEnabled ? BooleanTrue.TRUE : null }),
+      }),
+    });
   }
 }
 
@@ -434,6 +552,7 @@ export function getUserQuery(projectId: string, branchId: string, userId: string
       }
 
       const primaryEmailContactChannel = row.ContactChannels.find((c: any) => c.type === 'EMAIL' && c.isPrimary);
+      const primaryPhoneContactChannel = row.ContactChannels.find((c: any) => c.type === 'PHONE' && c.isPrimary);
       const passwordAuth = row.AuthMethods.find((m: any) => m.PasswordAuthMethod);
       const otpAuth = row.AuthMethods.find((m: any) => m.OtpAuthMethod);
       const passkeyAuth = row.AuthMethods.find((m: any) => m.PasskeyAuthMethod);
@@ -457,6 +576,9 @@ export function getUserQuery(projectId: string, branchId: string, userId: string
         primary_email: primaryEmailContactChannel?.value || null,
         primary_email_verified: primaryEmailContactChannel?.isVerified || false,
         primary_email_auth_enabled: primaryEmailContactChannel?.usedForAuth === 'TRUE' ? true : false,
+        primary_phone_number: primaryPhoneContactChannel?.value ?? null,
+        primary_phone_number_verified: primaryPhoneContactChannel?.isVerified ?? false,
+        primary_phone_number_auth_enabled: primaryPhoneContactChannel?.usedForAuth === 'TRUE',
         profile_image_url: row.profileImageUrl,
         signed_up_at_millis: getSignedUpAtMillis(new Date((row.signedUpAt ?? throwErr("signedUpAt should never be null — anonymous users get createdAt, and the backfill migration ensures all existing rows are populated")) + "Z")),
         client_metadata: row.clientMetadata,
@@ -743,11 +865,19 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
     const passwordHash = await getPasswordHashFromData(data);
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const result = await retryTransaction(prisma, async (tx) => {
-      await checkAuthData(tx, {
+      await checkPrimaryContactChannelAuthData(tx, {
         tenancyId: auth.tenancy.id,
-        primaryEmail: primaryEmail,
-        primaryEmailVerified: !!data.primary_email_verified,
-        primaryEmailAuthEnabled: !!data.primary_email_auth_enabled,
+        type: 'EMAIL',
+        value: primaryEmail,
+        verified: !!data.primary_email_verified,
+        authEnabled: !!data.primary_email_auth_enabled,
+      });
+      await checkPrimaryContactChannelAuthData(tx, {
+        tenancyId: auth.tenancy.id,
+        type: 'PHONE',
+        value: data.primary_phone_number,
+        verified: !!data.primary_phone_number_verified,
+        authEnabled: !!data.primary_phone_number_auth_enabled,
       });
 
       const config = auth.tenancy.config;
@@ -841,6 +971,20 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
         });
       }
 
+      if (data.primary_phone_number) {
+        await tx.contactChannel.create({
+          data: {
+            projectUserId: newUser.projectUserId,
+            tenancyId: auth.tenancy.id,
+            type: 'PHONE' as const,
+            value: data.primary_phone_number,
+            isVerified: data.primary_phone_number_verified ?? false,
+            isPrimary: "TRUE",
+            usedForAuth: data.primary_phone_number_auth_enabled ? BooleanTrue.TRUE : null,
+          }
+        });
+      }
+
       if (passwordHash) {
         if (!config.auth.password.allowSignIn) {
           throw new StatusError(StatusError.BadRequest, "Password auth not enabled in the project");
@@ -860,7 +1004,9 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
       }
 
       if (data.otp_auth_enabled) {
-        if (!config.auth.otp.allowSignIn) {
+        // The OTP auth method is shared between email OTP and SMS OTP; which channels it can be used with is determined
+        // by the user's contact channels that have usedForAuth set
+        if (!config.auth.otp.allowSignIn && !config.auth.sms.allowSignIn) {
           throw new StatusError(StatusError.BadRequest, "OTP auth not enabled in the project");
         }
         await tx.authMethod.create({
@@ -998,123 +1144,24 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
       const passwordAuth = oldUser.authMethods.find((m) => m.passwordAuthMethod)?.passwordAuthMethod;
       const passkeyAuth = oldUser.authMethods.find((m) => m.passkeyAuthMethod)?.passkeyAuthMethod;
 
-      // Use the explicitly provided primaryEmail if set (even if null), otherwise fall back to existing
-      const effectivePrimaryEmail = primaryEmail !== undefined ? primaryEmail : (primaryEmailContactChannel?.value ?? null);
-      // If email is being explicitly removed (set to null), force verified and auth enabled to false
-      const isRemovingEmail = primaryEmail === null;
-      const primaryEmailAuthEnabled = isRemovingEmail
-        ? false
-        : (data.primary_email_auth_enabled ?? !!primaryEmailContactChannel?.usedForAuth);
-      const primaryEmailVerified = isRemovingEmail
-        ? false
-        : (data.primary_email_verified ?? !!primaryEmailContactChannel?.isVerified);
-      await checkAuthData(tx, {
+      await updatePrimaryContactChannel(tx, {
         tenancyId: auth.tenancy.id,
-        oldPrimaryEmail: primaryEmailContactChannel?.value,
-        primaryEmail: effectivePrimaryEmail,
-        primaryEmailVerified,
-        primaryEmailAuthEnabled,
+        projectUserId: params.user_id,
+        type: 'EMAIL',
+        oldPrimaryChannel: primaryEmailContactChannel,
+        value: primaryEmail,
+        verified: data.primary_email_verified,
+        authEnabled: data.primary_email_auth_enabled,
       });
-
-      // if there is a new primary email
-      // - if the email already exists as a contact channel for this user, upgrade it to primary
-      // - if it doesn't exist, create a new primary email contact channel
-      // - demote the old primary email to non-primary (if different from the new one)
-      // if the primary email is null
-      // - demote the primary email contact channel to non-primary (does NOT delete it)
-      if (primaryEmail !== undefined) {
-        if (primaryEmail === null) {
-          // Setting primary email to null - demote the primary contact channel to non-primary
-          await demoteAllContactChannelsToNonPrimary(tx, {
-            tenancyId: auth.tenancy.id,
-            projectUserId: params.user_id,
-            type: 'EMAIL',
-          });
-        } else {
-          // Check if a contact channel with this email already exists for this user
-          const existingChannel = await tx.contactChannel.findFirst({
-            where: {
-              tenancyId: auth.tenancy.id,
-              projectUserId: params.user_id,
-              type: 'EMAIL',
-              value: primaryEmail,
-            },
-          });
-
-          if (existingChannel) {
-            // Email already exists as a contact channel - upgrade it to primary
-            // Include isVerified in additionalUpdates if primary_email_verified was specified
-            await setContactChannelAsPrimaryByValue(tx, {
-              tenancyId: auth.tenancy.id,
-              projectUserId: params.user_id,
-              type: 'EMAIL',
-              value: primaryEmail,
-              additionalUpdates: {
-                usedForAuth: primaryEmailAuthEnabled ? BooleanTrue.TRUE : null,
-                ...(data.primary_email_verified !== undefined && { isVerified: data.primary_email_verified }),
-              },
-            });
-          } else {
-            // Email doesn't exist as a contact channel - demote old primary and create new
-            await demoteAllContactChannelsToNonPrimary(tx, {
-              tenancyId: auth.tenancy.id,
-              projectUserId: params.user_id,
-              type: 'EMAIL',
-            });
-
-            // Create the new primary email contact channel
-            // Use primary_email_verified if specified, otherwise default to false
-            await tx.contactChannel.create({
-              data: {
-                projectUserId: params.user_id,
-                tenancyId: auth.tenancy.id,
-                type: 'EMAIL' as const,
-                value: primaryEmail,
-                isVerified: data.primary_email_verified ?? false,
-                isPrimary: "TRUE",
-                usedForAuth: primaryEmailAuthEnabled ? BooleanTrue.TRUE : null,
-              },
-            });
-          }
-        }
-      }
-
-      // if there is a new primary email verified (and we didn't just create/upgrade the primary email)
-      // - update the primary email contact channel if it exists
-      // Note: if primaryEmail was set, the verification status was already handled above
-      if (data.primary_email_verified !== undefined && primaryEmail === undefined && primaryEmailContactChannel) {
-        await tx.contactChannel.update({
-          where: {
-            tenancyId_projectUserId_type_isPrimary: {
-              tenancyId: auth.tenancy.id,
-              projectUserId: params.user_id,
-              type: 'EMAIL',
-              isPrimary: "TRUE",
-            },
-          },
-          data: withExternalDbSyncUpdate({
-            isVerified: data.primary_email_verified,
-          }),
-        });
-      }
-
-      // if primary_email_auth_enabled is being updated without changing the email
-      // - update the primary email contact channel's usedForAuth field
-      if (data.primary_email_auth_enabled !== undefined && primaryEmail === undefined && primaryEmailContactChannel) {
-        await tx.contactChannel.update({
-          where: {
-            tenancyId_projectUserId_type_isPrimary: {
-              tenancyId: auth.tenancy.id,
-              projectUserId: params.user_id,
-              type: 'EMAIL',
-              isPrimary: "TRUE",
-            },
-          },
-          data: withExternalDbSyncUpdate({
-            usedForAuth: primaryEmailAuthEnabled ? BooleanTrue.TRUE : null,
-          }),
-        });
-      }
+      await updatePrimaryContactChannel(tx, {
+        tenancyId: auth.tenancy.id,
+        projectUserId: params.user_id,
+        type: 'PHONE',
+        oldPrimaryChannel: oldUser.contactChannels.find((c) => c.type === 'PHONE' && c.isPrimary),
+        value: data.primary_phone_number,
+        verified: data.primary_phone_number_verified,
+        authEnabled: data.primary_phone_number_auth_enabled,
+      });
 
       // if otp_auth_enabled is true
       // - create a new otp auth method if it doesn't exist
@@ -1123,7 +1170,8 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
       if (data.otp_auth_enabled !== undefined) {
         if (data.otp_auth_enabled) {
           if (!otpAuth) {
-            if (!config.auth.otp.allowSignIn) {
+            // see the comment in onCreate for why SMS sign-in also counts here
+            if (!config.auth.otp.allowSignIn && !config.auth.sms.allowSignIn) {
               throw new StatusError(StatusError.BadRequest, "OTP auth not enabled in the project");
             }
             await tx.authMethod.create({

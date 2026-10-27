@@ -4,7 +4,9 @@ import { ContactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contac
 export type ContactChannel = {
   id: string,
   value: string,
-  type: 'email',
+  // Phone contact channels can be created through the REST API (and by SMS sign-in), so they can show up here even
+  // though the SDK doesn't have dedicated methods for them yet
+  type: 'email' | 'phone',
   isPrimary: boolean,
   isVerified: boolean,
   usedForAuth: boolean,
@@ -15,8 +17,9 @@ export type ContactChannel = {
 }
 
 export type ContactChannelCreateOptions = {
+  // For phone numbers, the value must be in E.164 format (eg. "+15555550100")
   value: string,
-  type: 'email',
+  type: 'email' | 'phone',
   usedForAuth: boolean,
   isPrimary?: boolean,
 }
