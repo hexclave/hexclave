@@ -15,10 +15,11 @@ import { useAdminApp } from "../use-admin-app";
 type SmsServerConfig = CompleteConfig["sms"]["server"];
 type SmsProvider = NonNullable<SmsServerConfig["provider"]>;
 
-// The `test` provider delivers SMS to the local Inbucket instead of sending them, and the backend refuses to use it
-// outside of development/test environments. We only offer it when the dashboard itself runs in development, which is
-// the only setup where the backend is guaranteed to be a local one too.
-const isTestProviderAvailable = process.env.NODE_ENV === "development";
+// The backend relaxes some SMS provider rules in development/test environments (the `test` provider, which delivers SMS
+// to the local Inbucket, and plain HTTP webhook URLs). We only allow these when the dashboard itself runs in
+// development, which is the only setup where the backend is guaranteed to be a local one too.
+const isLocalBackendGuaranteed = process.env.NODE_ENV === "development";
+const allowedWebhookUrlProtocols = isLocalBackendGuaranteed ? ["http:", "https:"] : ["https:"];
 
 const READ_ONLY_IN_DEVELOPMENT_ENVIRONMENT_TOOLTIP = "SMS provider settings contain secrets, so they are read-only in a development environment. Update them in your production deployment instead.";
 
@@ -63,10 +64,10 @@ const smsProviderFormSchema = yup.object({
   webhookUrl: requiredWhenProvider("webhook", "Webhook URL").when("provider", {
     is: "webhook",
     then: (schema) => schema.url("Must be a valid URL").test(
-      "http-or-https",
-      // The backend only delivers SMS webhooks over HTTP(S) (and only HTTPS outside of development environments)
-      "Must be an HTTP or HTTPS URL",
-      (value) => value == null || value === "" || !URL.canParse(value) || ["http:", "https:"].includes(new URL(value).protocol),
+      "allowed-protocol",
+      // The backend only delivers SMS webhooks over HTTPS, or also over plain HTTP in development/test environments
+      isLocalBackendGuaranteed ? "Must be an HTTP or HTTPS URL" : "Must be an HTTPS URL",
+      (value) => value == null || value === "" || !URL.canParse(value) || allowedWebhookUrlProtocols.includes(new URL(value).protocol),
     ),
   }),
   webhookSecret: requiredWhenProvider("webhook", "Signing secret").when("provider", {
@@ -82,7 +83,7 @@ function SmsProviderDialog(props: { trigger: React.ReactNode, currentConfig: Sms
   const providerOptions = [
     { value: "twilio", label: providerLabels.get("twilio") ?? "Twilio" },
     { value: "webhook", label: providerLabels.get("webhook") ?? "Webhook" },
-    ...(isTestProviderAvailable ? [{ value: "test", label: providerLabels.get("test") ?? "Test" }] : []),
+    ...(isLocalBackendGuaranteed ? [{ value: "test", label: providerLabels.get("test") ?? "Test" }] : []),
   ];
 
   return (
