@@ -58,13 +58,21 @@ const smsProviderFormSchema = yup.object({
     const error = getSmsSenderValueError(senderType, value);
     return error === null ? true : this.createError({ message: error });
   }),
-  webhookUrl: requiredWhenProvider("webhook", "Webhook URL").url("Must be a valid URL").test(
-    "http-or-https",
-    // The backend only delivers SMS webhooks over HTTP(S) (and only HTTPS outside of development environments)
-    "Must be an HTTP or HTTPS URL",
-    (value) => value == null || value === "" || !URL.canParse(value) || ["http:", "https:"].includes(new URL(value).protocol),
-  ),
-  webhookSecret: requiredWhenProvider("webhook", "Signing secret").min(16, "Signing secret must be at least 16 characters"),
+  // The format rules of the webhook fields must only apply while the webhook provider is selected; otherwise a value
+  // typed before switching to another provider would block saving on a field that is no longer shown
+  webhookUrl: requiredWhenProvider("webhook", "Webhook URL").when("provider", {
+    is: "webhook",
+    then: (schema) => schema.url("Must be a valid URL").test(
+      "http-or-https",
+      // The backend only delivers SMS webhooks over HTTP(S) (and only HTTPS outside of development environments)
+      "Must be an HTTP or HTTPS URL",
+      (value) => value == null || value === "" || !URL.canParse(value) || ["http:", "https:"].includes(new URL(value).protocol),
+    ),
+  }),
+  webhookSecret: requiredWhenProvider("webhook", "Signing secret").when("provider", {
+    is: "webhook",
+    then: (schema) => schema.min(16, "Signing secret must be at least 16 characters"),
+  }),
 });
 
 function SmsProviderDialog(props: { trigger: React.ReactNode, currentConfig: SmsServerConfig }) {
