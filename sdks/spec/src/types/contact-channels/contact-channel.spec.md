@@ -1,6 +1,6 @@
 # ContactChannel
 
-A contact channel (email address) associated with a user.
+A contact channel (email address or phone number) associated with a user.
 
 
 ## Properties
@@ -9,10 +9,10 @@ id: string
   Unique contact channel identifier.
 
 value: string
-  The actual email address.
+  The actual email address, or the phone number in E.164 format (eg. "+15555550100").
 
-type: "email"
-  Type of contact channel. Currently only "email" is supported.
+type: "email" | "phone"
+  Type of contact channel.
 
 isPrimary: bool
   Whether this is the user's primary email.
@@ -36,7 +36,10 @@ Route: apps/backend/src/app/api/latest/contact-channels/[id]/send-verification-e
 
 Sends a verification email to this contact channel.
 
-Does not error.
+If the contact channel's type is not "email", throws an error before making any request (phone numbers are verified
+with a code sent via SMS instead).
+
+Otherwise, does not error.
 
 
 ### update(options)
