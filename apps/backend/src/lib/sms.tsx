@@ -10,7 +10,7 @@ import { phoneNumberRegex } from "@hexclave/shared/dist/schema-fields";
 import { getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
 import { parseJson } from "@hexclave/shared/dist/utils/json";
 import { isObjectLike } from "@hexclave/shared/dist/utils/objects";
-import { HexclaveAssertionError, StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
+import { HexclaveAssertionError, StatusError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { createHmac } from "node:crypto";
@@ -100,6 +100,10 @@ export async function createRateLimitedSmsCode<T>(
   });
 }
 
+// How long we wait for an SMS provider (Twilio or the project's webhook) to accept a message. Also documented to webhook
+// receivers in the dashboard ("respond with a 2xx status within 10 seconds").
+const SMS_PROVIDER_TIMEOUT_MS = 10_000;
+
 // Twilio error codes that are caused by the recipient phone number rather than the project's configuration. See
 // https://www.twilio.com/docs/api/errors
 const TWILIO_INVALID_RECIPIENT_ERROR_CODES = new Set([
@@ -115,22 +119,33 @@ async function sendSmsWithTwilio(server: SmsServerConfig, options: SendSmsOption
     throw new HexclaveAssertionError("Twilio SMS config is incomplete despite provider being twilio; the config schema should have rejected this");
   }
 
-  const response = await fetch(urlString`https://api.twilio.com/2010-04-01/Accounts/${server.twilioAccountSid}/Messages.json`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Basic ${Buffer.from(`${server.twilioAccountSid}:${server.twilioAuthToken}`).toString("base64")}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      To: options.to,
-      Body: options.body,
-      // Phone numbers, short codes and alphanumeric sender IDs all go into `From`; a messaging service instead picks
-      // a sender from its pool for each message (eg. the right short code for the destination country)
-      ...server.senderType === "messaging_service"
-        ? { MessagingServiceSid: server.senderValue }
-        : { From: server.senderValue },
-    }),
-  });
+  let response;
+  try {
+    response = await fetch(urlString`https://api.twilio.com/2010-04-01/Accounts/${server.twilioAccountSid}/Messages.json`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${Buffer.from(`${server.twilioAccountSid}:${server.twilioAuthToken}`).toString("base64")}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        To: options.to,
+        Body: options.body,
+        // Phone numbers, short codes and alphanumeric sender IDs all go into `From`; a messaging service instead picks
+        // a sender from its pool for each message (eg. the right short code for the destination country)
+        ...server.senderType === "messaging_service"
+          ? { MessagingServiceSid: server.senderValue }
+          : { From: server.senderValue },
+      }),
+      // SMS are sent synchronously within the user's request, so a stalled connection to Twilio must not hold the
+      // request open indefinitely
+      signal: AbortSignal.timeout(SMS_PROVIDER_TIMEOUT_MS),
+    });
+  } catch (error) {
+    // Timeouts, connection errors, DNS failures, ... are transient delivery problems that the user can retry, just
+    // like they are for the webhook provider
+    captureError("sms-twilio-request-failed", error);
+    throw new KnownErrors.SmsDeliveryFailed();
+  }
 
   if (response.ok) {
     return;
@@ -149,8 +164,6 @@ async function sendSmsWithTwilio(server: SmsServerConfig, options: SendSmsOption
   }
   throw new KnownErrors.SmsDeliveryFailed();
 }
-
-const SMS_WEBHOOK_TIMEOUT_MS = 10_000;
 
 /**
  * Signs an SMS webhook request body. The signature covers the timestamp too, so receivers can reject replayed
@@ -191,7 +204,7 @@ async function sendSmsWithWebhook(tenancy: Tenancy, server: SmsServerConfig, opt
 
   let response;
   try {
-    response = await postToSmsWebhook(server.webhookUrl, { headers, body, signal: AbortSignal.timeout(SMS_WEBHOOK_TIMEOUT_MS) });
+    response = await postToSmsWebhook(server.webhookUrl, { headers, body, signal: AbortSignal.timeout(SMS_PROVIDER_TIMEOUT_MS) });
   } catch (error) {
     // SSRF violations are reported as 400s, so the project can see what's wrong with their URL
     if (error instanceof StatusError) throw error;
