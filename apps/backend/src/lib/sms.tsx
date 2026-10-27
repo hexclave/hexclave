@@ -106,9 +106,12 @@ const SMS_PROVIDER_TIMEOUT_MS = 10_000;
 
 // Twilio error codes that are caused by the recipient phone number rather than the project's configuration. See
 // https://www.twilio.com/docs/api/errors
+//
+// 21408 ("Permission to send an SMS has not been enabled for the region indicated by the 'To' number") is deliberately
+// not in this list: it is caused by the geo permissions of the project's Twilio account, not by the recipient, so it
+// must surface as a delivery failure rather than telling the user that their phone number is wrong.
 const TWILIO_INVALID_RECIPIENT_ERROR_CODES = new Set([
   21211, // Invalid 'To' phone number
-  21408, // Permission to send an SMS has not been enabled for the region indicated by the 'To' number
   21610, // Attempt to send to unsubscribed recipient
   21612, // The 'To' phone number is not currently reachable via SMS
   21614, // 'To' number is not a valid mobile number
