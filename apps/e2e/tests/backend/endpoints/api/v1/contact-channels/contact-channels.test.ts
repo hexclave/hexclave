@@ -749,3 +749,16 @@ it("normalizes email values when updating an email contact channel without speci
   expect(response.status).toBe(200);
   expect(response.body.value).toBe("new.address@example.com");
 });
+
+it("keeps an email contact channel verified when updating it to its current value in a different casing", async ({ expect }) => {
+  const email = backendContext.value.mailbox.emailAddress;
+  await Auth.fastSignUpWithEmail();
+  const channelId = await getPrimaryEmailChannelId();
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${channelId}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: email.toUpperCase() },
+  });
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({ value: email, is_verified: true });
+});

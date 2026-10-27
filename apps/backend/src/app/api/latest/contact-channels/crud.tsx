@@ -163,9 +163,12 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
       // validate (and normalize) against the existing type here, eg. when only the value of a phone channel changes.
       // An empty value for an email channel is a no-op rather than an error, for backwards compatibility: before phone
       // channels existed, requests that included `type: "email"` treated `value: ""` as "unchanged".
-      const value = data.value === undefined || (existingType === "email" && data.value === "")
+      const normalizedValue = data.value === undefined || (existingType === "email" && data.value === "")
         ? undefined
         : normalizeContactChannelValue(existingType, data.value);
+      // Submitting the current value again (possibly in a form that normalizes to the same value, eg. an email with
+      // different casing) is also treated as unchanged, as a changed value resets the verification status below
+      const value = normalizedValue === existingContactChannel.value ? undefined : normalizedValue;
 
       // if usedForAuth is set to true, make sure no other account uses this channel for auth
       if (data.used_for_auth) {

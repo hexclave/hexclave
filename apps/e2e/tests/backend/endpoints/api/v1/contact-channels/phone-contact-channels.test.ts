@@ -90,6 +90,35 @@ it("should reject changing the type of a contact channel", async ({ expect }) =>
   `);
 });
 
+it("should keep a phone contact channel verified when updating it to its current value", async ({ expect }) => {
+  await Auth.fastSignUpWithEmail();
+  const phoneNumber = generateTestPhoneNumber();
+  const createResponse = await createPhoneContactChannel(phoneNumber, { accessType: "server", isVerified: true });
+  expect(createResponse.body.is_verified).toBe(true);
+
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${createResponse.body.id}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: phoneNumber },
+  });
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({ value: phoneNumber, is_verified: true });
+});
+
+it("should unverify a phone contact channel when updating it to a different value", async ({ expect }) => {
+  await Auth.fastSignUpWithEmail();
+  const createResponse = await createPhoneContactChannel(generateTestPhoneNumber(), { accessType: "server", isVerified: true });
+  const newPhoneNumber = generateTestPhoneNumber();
+
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${createResponse.body.id}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: newPhoneNumber },
+  });
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({ value: newPhoneNumber, is_verified: false });
+});
+
 it("should allow a primary phone number alongside a primary email", async ({ expect }) => {
   await Auth.fastSignUpWithEmail();
   const phoneNumber = generateTestPhoneNumber();
