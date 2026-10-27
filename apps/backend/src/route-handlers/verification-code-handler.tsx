@@ -298,10 +298,14 @@ export function createVerificationCodeHandler<
       const validatedData = await options.data.validate(data, {
         strict: true,
       });
-      const tenancy = await getSoleTenancyFromProjectBranch(project.id, branchId);
-
-      if (callbackUrl !== undefined && !validateRedirectUrl(callbackUrl, tenancy)) {
-        throw new KnownErrors.RedirectUrlNotWhitelisted(callbackUrl.toString());
+      if (callbackUrl !== undefined) {
+        // Reuse the caller's tenancy if it has one. The lookup runs on `globalPrismaClient`, so when the caller passes a
+        // `transaction` (eg. `createRateLimitedSmsCode`, which holds an advisory lock in it), looking the tenancy up again
+        // would take a second pool connection while the first one is still held.
+        const tenancy = params.tenancy ?? await getSoleTenancyFromProjectBranch(project.id, branchId);
+        if (!validateRedirectUrl(callbackUrl, tenancy)) {
+          throw new KnownErrors.RedirectUrlNotWhitelisted(callbackUrl.toString());
+        }
       }
 
       const verificationCodePrisma = await (transaction ?? globalPrismaClient).verificationCode.create({
