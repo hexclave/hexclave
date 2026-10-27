@@ -51,6 +51,27 @@
                         "example": true,
                         "description": "Whether the primary email is used for authentication. If this is set to `false`, the user will not be able to sign in with the primary email with password or OTP"
                       },
+                      "primary_phone_number": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          null
+                        ],
+                        "example": "+15555550100",
+                        "description": "Primary phone number, in E.164 format"
+                      },
+                      "primary_phone_number_verified": {
+                        "type": "boolean",
+                        "example": true,
+                        "description": "Whether the primary phone number has been verified to belong to this user"
+                      },
+                      "primary_phone_number_auth_enabled": {
+                        "type": "boolean",
+                        "example": true,
+                        "description": "Whether the primary phone number is used for authentication. If this is set to `true`, the user can sign in with a one-time code sent via SMS, if enabled in the project settings"
+                      },
                       "display_name": {
                         "type": [
                           "string",
@@ -295,6 +316,8 @@
                       "id",
                       "primary_email_verified",
                       "primary_email_auth_enabled",
+                      "primary_phone_number_verified",
+                      "primary_phone_number_auth_enabled",
                       "signed_up_at_millis",
                       "last_active_at_millis",
                       "is_anonymous",
@@ -378,6 +401,27 @@
                         "example": true,
                         "description": "Whether the primary email is used for authentication. If this is set to `false`, the user will not be able to sign in with the primary email with password or OTP"
                       },
+                      "primary_phone_number": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          null
+                        ],
+                        "example": "+15555550100",
+                        "description": "Primary phone number, in E.164 format"
+                      },
+                      "primary_phone_number_verified": {
+                        "type": "boolean",
+                        "example": true,
+                        "description": "Whether the primary phone number has been verified to belong to this user"
+                      },
+                      "primary_phone_number_auth_enabled": {
+                        "type": "boolean",
+                        "example": true,
+                        "description": "Whether the primary phone number is used for authentication. If this is set to `true`, the user can sign in with a one-time code sent via SMS, if enabled in the project settings"
+                      },
                       "display_name": {
                         "type": [
                           "string",
@@ -622,6 +666,8 @@
                       "id",
                       "primary_email_verified",
                       "primary_email_auth_enabled",
+                      "primary_phone_number_verified",
+                      "primary_phone_number_auth_enabled",
                       "signed_up_at_millis",
                       "last_active_at_millis",
                       "is_anonymous",
