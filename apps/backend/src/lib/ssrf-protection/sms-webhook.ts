@@ -12,8 +12,6 @@ import {
 } from "./core";
 
 const SMS_WEBHOOK_SSRF_PROTECTION_ERROR = "SMS webhook URLs must use HTTPS and resolve only to public internet addresses.";
-// We only care about the status code, so there's no reason to buffer large responses
-const SMS_WEBHOOK_MAX_RESPONSE_BYTES = 64 * 1024;
 
 /**
  * SMS webhook URLs are provided by the project, so outside of development and tests (where they legitimately point at
@@ -57,7 +55,9 @@ export async function postToSmsWebhook(urlString: string, options: { headers: He
     body: options.body,
     signal: options.signal,
     lookup: safeSmsWebhookDnsLookup,
-    maxResponseBytes: SMS_WEBHOOK_MAX_RESPONSE_BYTES,
+    // We only care about the status code. Rejecting large bodies instead would report a webhook that accepted the
+    // message as a delivery failure, and the user would request a second code.
+    responseBody: { type: "status-only" },
     description: "SMS webhook",
   });
 }

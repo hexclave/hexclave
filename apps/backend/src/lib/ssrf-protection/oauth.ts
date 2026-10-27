@@ -93,7 +93,7 @@ export async function safeOAuthFetch(
     method: options.method,
     signal: options.signal,
     lookup: safeOAuthDnsLookup,
-    maxResponseBytes: OAUTH_DOCUMENT_MAX_BYTES,
+    responseBody: { type: "buffered", maxBytes: OAUTH_DOCUMENT_MAX_BYTES },
     description: "OAuth provider",
   });
 }
