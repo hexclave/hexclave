@@ -499,11 +499,12 @@ export const environmentConfigSchema = branchConfigSchema.concat(yupObject({
       senderValue: schemaFields.smsSenderValueSchema.optional().nonEmpty(),
       webhookUrl: schemaFields.urlSchema.optional(),
       webhookSecret: schemaFields.smsWebhookSecretSchema.optional().nonEmpty(),
-    }).test(
+    // `yupObject` defaults to undefined, and custom tests also run on undefined values (eg. for `sms: {}`), so the
+    // test has to handle a missing server; `.optional()` makes the inferred type reflect that
+    }).optional().test(
       "sms-provider-fields",
       "SMS provider config is incomplete or invalid",
       function (server) {
-        // `yupObject` defaults to undefined, and custom tests also run on undefined values (eg. for `sms: {}`)
         if (server == null) return true;
         switch (server.provider) {
           case "twilio": {
