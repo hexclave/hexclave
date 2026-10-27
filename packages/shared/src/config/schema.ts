@@ -503,6 +503,8 @@ export const environmentConfigSchema = branchConfigSchema.concat(yupObject({
       "sms-provider-fields",
       "SMS provider config is incomplete or invalid",
       function (server) {
+        // `yupObject` defaults to undefined, and custom tests also run on undefined values (eg. for `sms: {}`)
+        if (server == null) return true;
         switch (server.provider) {
           case "twilio": {
             if ([server.twilioAccountSid, server.twilioAuthToken, server.senderType, server.senderValue].some(field => field == null || field === "")) {
@@ -543,6 +545,10 @@ export const environmentConfigSchema = branchConfigSchema.concat(yupObject({
   analytics: environmentAnalyticsSchema,
   customDashboards: schemaFields.customDashboardsSchema,
 }));
+
+import.meta.vitest?.test("environmentConfigSchema accepts an sms config without a server", async ({ expect }) => {
+  await expect(environmentConfigSchema.validate({ sms: {} })).resolves.toMatchObject({ sms: {} });
+});
 
 export const organizationConfigSchema = environmentConfigSchema.concat(yupObject({}));
 
