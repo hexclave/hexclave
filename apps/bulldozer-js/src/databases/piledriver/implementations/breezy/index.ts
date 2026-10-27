@@ -12,6 +12,15 @@ import { planHeapObjects } from "./heap-plan.js";
 
 const breezyPiledriverProcessStartedAtMillis = Date.now();
 const gcSchemaVersion = 3;
+/**
+ * How many garbage objects GC deletes per LMDB transaction.
+ *
+ * GC waits for each commit before starting the next, and a commit takes ~4 ms, so deleting one
+ * object per transaction capped GC at ~200 objects/s (base, which lets its writes share commits,
+ * did ~1,500/s). Each transaction holds LMDB's single write lock, so a bigger batch also delays
+ * normal writes that arrive during GC; 256 per transaction raised write p50 from ~18 to ~78 ms.
+ */
+const gcDeletionsPerTransaction = 64;
 
 /**
  * Returns `items` sorted by their LMDB key, for writing in that order.
@@ -381,57 +390,67 @@ export function declareBreezyPiledriverDatabase(
 
     const rangeEnd = Buffer.alloc(8);
     rangeEnd.writeBigUInt64BE(BigInt(cutoffTimestampMillis));
-    const nextCandidate = () => {
+    const readCandidates = (limit: number) => {
       lmdbRoot.resetReadTxn();
-      for (const { key } of lmdbCandidates.getRange({ end: rangeEnd, limit: 1 })) return Buffer.from(key);
-      return null;
+      const candidates: Buffer[] = [];
+      for (const { key } of lmdbCandidates.getRange({ end: rangeEnd, limit })) candidates.push(Buffer.from(key));
+      return candidates;
+    };
+
+    /** Deletes one zero-reference heap object and decrements its children. Must run inside `transact`. */
+    const deleteCandidate = (indexedCandidate: Buffer, version: number, writes: Promise<boolean>[]) => {
+      const heapKeyBuffer = Buffer.from(indexedCandidate.subarray(8));
+      const heapKey = arrayBuffer(heapKeyBuffer);
+      if (!lmdbCandidates.doesExist(indexedCandidate)) {
+        result.objects.candidatesSkipped++;
+        return;
+      }
+      const storedMetadata = lmdbMetadata.get(heapKeyBuffer) ?? throwErr("Piledriver GC candidate has no reference metadata");
+      const metadata = parseMetadata(storedMetadata);
+      const eligibleAtMillis = metadata.lastDereferencedAtMillis ?? metadata.createdAtMillis;
+      const expectedCandidate = candidateKey(heapKey, eligibleAtMillis);
+      if (metadata.generation !== activeGcGeneration()) throw new Error("Piledriver GC candidate belongs to an inactive generation");
+      if (metadata.referenceCount !== 0) throw new Error("Piledriver GC candidate still has live references");
+      if (!indexedCandidate.equals(expectedCandidate)) throw new Error("Piledriver GC candidate index is inconsistent with its metadata");
+
+      const heapValue = lmdbHeap.get(heapKeyBuffer) ?? throwErr("Piledriver GC found metadata for a missing heap object");
+      const references = [...aggregateSerializedReferences(arrayBuffer(heapValue)).values()];
+      const deltas = references.map(reference => ({ key: reference.key, count: -reference.count }));
+      result.objects.childObjectsBecameUnreferenced += changeReferenceDeltas(deltas, eligibleAtMillis, version, writes, noHeapKeysCreated);
+      result.references.outgoingEdgesProcessed += references.reduce((sum, reference) => sum + reference.count, 0);
+      writes.push(lmdbHeap.remove(heapKeyBuffer), lmdbMetadata.remove(heapKeyBuffer), lmdbCandidates.remove(indexedCandidate));
+
+      result.objects.deleted++;
+      result.reclaimed.heapPayloadBytes += heapValue.byteLength;
+      result.reclaimed.heapKeyBytes += heapKeyBuffer.byteLength;
+      result.reclaimed.metadataValueBytes += storedMetadata.byteLength;
+      result.reclaimed.metadataKeyBytes += heapKeyBuffer.byteLength;
+      result.reclaimed.candidateKeyBytes += indexedCandidate.byteLength;
+      if (result.samples.deletedObjectKeysBase64.length < result.samples.limitPerCategory) result.samples.deletedObjectKeysBase64.push(encodeBase64(heapKeyBuffer));
+      result.reclaimed.smallestHeapPayloadBytes = Math.min(result.reclaimed.smallestHeapPayloadBytes ?? Infinity, heapValue.byteLength);
+      result.reclaimed.largestHeapPayloadBytes = Math.max(result.reclaimed.largestHeapPayloadBytes ?? 0, heapValue.byteLength);
     };
 
     try {
-      let candidate = nextCandidate();
-      while (candidate !== null && result.objects.deleted < maxObjects) {
-        if (candidate.byteLength <= 8) throw new Error("Invalid Piledriver GC candidate key");
-        const indexedCandidate = candidate;
-        const heapKeyBuffer = Buffer.from(candidate.subarray(8));
-        const heapKey = arrayBuffer(heapKeyBuffer);
-        result.objects.candidatesExamined++;
+      while (result.objects.deleted < maxObjects) {
+        const batch = readCandidates(Math.min(gcDeletionsPerTransaction, maxObjects - result.objects.deleted));
+        if (batch.length === 0) break;
+        for (const candidate of batch) {
+          if (candidate.byteLength <= 8) throw new Error("Invalid Piledriver GC candidate key");
+        }
+        result.objects.candidatesExamined += batch.length;
         result.objects.candidatesQueuedFromIndex = result.objects.candidatesExamined;
-        result.scanning.candidateIndexEntriesRead++;
+        result.scanning.candidateIndexEntriesRead += batch.length;
 
+        // Two objects in one batch can point at the same child. That's safe because reads inside a
+        // transaction see its own earlier writes, so the second decrement starts from the first's
+        // result. A child that reaches zero becomes a candidate here and is deleted by a later batch.
         await transact((version, writes) => {
-          if (!lmdbCandidates.doesExist(indexedCandidate)) {
-            result.objects.candidatesSkipped++;
-            return;
-          }
-          const storedMetadata = lmdbMetadata.get(heapKeyBuffer) ?? throwErr("Piledriver GC candidate has no reference metadata");
-          const metadata = parseMetadata(storedMetadata);
-          const eligibleAtMillis = metadata.lastDereferencedAtMillis ?? metadata.createdAtMillis;
-          const expectedCandidate = candidateKey(heapKey, eligibleAtMillis);
-          if (metadata.generation !== activeGcGeneration()) throw new Error("Piledriver GC candidate belongs to an inactive generation");
-          if (metadata.referenceCount !== 0) throw new Error("Piledriver GC candidate still has live references");
-          if (!indexedCandidate.equals(expectedCandidate)) throw new Error("Piledriver GC candidate index is inconsistent with its metadata");
-
-          const heapValue = lmdbHeap.get(heapKeyBuffer) ?? throwErr("Piledriver GC found metadata for a missing heap object");
-          const references = [...aggregateSerializedReferences(arrayBuffer(heapValue)).values()];
-          const deltas = references.map(reference => ({ key: reference.key, count: -reference.count }));
-          result.objects.childObjectsBecameUnreferenced += changeReferenceDeltas(deltas, eligibleAtMillis, version, writes, noHeapKeysCreated);
-          result.references.outgoingEdgesProcessed += references.reduce((sum, reference) => sum + reference.count, 0);
-          writes.push(lmdbHeap.remove(heapKeyBuffer), lmdbMetadata.remove(heapKeyBuffer), lmdbCandidates.remove(indexedCandidate));
-
-          result.objects.deleted++;
-          result.reclaimed.heapPayloadBytes += heapValue.byteLength;
-          result.reclaimed.heapKeyBytes += heapKeyBuffer.byteLength;
-          result.reclaimed.metadataValueBytes += storedMetadata.byteLength;
-          result.reclaimed.metadataKeyBytes += heapKeyBuffer.byteLength;
-          result.reclaimed.candidateKeyBytes += indexedCandidate.byteLength;
-          if (result.samples.deletedObjectKeysBase64.length < result.samples.limitPerCategory) result.samples.deletedObjectKeysBase64.push(encodeBase64(heapKeyBuffer));
-          result.reclaimed.smallestHeapPayloadBytes = Math.min(result.reclaimed.smallestHeapPayloadBytes ?? Infinity, heapValue.byteLength);
-          result.reclaimed.largestHeapPayloadBytes = Math.max(result.reclaimed.largestHeapPayloadBytes ?? 0, heapValue.byteLength);
+          for (const candidate of batch) deleteCandidate(candidate, version, writes);
         });
-        candidate = nextCandidate();
       }
 
-      const moreEligibleWorkMayRemain = candidate !== null;
+      const moreEligibleWorkMayRemain = readCandidates(1).length > 0;
       result.limits.limitReached = result.objects.deleted === maxObjects;
       result.limits.moreEligibleWorkMayRemain = moreEligibleWorkMayRemain;
       result.scanning.candidateIndexPagesRead = result.objects.candidatesExamined === 0 ? 0 : 1;

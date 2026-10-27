@@ -593,4 +593,341 @@ describe("Breezy Piledriver", () => {
       await rm(path, { recursive: true, force: true });
     }
   });
+
+  it("decrements a child once per parent when both parents are deleted in the same GC transaction", async () => {
+    // GC deletes several objects per transaction. When two of them point at the same child, the
+    // second decrement must start from the first one's result, or the child is left at a count of
+    // 1 with nothing pointing at it and is never collected.
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    const firstRootKey = new TextEncoder().encode("first").buffer;
+    const secondRootKey = new TextEncoder().encode("second").buffer;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const sharedChild = asHeapObject({ value: "shared" });
+    await writer.setRootObject(firstRootKey, asHeapObject({ child: sharedChild }));
+    await writer.setRootObject(secondRootKey, asHeapObject({ child: sharedChild }));
+    expect((await debugSnapshot(writer)).heap).toHaveLength(3);
+    await writer.deleteRootObject(firstRootKey);
+    await writer.deleteRootObject(secondRootKey);
+    await writer.close();
+
+    const cutoff = Date.now() + 1;
+    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
+    try {
+      // A limit of 2 makes exactly the two parents one batch.
+      const parents = await collector.collectGarbage(cutoff, 2);
+      expect(parents.objects.deleted).toBe(2);
+      expect(parents.objects.childObjectsBecameUnreferenced).toBe(1);
+      expect(parents.limits.moreEligibleWorkMayRemain).toBe(true);
+
+      const child = await collector.collectGarbage(cutoff);
+      expect(child.objects.deleted).toBe(1);
+      expect(child.limits.moreEligibleWorkMayRemain).toBe(false);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(0);
+      expect(await listEntries(inspector.declareKvStore("piledriver-gc-reference-metadata-v3"))).toEqual([]);
+      expect(await listEntries(inspector.declareKvStore("piledriver-gc-zero-reference-candidates-v3"))).toEqual([]);
+    } finally {
+      await inspector.close();
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("collects garbage spanning several GC transactions and stops at the requested limit", async () => {
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    const lmdbOptions = { path, dbId: crypto.randomUUID() };
+    // More than one transaction's worth of deletions (64), so the limit lands mid-batch.
+    const garbageCount = 150;
+    const rootKeys = Array.from({ length: garbageCount }, (_, index) => new TextEncoder().encode(`root-${index}`).buffer);
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    for (const [index, rootKey] of rootKeys.entries()) await writer.setRootObject(rootKey, asHeapObject({ index }));
+    const keptRootKey = new TextEncoder().encode("kept").buffer;
+    await writer.setRootObject(keptRootKey, asHeapObject({ kept: true }));
+    for (const rootKey of rootKeys) await writer.deleteRootObject(rootKey);
+    await writer.close();
+
+    const cutoff = Date.now() + 1;
+    const collector = declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 });
+    try {
+      const first = await collector.collectGarbage(cutoff, 100);
+      expect(first.objects.deleted).toBe(100);
+      expect(first.limits.limitReached).toBe(true);
+      expect(first.limits.moreEligibleWorkMayRemain).toBe(true);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(garbageCount - 100 + 1);
+
+      const rest = await collector.collectGarbage(cutoff);
+      expect(rest.objects.deleted).toBe(garbageCount - 100);
+      expect(rest.limits.moreEligibleWorkMayRemain).toBe(false);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(1);
+      const kept = (await collector.getRootObject(keptRootKey)).object;
+      if (typeof kept !== "object" || kept === null || !(isPiledriverHeapObjectSymbol in kept)) throw new Error("Expected the kept root to be a heap object");
+      expect(await kept.get()).toEqual({ kept: true });
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Breezy Piledriver garbage collection in batches", () => {
+  const rootKey = (name: string) => new TextEncoder().encode(name).buffer;
+  const openTemporary = async () => {
+    const path = await mkdtemp(join(tmpdir(), "piledriver-breezy-"));
+    return { path, lmdbOptions: { path, dbId: crypto.randomUUID() } };
+  };
+  // GC only collects garbage from before the current process started, so tests "restart" by opening
+  // a second database whose process start is after everything written so far.
+  const openCollector = (lmdbOptions: { path: string, dbId: string }) => {
+    const cutoff = Date.now() + 1;
+    return { cutoff, collector: declareBreezyPiledriverDatabase(lmdbOptions, { garbageCollectionProcessStartedAtMillis: cutoff + 1 }) };
+  };
+  /** Writes `count` roots, each pointing at its own heap object, then deletes them all. */
+  const writeGarbage = async (database: PiledriverDatabase, count: number, valueOf: (index: number) => PiledriverObject = index => asHeapObject({ index })) => {
+    for (let index = 0; index < count; index++) await database.setRootObject(rootKey(`garbage-${index}`), valueOf(index));
+    for (let index = 0; index < count; index++) await database.deleteRootObject(rootKey(`garbage-${index}`));
+  };
+  const expectHeapObject = (value: PiledriverObject) => {
+    if (typeof value !== "object" || value === null || !(isPiledriverHeapObjectSymbol in value)) throw new Error("Expected a heap object");
+    return value;
+  };
+  const expectPlainObject = (value: PiledriverObject) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value) || isPiledriverHeapObjectSymbol in value) throw new Error("Expected a plain object");
+    return value;
+  };
+
+  // The batch size is 64, so these sit on either side of one and two full batches.
+  it.each([1, 63, 64, 65, 128, 129])("collects all of %i garbage objects in one call", async (garbageCount) => {
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(rootKey("kept"), asHeapObject({ kept: true }));
+    await writeGarbage(writer, garbageCount);
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      const result = await collector.collectGarbage(cutoff, 10_000);
+      expect(result.objects.deleted).toBe(garbageCount);
+      expect(result.objects.candidatesExamined).toBe(garbageCount);
+      expect(result.limits.limitReached).toBe(false);
+      expect(result.limits.moreEligibleWorkMayRemain).toBe(false);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(1);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { garbageCount: 65, maxObjects: 64, expectedDeleted: 64, limitReached: true, moreEligibleWorkMayRemain: true },
+    { garbageCount: 64, maxObjects: 64, expectedDeleted: 64, limitReached: true, moreEligibleWorkMayRemain: false },
+    { garbageCount: 130, maxObjects: 129, expectedDeleted: 129, limitReached: true, moreEligibleWorkMayRemain: true },
+    { garbageCount: 0, maxObjects: 10, expectedDeleted: 0, limitReached: false, moreEligibleWorkMayRemain: false },
+  ])("stops at maxObjects $maxObjects with $garbageCount garbage objects", async ({ garbageCount, maxObjects, expectedDeleted, limitReached, moreEligibleWorkMayRemain }) => {
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(rootKey("kept"), asHeapObject({ kept: true }));
+    await writeGarbage(writer, garbageCount);
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      const result = await collector.collectGarbage(cutoff, maxObjects);
+      expect(result.objects.deleted).toBe(expectedDeleted);
+      expect(result.limits.limitReached).toBe(limitReached);
+      expect(result.limits.moreEligibleWorkMayRemain).toBe(moreEligibleWorkMayRemain);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(1 + garbageCount - expectedDeleted);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("collects a child shared by parents that land in different batches", async () => {
+    // 65 parents fill one batch and spill one into the next, so the shared child's count is
+    // decremented by two different transactions and only reaches zero in the second.
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const sharedChild = asHeapObject({ value: "shared" });
+    await writer.setRootObject(rootKey("kept"), asHeapObject({ kept: true }));
+    await writeGarbage(writer, 65, index => asHeapObject({ index, child: sharedChild }));
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
+    try {
+      const result = await collector.collectGarbage(cutoff, 10_000);
+      expect(result.objects.deleted).toBe(66);
+      expect(result.objects.childObjectsBecameUnreferenced).toBe(1);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(1);
+      expect(await listEntries(inspector.declareKvStore("piledriver-gc-reference-metadata-v3"))).toHaveLength(1);
+      expect(await listEntries(inspector.declareKvStore("piledriver-gc-zero-reference-candidates-v3"))).toEqual([]);
+    } finally {
+      await inspector.close();
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("collects a child that one parent references several times alongside another parent in the same batch", async () => {
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    const child = asHeapObject({ value: "child" });
+    await writeGarbage(writer, 2, index => asHeapObject(index === 0 ? { a: child, b: child, list: [child, child] } : { child }));
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      const result = await collector.collectGarbage(cutoff, 10_000);
+      expect(result.objects.deleted).toBe(3);
+      expect(result.references.outgoingEdgesProcessed).toBe(5);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(0);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("follows a cascade much deeper than one batch within a single call", async () => {
+    // Each link only becomes a candidate once its parent is deleted, so every batch holds one object
+    // and the loop has to keep picking up candidates that earlier batches created.
+    const { path, lmdbOptions } = await openTemporary();
+    const depth = 150;
+    let chain = asHeapObject({ leaf: true });
+    for (let index = 0; index < depth; index++) chain = asHeapObject({ index, next: chain });
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(rootKey("chain"), chain);
+    await writer.deleteRootObject(rootKey("chain"));
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      const partial = await collector.collectGarbage(cutoff, 10);
+      expect(partial.objects.deleted).toBe(10);
+      expect(partial.limits.moreEligibleWorkMayRemain).toBe(true);
+      const rest = await collector.collectGarbage(cutoff, 10_000);
+      expect(rest.objects.deleted).toBe(depth + 1 - 10);
+      expect(rest.limits.moreEligibleWorkMayRemain).toBe(false);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(0);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back a whole batch when one of its objects fails a safety check", async () => {
+    // If a batch were applied object by object, the objects before the bad one would stay deleted
+    // while the error reported that the GC call failed. The batch must be all-or-nothing.
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writeGarbage(writer, 40);
+    await writer.close();
+
+    const inspector = declareLmdbLowLevelDatabase(lmdbOptions);
+    const metadataStore = inspector.declareKvStore("piledriver-gc-reference-metadata-v3");
+    const candidates = await listEntries(inspector.declareKvStore("piledriver-gc-zero-reference-candidates-v3"));
+    expect(candidates).toHaveLength(40);
+    // Give the 20th candidate in collection order a live reference count, as if a write had raced in.
+    const corruptedKey = new Uint8Array(candidates[19].key).slice(8).buffer;
+    const corrupted = (await metadataStore.get(corruptedKey)).buffer ?? throwErr("Expected metadata for a GC candidate");
+    const written = await metadataStore.setAll([{ key: corruptedKey, value: new TextEncoder().encode(JSON.stringify({ ...parseJson(corrupted), referenceCount: 1 })).buffer }]);
+    await inspector.waitUntilAvailable(written.seq);
+    await inspector.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      await expect(collector.collectGarbage(cutoff, 10_000)).rejects.toThrow("still has live references");
+      expect((await debugSnapshot(collector)).heap).toHaveLength(40);
+      // The failed call must not leave GC marked as running.
+      await expect(collector.collectGarbage(cutoff, 10_000)).rejects.toThrow("still has live references");
+      // A limit that ends the first batch before the bad object deletes exactly that many.
+      const beforeCorrupted = await collector.collectGarbage(cutoff, 19);
+      expect(beforeCorrupted.objects.deleted).toBe(19);
+      expect((await debugSnapshot(collector)).heap).toHaveLength(21);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a maxObjects of 0 without deleting anything", async () => {
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writeGarbage(writer, 5);
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      await expect(collector.collectGarbage(cutoff, 0)).rejects.toThrow("maxObjects must be a positive safe integer");
+      expect((await debugSnapshot(collector)).heap).toHaveLength(5);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("runs only one of two GC calls started together, and that one completes", async () => {
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writeGarbage(writer, 200);
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      // The running check comes after GC initialization awaits, so either call may be the one that runs.
+      const results = await Promise.allSettled([collector.collectGarbage(cutoff, 10_000), collector.collectGarbage(cutoff, 10_000)]);
+      const completed = results.flatMap(result => result.status === "fulfilled" ? [result.value.objects.deleted] : []);
+      const rejected = results.flatMap(result => result.status === "rejected" ? [String(result.reason)] : []);
+      expect(completed).toEqual([200]);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain("already running");
+      expect((await debugSnapshot(collector)).heap).toHaveLength(0);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a shared child alive when writes re-reference it while GC deletes its old parents", async () => {
+    // GC batches decrement the shared child while concurrent writes increment it and delete the root
+    // that kept it alive. Whatever the interleaving, the copies that survive must still read it,
+    // and once everything is collected again only those copies and the child may remain.
+    const { path, lmdbOptions } = await openTemporary();
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writer.setRootObject(rootKey("live"), asHeapObject({ child: asHeapObject({ value: "shared" }) }));
+    const liveParent = expectHeapObject((await writer.getRootObject(rootKey("live"))).object);
+    const sharedChild = expectPlainObject(await liveParent.get()).child;
+    await writeGarbage(writer, 300, index => asHeapObject({ index, child: sharedChild }));
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    const copyCount = 30;
+    try {
+      const garbageCollection = collector.collectGarbage(cutoff, 10_000);
+      const parent = expectHeapObject((await collector.getRootObject(rootKey("live"))).object);
+      const child = expectPlainObject(await parent.get()).child;
+      for (let index = 0; index < copyCount; index++) {
+        await collector.setRootObject(rootKey(`copy-${index}`), asHeapObject({ index, child }));
+        if (index === copyCount / 2) await collector.deleteRootObject(rootKey("live"));
+        if (index % 2 === 0) await collector.deleteRootObject(rootKey(`copy-${index}`));
+      }
+      expect((await garbageCollection).objects.deleted).toBe(300);
+    } finally {
+      await collector.close();
+    }
+
+    const { cutoff: finalCutoff, collector: finalCollector } = openCollector(lmdbOptions);
+    try {
+      await finalCollector.collectGarbage(finalCutoff, 10_000);
+      // 15 surviving copies, plus the shared child they all point at.
+      expect((await debugSnapshot(finalCollector)).heap).toHaveLength(copyCount / 2 + 1);
+      for (let index = 1; index < copyCount; index += 2) {
+        const copy = expectPlainObject(await expectHeapObject((await finalCollector.getRootObject(rootKey(`copy-${index}`))).object).get());
+        expect(await expectHeapObject(copy.child).get()).toEqual({ value: "shared" });
+      }
+    } finally {
+      await finalCollector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
 });
