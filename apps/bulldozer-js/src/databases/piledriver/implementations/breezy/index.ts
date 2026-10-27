@@ -451,6 +451,9 @@ export function declareBreezyPiledriverDatabase(
         for (const candidate of batch) {
           if (candidate.byteLength <= 8) throw new Error("Invalid Piledriver GC candidate key");
         }
+        // Counted when read, not when processed: candidates the budget leaves out are read again by
+        // the next batch, and that rereading is real scan work.
+        result.scanning.candidateIndexEntriesRead += batch.length;
 
         // Two objects in one batch can point at the same child. That's safe because reads inside a
         // transaction see its own earlier writes, so the second decrement starts from the first's
@@ -462,7 +465,6 @@ export function declareBreezyPiledriverDatabase(
             // deleted on its own. Candidates left out stay in the index for the next batch.
             if (referenceUpdates >= gcReferenceUpdatesPerTransaction) break;
             result.objects.candidatesExamined++;
-            result.scanning.candidateIndexEntriesRead++;
             referenceUpdates += deleteCandidate(candidate, version, writes);
           }
         });

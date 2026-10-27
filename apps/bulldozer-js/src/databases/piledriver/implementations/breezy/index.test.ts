@@ -883,6 +883,28 @@ describe("Breezy Piledriver garbage collection in batches", { timeout: 30_000 },
     }
   });
 
+  it("counts candidates the budget leaves out as read again by the next batch", async () => {
+    // The first batch reads all three parents, but the first two use up the budget, so the third is
+    // read again by a later batch. Children reference nothing, so nothing else is read twice.
+    const { path, lmdbOptions } = await openTemporary();
+    const childrenPerParent = 3000;
+    const writer = declareBreezyPiledriverDatabase(lmdbOptions);
+    await writeGarbage(writer, 3, index => asHeapObject({ children: Array.from({ length: childrenPerParent }, (_, child) => asHeapObject({ index, child })) }));
+    await writer.close();
+
+    const { cutoff, collector } = openCollector(lmdbOptions);
+    try {
+      const result = await collector.collectGarbage(cutoff, 100_000);
+      const objectCount = 3 + 3 * childrenPerParent;
+      expect(result.objects.deleted).toBe(objectCount);
+      expect(result.objects.candidatesExamined).toBe(objectCount);
+      expect(result.scanning.candidateIndexEntriesRead).toBe(objectCount + 1);
+    } finally {
+      await collector.close();
+      await rm(path, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a maxObjects of 0 without deleting anything", async () => {
     const { path, lmdbOptions } = await openTemporary();
     const writer = declareBreezyPiledriverDatabase(lmdbOptions);
