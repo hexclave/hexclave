@@ -374,3 +374,35 @@ it("should share the SMS quota of a phone number between verification and sign-i
     }
   `);
 });
+
+it("should limit the number of phone verification codes sent on behalf of the same user", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ "sms.server.provider": "test" });
+  await Auth.fastSignUpWithEmail();
+
+  // two phone numbers exhaust their per-phone-number quotas, which together make up the per-user quota
+  for (let channelIndex = 0; channelIndex < 2; channelIndex++) {
+    const channel = await createPhoneContactChannel(generateTestPhoneNumber());
+    expect(channel.status).toBe(201);
+    for (let i = 0; i < 5; i++) {
+      const response = await sendPhoneVerificationCode(channel.body.id);
+      expect(response.status, `channel ${channelIndex + 1}, request ${i + 1}`).toBe(200);
+    }
+  }
+
+  // a third phone number still has its own quota left, but the user doesn't
+  const thirdChannel = await createPhoneContactChannel(generateTestPhoneNumber());
+  expect(thirdChannel.status).toBe(201);
+  expect(await sendPhoneVerificationCode(thirdChannel.body.id)).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 429,
+      "body": "Too many SMS codes were requested for this user. Please try again later.",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+
+  // other users are not affected
+  await Auth.fastSignUpWithEmail();
+  const otherUserChannel = await createPhoneContactChannel(generateTestPhoneNumber());
+  expect((await sendPhoneVerificationCode(otherUserChannel.body.id)).status).toBe(200);
+});

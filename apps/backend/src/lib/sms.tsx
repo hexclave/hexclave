@@ -69,38 +69,71 @@ export async function sendSms(tenancy: Tenancy, options: SendSmsOptions): Promis
 // Every SMS costs the project money, so we limit how many codes can be sent to the same phone number. This mostly
 // protects against SMS pumping (toll fraud), where attackers trigger many messages to premium-rate numbers they own.
 const SMS_CODE_RATE_LIMIT_WINDOW_MS = 1000 * 60 * 60;
-const SMS_CODE_RATE_LIMIT_MAX_CODES_PER_WINDOW = 5;
-// Every verification code type that is delivered by SMS; all of them count towards the same per-recipient quota
+const SMS_CODE_RATE_LIMIT_MAX_CODES_PER_PHONE_NUMBER = 5;
+// The per-phone-number quota alone doesn't stop a signed-in user from adding many phone numbers to their own account
+// and requesting verification codes for each of them, so codes sent on behalf of a user are limited too. This is
+// higher than the per-phone-number quota, so that a user can still verify a couple of numbers (eg. after a typo).
+const SMS_CODE_RATE_LIMIT_MAX_CODES_PER_USER = 10;
+// Every verification code type that is delivered by SMS; all of them count towards the same quotas
 const SMS_VERIFICATION_CODE_TYPES: VerificationCodeType[] = [
   VerificationCodeType.SMS_ONE_TIME_PASSWORD,
   VerificationCodeType.PHONE_NUMBER_VERIFICATION,
 ];
 
-/** Creates a code while holding the quota lock; the callback must only perform transactional database work. */
+/**
+ * Locks the given quota and throws if it is exhausted. The lock is held until the end of the transaction, so it covers
+ * both counting and the insertion of the new code, including across backend processes. Hash collisions only serialize
+ * unrelated quotas; they do not combine them.
+ *
+ * Quotas are matched on the code's `data` (which has a GIN index), and are shared between all SMS code types: sign-in
+ * and verification codes are billed the same way, so an attacker must not get a separate quota for each endpoint.
+ */
+async function assertSmsQuotaNotExhausted(tx: PrismaTransaction, tenancy: Tenancy, options: {
+  dataMatch: { phone_number: string } | { user_id: string },
+  maxCodes: number,
+  errorMessage: string,
+}): Promise<void> {
+  const lockKey = JSON.stringify([tenancy.project.id, tenancy.branchId, options.dataMatch]);
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('sms-code-quota'), hashtext(${lockKey}))`;
+  const rows = await tx.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*) AS "count"
+    FROM "VerificationCode"
+    WHERE "projectId" = ${tenancy.project.id}
+      AND "branchId" = ${tenancy.branchId}
+      AND "type" = ANY(${SMS_VERIFICATION_CODE_TYPES}::"VerificationCodeType"[])
+      AND "data" @> ${JSON.stringify(options.dataMatch)}::jsonb
+      AND "createdAt" > ${new Date(Date.now() - SMS_CODE_RATE_LIMIT_WINDOW_MS)}
+  `;
+  const count = (rows.length === 1 ? rows[0] : throwErr("COUNT query should always return exactly one row", { rows })).count;
+  if (count >= options.maxCodes) {
+    throw new StatusError(StatusError.TooManyRequests, options.errorMessage);
+  }
+}
+
+/**
+ * Creates a code while holding the quota locks; the callback must only perform transactional database work.
+ *
+ * If `userId` is given, the code also counts towards that user's quota, and the callback must store `user_id` in the
+ * code's `data` so that it is counted.
+ */
 export async function createRateLimitedSmsCode<T>(
   tenancy: Tenancy,
-  phoneNumber: string,
+  options: { phoneNumber: string, userId?: string },
   createCode: (transaction: PrismaTransaction) => Promise<T>,
 ): Promise<T> {
   return await retryTransaction(globalPrismaClient, async (tx) => {
-    // The lock covers both counting and insertion, including across backend processes. Hash
-    // collisions only serialize unrelated recipients; they do not combine their quotas.
-    // The quota is per recipient, not per code type: sign-in and verification codes are billed the same way, so an
-    // attacker must not get a separate quota for each SMS-sending endpoint.
-    const lockKey = JSON.stringify([tenancy.project.id, tenancy.branchId, phoneNumber]);
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('sms-code-quota'), hashtext(${lockKey}))`;
-    const rows = await tx.$queryRaw<{ count: bigint }[]>`
-      SELECT COUNT(*) AS "count"
-      FROM "VerificationCode"
-      WHERE "projectId" = ${tenancy.project.id}
-        AND "branchId" = ${tenancy.branchId}
-        AND "type" = ANY(${SMS_VERIFICATION_CODE_TYPES}::"VerificationCodeType"[])
-        AND "data" @> ${JSON.stringify({ phone_number: phoneNumber })}::jsonb
-        AND "createdAt" > ${new Date(Date.now() - SMS_CODE_RATE_LIMIT_WINDOW_MS)}
-    `;
-    const count = (rows.length === 1 ? rows[0] : throwErr("COUNT query should always return exactly one row", { rows })).count;
-    if (count >= SMS_CODE_RATE_LIMIT_MAX_CODES_PER_WINDOW) {
-      throw new StatusError(StatusError.TooManyRequests, "Too many codes were requested for this phone number. Please try again later.");
+    // Locks are always taken in the same order (phone number, then user), so concurrent requests can't deadlock
+    await assertSmsQuotaNotExhausted(tx, tenancy, {
+      dataMatch: { phone_number: options.phoneNumber },
+      maxCodes: SMS_CODE_RATE_LIMIT_MAX_CODES_PER_PHONE_NUMBER,
+      errorMessage: "Too many codes were requested for this phone number. Please try again later.",
+    });
+    if (options.userId !== undefined) {
+      await assertSmsQuotaNotExhausted(tx, tenancy, {
+        dataMatch: { user_id: options.userId },
+        maxCodes: SMS_CODE_RATE_LIMIT_MAX_CODES_PER_USER,
+        errorMessage: "Too many SMS codes were requested for this user. Please try again later.",
+      });
     }
     return await createCode(tx);
   });

@@ -50,7 +50,7 @@ export const POST = createSmartRouteHandler({
       throw new KnownErrors.BotChallengeFailed("A passed bot challenge is required to send an SMS sign-in code.");
     }
 
-    const codeObj = await createRateLimitedSmsCode(tenancy, phoneNumber, async (transaction) => await smsSignInVerificationCodeHandler.createCode({
+    const codeObj = await createRateLimitedSmsCode(tenancy, { phoneNumber }, async (transaction) => await smsSignInVerificationCodeHandler.createCode({
       transaction,
       tenancy,
       method: { phone_number: phoneNumber },
