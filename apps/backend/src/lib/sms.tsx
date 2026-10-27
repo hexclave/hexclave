@@ -70,25 +70,31 @@ export async function sendSms(tenancy: Tenancy, options: SendSmsOptions): Promis
 // protects against SMS pumping (toll fraud), where attackers trigger many messages to premium-rate numbers they own.
 const SMS_CODE_RATE_LIMIT_WINDOW_MS = 1000 * 60 * 60;
 const SMS_CODE_RATE_LIMIT_MAX_CODES_PER_WINDOW = 5;
+// Every verification code type that is delivered by SMS; all of them count towards the same per-recipient quota
+const SMS_VERIFICATION_CODE_TYPES: VerificationCodeType[] = [
+  VerificationCodeType.SMS_ONE_TIME_PASSWORD,
+  VerificationCodeType.PHONE_NUMBER_VERIFICATION,
+];
 
 /** Creates a code while holding the quota lock; the callback must only perform transactional database work. */
 export async function createRateLimitedSmsCode<T>(
   tenancy: Tenancy,
-  type: VerificationCodeType,
   phoneNumber: string,
   createCode: (transaction: PrismaTransaction) => Promise<T>,
 ): Promise<T> {
   return await retryTransaction(globalPrismaClient, async (tx) => {
     // The lock covers both counting and insertion, including across backend processes. Hash
     // collisions only serialize unrelated recipients; they do not combine their quotas.
-    const lockKey = JSON.stringify([tenancy.project.id, tenancy.branchId, type, phoneNumber]);
+    // The quota is per recipient, not per code type: sign-in and verification codes are billed the same way, so an
+    // attacker must not get a separate quota for each SMS-sending endpoint.
+    const lockKey = JSON.stringify([tenancy.project.id, tenancy.branchId, phoneNumber]);
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('sms-code-quota'), hashtext(${lockKey}))`;
     const rows = await tx.$queryRaw<{ count: bigint }[]>`
       SELECT COUNT(*) AS "count"
       FROM "VerificationCode"
       WHERE "projectId" = ${tenancy.project.id}
         AND "branchId" = ${tenancy.branchId}
-        AND "type" = ${type}::"VerificationCodeType"
+        AND "type" = ANY(${SMS_VERIFICATION_CODE_TYPES}::"VerificationCodeType"[])
         AND "data" @> ${JSON.stringify({ phone_number: phoneNumber })}::jsonb
         AND "createdAt" > ${new Date(Date.now() - SMS_CODE_RATE_LIMIT_WINDOW_MS)}
     `;

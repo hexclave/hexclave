@@ -1,5 +1,5 @@
 import { it } from "../../../../../helpers";
-import { Auth, Project, backendContext, createMailbox, generateTestPhoneNumber, niceBackendFetch, waitForSmsCode } from "../../../../backend-helpers";
+import { Auth, Project, backendContext, createMailbox, generateTestPhoneNumber, mockTurnstileTokens, niceBackendFetch, waitForSmsCode } from "../../../../backend-helpers";
 
 async function createPhoneContactChannel(phoneNumber: string, options: { usedForAuth?: boolean, accessType?: "client" | "server", isVerified?: boolean } = {}) {
   return await niceBackendFetch("/api/v1/contact-channels", {
@@ -334,5 +334,43 @@ it("should enforce the phone verification quota across concurrent requests", asy
       429,
       429,
     ]
+  `);
+});
+
+it("should share the SMS quota of a phone number between verification and sign-in codes", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Auth.Sms.enableSmsSignIn();
+  await Auth.fastSignUpWithEmail();
+  const phoneNumber = generateTestPhoneNumber();
+  const channel = await createPhoneContactChannel(phoneNumber);
+  expect(channel.status).toBe(201);
+
+  for (let i = 0; i < 3; i++) {
+    const response = await sendPhoneVerificationCode(channel.body.id);
+    expect(response.status, `verification request ${i + 1}`).toBe(200);
+  }
+  const sendSignInCode = async () => await niceBackendFetch("/api/v1/auth/sms/send-sign-in-code", {
+    method: "POST",
+    accessType: "client",
+    body: { phone_number: phoneNumber, bot_challenge_token: mockTurnstileTokens.smsSignInOk },
+  });
+  for (let i = 0; i < 2; i++) {
+    const response = await sendSignInCode();
+    expect(response.status, `sign-in request ${i + 1}`).toBe(200);
+  }
+
+  expect(await sendSignInCode()).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 429,
+      "body": "Too many codes were requested for this phone number. Please try again later.",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+  expect(await sendPhoneVerificationCode(channel.body.id)).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 429,
+      "body": "Too many codes were requested for this phone number. Please try again later.",
+      "headers": Headers { <some fields may have been hidden> },
+    }
   `);
 });

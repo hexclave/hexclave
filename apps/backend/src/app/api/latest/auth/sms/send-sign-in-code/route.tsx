@@ -1,4 +1,3 @@
-import { VerificationCodeType } from "@/generated/prisma/client";
 import { serializeStoredSignUpRequestContext } from "@/lib/sign-up-context";
 import { createRateLimitedSmsCode, isSmsProviderConfigured, sendSms } from "@/lib/sms";
 import { botChallengeFlowRequestSchemaFields, getRequestContextAndBotChallengeAssessment } from "@/lib/turnstile";
@@ -51,7 +50,7 @@ export const POST = createSmartRouteHandler({
       throw new KnownErrors.BotChallengeFailed("A passed bot challenge is required to send an SMS sign-in code.");
     }
 
-    const codeObj = await createRateLimitedSmsCode(tenancy, VerificationCodeType.SMS_ONE_TIME_PASSWORD, phoneNumber, async (transaction) => await smsSignInVerificationCodeHandler.createCode({
+    const codeObj = await createRateLimitedSmsCode(tenancy, phoneNumber, async (transaction) => await smsSignInVerificationCodeHandler.createCode({
       transaction,
       tenancy,
       method: { phone_number: phoneNumber },

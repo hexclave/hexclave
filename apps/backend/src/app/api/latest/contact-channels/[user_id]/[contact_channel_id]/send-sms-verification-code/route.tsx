@@ -1,5 +1,4 @@
 import { usersCrudHandlers } from "@/app/api/latest/users/crud";
-import { VerificationCodeType } from "@/generated/prisma/client";
 import { createRateLimitedSmsCode, isSmsProviderConfigured, sendSms } from "@/lib/sms";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
@@ -85,7 +84,7 @@ export const POST = createSmartRouteHandler({
       throw new StatusError(StatusError.BadRequest, "This phone number is already verified");
     }
 
-    const codeObj = await createRateLimitedSmsCode(auth.tenancy, VerificationCodeType.PHONE_NUMBER_VERIFICATION, contactChannel.value, async (transaction) => await phoneNumberVerificationCodeHandler.createCode({
+    const codeObj = await createRateLimitedSmsCode(auth.tenancy, contactChannel.value, async (transaction) => await phoneNumberVerificationCodeHandler.createCode({
       transaction,
       tenancy: auth.tenancy,
       data: {
