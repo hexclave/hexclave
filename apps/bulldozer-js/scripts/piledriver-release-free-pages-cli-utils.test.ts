@@ -5,12 +5,16 @@ const mib = 1024 * 1024;
 
 describe("release-free-pages CLI arguments", () => {
   it("defaults to one 1024 MiB release against the configured URL", () => {
-    expect(parseReleaseFreePagesArgs([])).toEqual({ kind: "run", maxBytes: 1024 * mib, all: false, dryRun: false, url: undefined });
+    expect(parseReleaseFreePagesArgs([])).toEqual({ kind: "release", maxBytes: 1024 * mib, all: false, url: undefined });
   });
 
-  it("reads every option", () => {
-    expect(parseReleaseFreePagesArgs(["--max-mib", "64", "--all", "--dry-run", "--url", "http://bulldozer:8146"]))
-      .toEqual({ kind: "run", maxBytes: 64 * mib, all: true, dryRun: true, url: "http://bulldozer:8146" });
+  it("reads every release option", () => {
+    expect(parseReleaseFreePagesArgs(["--max-mib", "64", "--all", "--url", "http://bulldozer:8146"]))
+      .toEqual({ kind: "release", maxBytes: 64 * mib, all: true, url: "http://bulldozer:8146" });
+  });
+
+  it("a dry run carries no limit, so it can't send one", () => {
+    expect(parseReleaseFreePagesArgs(["--dry-run", "--url", "http://bulldozer:8146"])).toEqual({ kind: "dry-run", url: "http://bulldozer:8146" });
   });
 
   it("shows help instead of running when asked", () => {
@@ -20,6 +24,19 @@ describe("release-free-pages CLI arguments", () => {
 
   it.each([["0"], ["-5"], ["1.5"], ["lots"]])("rejects --max-mib %s", value => {
     expect(() => parseReleaseFreePagesArgs([`--max-mib=${value}`])).toThrow("--max-mib must be a positive whole number");
+  });
+
+  it("rejects options a dry run would silently ignore", () => {
+    expect(() => parseReleaseFreePagesArgs(["--dry-run", "--max-mib", "64"])).toThrow("--dry-run can't be combined with --max-mib or --all");
+    expect(() => parseReleaseFreePagesArgs(["--dry-run", "--all"])).toThrow("--dry-run can't be combined with --max-mib or --all");
+    expect(parseReleaseFreePagesArgs(["--dry-run"]).kind).toBe("dry-run");
+  });
+
+  it("rejects a --url that isn't an http(s) URL", () => {
+    for (const url of ["not-a-url", "localhost:8146", "ftp://bulldozer:8146"]) {
+      expect(() => parseReleaseFreePagesArgs(["--url", url])).toThrow("--url must be an http:// or https:// URL");
+    }
+    expect(parseReleaseFreePagesArgs(["--url", "https://bulldozer.internal"])).toMatchObject({ url: "https://bulldozer.internal" });
   });
 
   it("rejects unknown options and stray arguments", () => {

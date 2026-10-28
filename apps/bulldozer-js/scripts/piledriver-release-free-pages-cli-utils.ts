@@ -32,7 +32,13 @@ Needs HEXCLAVE_BULLDOZER_SERVER_SECRET.`;
 
 export type ReleaseFreePagesCommand =
   | { kind: "help" }
-  | { kind: "run", maxBytes: number, all: boolean, dryRun: boolean, url: string | undefined };
+  | { kind: "dry-run", url: string | undefined }
+  | { kind: "release", maxBytes: number, all: boolean, url: string | undefined };
+
+const isHttpUrl = (value: string) => {
+  // URL.canParse instead of try/catch: "localhost:8146" parses too, with "localhost:" as its protocol.
+  return URL.canParse(value) && ["http:", "https:"].includes(new URL(value).protocol);
+};
 
 export function parseReleaseFreePagesArgs(args: string[]): ReleaseFreePagesCommand {
   const { values } = parseArgs({
@@ -48,12 +54,18 @@ export function parseReleaseFreePagesArgs(args: string[]): ReleaseFreePagesComma
     },
   });
   if (values.help) return { kind: "help" };
+  // A dry run releases nothing, so a limit or "keep going" would be silently ignored.
+  if (values["dry-run"] && (values["max-mib"] !== undefined || values.all)) {
+    throw new Error("--dry-run can't be combined with --max-mib or --all: a dry run only reports free pages");
+  }
+  if (values.url !== undefined && !isHttpUrl(values.url)) throw new Error("--url must be an http:// or https:// URL");
+  if (values["dry-run"]) return { kind: "dry-run", url: values.url };
   const maxMiBArgument = values["max-mib"] ?? "1024";
   const maxMiB = Number(maxMiBArgument);
   if (!/^\d+$/.test(maxMiBArgument) || !Number.isSafeInteger(maxMiB * mib) || maxMiB <= 0) {
     throw new Error("--max-mib must be a positive whole number");
   }
-  return { kind: "run", maxBytes: maxMiB * mib, all: values.all, dryRun: values["dry-run"], url: values.url };
+  return { kind: "release", maxBytes: maxMiB * mib, all: values.all, url: values.url };
 }
 
 const formatMiB = (bytes: number) => `${(bytes / mib).toFixed(1)} MiB`;

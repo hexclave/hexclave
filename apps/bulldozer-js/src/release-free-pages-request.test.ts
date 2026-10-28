@@ -29,13 +29,18 @@ describe("POST /internal/piledriver-release-free-pages", () => {
     expect(defaultReleaseFreePagesMaxBytes).toBe(1024 * 1024 * 1024);
   });
 
-  it("passes the requested limit and dry run through", async () => {
-    let received: unknown = null;
-    await handleReleaseFreePagesRequest({ maxBytes: 4096, dryRun: true }, async options => {
-      received = options;
+  it("passes the requested limit through, and a dry run on its own", async () => {
+    const received: unknown[] = [];
+    const release = async (options: { maxBytes: number, dryRun: boolean }) => {
+      received.push(options);
       return null;
-    }, "piledriver-breezylite");
-    expect(received).toEqual({ maxBytes: 4096, dryRun: true });
+    };
+    await handleReleaseFreePagesRequest({ maxBytes: 1024 * 1024 }, release, "piledriver-breezylite");
+    await handleReleaseFreePagesRequest({ dryRun: true }, release, "piledriver-breezylite");
+    expect(received).toEqual([
+      { maxBytes: 1024 * 1024, dryRun: false },
+      { maxBytes: 1024 * 1024 * 1024, dryRun: true },
+    ]);
   });
 
   it.each([
@@ -48,6 +53,11 @@ describe("POST /internal/piledriver-release-free-pages", () => {
     [{ maxBytes: null }, "maxBytes"],
     [{ dryRun: "yes" }, "dryRun"],
     [{ dryRun: null }, "dryRun"],
+    // Smaller than any SQLite page, so it could never release anything.
+    [{ maxBytes: 100 }, "at least 1 MiB"],
+    [{ maxBytes: 1024 * 1024 - 1 }, "at least 1 MiB"],
+    // A dry run releases nothing, so a limit would be silently ignored.
+    [{ dryRun: true, maxBytes: 1024 * 1024 }, "dryRun"],
   ])("rejects bad body %j with a 400 naming the problem", async (body, expectedMessage) => {
     const result = await statusOf(handleReleaseFreePagesRequest(body, async () => {
       throw new Error("must not run on a bad request");

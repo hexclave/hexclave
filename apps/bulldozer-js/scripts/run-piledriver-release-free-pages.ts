@@ -16,6 +16,7 @@ const baseUrl = configuredBaseUrl === undefined || configuredBaseUrl.length === 
   : configuredBaseUrl;
 const endpointUrl = new URL("/internal/piledriver-release-free-pages", baseUrl);
 
+const requestBody = command.kind === "dry-run" ? { dryRun: true } : { maxBytes: command.maxBytes };
 const requestRelease = async (): Promise<FreePageReleaseResult> => {
   const response = await fetch(endpointUrl, {
     method: "POST",
@@ -23,7 +24,7 @@ const requestRelease = async (): Promise<FreePageReleaseResult> => {
       "authorization": `Bearer ${secret}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ maxBytes: command.maxBytes, dryRun: command.dryRun }),
+    body: JSON.stringify(requestBody),
   });
   if (!response.ok) {
     throw new Error(`Releasing free pages via ${endpointUrl.toString()} failed with HTTP ${response.status}: ${await response.text()}`);
@@ -38,5 +39,5 @@ for (;;) {
   const result = await requestRelease();
   console.log(JSON.stringify({ command: "piledriver-release-free-pages", endpoint: endpointUrl.toString(), result }, null, 2));
   console.log(formatReleaseFreePagesSummary(result));
-  if (!command.all || result.stoppedBecause !== "limit" || result.released.pages === 0) break;
+  if (command.kind === "dry-run" || !command.all || result.stoppedBecause !== "limit" || result.released.pages === 0) break;
 }
