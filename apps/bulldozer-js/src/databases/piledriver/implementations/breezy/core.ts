@@ -1,8 +1,10 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
-import { wait } from "@hexclave/shared/dist/utils/promises";
+import { runAsynchronously, wait } from "@hexclave/shared/dist/utils/promises";
 import { createUuidV7Generator } from "@hexclave/shared/dist/utils/uuids";
 import type { BreezyStorage, BreezyStore } from "./storage.js";
+import { shouldSuppressPeriodicBulldozerLogs } from "../../../../logging.js";
+import { traceSpan } from "../../../../otel.js";
 import { createDatabaseSeq, DatabaseSeq } from "../../../index.js";
 import { aggregateSerializedReferences, zeroPiledriverGarbageCollectionResult } from "../../gc.js";
 import { heapObjectsByObject, PiledriverDatabase, PiledriverObject } from "../../index.js";
@@ -45,12 +47,21 @@ const ascendingByKey = <T>(items: T[], keyOf: (item: T) => Uint8Array) => {
 
 export type BreezyPiledriverDatabaseOptions = { disableHeapReadCache?: boolean, garbageCollectionProcessStartedAtMillis?: number };
 
+/** What the service's /diagnostics endpoint shows for a Breezy backend. */
+export type BreezyDiagnostics = {
+  backend: string,
+  dbId: string,
+  /** Every write transaction since the database was opened, including failed ones. */
+  writeTransactions: { count: number, averageMs: number, maxMs: number },
+  fileSizesInBytes: Record<string, number>,
+};
+
 /** Shared codec, heap cache, publication and GC logic for all Breezy storage engines. */
 export function declareBreezyDatabaseWithStorage(
   storage: BreezyStorage,
   dbId = "default",
   options: BreezyPiledriverDatabaseOptions = {},
-): PiledriverDatabase {
+): PiledriverDatabase & { getDiagnostics(): BreezyDiagnostics } {
   const processStartedAtMillis = options.garbageCollectionProcessStartedAtMillis ?? breezyPiledriverProcessStartedAtMillis;
   if (!Number.isSafeInteger(processStartedAtMillis) || processStartedAtMillis < 0) throw new Error("Piledriver garbageCollectionProcessStartedAtMillis must be a non-negative safe integer");
   const heapStore = storage.openStore(`${dbId}:dump:heap`);
@@ -71,7 +82,11 @@ export function declareBreezyDatabaseWithStorage(
     while (storage.lastTransactionId() < required) await wait(1);
     storage.refreshReads();
   };
-  const arrayBuffer = (value: Uint8Array) => Uint8Array.from(value).buffer;
+  const waitUntilDurable = async (seq: DatabaseSeq) => {
+    await waitUntilAvailable(seq);
+    await storage.flush();
+  };
+  const arrayBuffer =(value: Uint8Array) => Uint8Array.from(value).buffer;
   const reserveHeapKey = () => {
     const key = new Uint8Array(17);
     key[0] = 1;
@@ -113,6 +128,32 @@ export function declareBreezyDatabaseWithStorage(
     }
   };
   const heapCache = createPiledriverHeapCache({ disabled: options.disableHeapReadCache === true, load: loadHeapObject });
+  type WriteTransactionStats = { count: number, totalMs: number, maxMs: number };
+  const noWriteTransactions = (): WriteTransactionStats => ({ count: 0, totalMs: 0, maxMs: 0 });
+  const summarizeWriteTransactions = (stats: WriteTransactionStats) => ({
+    count: stats.count,
+    averageMs: stats.count === 0 ? 0 : stats.totalMs / stats.count,
+    maxMs: stats.maxMs,
+  });
+  const writeTransactionsSinceOpen = noWriteTransactions();
+  let writeTransactionsThisActivityWindow = noWriteTransactions();
+  const activityLogIntervalMs = 5_000;
+  // The same cadence as LMDB's "low-level lmdb activity" log, and like it, silent while idle.
+  // An error thrown in a timer callback has no caller to catch it and would crash the process, so
+  // report it to Sentry instead: a broken diagnostics log must not take the service down.
+  const activityLogInterval = setInterval(() => runAsynchronously(async () => {
+    const window = writeTransactionsThisActivityWindow;
+    writeTransactionsThisActivityWindow = noWriteTransactions();
+    if (window.count === 0 || shouldSuppressPeriodicBulldozerLogs) return;
+    console.debug("bulldozer-js breezy activity", {
+      backend: storage.backend,
+      dbId,
+      writeTransactionsPerSecond: window.count / (activityLogIntervalMs / 1000),
+      writeTransactions: summarizeWriteTransactions(window),
+      fileSizesInBytes: storage.fileSizesInBytes(),
+    });
+  }), activityLogIntervalMs);
+  activityLogInterval.unref();
   let lastRootWriteSeq = initialSeq;
   let mutations: Promise<unknown> = Promise.resolve();
   let gcGeneration: string | null = null;
@@ -188,13 +229,24 @@ export function declareBreezyDatabaseWithStorage(
    * leave refcounts that disagree with the root, and GC could later delete live data.
    */
   const transact = async (action: (version: number, writes: Promise<boolean>[]) => void) => {
-    const transaction = await storage.transaction(version => {
-      const pending: Promise<boolean>[] = [];
-      action(version, pending);
-      return { version, pending };
-    });
-    await Promise.all(transaction.pending);
-    return transaction.version;
+    const startedAt = performance.now();
+    try {
+      const transaction = await storage.transaction(version => {
+        const pending: Promise<boolean>[] = [];
+        action(version, pending);
+        return { version, pending };
+      });
+      await Promise.all(transaction.pending);
+      return transaction.version;
+    } finally {
+      // Failed transactions count too: they held the write lock (and, on SQLite, the main thread).
+      const elapsedMs = performance.now() - startedAt;
+      for (const stats of [writeTransactionsSinceOpen, writeTransactionsThisActivityWindow]) {
+        stats.count++;
+        stats.totalMs += elapsedMs;
+        stats.maxMs = Math.max(stats.maxMs, elapsedMs);
+      }
+    }
   };
   let gcInitialization: Promise<void> | null = null;
   const initializeGc = async () => {
@@ -325,6 +377,7 @@ export function declareBreezyDatabaseWithStorage(
    * next GC after a restart collects them.
    */
   const serializeAndPublish = async (value: PiledriverObject) => {
+    const planStartedAt = performance.now();
     const plan = planHeapObjects(
       value,
       object => {
@@ -338,13 +391,16 @@ export function declareBreezyDatabaseWithStorage(
       const buffer = serializeKnown(item.value);
       publications.push({ key: item.key, buffer, referenceKeys: plannedHeapReferenceKeys(item.value) });
     }
+    const planMs = performance.now() - planStartedAt;
+    const publishStartedAt = performance.now();
     const publicationSeq = await publishHeapObjects(publications);
+    const publishMs = performance.now() - publishStartedAt;
 
     const publishedSeq = combineSeqs([publicationSeq, ...plan.dependencies]);
     for (const item of plan.heapObjects) {
       heapCache.remember(item.object, { key: item.key, seq: publishedSeq });
     }
-    return serializeKnown(plan.root);
+    return { serializedRoot: serializeKnown(plan.root), heapObjectsPublished: publications.length, planMs, publishMs };
   };
 
   const readPreviousRoot = async (key: ArrayBuffer) => {
@@ -495,6 +551,7 @@ export function declareBreezyDatabaseWithStorage(
     closing ??= withMutationLock(async () => {
       // Each operation's own caller gets its result or error; here we only wait for it to stop.
       await Promise.allSettled([...garbageCollectionsInProgress, ...pausedHeapLoads]);
+      clearInterval(activityLogInterval);
       await storage.close();
     });
     await closing;
@@ -502,29 +559,58 @@ export function declareBreezyDatabaseWithStorage(
 
   return {
     getDebugInfo: () => ({ backend: storage.backend, storage, heapStore, rootsStore, metadataStore, candidatesStore, gcStateStore, options, processStartedAtMillis, heapObjectsByObject, heapObjectsByHeapKeyBase64: heapCache.objectsByKey, heapKeysAndSeqByHeapObjects: heapCache.locations, heapReadCacheDisabled: options.disableHeapReadCache === true }),
-    async getRootObject(key) {
+    getDiagnostics: () => ({
+      backend: storage.backend,
+      dbId,
+      writeTransactions: summarizeWriteTransactions(writeTransactionsSinceOpen),
+      fileSizesInBytes: storage.fileSizesInBytes(),
+    }),
+    // Span names (including the doubled "bulldozer-js." that traceSpan adds) match base.ts, so the
+    // same trace queries and dashboards work on every backend.
+    getRootObject: async key => await traceSpan("bulldozer-js.piledriver.getRootObject", async () => {
       throwIfClosing();
       const stored = read(rootsStore, key);
       if (stored.buffer === null) throw new Error("Root object not found");
       return { object: decodePiledriverObject(stored.buffer, heapKey => heapCache.resolve(heapKey, stored.seq), `root ${encodeBase64(new Uint8Array(key))}`), seq: stored.seq };
-    },
-    async setRootObject(key, value) {
+    }),
+    setRootObject: async (key, value) => await traceSpan("bulldozer-js.piledriver.setRootObject", async () => {
       throwIfClosing();
+      const startedAt = performance.now();
       return await withMutationLock(async () => {
+        const mutationLockWaitMs = performance.now() - startedAt;
         await initializeGc();
+        const readPreviousRootStartedAt = performance.now();
         const previous = await readPreviousRoot(key);
-        const serializedRoot = await serializeAndPublish(value);
+        const readPreviousRootMs = performance.now() - readPreviousRootStartedAt;
+        const { serializedRoot, heapObjectsPublished, planMs, publishMs } = await serializeAndPublish(value);
+        const rootWriteStartedAt = performance.now();
         const written = await mutateRoot(
           key,
           serializedRoot,
           previous.buffer,
           Math.max(Date.now(), processStartedAtMillis),
         );
+        const rootWriteMs = performance.now() - rootWriteStartedAt;
         lastRootWriteSeq = written.seq;
+        if (!shouldSuppressPeriodicBulldozerLogs) {
+          // Same message as base.ts, so existing log queries find it; elapsedMs and rootValueBytes
+          // mean the same thing there. The other fields are Breezy's own phases.
+          console.debug("bulldozer-js piledriver setRootObject timing", {
+            backend: storage.backend,
+            elapsedMs: performance.now() - startedAt,
+            mutationLockWaitMs,
+            readPreviousRootMs,
+            planHeapObjectsMs: planMs,
+            publishHeapObjectsMs: publishMs,
+            heapObjectsPublished,
+            rootWriteMs,
+            rootValueBytes: serializedRoot.byteLength,
+          });
+        }
         return written;
       });
-    },
-    async deleteRootObject(key) {
+    }),
+    deleteRootObject: async key => await traceSpan("bulldozer-js.piledriver.deleteRootObject", async () => {
       throwIfClosing();
       return await withMutationLock(async () => {
         await initializeGc();
@@ -538,21 +624,16 @@ export function declareBreezyDatabaseWithStorage(
         lastRootWriteSeq = deleted.seq;
         return deleted;
       });
-    },
+    }),
     getGarbageCollectionProcessStartedAtMillis: () => processStartedAtMillis,
-    collectGarbage,
+    collectGarbage: async (cutoffTimestampMillis, maxObjects) => await traceSpan("bulldozer-js.piledriver.collectGarbage", async () => await collectGarbage(cutoffTimestampMillis, maxObjects)),
     combineSeqs: (...seqs) => combineSeqs(seqs),
     close,
-    waitUntilAvailable,
-    async waitUntilDurable(seq) {
-      await waitUntilAvailable(seq);
-      await storage.flush();
-    },
-    waitUntilReplicated: waitUntilAvailable,
-    async waitUntilConsistent(seq) {
-      await Promise.all([this.waitUntilReplicated(seq), this.waitUntilDurable(seq)]);
-    },
-    async debugSnapshot() {
+    waitUntilAvailable: async seq => await traceSpan("bulldozer-js.piledriver.waitUntilAvailable", async () => await waitUntilAvailable(seq)),
+    waitUntilDurable: async seq => await traceSpan("bulldozer-js.piledriver.waitUntilDurable", async () => await waitUntilDurable(seq)),
+    waitUntilReplicated: async seq => await traceSpan("bulldozer-js.piledriver.waitUntilReplicated", async () => await waitUntilAvailable(seq)),
+    waitUntilConsistent: async seq => await traceSpan("bulldozer-js.piledriver.waitUntilConsistent", async () => await waitUntilDurable(seq)),
+    debugSnapshot: async () => await traceSpan("bulldozer-js.piledriver.debugSnapshot", async () => {
       const entries = (database: BreezyStore) => [...database.getRange()].map(({ key, value }) => {
         const keyBuffer = Buffer.from(key);
         let keyUtf8: string | null;
@@ -570,7 +651,7 @@ export function declareBreezyDatabaseWithStorage(
         };
       });
       return { roots: entries(rootsStore), heap: entries(heapStore) };
-    },
+    }),
     initialSeq,
   };
 }

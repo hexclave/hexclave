@@ -15,7 +15,7 @@ import { isBulldozerRequestAuthorized } from "./auth.js";
 import { declareBulldozerDatabase, type BulldozerDatabase } from "./databases/bulldozer/index.js";
 import { declareInMemoryLowLevelDatabase } from "./databases/low-level/implementations/in-memory.js";
 import { declareInstantAvailabilityLowLevelDatabase } from "./databases/low-level/implementations/instant-availability.js";
-import { declareLmdbLowLevelDatabase, getLmdbDiagnostics } from "./databases/low-level/implementations/lmdb.js";
+import { declareLmdbLowLevelDatabase } from "./databases/low-level/implementations/lmdb.js";
 import type { LowLevelDatabase } from "./databases/low-level/index.js";
 import { declareBasePiledriverDatabase } from "./databases/piledriver/implementations/base.js";
 import { declareBufferedPiledriverDatabase } from "./databases/piledriver/implementations/buffered.js";
@@ -79,14 +79,10 @@ function createLowLevelDatabase(): LowLevelDatabase {
   }));
 }
 
-const piledriverImplementation = process.env.HEXCLAVE_BULLDOZER_JS_PILEDRIVER_IMPLEMENTATION ?? "base";
-const basePiledriver = await createServicePiledriver({
-  implementation: piledriverImplementation,
-  sqlitePath: process.env.HEXCLAVE_BULLDOZER_JS_SQLITE_PATH,
-  disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
-}, () => declareBasePiledriverDatabase(createLowLevelDatabase(), {
+const servicePiledriver = await createServicePiledriver(process.env, () => declareBasePiledriverDatabase(createLowLevelDatabase(), {
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
 }));
+const basePiledriver = servicePiledriver.piledriver;
 // Buffering keeps availability instant while durability/replication waits for the wrapped root write;
 // it is worthwhile for write-lock occupancy and throughput, not per-call latency.
 const bufferedPiledriverEnabled = process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_BUFFERED_PILEDRIVER !== "1";
@@ -987,7 +983,7 @@ const app = new Elysia({ adapter: node() })
     }
   })
   .get("/health", () => ({ ok: true }))
-  .get("/diagnostics", () => getLmdbDiagnostics() ?? { available: false })
+  .get("/diagnostics", () => handler("diagnostics", async () => servicePiledriver.getDiagnostics()))
   .get("/v1/manual-transactions", ({ query }) => handler("list-manual-transactions", async () => {
     // Cross-instance export surface: backend pages this to back up refunds into Prisma.
     const { limit, cursor } = parseManualTransactionsListQuery(query);
@@ -1175,10 +1171,7 @@ const startupFields = {
   pid: process.pid,
   nodeVersion: process.version,
   sentryEnvironment: resolveBulldozerSentryEnvironment(),
-  piledriverImplementation,
-  lowLevelBackend: piledriverImplementation === "breezylite" ? "sqlite" : process.env.HEXCLAVE_BULLDOZER_JS_LOW_LEVEL_BACKEND ?? "lmdb",
-  usingTmpLmdb: process.env.HEXCLAVE_BULLDOZER_JS_USE_TMP_LMDB === "1",
-  lmdbCompression: process.env.HEXCLAVE_BULLDOZER_JS_LMDB_COMPRESSION === "1",
+  ...servicePiledriver.startupSettings,
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
   bufferedPiledriverEnabled,
   gcExposed: globalThis.gc !== undefined,

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { declareBreezyDatabaseWithStorage, type BreezyPiledriverDatabaseOptions } from "../breezy/core.js";
-import type { BreezyStorage } from "../breezy/storage.js";
+import { existingFileSizesInBytes, type BreezyStorage } from "../breezy/storage.js";
 
 // node:sqlite requires its prefix; older Vite versions strip it from static imports.
 const { DatabaseSync }: typeof import("node:sqlite") = createRequire(import.meta.url)("node:sqlite");
@@ -159,6 +159,7 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
     },
     lastTransactionId,
     refreshReads() {}, // Each statement sees the latest committed snapshot.
+    fileSizesInBytes: () => existingFileSizesInBytes(options.path, ["breezy.sqlite", "breezy.sqlite-wal", "breezy.sqlite-shm"]),
     async flush() {}, // COMMIT already synchronized the WAL (synchronous=FULL).
     async close() { db.close(); },
   };

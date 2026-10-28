@@ -1,5 +1,5 @@
 import * as lmdb from "lmdb";
-import type { BreezyStorage } from "../breezy/storage.js";
+import { existingFileSizesInBytes, type BreezyStorage } from "../breezy/storage.js";
 
 export function openBreezyLMDBStorage(options: { path: string, compression?: boolean }): BreezyStorage {
   const root = lmdb.open({ path: options.path, maxDbs: 1024, compression: options.compression === true, separateFlushed: true });
@@ -33,6 +33,7 @@ export function openBreezyLMDBStorage(options: { path: string, compression?: boo
       return value;
     },
     refreshReads: () => root.resetReadTxn(),
+    fileSizesInBytes: () => existingFileSizesInBytes(options.path, ["data.mdb", "lock.mdb"]),
     flush: async () => { await root.flushed; },
     close: async () => { await root.close(); },
   };
