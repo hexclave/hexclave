@@ -8,6 +8,30 @@ import type { BreezyStorage } from "../breezy/storage.js";
 // node:sqlite requires its prefix; older Vite versions strip it from static imports.
 const { DatabaseSync }: typeof import("node:sqlite") = createRequire(import.meta.url)("node:sqlite");
 
+/**
+ * Returns the decompressed size that a Zstd frame's header declares (RFC 8878, section 3.1.1.1).
+ *
+ * Node's zstdDecompressSync doesn't fail on a frame that is cut short: it returns whatever it had
+ * decoded, often nothing, and skips the checksum if the cut removed it. Comparing the output's length
+ * with this size is what catches that. Node always writes the size, so a frame without one is damaged.
+ */
+function zstdFrameContentSize(frame: Uint8Array) {
+  const header = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength);
+  if (header.length < 5) throw new Error("Breezylite Zstd value is truncated or corrupt");
+  const descriptor = header[4];
+  const isSingleSegment = (descriptor & 0b0010_0000) !== 0;
+  const dictionaryIdBytes = [0, 1, 2, 4][descriptor & 0b11];
+  const sizeFieldBytes = [isSingleSegment ? 1 : 0, 2, 4, 8][descriptor >> 6];
+  // A window descriptor byte follows the frame header descriptor unless the frame is a single segment.
+  const sizeFieldOffset = 5 + (isSingleSegment ? 0 : 1) + dictionaryIdBytes;
+  if (sizeFieldBytes === 0 || header.length < sizeFieldOffset + sizeFieldBytes) throw new Error("Breezylite Zstd value is truncated or corrupt");
+  // The 2-byte form stores the size minus 256; sizes below 256 use the 1-byte form instead.
+  if (sizeFieldBytes === 1) return header.readUInt8(sizeFieldOffset);
+  if (sizeFieldBytes === 2) return header.readUInt16LE(sizeFieldOffset) + 256;
+  if (sizeFieldBytes === 4) return header.readUInt32LE(sizeFieldOffset);
+  return Number(header.readBigUInt64LE(sizeFieldOffset));
+}
+
 export function openBreezyliteStorage(options: { path: string, compression?: boolean }): BreezyStorage {
   if (existsSync(join(options.path, "data.mdb")) || existsSync(join(options.path, "lock.mdb"))) {
     throw new Error("SQLite PoC requires a separate directory; the selected path contains an LMDB store");
@@ -41,7 +65,11 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
   }
   const decode = (value: Uint8Array, codec: unknown) => {
     if (codec === 0) return Buffer.from(value);
-    if (codec === 2) return zstdDecompressSync(value);
+    if (codec === 2) {
+      const decompressed = zstdDecompressSync(value);
+      if (decompressed.length !== zstdFrameContentSize(value)) throw new Error("Breezylite Zstd value is truncated or corrupt");
+      return decompressed;
+    }
     throw new Error(`Unsupported Breezylite value codec: ${String(codec)}`);
   };
   const select = db.prepare("SELECT value, version, codec FROM entries WHERE store = ? AND key = ?");
@@ -85,7 +113,9 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
         put(key, value, version) {
           requireWrite();
           // Skip tiny values and retain raw bytes whenever compression would increase size.
-          const compressed = options.compression !== false && value.length >= 256 ? zstdCompressSync(value, { params: { [constants.ZSTD_c_compressionLevel]: 1 } }) : undefined;
+          // The checksum (4 bytes) makes decompression fail on a flipped bit; without it, most flips
+          // decode to silently wrong data. Each frame records whether it has one, so old values still read.
+          const compressed = options.compression !== false && value.length >= 256 ? zstdCompressSync(value, { params: { [constants.ZSTD_c_compressionLevel]: 1, [constants.ZSTD_c_checksumFlag]: 1 } }) : undefined;
           const useCompressed = compressed !== undefined && compressed.length < value.length;
           put.run(store, key, useCompressed ? compressed : value, version, useCompressed ? 2 : 0);
           return Promise.resolve(true);

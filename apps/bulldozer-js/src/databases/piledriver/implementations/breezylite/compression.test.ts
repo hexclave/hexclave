@@ -55,6 +55,72 @@ it("reads mixed codecs regardless of the write compression setting", async () =>
   }
 });
 
+it("never returns wrong data when one bit of a stored compressed value flips", async () => {
+  const path = mkdtempSync(join(tmpdir(), "breezylite-bitflip-"));
+  const db = openBreezyliteStorage({ path });
+  const raw = new DatabaseSync(join(path, "breezy.sqlite"));
+  try {
+    const store = db.openStore("test");
+    const key = Buffer.from("a");
+    // Prod values average ~380 bytes of JSON-like text, which compresses.
+    const value = Buffer.from(JSON.stringify(Array.from({ length: 12 }, (_, i) => ({ customerId: `customer-${i}`, quantity: i * 7, product: "pro-plan" }))).slice(0, 380));
+    await db.transaction(version => store.put(key, value, version));
+    const stored = raw.prepare("SELECT value, codec FROM entries WHERE key = ?").get(key);
+    expect(stored?.codec).toBe(2);
+    const compressed = Buffer.from(stored?.value as Uint8Array);
+
+    const silentlyWrongBitPositions: number[] = [];
+    for (let bit = 0; bit < compressed.length * 8; bit++) {
+      const corrupted = Buffer.from(compressed);
+      corrupted[bit >> 3] ^= 1 << (bit & 7);
+      raw.prepare("UPDATE entries SET value = ? WHERE key = ?").run(corrupted, key);
+      let readBack: Buffer | undefined;
+      try {
+        readBack = store.get(key);
+      } catch {
+        continue; // Detected: the read failed instead of returning damaged data.
+      }
+      if (readBack === undefined || !readBack.equals(value)) silentlyWrongBitPositions.push(bit);
+    }
+    expect(silentlyWrongBitPositions).toEqual([]);
+  } finally {
+    raw.close();
+    await db.close();
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+it("never returns wrong data when a stored compressed value is cut short", async () => {
+  const path = mkdtempSync(join(tmpdir(), "breezylite-truncated-"));
+  const db = openBreezyliteStorage({ path });
+  const raw = new DatabaseSync(join(path, "breezy.sqlite"));
+  try {
+    const store = db.openStore("test");
+    const key = Buffer.from("a");
+    // Large enough that Zstd splits it into several blocks, so a cut can land between blocks.
+    const value = Buffer.from(Array.from({ length: 20_000 }, (_, i) => `row-${i * 7919 % 10_007};`).join(""));
+    await db.transaction(version => store.put(key, value, version));
+    const compressed = Buffer.from(raw.prepare("SELECT value FROM entries WHERE key = ?").get(key)?.value as Uint8Array);
+
+    const silentlyWrongLengths: number[] = [];
+    for (let length = 0; length < compressed.length; length += Math.ceil(compressed.length / 64)) {
+      raw.prepare("UPDATE entries SET value = ? WHERE key = ?").run(compressed.subarray(0, length), key);
+      let readBack: Buffer | undefined;
+      try {
+        readBack = store.get(key);
+      } catch {
+        continue; // Detected: the read failed instead of returning damaged data.
+      }
+      if (readBack === undefined || !readBack.equals(value)) silentlyWrongLengths.push(length);
+    }
+    expect(silentlyWrongLengths).toEqual([]);
+  } finally {
+    raw.close();
+    await db.close();
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
 it("rejects unknown codecs and corrupt compressed bytes", async () => {
   const path = mkdtempSync(join(tmpdir(), "breezylite-corrupt-"));
   const db = openBreezyliteStorage({ path });
