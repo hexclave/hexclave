@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { openBreezyliteStorage } from "./index.js";
 
 const { DatabaseSync }: typeof import("node:sqlite") = createRequire(import.meta.url)("node:sqlite");
+const SQLITE_BUSY = 5;
 const SQLITE_FULL = 13;
 
 /**
@@ -43,6 +44,30 @@ it("reports a full disk as SQLITE_FULL and keeps earlier data readable", async (
     expect(store.doesExist(Buffer.from("too-big"))).toBe(false);
   } finally {
     vi.restoreAllMocks();
+    await storage.close();
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+it("fails a write right away, instead of freezing the process, while another connection holds the lock", async () => {
+  const path = mkdtempSync(join(tmpdir(), "breezylite-locked-"));
+  const storage = openBreezyliteStorage({ path });
+  // Stands in for a backup tool, the sqlite3 CLI, or an old process that is still shutting down.
+  const otherConnection = new DatabaseSync(join(path, "breezy.sqlite"));
+  try {
+    const store = storage.openStore("test");
+    otherConnection.exec("BEGIN IMMEDIATE");
+
+    const startedAt = performance.now();
+    await expect(storage.transaction(version => store.put(Buffer.from("key"), Buffer.from("value"), version))).rejects.toMatchObject({ errcode: SQLITE_BUSY });
+    // SQLite waits on the main thread, so any wait here is time no other request can run.
+    expect(performance.now() - startedAt).toBeLessThan(500);
+
+    otherConnection.exec("ROLLBACK");
+    await storage.transaction(version => store.put(Buffer.from("key"), Buffer.from("value"), version));
+    expect(store.get(Buffer.from("key"))).toEqual(Buffer.from("value"));
+  } finally {
+    otherConnection.close();
     await storage.close();
     rmSync(path, { recursive: true, force: true });
   }

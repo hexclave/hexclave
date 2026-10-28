@@ -48,7 +48,9 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
     )) {
       throw new Error("Unsupported older Breezylite PoC format; use a fresh SQLite directory (no migration is provided)");
     }
-    db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+    // busy_timeout=0: SQLite waits for a lock on the main thread, freezing every request. This engine
+    // is the database's only writer, so a held lock belongs to another process; fail instead of waiting.
+    db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=0;
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS store_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
       CREATE TABLE IF NOT EXISTS entries (
