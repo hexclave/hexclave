@@ -115,7 +115,9 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
         db.exec("COMMIT");
         return result;
       } catch (error) {
-        db.exec("ROLLBACK");
+        // After some errors (disk full, I/O error, out of memory) SQLite has already rolled back.
+        // Rolling back again would fail and replace the real error with "no transaction is active".
+        if (db.isTransaction) db.exec("ROLLBACK");
         throw error;
       } finally {
         writing = false;
