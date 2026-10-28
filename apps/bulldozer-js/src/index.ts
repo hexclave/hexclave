@@ -27,6 +27,7 @@ import { instrumentation, traceSpan } from "./otel.js";
 import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf } from "./payments/schema/index.js";
 import type { CustomerType, Json, ManualTransactionRow, SubscriptionRow, TransactionRow } from "./payments/schema/types.js";
 import { handleVerifyDataIntegrityRequest, verifyDataIntegrity } from "./payments/verify-data-integrity.js";
+import { handleReleaseFreePagesRequest } from "./release-free-pages-request.js";
 import { initSentry, resolveBulldozerSentryEnvironment } from "./sentry.js";
 
 const sentryEnabled = initSentry();
@@ -1009,6 +1010,11 @@ const app = new Elysia({ adapter: node() })
       request.maxObjects === undefined ? undefined : readPositiveSafeIntegerField(request, "maxObjects"),
     );
   }))
+  .post("/internal/piledriver-release-free-pages", ({ body }) => handler("piledriver-release-free-pages", async () => await handleReleaseFreePagesRequest(
+    body,
+    servicePiledriver.releaseFreePages,
+    String(servicePiledriver.startupSettings.piledriverImplementation),
+  )))
   .get("/v1/:tenancyId/transactions", ({ params, query }) => handler("list-transactions", async () => {
     const parsedLimit = Number.parseInt(typeof query.limit === "string" ? query.limit : "50", 10);
     const result = await listTransactions({
