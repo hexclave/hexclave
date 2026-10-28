@@ -502,6 +502,9 @@ export function declareBreezyDatabaseWithStorage(
           }
         });
         result.objects.candidatesQueuedFromIndex = result.objects.candidatesExamined;
+        // Engines whose transactions finish synchronously (SQLite) resolve `transact` without ever
+        // giving queued I/O a turn, so without this a long GC froze every request until it finished.
+        await letWaitingRequestsRun();
       }
 
       const moreEligibleWorkMayRemain = readCandidates(1).length > 0;
