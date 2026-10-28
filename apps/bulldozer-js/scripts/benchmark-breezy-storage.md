@@ -82,6 +82,52 @@ October 9, 2026 sandbox results (Node 24.21.0), median of three runs; MiB = 1,04
 
 Compression reduced BreezyLMDB’s database file by about 57%. Uncompressed Breezylite was about 1% larger than uncompressed BreezyLMDB. The closed LMDB lock file adds 8,272 logical bytes (4,096 allocated bytes); closed data-file allocation matched file length for both engines. All nine workload runs passed.
 
+## Releasing free pages (shrinking the file)
+
+Deleting data never shrinks a SQLite file: GC empties pages, and SQLite keeps them as *free pages* inside the file for reuse. Breezylite creates every new file with `auto_vacuum=INCREMENTAL`, so those pages can be given back to the operating system in small steps. A full `VACUUM` rewrites the whole file, needs up to twice its size in free disk and blocks writers for the whole run. SQLite only accepts `auto_vacuum` before the first table exists, so files created before this change report `canRelease: false` and must be recreated to use it.
+
+Operator workflow, against the running service:
+
+```sh
+pnpm -C apps/bulldozer-js gc:piledriver <cutoff epoch ms>       # GC first, usually a few times, until no eligible work remains
+pnpm -C apps/bulldozer-js release-free-pages:piledriver --dry-run
+pnpm -C apps/bulldozer-js release-free-pages:piledriver --all   # or --max-mib N for one bounded step
+```
+
+The command calls `POST /internal/piledriver-release-free-pages` (`{ maxBytes?, dryRun? }`, default 1 GiB per request). The release runs inside the service as a series of short SQLite writes on its only connection. It yields to queued requests between them, so it never competes with Bulldozer for SQLite's write lock. Never run `VACUUM` or `incremental_vacuum` from a separate `sqlite3` process: with `busy_timeout=0`, every Bulldozer write fails while that process holds the lock. A second concurrent release, or a file without auto_vacuum, gets a 409. `GET /diagnostics` reports `freePages` (`pageSizeBytes`, `totalPages`, `freePages`, `canRelease`). These are read from SQLite's file header, so the cost doesn't grow with file size (about 3 µs).
+
+Disk: releasing needs no space beyond the WAL, which `journal_size_limit` keeps at or below 64 MiB after checkpoints. The WAL size is in `/diagnostics` and in the 5-second activity log, and it keeps growing if checkpoints are starved. Both Breezy callers of `getRange` read their rows within a single synchronous loop, so no read stays open across an `await` to block checkpoints.
+
+Chunk size: each chunk targets 5 ms of event-loop time. The first chunk releases 16 pages to measure the cost per page, and later chunks are sized from that, up to 4,096 pages. A fixed page count can't work, because the cost per page grows with the file. SQLite searches its free-page list for a slot for every live page it moves out of the file's tail. A native profile showed that search (`allocateBtreePage`) dominating, at about 7 µs per page on 50 MiB and about 55 µs on 5 GiB. Neither fsync nor `mmap` changed it. A 64 MiB `cache_size` halved it in a standalone test (134 → 63 ms per 1,000 pages at 5 GiB). It isn't enabled, because earlier tuning showed no win for normal traffic and about 63 MiB more memory. Release is rarely run and yields to requests, so a slower release is acceptable.
+
+### Load test (October 28, 2026)
+
+A local load test (not committed) filled a fresh database with incompressible 4 KB rows and deleted a random fraction of them, so free pages were scattered the way GC leaves them. It then released every free page while N writers and N readers ran through the buffered wrapper, and finally read back every written value. Medians of 3 runs on an Apple Silicon Mac (48 GB RAM, APFS), Node 24.11; "chunk time / 1k pages" counts only time inside release chunks:
+
+| DB | freed | writers | pages released | release time | chunk time / 1k pages | slowest chunk | event-loop max, before → during | failed writes + mismatches |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 GiB | 10% | 0 | 26,929 | 0.5 s | 18 ms | 33 ms (max 72) | 0 → 33 ms | 0 |
+| 1 GiB | 10% | 16 | 26,909 | 0.6 s | 18 ms | 24 ms (max 28) | 75 → 31 ms | 0 |
+| 1 GiB | 10% | 64 | 26,845 | 0.9 s | 18 ms | 27 ms (max 30) | 34 → 37 ms | 0 |
+| 1 GiB | 50% | 0 | 144,926 | 1.7 s | 12 ms | 21 ms (max 21) | 0 → 14 ms | 0 |
+| 1 GiB | 50% | 16 | 144,908 | 2.4 s | 12 ms | 12 ms (max 13) | 26 → 16 ms | 0 |
+| 1 GiB | 50% | 64 | 144,845 | 4.6 s | 12 ms | 12 ms (max 13) | 30 → 28 ms | 0 |
+| 5 GiB | 10% | 0 | 134,650 | 7.4 s | 54 ms | 28 ms (max 33) | 0 → 28 ms | 0 |
+| 5 GiB | 10% | 16 | 134,630 | 10.3 s | 52 ms | 50 ms (max 75) | 20 → 52 ms | 0 |
+| 5 GiB | 10% | 64 | 134,565 | 41.8 s | 125 ms | 132 ms (max 899) | 34 → 140 ms | 0 |
+| 5 GiB | 50% | 0 | 726,447 | 40.3 s | 55 ms | 23 ms (max 31) | 0 → 23 ms | 0 |
+| 5 GiB | 50% | 16 | 726,430 | 64.5 s | 56 ms | 39 ms (max 617) | 18 → 43 ms | 0 |
+| 5 GiB | 50% | 64 | 726,367 | 346.1 s | 149 ms | 695 ms (max 3,429) | 33 → 1,302 ms | 0 |
+
+Every run ended with 0 free pages, and the main file shrank by the freed bytes (ratio 1.001). No write failed and every value read back. Up to 16 writers, a release barely affects the event loop.
+
+**Open issue:** at 5 GiB with 64 concurrent writers, about 1% of chunks block for 0.4–3.4 s even though they are small (26–186 pages, after normal ~5 ms chunks). Ruled out:
+- chunk growth (no chunk exceeded 656 pages);
+- V8 GC (no pause over 41 ms, and none overlapped the slowest chunks);
+- SQLite's automatic checkpoint and plain interleaved writes (a standalone `node:sqlite` reproduction with 40-page chunks between 64 writes stayed at or below 11 ms).
+
+The cause is inside SQLite, but only under this in-process write pattern. Until it's understood, run large releases during low write traffic. Not yet measured: files larger than 5 GiB, cold OS cache, and GCP persistent-disk fsync.
+
 ## Breezylite compression
 
 Breezylite compresses new SQLite values by default; the service has no compression flag. The adapter accepts `compression: false` for controlled benchmarks. Compression uses Node Zstd at level 1, attempts values of at least 256 bytes and keeps the original bytes when compression is not smaller. Keys remain uncompressed and retain their ordering. Compression and decompression are synchronous.
