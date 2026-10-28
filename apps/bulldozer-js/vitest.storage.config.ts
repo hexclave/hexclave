@@ -6,7 +6,6 @@ export default defineConfig({
   resolve: {
     alias: [{ find: /^@hexclave\/shared\/dist\/(.*)$/, replacement: `${fileURLToPath(new URL("../../packages/shared/src/", import.meta.url))}$1` }],
   },
-  define: { "import.meta.vitest": "undefined" },
   test: {
     include: ["src/**/*.test.ts"],
     pool: "forks",
