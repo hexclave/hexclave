@@ -2,7 +2,7 @@ import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously, wait } from "@hexclave/shared/dist/utils/promises";
 import { createUuidV7Generator } from "@hexclave/shared/dist/utils/uuids";
-import type { BreezyStorage, BreezyStore } from "./storage.js";
+import type { BreezyFreePages, BreezyFreePageStats, BreezyStorage, BreezyStore } from "./storage.js";
 import { shouldSuppressPeriodicBulldozerLogs } from "../../../../logging.js";
 import { traceSpan } from "../../../../otel.js";
 import { createDatabaseSeq, DatabaseSeq } from "../../../index.js";
@@ -54,14 +54,50 @@ export type BreezyDiagnostics = {
   /** Every write transaction since the database was opened, including failed ones. */
   writeTransactions: { count: number, averageMs: number, maxMs: number },
   fileSizesInBytes: Record<string, number>,
+  /** Null when the storage engine can't release free pages. */
+  freePages: BreezyFreePageStats | null,
 };
+
+/** A release that can't run in the database's current state: another one is running, or the file can't release pages. */
+export class FreePageReleaseConflictError extends Error {}
+
+type FreePageSnapshot = BreezyFreePageStats & { fileSizesInBytes: Record<string, number> };
+
+export type FreePageReleaseResult = {
+  /** "limit": free pages may remain, so run it again. "no-free-pages": nothing left to release. */
+  stoppedBecause: "limit" | "no-free-pages" | "dry-run",
+  dryRun: boolean,
+  before: FreePageSnapshot,
+  after: FreePageSnapshot,
+  released: { pages: number, bytes: number },
+  chunks: { count: number, largestPages: number, maxMs: number, totalMs: number },
+  /** Null on a dry run, which doesn't checkpoint. */
+  checkpoint: ReturnType<BreezyFreePages["checkpoint"]> | null,
+  elapsedMs: number,
+};
+
+/**
+ * How long one chunk of a release may block the event loop. Chunks are sized by time, not by a fixed
+ * page count, because the cost of a page grows with the file: SQLite searches its free-page list to
+ * find a slot for every page it moves (allocateBtreePage, which dominated a native profile), so a
+ * page took ~7 µs on a 50 MiB file and ~110 µs on a 5 GiB one. A fixed count small enough for big
+ * files would make releases needlessly slow on small ones.
+ */
+const freePageReleaseChunkBudgetMs = 5;
+/** The first chunk is a small probe that measures the cost per page on this file. */
+const freePageReleaseFirstChunkPages = 16;
+/** Caps a chunk even when pages are cheap, so one chunk never adds more than 16 MiB to the WAL. */
+const freePageReleaseMaxChunkPages = 4096;
 
 /** Shared codec, heap cache, publication and GC logic for all Breezy storage engines. */
 export function declareBreezyDatabaseWithStorage(
   storage: BreezyStorage,
   dbId = "default",
   options: BreezyPiledriverDatabaseOptions = {},
-): PiledriverDatabase & { getDiagnostics(): BreezyDiagnostics } {
+): PiledriverDatabase & {
+  getDiagnostics(): BreezyDiagnostics,
+  releaseFreePages(options: { maxBytes: number, dryRun: boolean }): Promise<FreePageReleaseResult>,
+} {
   const processStartedAtMillis = options.garbageCollectionProcessStartedAtMillis ?? breezyPiledriverProcessStartedAtMillis;
   if (!Number.isSafeInteger(processStartedAtMillis) || processStartedAtMillis < 0) throw new Error("Piledriver garbageCollectionProcessStartedAtMillis must be a non-negative safe integer");
   const heapStore = storage.openStore(`${dbId}:dump:heap`);
@@ -545,15 +581,90 @@ export function declareBreezyDatabaseWithStorage(
       garbageCollectionsInProgress.delete(collection);
     }
   };
+  let freePageReleaseRunning = false;
+  const freePageReleasesInProgress = new Set<Promise<unknown>>();
+  const freePageSnapshot = (freePages: BreezyFreePages): FreePageSnapshot => ({ ...freePages.stats(), fileSizesInBytes: storage.fileSizesInBytes() });
   /**
-   * Waits for writes, garbage collections and heap reads already in progress, then closes storage.
+   * Gives free pages (space GC already emptied) back to the operating system, which shrinks the file.
+   * It never deletes data. Each chunk is one synchronous write on the service's only connection, then
+   * waiting requests get a turn, so writers wait at most one chunk and never fight for SQLite's lock.
+   * No mutation lock: a chunk can't interleave with a write transaction, since both run synchronously.
+   */
+  const releaseFreePagesUntracked = async ({ maxBytes, dryRun }: { maxBytes: number, dryRun: boolean }): Promise<FreePageReleaseResult> => {
+    const startedAt = performance.now();
+    const freePages = storage.freePages ?? throwErr(`The ${storage.backend} storage engine can't release free pages`);
+    const before = freePageSnapshot(freePages);
+    const chunks = { count: 0, largestPages: 0, maxMs: 0, totalMs: 0 };
+    if (dryRun) {
+      return { stoppedBecause: "dry-run", dryRun, before, after: before, released: { pages: 0, bytes: 0 }, chunks, checkpoint: null, elapsedMs: performance.now() - startedAt };
+    }
+    if (!before.canRelease) {
+      throw new FreePageReleaseConflictError("This SQLite file was created without auto_vacuum=INCREMENTAL, so its free pages can't be released incrementally. Recreate the database directory to enable it.");
+    }
+    if (freePageReleaseRunning) throw new FreePageReleaseConflictError("A free page release is already running");
+    freePageReleaseRunning = true;
+    try {
+      const maxPages = Math.floor(maxBytes / before.pageSizeBytes);
+      let releasedPages = 0;
+      let freePagesLeft = before.freePages;
+      let nextChunkPages = freePageReleaseFirstChunkPages;
+      while (releasedPages < maxPages && freePagesLeft > 0) {
+        const chunkPages = Math.min(nextChunkPages, maxPages - releasedPages);
+        const chunkStartedAt = performance.now();
+        const released = freePages.release(chunkPages);
+        const chunkMs = performance.now() - chunkStartedAt;
+        chunks.count++;
+        chunks.totalMs += chunkMs;
+        chunks.maxMs = Math.max(chunks.maxMs, chunkMs);
+        chunks.largestPages = Math.max(chunks.largestPages, chunkPages);
+        releasedPages += released;
+        freePagesLeft = freePages.stats().freePages;
+        // Writes in between can add or reuse free pages, so a chunk may release fewer than it asked for.
+        if (released === 0) break;
+        const msPerPage = chunkMs / chunkPages;
+        nextChunkPages = msPerPage === 0
+          ? freePageReleaseMaxChunkPages
+          : Math.max(1, Math.min(freePageReleaseMaxChunkPages, Math.floor(freePageReleaseChunkBudgetMs / msPerPage)));
+        await letWaitingRequestsRun();
+      }
+      // The released pages only leave the main file once the WAL is applied to it.
+      const checkpoint = freePages.checkpoint();
+      const after = freePageSnapshot(freePages);
+      const result: FreePageReleaseResult = {
+        stoppedBecause: after.freePages === 0 ? "no-free-pages" : "limit",
+        dryRun,
+        before,
+        after,
+        released: { pages: releasedPages, bytes: releasedPages * before.pageSizeBytes },
+        chunks,
+        checkpoint,
+        elapsedMs: performance.now() - startedAt,
+      };
+      console.log("bulldozer-js breezy releaseFreePages", { backend: storage.backend, dbId, ...result });
+      return result;
+    } finally {
+      freePageReleaseRunning = false;
+    }
+  };
+  const releaseFreePages = async (options: { maxBytes: number, dryRun: boolean }) => {
+    throwIfClosing();
+    const release = releaseFreePagesUntracked(options);
+    freePageReleasesInProgress.add(release);
+    try {
+      return await release;
+    } finally {
+      freePageReleasesInProgress.delete(release);
+    }
+  };
+  /**
+   * Waits for writes, garbage collections, free page releases and heap reads already in progress, then closes storage.
    * Closing storage under them made them fail midway. New operations started after this is called
    * throw, so nothing new can start while this waits.
    */
   const close = async () => {
     closing ??= withMutationLock(async () => {
       // Each operation's own caller gets its result or error; here we only wait for it to stop.
-      await Promise.allSettled([...garbageCollectionsInProgress, ...pausedHeapLoads]);
+      await Promise.allSettled([...garbageCollectionsInProgress, ...freePageReleasesInProgress, ...pausedHeapLoads]);
       clearInterval(activityLogInterval);
       await storage.close();
     });
@@ -567,7 +678,9 @@ export function declareBreezyDatabaseWithStorage(
       dbId,
       writeTransactions: summarizeWriteTransactions(writeTransactionsSinceOpen),
       fileSizesInBytes: storage.fileSizesInBytes(),
+      freePages: storage.freePages?.stats() ?? null,
     }),
+    releaseFreePages: async options => await traceSpan("bulldozer-js.piledriver.releaseFreePages", async () => await releaseFreePages(options)),
     // Span names (including the doubled "bulldozer-js." that traceSpan adds) match base.ts, so the
     // same trace queries and dashboards work on every backend.
     getRootObject: async key => await traceSpan("bulldozer-js.piledriver.getRootObject", async () => {

@@ -34,6 +34,8 @@ export function openBreezyLMDBStorage(options: { path: string, compression?: boo
     },
     refreshReads: () => root.resetReadTxn(),
     fileSizesInBytes: () => existingFileSizesInBytes(options.path, ["data.mdb", "lock.mdb"]),
+    // LMDB reuses free pages but can only shrink its file by copying it (mdb_copy -c).
+    freePages: null,
     flush: async () => { await root.flushed; },
     close: async () => { await root.close(); },
   };
