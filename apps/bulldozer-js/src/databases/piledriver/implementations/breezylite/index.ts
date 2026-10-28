@@ -80,8 +80,8 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
   const createStore = db.prepare("INSERT INTO store_names(name) VALUES (?) ON CONFLICT(name) DO NOTHING");
   const put = db.prepare("INSERT INTO entries (store, key, value, version, codec) VALUES (?, ?, ?, ?, ?) ON CONFLICT(store, key) DO UPDATE SET value=excluded.value, version=excluded.version, codec=excluded.codec");
   const remove = db.prepare("DELETE FROM entries WHERE store = ? AND key = ?");
-  const range = db.prepare("SELECT key, value, codec FROM entries WHERE store = ? ORDER BY key LIMIT ?");
-  const rangeEnd = db.prepare("SELECT key, value, codec FROM entries WHERE store = ? AND key < ? ORDER BY key LIMIT ?");
+  const rangeSql = "SELECT key, value, codec FROM entries WHERE store = ? ORDER BY key LIMIT ?";
+  const rangeEndSql = "SELECT key, value, codec FROM entries WHERE store = ? AND key < ? ORDER BY key LIMIT ?";
   const readSequence = db.prepare("SELECT version FROM sequence WHERE id = 1");
   const incrementSequence = db.prepare("UPDATE sequence SET version = version + 1 WHERE id = 1");
   let writing = false;
@@ -127,9 +127,11 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
           return Promise.resolve(Number(remove.run(store, key).changes) > 0);
         },
         *getRange(options = {}) {
+          // A fresh statement per scan: a statement has a single cursor, so scans sharing one would
+          // read each other's rows whenever two are open at once.
           const rows = options.end === undefined
-            ? range.iterate(store, options.limit ?? -1)
-            : rangeEnd.iterate(store, options.end, options.limit ?? -1);
+            ? db.prepare(rangeSql).iterate(store, options.limit ?? -1)
+            : db.prepare(rangeEndSql).iterate(store, options.end, options.limit ?? -1);
           for (const row of rows) {
             if (!(row.key instanceof Uint8Array) || !(row.value instanceof Uint8Array)) throw new Error("Invalid SQLite range entry");
             yield { key: Buffer.from(row.key), value: decode(row.value, row.codec) };

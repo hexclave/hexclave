@@ -13,6 +13,46 @@ for (const [name, open] of [
   ["Breezylite compressed by default", openBreezyliteStorage],
 ] as const) {
   describe(name, () => {
+    it("keeps range scans independent when several are open at once", async () => {
+      const path = mkdtempSync(join(tmpdir(), "breezy-overlapping-scans-"));
+      const storage = open({ path });
+      try {
+        const letters = storage.openStore("letters");
+        const digits = storage.openStore("digits");
+        const writes: Promise<boolean>[] = [];
+        await storage.transaction(version => {
+          for (const letter of ["a", "b", "c"]) writes.push(letters.put(Buffer.from(letter), Buffer.from(letter), version));
+          for (const digit of ["1", "2", "3"]) writes.push(digits.put(Buffer.from(digit), Buffer.from(digit), version));
+        });
+        await Promise.all(writes);
+        const keyText = (row: { key: Uint8Array }) => Buffer.from(row.key).toString();
+
+        // Two scans of the same store, read in turns.
+        const first = letters.getRange()[Symbol.iterator]();
+        const second = letters.getRange()[Symbol.iterator]();
+        const firstKeys: string[] = [];
+        const secondKeys: string[] = [];
+        for (let step = 0; step < 4; step++) {
+          const fromFirst = first.next();
+          if (fromFirst.done !== true) firstKeys.push(keyText(fromFirst.value));
+          const fromSecond = second.next();
+          if (fromSecond.done !== true) secondKeys.push(keyText(fromSecond.value));
+        }
+        expect(firstKeys).toEqual(["a", "b", "c"]);
+        expect(secondKeys).toEqual(["a", "b", "c"]);
+
+        // A scan of one store nested inside a scan of another.
+        const pairs: string[] = [];
+        for (const letter of letters.getRange()) {
+          for (const digit of digits.getRange({ end: Buffer.from("3") })) pairs.push(keyText(letter) + keyText(digit));
+        }
+        expect(pairs).toEqual(["a1", "a2", "b1", "b2", "c1", "c2"]);
+      } finally {
+        await storage.close();
+        rmSync(path, { recursive: true, force: true });
+      }
+    });
+
     it("preserves binary ordering, versions and data across reopen", async () => {
       const path = mkdtempSync(join(tmpdir(), "breezy-storage-"));
       let storage = open({ path });
