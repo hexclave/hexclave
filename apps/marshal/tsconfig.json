@@ -27,6 +27,8 @@
   ],
   "exclude": [
     "node_modules",
-    "dist"
+    "dist",
+    "**/*.untracked.*",
+    "**/*.untracked/**"
   ]
 }
