@@ -71,11 +71,23 @@ describe("POST /internal/piledriver-release-free-pages", () => {
     expect(result).toEqual({ status: 400, message: "Releasing free pages is only supported on the breezylite backend (current: base)" });
   });
 
-  it("turns a release that can't run now into a 409 with its message", async () => {
+  it.each([
+    ["already-running", "A free page release is already running"],
+    ["cannot-release", "This SQLite file was created without auto_vacuum=INCREMENTAL, so its free pages can't be released incrementally. Recreate the database directory to enable it."],
+  ] as const)("turns a %s conflict into a 409 with a fixed message", async (reason, message) => {
     const result = await statusOf(handleReleaseFreePagesRequest({}, async () => {
-      throw new FreePageReleaseConflictError("A free page release is already running");
+      throw new FreePageReleaseConflictError(reason);
     }, "piledriver-breezylite"));
-    expect(result).toEqual({ status: 409, message: "A free page release is already running" });
+    expect(result).toEqual({ status: 409, message });
+  });
+
+  it("never sends the error's own message text to the client", async () => {
+    const conflict = new FreePageReleaseConflictError("already-running");
+    conflict.message = "internal detail: /var/lib/bulldozer/breezy.sqlite";
+    const result = await statusOf(handleReleaseFreePagesRequest({}, async () => {
+      throw conflict;
+    }, "piledriver-breezylite"));
+    expect(result.message).not.toContain("internal detail");
   });
 
   it("lets any other failure through unchanged, so the handler reports it as a server error", async () => {

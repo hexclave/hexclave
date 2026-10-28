@@ -58,14 +58,28 @@ export type BreezyDiagnostics = {
   freePages: BreezyFreePageStats | null,
 };
 
-/** A release that can't run in the database's current state: another one is running, or the file can't release pages. */
-export class FreePageReleaseConflictError extends Error {}
+/**
+ * A release that can't run in the database's current state. Callers branch on `reason`; the message is
+ * for logs only, and the HTTP boundary picks its own client-facing text per reason.
+ */
+export class FreePageReleaseConflictError extends Error {
+  constructor(readonly reason: "already-running" | "cannot-release") {
+    super(reason === "already-running"
+      ? "A free page release is already running"
+      : "This SQLite file was created without auto_vacuum=INCREMENTAL, so its free pages can't be released incrementally");
+  }
+}
 
 type FreePageSnapshot = BreezyFreePageStats & { fileSizesInBytes: Record<string, number> };
 
 export type FreePageReleaseResult = {
-  /** "limit": free pages may remain, so run it again. "no-free-pages": nothing left to release. */
-  stoppedBecause: "limit" | "no-free-pages" | "dry-run",
+  /**
+   * Why the release stopped, decided at the moment it stopped:
+   * "limit": it released maxBytes, so free pages may remain; run it again.
+   * "no-free-pages": the free list was empty when it last checked.
+   * "no-progress": a chunk released nothing although free pages remained; running again won't help now.
+   */
+  stoppedBecause: "limit" | "no-free-pages" | "no-progress" | "dry-run",
   dryRun: boolean,
   before: FreePageSnapshot,
   after: FreePageSnapshot,
@@ -79,9 +93,10 @@ export type FreePageReleaseResult = {
 /**
  * How long one chunk of a release may block the event loop. Chunks are sized by time, not by a fixed
  * page count, because the cost of a page grows with the file: SQLite searches its free-page list to
- * find a slot for every page it moves (allocateBtreePage, which dominated a native profile), so a
- * page took ~7 µs on a 50 MiB file and ~110 µs on a 5 GiB one. A fixed count small enough for big
- * files would make releases needlessly slow on small ones.
+ * find a slot for every page it moves (allocateBtreePage, which dominated a native profile). Measured
+ * on a Mac: ~7 µs per page on a 50 MiB file; on a 5 GiB one, ~55 µs with the small chunks this loop
+ * uses and ~80–135 µs in fixed chunks of 250–8,000 pages (the cost per page grows with chunk size).
+ * A fixed count small enough for big files would make releases needlessly slow on small ones.
  */
 const freePageReleaseChunkBudgetMs = 5;
 /** The first chunk is a small probe that measures the cost per page on this file. */
@@ -599,16 +614,29 @@ export function declareBreezyDatabaseWithStorage(
       return { stoppedBecause: "dry-run", dryRun, before, after: before, released: { pages: 0, bytes: 0 }, chunks, checkpoint: null, elapsedMs: performance.now() - startedAt };
     }
     if (!before.canRelease) {
-      throw new FreePageReleaseConflictError("This SQLite file was created without auto_vacuum=INCREMENTAL, so its free pages can't be released incrementally. Recreate the database directory to enable it.");
+      throw new FreePageReleaseConflictError("cannot-release");
     }
-    if (freePageReleaseRunning) throw new FreePageReleaseConflictError("A free page release is already running");
+    if (freePageReleaseRunning) throw new FreePageReleaseConflictError("already-running");
     freePageReleaseRunning = true;
     try {
       const maxPages = Math.floor(maxBytes / before.pageSizeBytes);
       let releasedPages = 0;
-      let freePagesLeft = before.freePages;
       let nextChunkPages = freePageReleaseFirstChunkPages;
-      while (releasedPages < maxPages && freePagesLeft > 0) {
+      // Decided where the loop stops, not afterwards from the free-page count: writes during the
+      // yields can free new pages, and deriving the reason from a later count reported "limit" for a
+      // release that never reached its limit, which made `--all` keep going.
+      let stoppedBecause: "limit" | "no-free-pages" | "no-progress";
+      for (;;) {
+        if (releasedPages >= maxPages) {
+          stoppedBecause = "limit";
+          break;
+        }
+        // Read after the previous yield, so pages freed during it are released too. Nothing awaits
+        // between the last read and the snapshot below, so a "no-free-pages" result is still true then.
+        if (freePages.stats().freePages === 0) {
+          stoppedBecause = "no-free-pages";
+          break;
+        }
         const chunkPages = Math.min(nextChunkPages, maxPages - releasedPages);
         const chunkStartedAt = performance.now();
         const released = freePages.release(chunkPages);
@@ -618,9 +646,10 @@ export function declareBreezyDatabaseWithStorage(
         chunks.maxMs = Math.max(chunks.maxMs, chunkMs);
         chunks.largestPages = Math.max(chunks.largestPages, chunkPages);
         releasedPages += released;
-        freePagesLeft = freePages.stats().freePages;
-        // Writes in between can add or reuse free pages, so a chunk may release fewer than it asked for.
-        if (released === 0) break;
+        if (released === 0) {
+          stoppedBecause = "no-progress";
+          break;
+        }
         const msPerPage = chunkMs / chunkPages;
         nextChunkPages = msPerPage === 0
           ? freePageReleaseMaxChunkPages
@@ -631,7 +660,7 @@ export function declareBreezyDatabaseWithStorage(
       const checkpoint = freePages.checkpoint();
       const after = freePageSnapshot(freePages);
       const result: FreePageReleaseResult = {
-        stoppedBecause: after.freePages === 0 ? "no-free-pages" : "limit",
+        stoppedBecause,
         dryRun,
         before,
         after,

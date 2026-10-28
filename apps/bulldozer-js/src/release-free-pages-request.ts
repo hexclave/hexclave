@@ -1,4 +1,4 @@
-import { StatusError } from "@hexclave/shared/dist/utils/errors";
+import { StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { FreePageReleaseConflictError } from "./databases/piledriver/implementations/breezy/core.js";
 
 export type ReleaseFreePagesOptions = { maxBytes: number, dryRun: boolean };
@@ -6,6 +6,11 @@ export type ReleaseFreePagesOptions = { maxBytes: number, dryRun: boolean };
 /** Without a limit, one request gives back at most this much, so it finishes in seconds. */
 export const defaultReleaseFreePagesMaxBytes = 1024 * 1024 * 1024;
 const minReleaseFreePagesMaxBytes = 1024 * 1024;
+
+const conflictMessageByReason = new Map<FreePageReleaseConflictError["reason"], string>([
+  ["already-running", "A free page release is already running"],
+  ["cannot-release", "This SQLite file was created without auto_vacuum=INCREMENTAL, so its free pages can't be released incrementally. Recreate the database directory to enable it."],
+]);
 
 /**
  * Validates a POST /internal/piledriver-release-free-pages body and runs the release. `release` is
@@ -38,7 +43,8 @@ export async function handleReleaseFreePagesRequest<Result>(
   try {
     return await release({ maxBytes, dryRun });
   } catch (error) {
-    if (error instanceof FreePageReleaseConflictError) throw new StatusError(StatusError.Conflict, error.message);
+    // The text comes from this fixed map, never from the error, so nothing internal can reach a client.
+    if (error instanceof FreePageReleaseConflictError) throw new StatusError(StatusError.Conflict, conflictMessageByReason.get(error.reason) ?? throwErr(`No client message for conflict ${error.reason}`));
     throw error;
   }
 }

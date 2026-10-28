@@ -274,8 +274,72 @@ it("sizes each chunk to a short time budget, even when releasing a page is slow"
     await fillThenDelete(storage, 1000);
     const result = await db.releaseFreePages({ maxBytes: 300 * 4096, dryRun: false });
     expect(result.released.pages).toBe(300);
-    // A fixed 1,000-page chunk would block for 500 ms here; the budget keeps every chunk short.
-    expect(result.chunks.maxMs).toBeLessThan(25);
+    // Asserted on chunk size, not chunk time: wall-clock time also counts whatever else the machine
+    // did meanwhile, so it flakes on a busy CI worker. Every page here costs at least 0.5 ms, so after
+    // the 16-page probe each chunk fits the 5 ms budget at <= 10 pages. One 300-page chunk (what a
+    // fixed page count would do) would block for 150 ms.
+    expect(result.chunks.largestPages).toBeLessThanOrEqual(16);
+  } finally {
+    await db.close();
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+it("releases pages freed while it was yielding, instead of claiming the limit was reached", async () => {
+  const path = mkdtempSync(join(tmpdir(), "breezylite-release-concurrent-free-"));
+  const storage = openBreezyliteStorage({ path });
+  const realFreePages = freePagesOf(storage);
+  const churn = storage.openStore("churn");
+  const churnWrites: Promise<unknown>[] = [];
+  let freedDuringLastYield = false;
+  // A write that frees pages, scheduled by the chunk that empties the free list, so it runs during
+  // the yield right after the release's last chunk: the moment a stale count would end the loop.
+  const churningStorage: BreezyStorage = {
+    ...storage,
+    freePages: {
+      ...realFreePages,
+      release(maxPages) {
+        const released = realFreePages.release(maxPages);
+        if (!freedDuringLastYield && realFreePages.stats().freePages === 0) {
+          freedDuringLastYield = true;
+          setImmediate(() => {
+            const keys = Array.from({ length: 200 }, (_, i) => Buffer.from(`churn-${i}`));
+            churnWrites.push(storage.transaction(version => keys.map(key => churn.put(key, randomBytes(4000), version))));
+            churnWrites.push(storage.transaction(() => keys.map(key => churn.remove(key))));
+          });
+        }
+        return released;
+      },
+    },
+  };
+  const db = declareBreezyDatabaseWithStorage(churningStorage, "test");
+  try {
+    await fillThenDelete(storage, 2000);
+    const result = await db.releaseFreePages({ maxBytes: 1024 * mib, dryRun: false });
+    await Promise.all(churnWrites);
+
+    expect(freedDuringLastYield).toBe(true);
+    // 1 GiB was never reached, so "limit" would wrongly tell the operator to run it again.
+    expect(result.stoppedBecause).toBe("no-free-pages");
+    expect(result.after.freePages).toBe(0);
+  } finally {
+    await db.close();
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+it("says it made no progress, rather than that the limit was reached, when a chunk releases nothing", async () => {
+  const path = mkdtempSync(join(tmpdir(), "breezylite-release-no-progress-"));
+  const storage = openBreezyliteStorage({ path });
+  const realFreePages = freePagesOf(storage);
+  const stuckStorage: BreezyStorage = { ...storage, freePages: { ...realFreePages, release: () => 0 } };
+  const db = declareBreezyDatabaseWithStorage(stuckStorage, "test");
+  try {
+    await fillThenDelete(storage, 500);
+    const result = await db.releaseFreePages({ maxBytes: 1024 * mib, dryRun: false });
+    expect(result.stoppedBecause).toBe("no-progress");
+    expect(result.released.pages).toBe(0);
+    expect(result.after.freePages).toBeGreaterThan(0);
   } finally {
     await db.close();
     rmSync(path, { recursive: true, force: true });
