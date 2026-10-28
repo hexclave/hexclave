@@ -1,3 +1,4 @@
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { parseArgs } from "node:util";
 import type { FreePageReleaseResult } from "../src/databases/piledriver/implementations/breezy/core.js";
 
@@ -23,8 +24,9 @@ requests for up to a few seconds, so run big releases during quieter periods
 
 Options:
   --max-mib N   release at most N MiB in this run (default 1024)
-  --all         keep going, N MiB per request, until no free pages remain
-  --dry-run     only report how many free pages could be released
+  --all         keep going while each request releases its full N MiB; stops when a request finds
+                fewer free pages than that, or makes no progress (the summary says which)
+  --dry-run     only report the free pages, and whether this file can release them
   --url URL     Bulldozer service URL (default: HEXCLAVE_BULLDOZER_SERVER_URL, or localhost:<port prefix>46)
   -h, --help    show this help
 
@@ -73,15 +75,27 @@ const freePagesWithSize = (snapshot: FreePageReleaseResult["after"]) => `${snaps
 const mainFileBytes = (snapshot: FreePageReleaseResult["after"]) => snapshot.fileSizesInBytes["breezy.sqlite"] ?? 0;
 const walFileBytes = (snapshot: FreePageReleaseResult["after"]) => snapshot.fileSizesInBytes["breezy.sqlite-wal"] ?? 0;
 
+/** `--all` sends another request only after one that used its whole limit, so every round releases at least --max-mib. */
+export function shouldRequestAgain(stoppedBecause: FreePageReleaseResult["stoppedBecause"]) {
+  return stoppedBecause === "limit";
+}
+
+const nextStepByStopReason = new Map<Exclude<FreePageReleaseResult["stoppedBecause"], "dry-run">, (result: FreePageReleaseResult) => string>([
+  ["limit", result => `${freePagesWithSize(result.after)} left: limit reached, run again to release more.`],
+  ["no-free-pages", () => "No free pages left. If you expected some, run GC first (pnpm gc:piledriver)."],
+  ["no-progress", result => `${freePagesWithSize(result.after)} left, but the last step made no progress; try again when writes are quieter.`],
+]);
+
 /** One line for the operator: what happened, and whether running it again would release more. */
 export function formatReleaseFreePagesSummary(result: FreePageReleaseResult) {
-  if (result.dryRun) {
-    return `Dry run: ${freePagesWithSize(result.before)} could be released. breezy.sqlite is ${formatMiB(mainFileBytes(result.before))}, WAL ${formatMiB(walFileBytes(result.before))}.`;
+  if (result.stoppedBecause === "dry-run") {
+    const files = `breezy.sqlite is ${formatMiB(mainFileBytes(result.before))}, WAL ${formatMiB(walFileBytes(result.before))}.`;
+    return result.before.canRelease
+      ? `Dry run: ${freePagesWithSize(result.before)} could be released. ${files}`
+      : `Dry run: ${freePagesWithSize(result.before)}, but this file was created without auto_vacuum=INCREMENTAL, so they can't be released incrementally; recreate the database directory to enable it. ${files}`;
   }
   const released = `Released ${formatMiB(result.released.bytes)} in ${result.chunks.count} chunks (slowest ${result.chunks.maxMs.toFixed(1)} ms).`;
   const files = `breezy.sqlite ${formatMiB(mainFileBytes(result.before))} -> ${formatMiB(mainFileBytes(result.after))}, WAL ${formatMiB(walFileBytes(result.after))}.`;
-  const next = result.stoppedBecause === "limit"
-    ? `${freePagesWithSize(result.after)} left: limit reached, run again to release more.`
-    : "No free pages left. If you expected some, run GC first (pnpm gc:piledriver).";
-  return `${released} ${files} ${next}`;
+  const nextStep = nextStepByStopReason.get(result.stoppedBecause) ?? throwErr(`No summary for stop reason ${result.stoppedBecause}`);
+  return `${released} ${files} ${nextStep(result)}`;
 }

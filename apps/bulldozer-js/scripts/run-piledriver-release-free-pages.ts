@@ -1,6 +1,6 @@
 import "../src/load-env.js";
 import type { FreePageReleaseResult } from "../src/databases/piledriver/implementations/breezy/core.js";
-import { formatReleaseFreePagesSummary, parseReleaseFreePagesArgs, releaseFreePagesHelp } from "./piledriver-release-free-pages-cli-utils.js";
+import { formatReleaseFreePagesSummary, parseReleaseFreePagesArgs, releaseFreePagesHelp, shouldRequestAgain } from "./piledriver-release-free-pages-cli-utils.js";
 
 const command = parseReleaseFreePagesArgs(process.argv.slice(2));
 if (command.kind === "help") {
@@ -33,11 +33,11 @@ const requestRelease = async (): Promise<FreePageReleaseResult> => {
   return await response.json();
 };
 
-// Each request is bounded by --max-mib; --all repeats them, and stops early if a request released
-// nothing (for example because writes kept reusing the free pages), so it can't loop forever.
+// Each request is bounded by --max-mib. --all repeats only after a request that released its whole
+// limit, so every round shrinks the file by at least --max-mib and the loop ends once free pages run short.
 for (;;) {
   const result = await requestRelease();
   console.log(JSON.stringify({ command: "piledriver-release-free-pages", endpoint: endpointUrl.toString(), result }, null, 2));
   console.log(formatReleaseFreePagesSummary(result));
-  if (command.kind === "dry-run" || !command.all || result.stoppedBecause !== "limit" || result.released.pages === 0) break;
+  if (command.kind === "dry-run" || !command.all || !shouldRequestAgain(result.stoppedBecause)) break;
 }

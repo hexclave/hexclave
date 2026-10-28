@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatReleaseFreePagesSummary, parseReleaseFreePagesArgs } from "./piledriver-release-free-pages-cli-utils.js";
+import { formatReleaseFreePagesSummary, parseReleaseFreePagesArgs, shouldRequestAgain } from "./piledriver-release-free-pages-cli-utils.js";
 
 const mib = 1024 * 1024;
 
@@ -80,5 +80,45 @@ describe("release-free-pages CLI summary", () => {
       .toBe("Released 0.0 MiB in 0 chunks (slowest 0.0 ms). breezy.sqlite 12.0 MiB -> 12.0 MiB, WAL 1.0 MiB. No free pages left. If you expected some, run GC first (pnpm gc:piledriver).");
     expect(formatReleaseFreePagesSummary({ ...base, before: snapshot(500, 3000, 12, 1), after: snapshot(500, 3000, 12, 1), stoppedBecause: "dry-run", dryRun: true }))
       .toBe("Dry run: 500 free pages (2.0 MiB) could be released. breezy.sqlite is 12.0 MiB, WAL 1.0 MiB.");
+  });
+
+  it("says a release made no progress instead of claiming the limit was reached", () => {
+    const summary = formatReleaseFreePagesSummary({
+      stoppedBecause: "no-progress",
+      dryRun: false,
+      before: snapshot(500, 3000, 12, 1),
+      after: snapshot(500, 3000, 12, 1),
+      released: { pages: 0, bytes: 0 },
+      chunks: { count: 1, largestPages: 16, maxMs: 1, totalMs: 1 },
+      checkpoint: { busy: false, logFrames: 0, checkpointedFrames: 0 },
+      elapsedMs: 2,
+    });
+    expect(summary).not.toContain("limit reached");
+    expect(summary).toContain("made no progress");
+  });
+
+  it("a dry run on a file without auto_vacuum says its pages can't be released, not that they could be", () => {
+    const legacy = { ...snapshot(500, 3000, 12, 1), canRelease: false };
+    const summary = formatReleaseFreePagesSummary({
+      stoppedBecause: "dry-run",
+      dryRun: true,
+      before: legacy,
+      after: legacy,
+      released: { pages: 0, bytes: 0 },
+      chunks: { count: 0, largestPages: 0, maxMs: 0, totalMs: 0 },
+      checkpoint: null,
+      elapsedMs: 1,
+    });
+    expect(summary).not.toContain("could be released");
+    expect(summary).toContain("created without auto_vacuum");
+  });
+});
+
+describe("release-free-pages --all", () => {
+  it("only asks for another request after one that used its whole limit", () => {
+    expect(shouldRequestAgain("limit")).toBe(true);
+    for (const stoppedBecause of ["no-free-pages", "no-progress", "dry-run"] as const) {
+      expect(shouldRequestAgain(stoppedBecause)).toBe(false);
+    }
   });
 });
