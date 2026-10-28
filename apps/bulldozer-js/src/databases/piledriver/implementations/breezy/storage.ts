@@ -24,6 +24,24 @@ export type BreezyStore = {
   getRange(options?: { end?: Uint8Array, limit?: number }): Iterable<{ key: Uint8Array, value: Buffer }>,
 };
 
+/** How much of an engine's file is free pages: space deleted data left behind that the file still holds. */
+export type BreezyFreePageStats = {
+  pageSizeBytes: number,
+  totalPages: number,
+  freePages: number,
+  /** False when the file's format can't give free pages back without a full rebuild. */
+  canRelease: boolean,
+};
+
+/** Giving free pages back to the operating system, which shrinks the file. Reading stats is O(1). */
+export type BreezyFreePages = {
+  stats(): BreezyFreePageStats,
+  /** Synchronously gives back up to `maxPages` free pages and returns how many it gave back. */
+  release(maxPages: number): number,
+  /** Applies logged writes to the main file, which is when the file actually gets shorter. */
+  checkpoint(): { busy: boolean, logFrames: number, checkpointedFrames: number },
+};
+
 export type BreezyStorage = {
   backend: string,
   openStore(name: string): BreezyStore,
@@ -33,6 +51,8 @@ export type BreezyStorage = {
   refreshReads(): void,
   /** Size of each of this engine's files on disk, by file name, for diagnostics. */
   fileSizesInBytes(): Record<string, number>,
+  /** Null when the engine has no way to give free pages back. */
+  freePages: BreezyFreePages | null,
   flush(): Promise<void>,
   close(): Promise<void>,
 };

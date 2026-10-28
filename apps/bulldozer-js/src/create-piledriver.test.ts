@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { expect, it, vi } from "vitest";
 import { createServicePiledriver } from "./create-piledriver.js";
 import { declareInMemoryPiledriverDatabase } from "./databases/piledriver/implementations/in-memory.js";
@@ -82,6 +83,27 @@ it("describes only the settings that apply to the chosen backend, for the startu
   const breezylite = await createServicePiledriver(breezyliteEnv(path), failIfDefaultOpens);
   try {
     expect(breezylite.startupSettings).toEqual({ piledriverImplementation: "breezylite", sqlitePath: path, sqliteCompression: true, ignoredLmdbSettings: "" });
+  } finally {
+    await breezylite.piledriver.close();
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+it("offers releasing free pages only on Breezylite", async () => {
+  const db = declareInMemoryPiledriverDatabase("test");
+  const base = await createServicePiledriver({}, () => db);
+  expect(base.releaseFreePages).toBeNull();
+  await db.close();
+
+  const path = mkdtempSync(join(tmpdir(), "sqlite-release-free-pages-"));
+  const breezylite = await createServicePiledriver(breezyliteEnv(path), failIfDefaultOpens);
+  try {
+    const release = breezylite.releaseFreePages ?? throwErr("Breezylite must offer releasing free pages");
+    const result = await release({ maxBytes: 1024 * 1024, dryRun: true });
+    expect(result.before.canRelease).toBe(true);
+    const diagnostics = breezylite.getDiagnostics();
+    if (!("freePages" in diagnostics)) throw new Error(`Expected Breezy diagnostics, got ${JSON.stringify(diagnostics)}`);
+    expect(diagnostics.freePages?.canRelease).toBe(true);
   } finally {
     await breezylite.piledriver.close();
     rmSync(path, { recursive: true, force: true });

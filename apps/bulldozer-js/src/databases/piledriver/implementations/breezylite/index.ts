@@ -32,6 +32,9 @@ function zstdFrameContentSize(frame: Uint8Array) {
   return Number(header.readBigUInt64LE(sizeFieldOffset));
 }
 
+const walSizeLimitBytes = 64 * 1024 * 1024;
+const incrementalAutoVacuum = 2;
+
 export function openBreezyliteStorage(options: { path: string, compression?: boolean }): BreezyStorage {
   if (existsSync(join(options.path, "data.mdb")) || existsSync(join(options.path, "lock.mdb"))) {
     throw new Error("SQLite PoC requires a separate directory; the selected path contains an LMDB store");
@@ -48,9 +51,15 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
     )) {
       throw new Error("Unsupported older Breezylite PoC format; use a fresh SQLite directory (no migration is provided)");
     }
+    // auto_vacuum=INCREMENTAL lets freePages.release() shrink the file in small steps. SQLite only
+    // accepts it before the first table exists, so it must come first; on a file created without it,
+    // this does nothing and the file can only be shrunk by a full VACUUM (see freePages below).
+    // journal_size_limit: after a large write, SQLite trims the WAL file back to 64 MiB instead of
+    // keeping it at its largest size forever.
     // busy_timeout=0: SQLite waits for a lock on the main thread, freezing every request. This engine
     // is the database's only writer, so a held lock belongs to another process; fail instead of waiting.
-    db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=0;
+    db.exec(`PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=0;
+      PRAGMA journal_size_limit=${String(walSizeLimitBytes)};
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS store_names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
       CREATE TABLE IF NOT EXISTS entries (
@@ -93,6 +102,26 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
   const requireWrite = () => {
     if (!writing) throw new Error("SQLite writes require an active transaction");
   };
+  // Each of these reads a field of SQLite's file header, so they cost the same on any file size.
+  const pragmaNumberReader = (name: string) => {
+    const statement = db.prepare(`PRAGMA ${name}`);
+    return () => {
+      const value = statement.get()?.[name];
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`Invalid SQLite PRAGMA ${name}`);
+      return value;
+    };
+  };
+  const readPageSize = pragmaNumberReader("page_size");
+  const readPageCount = pragmaNumberReader("page_count");
+  const readFreePageCount = pragmaNumberReader("freelist_count");
+  const readAutoVacuumMode = pragmaNumberReader("auto_vacuum");
+  const freePageStats = () => ({
+    pageSizeBytes: readPageSize(),
+    totalPages: readPageCount(),
+    freePages: readFreePageCount(),
+    canRelease: readAutoVacuumMode() === incrementalAutoVacuum,
+  });
+  const checkpoint = db.prepare("PRAGMA wal_checkpoint(PASSIVE)");
   return {
     backend: "piledriver-breezylite",
     openStore(name) {
@@ -160,6 +189,29 @@ export function openBreezyliteStorage(options: { path: string, compression?: boo
     lastTransactionId,
     refreshReads() {}, // Each statement sees the latest committed snapshot.
     fileSizesInBytes: () => existingFileSizesInBytes(options.path, ["breezy.sqlite", "breezy.sqlite-wal", "breezy.sqlite-shm"]),
+    freePages: {
+      stats: freePageStats,
+      release(maxPages) {
+        // incremental_vacuum(0) means "release every free page" in SQLite, which on a large file
+        // would hold the write lock for minutes, so 0 must never reach it.
+        if (!Number.isSafeInteger(maxPages) || maxPages <= 0) throw new Error("maxPages must be a positive safe integer");
+        if (writing) throw new Error("Free pages can't be released inside a write transaction");
+        const before = freePageStats();
+        if (!before.canRelease) {
+          throw new Error("This SQLite file was created without auto_vacuum=INCREMENTAL, so its free pages can't be released incrementally");
+        }
+        db.exec(`PRAGMA incremental_vacuum(${String(maxPages)})`);
+        return before.freePages - readFreePageCount();
+      },
+      checkpoint() {
+        const row = checkpoint.get();
+        const busy = row?.busy;
+        const logFrames = row?.log;
+        const checkpointedFrames = row?.checkpointed;
+        if (typeof busy !== "number" || typeof logFrames !== "number" || typeof checkpointedFrames !== "number") throw new Error("Invalid SQLite checkpoint result");
+        return { busy: busy !== 0, logFrames, checkpointedFrames };
+      },
+    },
     async flush() {}, // COMMIT already synchronized the WAL (synchronous=FULL).
     async close() { db.close(); },
   };

@@ -82,6 +82,10 @@ October 9, 2026 sandbox results (Node 24.21.0), median of three runs; MiB = 1,04
 
 Compression reduced BreezyLMDB’s database file by about 57%. Uncompressed Breezylite was about 1% larger than uncompressed BreezyLMDB. The closed LMDB lock file adds 8,272 logical bytes (4,096 allocated bytes); closed data-file allocation matched file length for both engines. All nine workload runs passed.
 
+## Shrinking the file
+
+GC and releasing free pages back to the operating system are covered in [gc-and-release-free-pages.md](gc-and-release-free-pages.md).
+
 ## Breezylite compression
 
 Breezylite compresses new SQLite values by default; the service has no compression flag. The adapter accepts `compression: false` for controlled benchmarks. Compression uses Node Zstd at level 1, attempts values of at least 256 bytes and keeps the original bytes when compression is not smaller. Keys remain uncompressed and retain their ordering. Compression and decompression are synchronous.

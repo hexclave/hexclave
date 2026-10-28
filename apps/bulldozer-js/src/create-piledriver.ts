@@ -1,5 +1,5 @@
 import { getLmdbDiagnostics, type LmdbDiagnostics } from "./databases/low-level/implementations/lmdb.js";
-import type { BreezyDiagnostics } from "./databases/piledriver/implementations/breezy/core.js";
+import type { BreezyDiagnostics, FreePageReleaseResult } from "./databases/piledriver/implementations/breezy/core.js";
 import type { PiledriverDatabase } from "./databases/piledriver/index.js";
 
 /**
@@ -22,6 +22,8 @@ export type ServicePiledriver = {
   startupSettings: Record<string, string | boolean>,
   /** What GET /diagnostics returns. LMDB has nothing to report until its first 5-second activity window ends. */
   getDiagnostics: () => LmdbDiagnostics | BreezyDiagnostics | { available: false },
+  /** Gives free pages back to the OS so the file shrinks. Null when the backend can't do that. */
+  releaseFreePages: ((options: { maxBytes: number, dryRun: boolean }) => Promise<FreePageReleaseResult>) | null,
 };
 
 /** Picks and opens the service's Piledriver from its environment. SQLite is an opt-in PoC with its own path, never a reinterpretation of an LMDB store. */
@@ -41,6 +43,7 @@ export async function createServicePiledriver(
         lmdbCompression: env.HEXCLAVE_BULLDOZER_JS_LMDB_COMPRESSION === "1",
       },
       getDiagnostics: () => getLmdbDiagnostics() ?? { available: false },
+      releaseFreePages: null,
     };
   }
   if (implementation !== "breezylite") throw new Error("HEXCLAVE_BULLDOZER_JS_PILEDRIVER_IMPLEMENTATION must be base or breezylite");
@@ -67,5 +70,6 @@ export async function createServicePiledriver(
         .join(", "),
     },
     getDiagnostics: () => piledriver.getDiagnostics(),
+    releaseFreePages: async options => await piledriver.releaseFreePages(options),
   };
 }
