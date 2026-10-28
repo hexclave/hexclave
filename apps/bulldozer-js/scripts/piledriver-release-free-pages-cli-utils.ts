@@ -20,12 +20,13 @@ the database's write lock, and Bulldozer's writes fail until it finishes.
 While it runs, the WAL file next to the database grows by up to about 64 MiB, so keep at least that
 much disk free. On a large database under heavy write traffic, an occasional step can still pause
 requests for up to a few seconds, so run big releases during quieter periods
-(see scripts/benchmark-breezy-storage.md).
+(see scripts/gc-and-release-free-pages.md).
 
 Options:
-  --max-mib N   release at most N MiB in this run (default 1024)
-  --all         keep going while each request releases its full N MiB; stops when a request finds
-                fewer free pages than that, or makes no progress (the summary says which)
+  --max-mib N   release at most N MiB per request (default 1024). Without --all, that's one request
+  --all         keep sending --max-mib sized requests while each releases its full N MiB; stops after
+                one finds fewer free pages than that, or makes no progress (the summary says which).
+                Use both together, e.g. --max-mib 1024 --all, to release everything in bounded steps
   --dry-run     only report the free pages, and whether this file can release them
   --url URL     Bulldozer service URL (default: HEXCLAVE_BULLDOZER_SERVER_URL, or localhost:<port prefix>46)
   -h, --help    show this help
