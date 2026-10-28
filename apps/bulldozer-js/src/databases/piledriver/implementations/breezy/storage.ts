@@ -3,13 +3,14 @@ import { join } from "node:path";
 
 /** Sizes of the given files in `directory`, skipping any that don't exist (yet). */
 export function existingFileSizesInBytes(directory: string, fileNames: readonly string[]) {
-  const sizes: Record<string, number> = {};
+  const fileNameToSizeInBytes = new Map<string, number>();
   for (const fileName of fileNames) {
     // One call, not existsSync + statSync, so a file deleted in between can't make this throw.
     const stats = statSync(join(directory, fileName), { throwIfNoEntry: false });
-    if (stats !== undefined) sizes[fileName] = stats.size;
+    if (stats !== undefined) fileNameToSizeInBytes.set(fileName, stats.size);
   }
-  return sizes;
+  // A plain object, so /diagnostics and the activity log serialize it as JSON (a Map prints as {}).
+  return Object.fromEntries(fileNameToSizeInBytes);
 }
 
 /** Binary, versioned stores sharing one atomic write transaction and durability barrier. */
