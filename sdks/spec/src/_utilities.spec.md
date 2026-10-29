@@ -84,7 +84,7 @@ Set Content-Type: application/json for all requests with a body.
    (Server may return 200 with actual status in this header)
 
 2. Check x-stack-known-error header for error code
-   If present: body is { code, message, details? }
+   If present: body is { code, error, details? }
    Parse into appropriate error type
 
 3. On success (2xx): parse JSON body and return
@@ -104,10 +104,18 @@ Set cache: "no-store" to prevent caching.
 
 ## Error Response Format
 
-If the response has x-stack-known-error header, the body has shape:
-  { code: string, message: string, details?: object }
+If the response has x-hexclave-known-error / x-stack-known-error header, the body has shape:
+  { code: string, error: string, details?: object }
 
-The code matches the x-stack-known-error header value.
+The code matches the known error header value. "error" is the human-readable message
+(there is no "message" field). Use the header value as the error code, "error" as the
+message, and pass "details" through (e.g. details.attempt_code for
+MULTI_FACTOR_AUTHENTICATION_REQUIRED).
+
+OAuth endpoints (e.g. POST /api/v1/auth/oauth/token) may also return standard OAuth 2.0
+error bodies without a known error header:
+  { error: string, error_description?: string }
+Here "error" is the error code. Surface these as OAuthError(error, error_description).
 See packages/stack-shared/src/known-errors.ts for all error types.
 
 
