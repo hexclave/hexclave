@@ -6,7 +6,7 @@
 // live app becomes an orphan. See fly/naming.ts.
 import { createHash } from "node:crypto";
 import { platformHostname } from "../platform-domain-names.js";
-import { BASE_IMAGE, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, FLY_DEFAULT_MEMORY_MB, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, RAILPACK_BUILDKIT_TMPFS_SIZE, SOFT_CONCURRENCY_LIMIT, flyBuilderGuestFor, flyConfig, flyGuestFor, flyVolumeName, getConfig, memorySizesFor, resolveNamespaceOrg, serviceMemoryMb } from "../config.js";
+import { BASE_IMAGE, BUILDER_IMAGE, BUILD_DOCKERFILE_DIR, BUILD_ENV_DIR, BUILD_TIMEOUT_SECONDS, FLY_DEFAULT_MEMORY_MB, RAILPACK_CLI_SHA256, RAILPACK_CLI_URL, RAILPACK_FRONTEND_IMAGE, RAILPACK_BUILDKIT_TMPFS_SIZE, SOFT_CONCURRENCY_LIMIT, buildkitTmpfsSize, flyBuilderGuestFor, flyConfig, flyGuestFor, flyVolumeName, getConfig, memorySizesFor, resolveNamespaceOrg, serviceMemoryMb } from "../config.js";
 import { buildCompletionPath, buildHarnessScript, computeWebhookToken, generatedDockerfile, type Builder } from "../builds.js";
 import { badRequest, conflict, notFound } from "../errors.js";
 import { isImageDigest, pinToDigest } from "../image-ref.js";
@@ -813,6 +813,10 @@ function createFlyBuilder(): Builder {
         config: {
           image: BUILDER_IMAGE,
           guest,
+          // A large build can exceed both tmpfs and Fly's default 8GB root disk.
+          // Reserve enough ephemeral disk for the bounded BuildKit retry; it is
+          // reclaimed with the builder, so no separate volume lifecycle is needed.
+          rootfs: { size_gb: 32 },
           // One microVM per DEPLOYMENT = tenant isolation; auto_destroy reclaims it on exit
           // (logs survive destruction — smoke-verified). Every service of one deployment
           // source shares it, which is the point: they share a source tree, and a machine
@@ -876,7 +880,8 @@ function createFlyBuilder(): Builder {
             RAILPACK_CLI_URL,
             RAILPACK_CLI_SHA256,
             RAILPACK_FRONTEND_IMAGE,
-            ...(isRailpackBuild ? { BUILDKIT_TMPFS_SIZE: RAILPACK_BUILDKIT_TMPFS_SIZE } : {}),
+            BUILDKIT_TMPFS_SIZE: isRailpackBuild ? RAILPACK_BUILDKIT_TMPFS_SIZE : buildkitTmpfsSize(guest.memory_mb),
+            HEXCLAVE_BUILDKIT_DISK_FALLBACK: "1",
           },
         },
       });
