@@ -11,7 +11,7 @@ Includes: UserExtra methods, Customer methods
 lastActiveAt: Date
   When the user was last active.
 
-selectedTeam: ServerTeam | null [JS-ONLY]
+selectedTeam: ServerTeam | null
   User's currently selected team.
   Constructed as a ServerTeam (types/teams/server-team.spec.md) from selected_team in the API response, which has the server team shape for server users.
 
