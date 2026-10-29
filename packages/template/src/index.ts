@@ -10,6 +10,7 @@ export type {
   HexclaveDeploymentConfig,
   HexclaveDeploymentContext,
   HexclaveDeploymentReference,
+  HexclaveEnvVarEnvironmentMap,
   HexclaveEnvVarValue,
   HexclavePersistentVolume,
   HexclaveServerService,
