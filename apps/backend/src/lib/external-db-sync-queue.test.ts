@@ -103,7 +103,7 @@ describe("enqueueExternalDbSyncBatch (real DB, isolated schema)", () => {
     expect(rows[0].qstashOptions).toMatchObject({
       url: "/api/latest/internal/external-db-sync/sync-engine",
       body: { tenancyId },
-      flowControl: { key: "sentinel-sync-key", parallelism: 20 },
+      flowControl: { key: "sentinel-sync-key", parallelism: 100 },
     });
   });
 
