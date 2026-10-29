@@ -197,13 +197,17 @@ export class InternalSession {
     if (!accessToken) {
       let newTokens = await this.fetchNewTokens();
       let issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
-      if (maxMillisSinceIssued !== null && issuedMillisAgo !== undefined && issuedMillisAgo > maxMillisSinceIssued) {
-        // The process may have been suspended after the server issued the token but before this code resumed.
-        // Retry once so an otherwise healthy session does not fail because of that scheduling delay.
+      let expiresInMillis = newTokens?.accessToken.expiresInMillis;
+      if (
+        (maxMillisSinceIssued !== null && issuedMillisAgo !== undefined && issuedMillisAgo > maxMillisSinceIssued)
+        || (expiresInMillis !== undefined && expiresInMillis < minMillisUntilExpiration)
+      ) {
+        // The process may have been suspended after the server issued the token but before this code resumed,
+        // leaving the newly received token too old or too close to expiry. Retry once before treating it as an error.
         newTokens = await this.fetchNewTokens();
         issuedMillisAgo = newTokens?.accessToken.issuedMillisAgo;
+        expiresInMillis = newTokens?.accessToken.expiresInMillis;
       }
-      const expiresInMillis = newTokens?.accessToken.expiresInMillis;
       if (expiresInMillis !== undefined && expiresInMillis < minMillisUntilExpiration) {
         throw new HexclaveAssertionError(`Required access token expiry ${minMillisUntilExpiration}ms is too long; access tokens are too short when they're generated (${expiresInMillis}ms)`);
       }

@@ -270,6 +270,22 @@ describe("InternalSession#getOrFetchLikelyValidTokens", () => {
     expect(tokens?.accessToken.issuedMillisAgo).toBeLessThan(15_000);
   });
 
+  it("retries once when a newly fetched access token is already too close to expiry", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        return createAccessToken("rtid-1", { iatOffsetSeconds: refreshCount === 1 ? -60 : 0 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    const tokens = await session.getOrFetchLikelyValidTokens(20_000, null);
+
+    expect(refreshCount).toBe(2);
+    expect(tokens?.accessToken.expiresInMillis).toBeGreaterThanOrEqual(20_000);
+  });
+
   it("throws after one retry when the newly fetched access token is still too old", async () => {
     let refreshCount = 0;
     const session = new InternalSession({
