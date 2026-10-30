@@ -5,7 +5,7 @@ import { readReplicas } from '@prisma/extension-read-replicas';
 import { CompleteConfig } from "@hexclave/shared/dist/config/schema";
 import { yupObject, yupValidate } from "@hexclave/shared/dist/schema-fields";
 import { getEnvVariable, getNodeEnvironment } from '@hexclave/shared/dist/utils/env';
-import { captureError, captureWarning, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
+import { captureError, HexclaveAssertionError } from "@hexclave/shared/dist/utils/errors";
 import { globalVar } from "@hexclave/shared/dist/utils/globals";
 import { deepPlainEquals, filterUndefined, typedFromEntries, typedKeys } from "@hexclave/shared/dist/utils/objects";
 import { concatStacktracesIfRejected, ignoreUnhandledRejection, wait } from "@hexclave/shared/dist/utils/promises";
@@ -173,7 +173,7 @@ export function withPrimaryFallbackForReads(replicaFactory: SqlDriverAdapterFact
             if (!isDatabaseUnavailableError(error)) {
               throw error;
             }
-            captureWarning("prisma-client-replica-unavailable", new HexclaveAssertionError("The read replica is unavailable, so the query was retried on the primary. This is expected while the replica restarts (eg. during maintenance), but should not happen otherwise.", { cause: error }));
+            captureError("prisma-client-replica-unavailable", new HexclaveAssertionError("The read replica is unavailable, so the query was retried on the primary. This is expected while the replica restarts (eg. during maintenance), but should not happen otherwise.", { cause: error }));
             return await primary.queryRaw(query);
           }
         },
