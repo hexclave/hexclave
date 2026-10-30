@@ -13,7 +13,7 @@ import {
   parseCopySpecifiedTenancySubscriptionsArgs,
   runCopySpecifiedTenancySubscriptions,
 } from "./copy-specified-tenancy-subscriptions";
-import { parseBackfillResumeOptions, runBulldozerPaymentsInit } from "./bulldozer-payments-init";
+import { BACKFILL_USAGE, parseBackfillResumeOptions, runBulldozerPaymentsInit } from "./bulldozer-payments-init";
 import { runClickhouseMigrations } from "./clickhouse-migrations";
 import { runRegenInternalSubscriptionsToLatest } from "./regen-internal-subscriptions-to-latest";
 
@@ -193,19 +193,7 @@ Commands:
   migrate                          Apply migrations
   backfill-bulldozer-from-prisma   One-way backfill of the payment tables from Postgres into bulldozer-js.
                                    In dev, run after restart-deps once the bulldozer-js server is running.
-                                   Idempotent; safe to re-run. Optional resume for very large tables
-                                   (paste cursor from a prior batch log; use the same tenancy filters):
-                                   --resume-table=<TableName> --resume-cursor=<tenancyId>,<id>
-                                   Order is tenancyId, then id (ManualTransaction: id means txnId).
-                                   Tables: Subscription, SubscriptionInvoice, OneTimePurchase,
-                                   ItemQuantityChange, ManualTransaction.
-                                   Tenancy filters (optional; pick one; --flag=value or --flag value):
-                                   (omit both)                 copy every tenancy
-                                   --only-tenancy-ids=...      copy JUST these tenancies
-                                   --exclude-tenancy-ids=...   copy everyone EXCEPT these
-                                   --continue-on-error skips rows bulldozer-js rejects and reports them
-                                   all at the end (default is fail-fast on the first bad row)
-                                   --batch-size=<n> rows per page/POST (default 50)
+                                   Pass --help to see its options.
   backfill-internal-free-plans     Grant the free plan to internal-tenancy teams that have no plan. Run AFTER seed.
   copy-specified-tenancy-subscriptions
                                    One-off: copy Subscription + related SubscriptionInvoice rows for one
@@ -261,18 +249,11 @@ const main = async () => {
     case 'backfill-bulldozer-from-prisma': {
       // Standalone one-way backfill of the payment tables from Postgres into
       // bulldozer-js. Idempotent, so a crash is recovered by re-running.
-      // Optional resume for very large tables (paste cursor from a prior batch
-      // log; keep the same tenancy filters):
-      //   --resume-table=<TableName> --resume-cursor=<tenancyId>,<id>
-      //   ManualTransaction: <id> is txnId (that table has no separate id column).
-      // Optional tenancy filters (mutually exclusive; --flag=value or --flag value):
-      //   (omit both)                 → every tenancy
-      //   --only-tenancy-ids=...      → JUST these tenancies
-      //   --exclude-tenancy-ids=...   → everyone EXCEPT these
-      // Optional --continue-on-error: skip rows bulldozer-js rejects and throw
-      // with the full list at the end instead of aborting on the first one.
-      // Optional --batch-size=<n>: rows per keyset page / bulldozer-js POST
-      // (default 50).
+      // Options are documented in BACKFILL_USAGE.
+      if (args.includes("--help")) {
+        console.log(BACKFILL_USAGE);
+        break;
+      }
       await runBulldozerPaymentsInit(parseBackfillResumeOptions(args));
       break;
     }
