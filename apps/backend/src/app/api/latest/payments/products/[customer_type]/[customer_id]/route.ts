@@ -1,5 +1,6 @@
-import { ensureClientCanAccessCustomer, ensureCustomerExists, ensureProductIdOrInlineProduct, grantProductToCustomer, isActiveSubscription, isAddOnProduct, productToInlineProduct } from "@/lib/payments";
+import { ensureClientCanAccessCustomer, ensureCustomerExists, ensureProductIdOrInlineProduct, grantProductToCustomer, isAddOnProduct, isSubscriptionCancelable, isSubscriptionInEffect, productToInlineProduct, subscriptionDisplayRank } from "@/lib/payments";
 import { getOwnedProductsForCustomer, getSubscriptionMapForCustomer } from "@/lib/payments/customer-data";
+import type { SubscriptionRow } from "@/lib/payments/schema/types";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared";
@@ -65,12 +66,22 @@ export const GET = createSmartRouteHandler({
         customerId: params.customer_id,
       }),
     ]);
-    // Deprecated: map productId → active subscription for backward-compat fields.
+    // Deprecated: map productId → subscription for backward-compat fields.
     // ownedProducts keys use '__null__' for inline products (null productId),
-    // so we normalize subscription productIds to match.
-    const activeSubByProductId = new Map(
-      Object.values(subMap).filter(s => isActiveSubscription(s)).map(s => [s.productId ?? "__null__", s] as const)
-    );
+    // so we normalize subscription productIds to match. In-effect, not
+    // active-only: a winding-down sub still backs its product and must not
+    // fall through to the one_time branch below; productId ties pick the
+    // highest subscriptionDisplayRank.
+    const nowMillis = Date.now();
+    const inEffectSubByProductId = new Map<string, SubscriptionRow>();
+    for (const s of Object.values(subMap)) {
+      if (!isSubscriptionInEffect(s, nowMillis)) continue;
+      const key = s.productId ?? "__null__";
+      const existing = inEffectSubByProductId.get(key);
+      if (existing == null || subscriptionDisplayRank(s) > subscriptionDisplayRank(existing)) {
+        inEffectSubByProductId.set(key, s);
+      }
+    }
 
     // Build switch options per product line (available plan upgrades/downgrades)
     const switchOptionsByProductLineId = new Map<string, Array<{ product_id: string, product: ReturnType<typeof productToInlineProduct> }>>();
@@ -108,7 +119,7 @@ export const GET = createSmartRouteHandler({
           ? (switchOptionsByProductLineId.get(productLineId) ?? []).filter((option) => option.product_id !== productId)
           : undefined;
         // Deprecated fields for backward compat
-        const sub = activeSubByProductId.get(productId);
+        const sub = inEffectSubByProductId.get(productId);
         const type = sub ? "subscription" as const : "one_time" as const;
 
         return {
@@ -128,7 +139,7 @@ export const GET = createSmartRouteHandler({
               subscription_id: sub.id,
               current_period_end: sub.currentPeriodEndMillis ? new Date(sub.currentPeriodEndMillis).toISOString() : null,
               cancel_at_period_end: sub.cancelAtPeriodEnd,
-              is_cancelable: true,
+              is_cancelable: isSubscriptionCancelable(sub),
             } : null,
             switch_options: switchOptions,
           },
