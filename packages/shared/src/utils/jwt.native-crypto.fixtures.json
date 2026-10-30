@@ -1,0 +1,42 @@
+{
+  "note": "Synthetic/public test scalars only. Generated with legacy elliptic6.5.7; no service keys or tokens.",
+  "audience": "urn:hexclave:native-p256:compatibility",
+  "kids": [
+    "DDxXnU0C9IO8",
+    "ZkTlue9djtmo"
+  ],
+  "endToEndHash": "5f030b5e1ef502acf140048bd4cacabbe51d8a58e42636ee354aaeb884208179",
+  "aggregateHash": "ded714fec6f974e5cc1d46faa9643c0cd6246594bedd67dca666f10530013217",
+  "vectors": [
+    {
+      "label": "one",
+      "scalar": "0000000000000000000000000000000000000000000000000000000000000001",
+      "x": "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY",
+      "y": "T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
+    },
+    {
+      "label": "order-minus-one",
+      "scalar": "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550",
+      "x": "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY",
+      "y": "sBy9HAHlgGVxGBS1g_Bh6dQxzKmUzqExNEm_l8hArgo"
+    },
+    {
+      "label": "order-plus-one",
+      "scalar": "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632552",
+      "x": "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY",
+      "y": "T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
+    },
+    {
+      "label": "max",
+      "scalar": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "x": "9yy9JA4mwNIbECMXlYbrUyxhAsScNnfMGj0TK5250xo",
+      "y": "Q-TKd-KjZiHcDb2Rv-el0iMlDvDNyoMe5FPZP6g0CKc"
+    },
+    {
+      "label": "leading-zero",
+      "scalar": "000000000000000000000000000000000000000000000000000000000000002b",
+      "x": "mGriUG8f8QTQQjCGHY9LSY9LxMbQCbMPdUTcEpuC0o0",
+      "y": "PMzApkYOCuMopNl9PHth2G_GKJwYnyUlEQxEG7B-lw"
+    }
+  ]
+}
