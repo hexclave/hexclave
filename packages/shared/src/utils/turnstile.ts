@@ -1,6 +1,7 @@
 export const turnstileActionValues = [
   "sign_up_with_credential",
   "send_magic_link_email",
+  "send_sms_sign_in_code",
   "oauth_authenticate",
 ] as const;
 

@@ -709,7 +709,7 @@ model SessionReplayChunk {
 
 enum ContactChannelType {
   EMAIL
-  // PHONE
+  PHONE
 }
 
 model ContactChannel {
@@ -1027,6 +1027,8 @@ enum VerificationCodeType {
   INTEGRATION_PROJECT_TRANSFER
   PURCHASE_URL
   BROWSER_ACTION
+  SMS_ONE_TIME_PASSWORD
+  PHONE_NUMBER_VERIFICATION
 }
 
 //#region API keys

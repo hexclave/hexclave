@@ -29,7 +29,7 @@ import { constructRedirectUrl } from "../../../../utils/url";
 import { ApiKey, ApiKeyCreationOptions, ApiKeyUpdateOptions, apiKeyCreationOptionsToCrud, apiKeyUpdateOptionsToCrud } from "../../api-keys";
 import { ConvexCtx, GetCurrentUserOptions } from "../../common";
 import { DeprecatedOAuthConnection, OAuthConnection } from "../../connected-accounts";
-import { ServerContactChannel, ServerContactChannelCreateOptions, ServerContactChannelUpdateOptions, serverContactChannelCreateOptionsToCrud, serverContactChannelUpdateOptionsToCrud } from "../../contact-channels";
+import { ServerContactChannel, assertCanSendVerificationEmail, ServerContactChannelCreateOptions, ServerContactChannelUpdateOptions, serverContactChannelCreateOptionsToCrud, serverContactChannelUpdateOptionsToCrud } from "../../contact-channels";
 import { Customer, CustomerProductsList, CustomerProductsRequestOptions, InlineProduct, ServerItem } from "../../customers";
 import { DataVaultStore } from "../../data-vault";
 import { EmailDeliveryInfo, SendEmailOptions } from "../../email";
@@ -388,6 +388,7 @@ export class _HexclaveServerAppImplIncomplete<HasTokenStore extends boolean, Pro
       isPrimary: crud.is_primary,
       usedForAuth: crud.used_for_auth,
       async sendVerificationEmail(options?: { callbackUrl?: string }) {
+        assertCanSendVerificationEmail(crud.type);
         await app._interface.sendServerContactChannelVerificationEmail(userId, crud.id, options?.callbackUrl ?? constructRedirectUrl(app._getUrls().emailVerification, "callbackUrl"));
       },
       async update(data: ServerContactChannelUpdateOptions) {

@@ -1,6 +1,6 @@
 # ContactChannel
 
-A contact channel (email address) associated with a user.
+A contact channel (email address or phone number) associated with a user.
 
 
 ## Properties
@@ -9,19 +9,21 @@ id: string
   Unique contact channel identifier.
 
 value: string
-  The actual email address.
+  The actual email address, or the phone number in E.164 format (eg. "+15555550100").
 
-type: "email"
-  Type of contact channel. Currently only "email" is supported.
+type: "email" | "phone"
+  Type of contact channel.
 
 isPrimary: bool
-  Whether this is the user's primary email.
+  Whether this is the user's primary contact channel of its type (ie. their primary email or primary phone number).
+  A user can have one primary contact channel per type.
 
 isVerified: bool
-  Whether the email has been verified.
+  Whether the email address or phone number has been verified.
 
 usedForAuth: bool
-  Whether this email can be used for authentication (magic link, password reset, etc.).
+  Whether this contact channel can be used for authentication (magic link, OTP, and password reset for emails; SMS
+  sign-in codes for phone numbers).
 
 
 ## Methods
@@ -36,7 +38,10 @@ Route: apps/backend/src/app/api/latest/contact-channels/[id]/send-verification-e
 
 Sends a verification email to this contact channel.
 
-Does not error.
+If the contact channel's type is not "email", throws an error before making any request (phone numbers are verified
+with a code sent via SMS instead).
+
+Otherwise, does not error.
 
 
 ### update(options)

@@ -164,6 +164,7 @@ describe("getConfig", () => {
           "password": { "allowSignIn": true },
           "signUpRules": {},
           "signUpRulesDefaultAction": "allow",
+          "sms": { "allowSignIn": false },
         },
         "teams": {
           "allowClientTeamCreation": false,
@@ -193,6 +194,7 @@ describe("updateConfig", () => {
         "password": { "allowSignIn": true },
         "signUpRules": {},
         "signUpRulesDefaultAction": "allow",
+        "sms": { "allowSignIn": false },
       }
     `);
 
@@ -213,6 +215,7 @@ describe("updateConfig", () => {
         "password": { "allowSignIn": true },
         "signUpRules": {},
         "signUpRulesDefaultAction": "allow",
+        "sms": { "allowSignIn": false },
       }
     `);
   });

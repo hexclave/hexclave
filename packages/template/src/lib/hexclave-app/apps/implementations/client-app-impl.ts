@@ -52,7 +52,7 @@ import { CookieHelper, createBrowserCookieHelper, createCookieHelper, createPlac
 import { ApiKey, ApiKeyCreationOptions, ApiKeyUpdateOptions, apiKeyCreationOptionsToCrud } from "../../api-keys";
 import { ConvexCtx, GetCurrentPartialUserOptions, GetCurrentUserOptions, HandlerUrlOptions, HandlerUrls, OAuthScopesOnSignIn, RedirectMethod, RedirectToOptions, RequestLike, ResolvedHandlerUrls, TokenStoreInit, hexclaveAppInternalsSymbol } from "../../common";
 import { DeprecatedOAuthConnection, OAuthConnection } from "../../connected-accounts";
-import { ContactChannel, ContactChannelCreateOptions, ContactChannelUpdateOptions, contactChannelCreateOptionsToCrud, contactChannelUpdateOptionsToCrud } from "../../contact-channels";
+import { ContactChannel, ContactChannelCreateOptions, assertCanSendVerificationEmail, ContactChannelUpdateOptions, contactChannelCreateOptionsToCrud, contactChannelUpdateOptionsToCrud } from "../../contact-channels";
 import { Customer, CustomerBilling, CustomerDefaultPaymentMethod, CustomerInvoiceStatus, CustomerInvoicesList, CustomerInvoicesListOptions, CustomerInvoicesRequestOptions, CustomerPaymentMethodSetupIntent, CustomerProductsList, CustomerProductsListOptions, CustomerProductsRequestOptions, Item } from "../../customers";
 import { NotificationCategory } from "../../notification-categories";
 import { scopePasskeyAuthenticationToHostname, scopePasskeyRegistrationToHostname } from "../../passkey-rp-id";
@@ -2252,6 +2252,7 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       usedForAuth: crud.used_for_auth,
 
       async sendVerificationEmail(options?: { callbackUrl?: string }) {
+        assertCanSendVerificationEmail(crud.type);
         await app._interface.sendCurrentUserContactChannelVerificationEmail(
           crud.id,
           options?.callbackUrl || constructRedirectUrl(app._getUrls().emailVerification, "callbackUrl"),

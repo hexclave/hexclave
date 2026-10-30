@@ -3,6 +3,7 @@ import { logSignInAttemptInBackground } from "@/lib/compliance-events";
 import { validateRedirectUrl } from "@/lib/redirect-urls";
 import { getApiUrlForRequest } from "@/lib/request-api-url";
 import { getSoleTenancyFromProjectBranch, getTenancy, Tenancy } from "@/lib/tenancies";
+import { PrismaTransaction } from "@/lib/types";
 import { globalPrismaClient } from "@/prisma-client";
 import { Prisma, VerificationCodeType } from "@/generated/prisma/client";
 import { KnownErrors } from "@hexclave/shared";
@@ -46,6 +47,7 @@ export async function claimVerificationCode(options: {
 type CreateCodeOptions<Data, Method extends {}, CallbackUrl extends string | URL | undefined, AlreadyParsed extends boolean = true> = ProjectBranchCombo<AlreadyParsed> & {
   method: Method,
   expiresInMs?: number,
+  transaction?: PrismaTransaction,
   data: Data,
   callbackUrl: CallbackUrl,
 };
@@ -291,18 +293,22 @@ export function createVerificationCodeHandler<
   });
 
   return {
-    async createCode({ method, data, callbackUrl, expiresInMs, ...params }) {
+    async createCode({ method, data, callbackUrl, expiresInMs, transaction, ...params }) {
       const { project, branchId } = parseProjectBranchCombo(params);
       const validatedData = await options.data.validate(data, {
         strict: true,
       });
-      const tenancy = await getSoleTenancyFromProjectBranch(project.id, branchId);
-
-      if (callbackUrl !== undefined && !validateRedirectUrl(callbackUrl, tenancy)) {
-        throw new KnownErrors.RedirectUrlNotWhitelisted(callbackUrl.toString());
+      if (callbackUrl !== undefined) {
+        // Reuse the caller's tenancy if it has one. The lookup runs on `globalPrismaClient`, so when the caller passes a
+        // `transaction` (eg. `createRateLimitedSmsCode`, which holds an advisory lock in it), looking the tenancy up again
+        // would take a second pool connection while the first one is still held.
+        const tenancy = params.tenancy ?? await getSoleTenancyFromProjectBranch(project.id, branchId);
+        if (!validateRedirectUrl(callbackUrl, tenancy)) {
+          throw new KnownErrors.RedirectUrlNotWhitelisted(callbackUrl.toString());
+        }
       }
 
-      const verificationCodePrisma = await globalPrismaClient.verificationCode.create({
+      const verificationCodePrisma = await (transaction ?? globalPrismaClient).verificationCode.create({
         data: {
           projectId: project.id,
           branchId,
