@@ -86,6 +86,8 @@ export default function PageClient() {
   const refreshUsersMetrics = useCallback(async () => {
     const refreshId = ++latestRefreshRef.current;
     const isLatest = () => refreshId === latestRefreshRef.current;
+    // Show the skeleton again on retry instead of keeping the cards hidden.
+    setKpisError(null);
     const kpisPromise = fetchEntityKpisOrThrow(hexclaveAdminApp, "users").then(
       (result) => {
         if (!isLatest()) return;
