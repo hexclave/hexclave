@@ -133,6 +133,14 @@ const docsJson = {
                 ]
               },
               {
+                "group": "Deploy",
+                "icon": "/images/app-icons/deploy.svg",
+                "pages": [
+                  "guides/apps/deploy/overview",
+                  "guides/apps/deploy/domains"
+                ]
+              },
+              {
                 "group": "Payments",
                 "icon": "/images/app-icons/payments.svg",
                 "pages": [
