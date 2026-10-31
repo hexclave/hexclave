@@ -359,6 +359,11 @@ it("should expose lightweight user counts without loading the full metrics route
   `);
 });
 
+// Sums a whole series, so the checks still hold if a test crosses midnight UTC.
+function sumActivity(series: { activity: number }[]): number {
+  return series.reduce((total, point) => total + point.activity, 0);
+}
+
 it("should expose the users/teams page KPIs without loading the full metrics route", async ({ expect }) => {
   await Project.createAndSwitch({
     config: {
@@ -376,14 +381,14 @@ it("should expose the users/teams page KPIs without loading the full metrics rou
   // daily_new comes from ClickHouse, which the users table syncs to
   // asynchronously; wait until both sign-ups (including the anonymous one)
   // have landed, so the exclusion check below actually tests something.
-  await waitForMetricsMatch(true, (r) => r.status === 200 && r.body.daily_users.at(-1)?.activity === 2);
+  await waitForMetricsMatch(true, (r) => r.status === 200 && sumActivity(r.body.daily_users) === 2);
 
   const users = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=users", { accessType: 'admin' });
   expect(users.status).toBe(200);
   // Anonymous users are excluded from both the total and the sign-up series.
   expect(users.body.total).toBe(1);
   expect(users.body.daily_new).toHaveLength(31);
-  expect(users.body.daily_new.at(-1).activity).toBe(1);
+  expect(sumActivity(users.body.daily_new)).toBe(1);
   expect(users.body.daily_active_split.total).toHaveLength(31);
   expect(users.body.daily_active_split.new).toHaveLength(31);
 
