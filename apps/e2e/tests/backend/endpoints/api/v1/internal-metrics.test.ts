@@ -374,13 +374,11 @@ it("should expose the users/teams page KPIs without loading the full metrics rou
   await Team.create();
 
   // daily_new comes from ClickHouse, which the users table syncs to
-  // asynchronously; wait for today's sign-up to land.
-  let users!: NiceResponse;
-  for (let i = 0; i < 60; i++) {
-    users = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=users", { accessType: 'admin' });
-    if (users.status !== 200 || users.body.daily_new.at(-1)?.activity >= 1) break;
-    await wait(1_000);
-  }
+  // asynchronously; wait until both sign-ups (including the anonymous one)
+  // have landed, so the exclusion check below actually tests something.
+  await waitForMetricsMatch(true, (r) => r.status === 200 && r.body.daily_users.at(-1)?.activity === 2);
+
+  const users = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=users", { accessType: 'admin' });
   expect(users.status).toBe(200);
   // Anonymous users are excluded from both the total and the sign-up series.
   expect(users.body.total).toBe(1);
