@@ -54,8 +54,35 @@ export class AccessToken {
     return Math.max(0, this.expiresAt.getTime() - Date.now());
   }
 
+  /**
+   * For a token this client fetched itself: the local time (`Date.now()`) at which the request for it started. The
+   * server can only have issued the token after that, so `Date.now() - fetchStartedAtLocalMillis` is an upper bound
+   * for its age that doesn't depend on the client's clock agreeing with the server's.
+   */
+  private _fetchStartedAtLocalMillis: number | null = null;
+
+  /**
+   * Records that this token was fetched by a request that started at the given local time. Only the first call has an
+   * effect, so the earliest (most conservative) time is kept.
+   *
+   * @internal
+   */
+  _recordFetchStartedAt(localMillis: number): void {
+    this._fetchStartedAtLocalMillis ??= localMillis;
+  }
+
+  /**
+   * How long ago the token was issued.
+   *
+   * `iat` is the server's clock and `Date.now()` the client's, so on a device whose clock runs ahead (we see users
+   * minutes to an hour ahead) a token fetched a moment ago looks minutes old. For tokens this client fetched itself we
+   * therefore also bound the age by the local time elapsed since the fetch started, and use the smaller of the two.
+   */
   get issuedMillisAgo(): number {
-    return Math.max(0, Date.now() - this.issuedAt.getTime());
+    const byServerClock = Math.max(0, Date.now() - this.issuedAt.getTime());
+    if (this._fetchStartedAtLocalMillis === null) return byServerClock;
+    const sinceFetchStarted = Math.max(0, Date.now() - this._fetchStartedAtLocalMillis);
+    return Math.min(byServerClock, sinceFetchStarted);
   }
 
   isExpired(): boolean {
@@ -338,7 +365,9 @@ export class InternalSession {
     const refresh = refreshToken == null
       ? this._options.refreshAccessTokenWithoutRefreshTokenCallback ?? throwErr("Session has no way to refresh its access token")
       : async () => await this._options.refreshAccessTokenCallback(refreshToken);
+    const fetchStartedAtLocalMillis = Date.now();
     let refreshPromise: Promise<AccessToken | null> = refresh().then((accessToken) => {
+      accessToken?._recordFetchStartedAt(fetchStartedAtLocalMillis);
       if (refreshPromise === this._refreshPromise) {
         this._refreshPromise = null;
         this._accessToken.set(accessToken);

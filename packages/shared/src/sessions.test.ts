@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccessToken, InternalSession } from "./sessions";
 
 /**
@@ -6,14 +6,14 @@ import { AccessToken, InternalSession } from "./sessions";
  * `refresh_token_id` claim (the session identifier); `iatOffsetSeconds` lets two tokens for the same session
  * differ as strings while sharing a `refresh_token_id`.
  */
-function createAccessTokenString(refreshTokenId: string, options?: { iatOffsetSeconds?: number, sub?: string }): string {
+function createAccessTokenString(refreshTokenId: string, options?: { iatOffsetSeconds?: number, lifetimeSeconds?: number, sub?: string }): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const nowSeconds = Math.floor(Date.now() / 1000) + (options?.iatOffsetSeconds ?? 0);
   return [
     encode({ alg: "none", typ: "JWT" }),
     encode({
       sub: options?.sub ?? "user-id",
-      exp: nowSeconds + 60,
+      exp: nowSeconds + (options?.lifetimeSeconds ?? 60),
       iat: nowSeconds,
       iss: "https://api.example.test",
       aud: "project-id",
@@ -35,7 +35,7 @@ function createAccessTokenString(refreshTokenId: string, options?: { iatOffsetSe
   ].join(".");
 }
 
-function createAccessToken(refreshTokenId: string, options?: { iatOffsetSeconds?: number, sub?: string }): AccessToken {
+function createAccessToken(refreshTokenId: string, options?: { iatOffsetSeconds?: number, lifetimeSeconds?: number, sub?: string }): AccessToken {
   const accessToken = AccessToken.createIfValid(createAccessTokenString(refreshTokenId, options));
   if (accessToken === null) {
     throw new Error("The test access token should satisfy the access token schema");
@@ -254,12 +254,24 @@ describe("InternalSession#getOrFetchLikelyValidTokens", () => {
     expect(refreshCount).toBe(2);
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Simulates the process being suspended (eg. a frozen background tab) for a while during the fetch
+  const suspendFor = (millis: number) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + millis);
+  };
+
   it("retries once when a newly fetched access token is already too old", async () => {
     let refreshCount = 0;
     const session = new InternalSession({
       refreshAccessTokenCallback: async () => {
         refreshCount += 1;
-        return createAccessToken("rtid-1", { iatOffsetSeconds: refreshCount === 1 ? -20 : 0 });
+        const accessToken = createAccessToken("rtid-1");
+        if (refreshCount === 1) suspendFor(20_000);
+        return accessToken;
       },
       refreshToken: "rt-abc",
     });
@@ -275,7 +287,9 @@ describe("InternalSession#getOrFetchLikelyValidTokens", () => {
     const session = new InternalSession({
       refreshAccessTokenCallback: async () => {
         refreshCount += 1;
-        return createAccessToken("rtid-1", { iatOffsetSeconds: -20 });
+        const accessToken = createAccessToken("rtid-1");
+        suspendFor(20_000);
+        return accessToken;
       },
       refreshToken: "rt-abc",
     });
@@ -283,5 +297,54 @@ describe("InternalSession#getOrFetchLikelyValidTokens", () => {
     await expect(session.getOrFetchLikelyValidTokens(20_000, 15_000))
       .rejects.toThrow("access token issuance is too slow");
     expect(refreshCount).toBe(2);
+  });
+
+  it.each([
+    ["2 minutes", 122],
+    ["57 minutes", 3_432],
+  ])("accepts a fresh token when the device clock runs %s ahead of the server", async (_name, skewSeconds) => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        // The server stamps `iat` with its own clock, which is behind the device's
+        return createAccessToken("rtid-1", { iatOffsetSeconds: -skewSeconds, lifetimeSeconds: skewSeconds + 600 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    const tokens = await session.getOrFetchLikelyValidTokens(30_000, 60_000);
+
+    expect(refreshCount).toBe(1);
+    expect(tokens?.accessToken.issuedMillisAgo).toBeLessThan(60_000);
+    // and the cached token is reused instead of being refetched on every call
+    await session.getOrFetchLikelyValidTokens(30_000, 60_000);
+    expect(refreshCount).toBe(1);
+  });
+});
+
+describe("AccessToken#issuedMillisAgo", () => {
+  it("uses the server's issue time for tokens the client didn't fetch itself", () => {
+    expect(createAccessToken("rtid-1", { iatOffsetSeconds: -120, lifetimeSeconds: 600 }).issuedMillisAgo).toBeGreaterThanOrEqual(120_000);
+  });
+
+  it("is bounded by the time since the fetch started for tokens the client fetched", () => {
+    const accessToken = createAccessToken("rtid-1", { iatOffsetSeconds: -120, lifetimeSeconds: 600 });
+    accessToken._recordFetchStartedAt(Date.now() - 1_000);
+    expect(accessToken.issuedMillisAgo).toBeGreaterThanOrEqual(1_000);
+    expect(accessToken.issuedMillisAgo).toBeLessThan(60_000);
+  });
+
+  it("never reports a token as older than the server's clock says", () => {
+    const accessToken = createAccessToken("rtid-1");
+    accessToken._recordFetchStartedAt(Date.now() - 120_000);
+    expect(accessToken.issuedMillisAgo).toBeLessThan(60_000);
+  });
+
+  it("keeps the earliest fetch start", () => {
+    const accessToken = createAccessToken("rtid-1", { iatOffsetSeconds: -600, lifetimeSeconds: 1_200 });
+    accessToken._recordFetchStartedAt(Date.now() - 30_000);
+    accessToken._recordFetchStartedAt(Date.now());
+    expect(accessToken.issuedMillisAgo).toBeGreaterThanOrEqual(30_000);
   });
 });
