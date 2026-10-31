@@ -80,15 +80,24 @@ export default function PageClient() {
 
   // The KPI queries are much slower than the user count on large projects, so
   // each one updates its part of the page as soon as it arrives.
+  // Refreshes can overlap (refresh button, mutations, page restore); only the
+  // latest one may update state.
+  const latestRefreshRef = useRef(0);
   const refreshUsersMetrics = useCallback(async () => {
+    const refreshId = ++latestRefreshRef.current;
+    const isLatest = () => refreshId === latestRefreshRef.current;
     const kpisPromise = fetchEntityKpisOrThrow(hexclaveAdminApp, "users").then(
       (result) => {
+        if (!isLatest()) return;
         setKpis(result);
         setKpisError(null);
       },
-      (error: unknown) => setKpisError(error),
+      (error: unknown) => {
+        if (isLatest()) setKpisError(error);
+      },
     );
-    setUserCounts(await fetchMetricsUserCountsOrThrow(hexclaveAdminApp));
+    const counts = await fetchMetricsUserCountsOrThrow(hexclaveAdminApp);
+    if (isLatest()) setUserCounts(counts);
     await kpisPromise;
   }, [hexclaveAdminApp]);
 

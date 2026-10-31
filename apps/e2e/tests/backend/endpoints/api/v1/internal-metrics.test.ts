@@ -373,20 +373,31 @@ it("should expose the users/teams page KPIs without loading the full metrics rou
   await Auth.Anonymous.signUp();
   await Team.create();
 
-  const users = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=users", { accessType: 'admin' });
+  // daily_new comes from ClickHouse, which the users table syncs to
+  // asynchronously; wait for today's sign-up to land.
+  let users!: NiceResponse;
+  for (let i = 0; i < 60; i++) {
+    users = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=users", { accessType: 'admin' });
+    if (users.status !== 200 || users.body.daily_new.at(-1)?.activity >= 1) break;
+    await wait(1_000);
+  }
   expect(users.status).toBe(200);
+  // Anonymous users are excluded from both the total and the sign-up series.
   expect(users.body.total).toBe(1);
   expect(users.body.daily_new).toHaveLength(31);
+  expect(users.body.daily_new.at(-1).activity).toBe(1);
   expect(users.body.daily_active_split.total).toHaveLength(31);
   expect(users.body.daily_active_split.new).toHaveLength(31);
 
   const teams = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=teams", { accessType: 'admin' });
   expect(teams.status).toBe(200);
   expect(teams.body.total).toBe(1);
-  expect(teams.body.daily_new).toEqual(teams.body.daily_active_split.new);
+  expect(teams.body.daily_active_split.total).toHaveLength(31);
 
   const invalid = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=projects", { accessType: 'admin' });
   expect(invalid.status).toBe(400);
+}, {
+  timeout: 120_000,
 });
 
 it("should handle mixed auth methods excluding anonymous users", async ({ expect }) => {

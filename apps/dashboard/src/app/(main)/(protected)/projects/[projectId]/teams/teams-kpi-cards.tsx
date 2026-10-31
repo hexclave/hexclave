@@ -12,6 +12,8 @@ export function TeamsKpiCards() {
 
   useEffect(() => {
     let cancelled = false;
+    setKpis(null);
+    setError(null);
     fetchEntityKpisOrThrow(hexclaveAdminApp, "teams").then(
       (result) => {
         if (!cancelled) setKpis(result);
