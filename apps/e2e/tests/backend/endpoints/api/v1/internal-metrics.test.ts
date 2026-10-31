@@ -359,6 +359,36 @@ it("should expose lightweight user counts without loading the full metrics route
   `);
 });
 
+it("should expose the users/teams page KPIs without loading the full metrics route", async ({ expect }) => {
+  await Project.createAndSwitch({
+    config: {
+      magic_link_enabled: true,
+    }
+  });
+
+  await InternalApiKey.createAndSetProjectKeys();
+
+  backendContext.set({ mailbox: createMailbox() });
+  await Auth.Otp.signIn();
+  await Auth.Anonymous.signUp();
+  await Team.create();
+
+  const users = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=users", { accessType: 'admin' });
+  expect(users.status).toBe(200);
+  expect(users.body.total).toBe(1);
+  expect(users.body.daily_new).toHaveLength(31);
+  expect(users.body.daily_active_split.total).toHaveLength(31);
+  expect(users.body.daily_active_split.new).toHaveLength(31);
+
+  const teams = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=teams", { accessType: 'admin' });
+  expect(teams.status).toBe(200);
+  expect(teams.body.total).toBe(1);
+  expect(teams.body.daily_new).toEqual(teams.body.daily_active_split.new);
+
+  const invalid = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=projects", { accessType: 'admin' });
+  expect(invalid.status).toBe(400);
+});
+
 it("should handle mixed auth methods excluding anonymous users", async ({ expect }) => {
   await Project.createAndSwitch({
     config: {
