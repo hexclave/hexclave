@@ -36,6 +36,8 @@ export type { StackServerAppConstructor } from "./apps";
 export type { StackServerAppConstructorOptions } from "./apps";
 
 export type {
+  AdminPromoCode,
+  CreateAdminPromoCodeOptions,
   EmailOutboxListOptions,
   EmailOutboxListResult,
   EmailOutboxUpdateOptions

@@ -73,6 +73,8 @@ const branchSchemaFuzzerConfig = [{
   }],
   payments: [{
     blockNewPurchases: [false, true],
+    allowPromoCodes: [false, true],
+    allowStackingPromoCodes: [false, true],
     autoPay: [{
       interval: [[[0, 1, -3, 100, 0.333, Infinity], ["day", "week", "month", "year"]]] as const,
     }],

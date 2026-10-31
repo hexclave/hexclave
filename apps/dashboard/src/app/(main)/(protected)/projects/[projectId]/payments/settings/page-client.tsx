@@ -4,7 +4,7 @@ import { Switch, Typography } from "@/components/ui";
 import { DesignCard } from "@/components/design-components";
 import { useUpdateConfig } from "@/components/config-update";
 import { cn } from "@/lib/utils";
-import { LockIcon } from "@phosphor-icons/react";
+import { LockIcon, TicketIcon } from "@phosphor-icons/react";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { useRef, useState } from "react";
 import { PageLayout } from "../../page-layout";
@@ -80,6 +80,56 @@ export default function PageClient() {
               </div>
             </div>
             <Switch checked={blocked} onCheckedChange={handleBlockChange} />
+          </div>
+        </DesignCard>
+
+        <DesignCard
+          title="Promo codes"
+          subtitle="Allow promo codes on hosted checkout and plan switches."
+          icon={TicketIcon}
+        >
+          <div className="flex flex-col gap-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1 min-w-0">
+                <Typography className="text-sm font-medium text-foreground">
+                  Allow promo codes
+                </Typography>
+                <Typography variant="secondary" className="text-xs">
+                  Required before checkout URLs can show a promo field, and before codes can be applied on a plan switch.
+                </Typography>
+              </div>
+              <Switch
+                checked={paymentsConfig.allowPromoCodes === true}
+                onCheckedChange={async (checked) => {
+                  await updateConfig({
+                    adminApp,
+                    configUpdate: { "payments.allowPromoCodes": checked },
+                    pushable: true,
+                  });
+                }}
+              />
+            </div>
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1 min-w-0">
+                <Typography className="text-sm font-medium text-foreground">
+                  Allow stacking promo codes
+                </Typography>
+                <Typography variant="secondary" className="text-xs">
+                  Lets more than one promo code be applied to a checkout or plan switch.
+                </Typography>
+              </div>
+              <Switch
+                checked={paymentsConfig.allowPromoCodes === true && paymentsConfig.allowStackingPromoCodes === true}
+                disabled={paymentsConfig.allowPromoCodes !== true}
+                onCheckedChange={async (checked) => {
+                  await updateConfig({
+                    adminApp,
+                    configUpdate: { "payments.allowStackingPromoCodes": checked },
+                    pushable: true,
+                  });
+                }}
+              />
+            </div>
           </div>
         </DesignCard>
       </div>

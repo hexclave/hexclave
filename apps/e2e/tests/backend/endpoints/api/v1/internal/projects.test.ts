@@ -84,6 +84,8 @@ it("creates a new project", async ({ expect }) => {
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -221,6 +223,8 @@ it("creates a new project with different configurations", async ({ expect }) => 
       "body": {
         "config": {
           "allow_localhost": false,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -277,6 +281,8 @@ it("creates a new project with different configurations", async ({ expect }) => 
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -336,6 +342,8 @@ it("creates a new project with different configurations", async ({ expect }) => 
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -395,6 +403,8 @@ it("creates a new project with different configurations", async ({ expect }) => 
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -463,6 +473,8 @@ it("creates a new project with different configurations", async ({ expect }) => 
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -524,6 +536,8 @@ it("lists the current projects after creating a new project", async ({ expect })
           {
             "config": {
               "allow_localhost": true,
+              "allow_promo_codes": false,
+              "allow_stacking_promo_codes": false,
               "allow_team_api_keys": false,
               "allow_user_api_keys": false,
               "client_team_creation_enabled": false,
@@ -582,6 +596,8 @@ it("verifies email_theme update persists", async ({ expect }) => {
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -629,6 +645,8 @@ it("verifies email_theme update persists", async ({ expect }) => {
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -686,6 +704,8 @@ it("updates trusted domains without modifying allow_localhost", async ({ expect 
       "body": {
         "config": {
           "allow_localhost": false,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -741,6 +761,8 @@ it("updates trusted domains without modifying allow_localhost", async ({ expect 
       "body": {
         "config": {
           "allow_localhost": false,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
@@ -823,6 +845,8 @@ it("lets user update logo_url to a valid image", async ({ expect }) => {
       "body": {
         "config": {
           "allow_localhost": true,
+          "allow_promo_codes": false,
+          "allow_stacking_promo_codes": false,
           "allow_team_api_keys": false,
           "allow_user_api_keys": false,
           "client_team_creation_enabled": false,
