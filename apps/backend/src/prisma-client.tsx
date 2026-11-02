@@ -669,10 +669,49 @@ export function isPrismaError(error: unknown, code: keyof typeof PRISMA_ERROR_CO
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === PRISMA_ERROR_CODES[code];
 }
 
+/**
+ * Checks whether `error` is a P2002 for the unique constraint on `target` (the constraint's fields in schema order,
+ * as written in `@@unique([...])`) of `modelName`.
+ *
+ * Without a driver adapter, Prisma reports the violated fields in `meta.target`. With the pg driver adapter we use in
+ * production, `meta.target` is missing and the constraint is only described in `meta.driverAdapterError.cause.constraint`,
+ * either as `{ index: "<Model>_<field>_<field>_key" }` (Prisma 7.10) or as `{ fields: '["\\"tenancyId\\"","type",...]' }`
+ * (a JSON string of the possibly-quoted column names, Prisma 7.1). We handle all three shapes.
+ *
+ * The index-name comparison assumes Prisma's default constraint name (`<table>_<columns>_key`), i.e. the model has no
+ * `@@map` and the `@@unique` has no custom `map:` name.
+ */
 export function isPrismaUniqueConstraintViolation(error: unknown, modelName: string, target: string | string[]): error is Prisma.PrismaClientKnownRequestError {
   if (!isPrismaError(error, "UNIQUE_CONSTRAINT_VIOLATION")) return false;
-  if (!error.meta?.target) return false;
-  return error.meta.modelName === modelName && deepPlainEquals(error.meta.target, target);
+  if (error.meta?.modelName !== modelName) return false;
+  if (error.meta.target) {
+    return deepPlainEquals(error.meta.target, target);
+  }
+  const targetFields = typeof target === "string" ? [target] : target;
+  const constraint = getDriverAdapterUniqueConstraint(error.meta.driverAdapterError);
+  if (constraint === null) return false;
+  if ("index" in constraint) {
+    return constraint.index === `${modelName}_${targetFields.join("_")}_key`;
+  }
+  return deepPlainEquals(constraint.fields, targetFields);
+}
+
+function getDriverAdapterUniqueConstraint(driverAdapterError: unknown): { index: string } | { fields: string[] } | null {
+  if (typeof driverAdapterError !== "object" || driverAdapterError === null || !("cause" in driverAdapterError)) return null;
+  const cause = driverAdapterError.cause;
+  if (typeof cause !== "object" || cause === null || !("constraint" in cause)) return null;
+  const constraint = cause.constraint;
+  if (typeof constraint !== "object" || constraint === null) return null;
+  if ("index" in constraint && typeof constraint.index === "string") {
+    return { index: constraint.index };
+  }
+  if ("fields" in constraint) {
+    const fields: unknown = typeof constraint.fields === "string" ? JSON.parse(constraint.fields) : constraint.fields;
+    if (!Array.isArray(fields) || !fields.every((field): field is string => typeof field === "string")) return null;
+    // Postgres quotes column names that aren't all-lowercase (`"tenancyId"`), but not the others (`type`).
+    return { fields: fields.map((field) => field.replace(/^"(.*)"$/, "$1")) };
+  }
+  return null;
 }
 
 export function sqlQuoteIdentToString(id: string) {

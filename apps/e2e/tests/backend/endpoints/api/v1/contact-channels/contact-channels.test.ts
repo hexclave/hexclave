@@ -130,10 +130,104 @@ it("cannot update a contact channel to a duplicate value", async ({ expect }) =>
     method: "PATCH",
     body: { value: firstMailbox.emailAddress },
   });
-  expect(response).toMatchObject({
-    status: 400,
-    body: "Contact channel already exists",
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "Contact channel already exists",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("cannot change the value of a channel used for auth to an email another account signs in with", async ({ expect }) => {
+  // The first account signs in with the default mailbox, the second one with a fresh mailbox
+  await Auth.Otp.signIn();
+  const firstAccountEmail = backendContext.value.mailbox.emailAddress;
+  await bumpEmailAddress();
+  await Auth.Otp.signIn();
+
+  const listResponse = await niceBackendFetch("/api/v1/contact-channels?user_id=me", {
+    accessType: "client",
+    method: "GET",
   });
+  expect(listResponse.body.items).toHaveLength(1);
+  const signInChannel = listResponse.body.items[0];
+  expect(signInChannel.used_for_auth).toBe(true);
+
+  // Only the value is sent: the channel is already used for auth, so the check must still run
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${signInChannel.id}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { value: firstAccountEmail },
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 409,
+      "body": {
+        "code": "CONTACT_CHANNEL_ALREADY_USED_FOR_AUTH_BY_SOMEONE_ELSE",
+        "details": {
+          "contact_channel_value": "default-mailbox--<stripped UUID>@stack-generated.example.com",
+          "type": "email",
+          "would_work_if_email_was_verified": false,
+        },
+        "error": "This email \\"(default-mailbox--<stripped UUID>@stack-generated.example.com)\\" is already used for authentication by another account.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "CONTACT_CHANNEL_ALREADY_USED_FOR_AUTH_BY_SOMEONE_ELSE",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+
+  // The channel keeps its old value
+  const afterResponse = await niceBackendFetch(`/api/v1/contact-channels/me/${signInChannel.id}`, {
+    accessType: "client",
+    method: "GET",
+  });
+  expect(afterResponse.body.value).toBe(signInChannel.value);
+});
+
+it("cannot switch on used_for_auth for a channel another account signs in with", async ({ expect }) => {
+  await Auth.Otp.signIn();
+  const firstAccountEmail = backendContext.value.mailbox.emailAddress;
+  await bumpEmailAddress();
+  await Auth.Otp.signIn();
+
+  const createResponse = await niceBackendFetch("/api/v1/contact-channels", {
+    accessType: "client",
+    method: "POST",
+    body: {
+      value: firstAccountEmail,
+      type: "email",
+      used_for_auth: false,
+      user_id: "me",
+    }
+  });
+  expect(createResponse.status).toBe(201);
+
+  const response = await niceBackendFetch(`/api/v1/contact-channels/me/${createResponse.body.id}`, {
+    accessType: "client",
+    method: "PATCH",
+    body: { used_for_auth: true },
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 409,
+      "body": {
+        "code": "CONTACT_CHANNEL_ALREADY_USED_FOR_AUTH_BY_SOMEONE_ELSE",
+        "details": {
+          "contact_channel_value": "default-mailbox--<stripped UUID>@stack-generated.example.com",
+          "type": "email",
+          "would_work_if_email_was_verified": false,
+        },
+        "error": "This email \\"(default-mailbox--<stripped UUID>@stack-generated.example.com)\\" is already used for authentication by another account.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "CONTACT_CHANNEL_ALREADY_USED_FOR_AUTH_BY_SOMEONE_ELSE",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
 });
 
 it("create contact channel on the server", async ({ expect }) => {
