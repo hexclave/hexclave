@@ -116,7 +116,8 @@ public actor CurrentUser {
     
     // MARK: - Team Methods
     
-    /// Lists the user's teams. Returns at most 200 teams; use `listTeamsPage` to page through more.
+    /// Lists all of the user's teams. Fails if the user is in more than 500 teams; use `listTeamsPage` with a `limit` to
+    /// page through them instead.
     public func listTeams() async throws -> [Team] {
         return try await listTeamsPage().items
     }

@@ -183,8 +183,9 @@ export type ListTeamsOptions = {
 } & (
   {
     /**
-     * Maximum number of teams to return (at most 200). If omitted, at most 200 teams are returned; when there
-     * are more, `nextCursor` on the result is set and can be passed as `cursor` (together with `limit`) to fetch the rest.
+     * Maximum number of teams to return (at most 200). If omitted, all teams are returned, but the request fails if
+     * more than 500 teams match; prefer setting `limit`. When there are more teams than `limit`, `nextCursor` on the
+     * result is set and can be passed as `cursor` (together with `limit`) to fetch the rest.
      */
     limit?: number,
     cursor?: undefined,

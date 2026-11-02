@@ -1,7 +1,13 @@
 import type { Config } from "tailwindcss";
 
 const config = {
-  darkMode: ["selector", 'html:has(head > [data-stack-theme="dark"])'],
+  // `variant` with `:is(...)` instead of the `selector` strategy, because `selector` wraps the
+  // condition in `:where(...)`, which gives `dark:` utilities zero extra specificity. The SDK injects
+  // its own (`:where(.stack-scope)`-scoped) Tailwind utilities at runtime, *after* our stylesheet, so
+  // any utility that exists in both (eg. `text-white`) would win over our `dark:` override purely
+  // through source order (that's how the Apple button ended up white-on-white in dark mode).
+  // `:is(...)` keeps the selector's specificity, matching the dashboard's `:is(.dark *)` behavior.
+  darkMode: ["variant", '&:is(html:has(head > [data-stack-theme="dark"]) *)'],
   content: [
     "./src/**/*.{ts,tsx}",
   ],

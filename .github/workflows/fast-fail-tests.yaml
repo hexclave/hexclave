@@ -215,8 +215,10 @@ jobs:
         with:
           node-version: 24.x
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - name: Activate integrity-pinned pnpm
+        run: |
+          corepack enable pnpm
+          corepack install
 
       - name: Start Docker Compose in background
         uses: JarvusInnovations/background-action@2428e7b970a846423095c79d43f759abf979a635 # v1.0.7

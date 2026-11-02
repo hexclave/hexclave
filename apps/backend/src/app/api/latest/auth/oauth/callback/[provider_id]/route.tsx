@@ -3,7 +3,8 @@ import { logSignInAttemptInBackground } from "@/lib/compliance-events";
 import { getBestEffortEndUserRequestContext } from "@/lib/end-users";
 import { buildSignUpRuleOptions, reconstructTurnstileAssessment } from "@/lib/sign-up-context";
 import { checkApiKeySet, throwCheckApiKeySetError } from "@/lib/internal-api-keys";
-import { createOAuthUserAndAccount, findExistingOAuthAccount, handleOAuthEmailMergeStrategy, linkOAuthAccountToUser } from "@/lib/oauth";
+import { createOAuthUserAndAccount, evaluateOAuthSignUp, findExistingOAuthAccount, handleOAuthEmailMergeStrategy, linkOAuthAccountToUser, storeOAuthProviderTokens } from "@/lib/oauth";
+import { PendingOAuthAction, PendingOAuthProviderTokens } from "@/lib/oauth-pending-actions";
 import { isAcceptedNativeAppUrl, validateRedirectUrl } from "@/lib/redirect-urls";
 import { getApiUrlForRequest } from "@/lib/request-api-url";
 import { Tenancy, getTenancy } from "@/lib/tenancies";
@@ -19,34 +20,6 @@ import { deindent, extractScopes, mergeScopeStrings } from "@hexclave/shared/dis
 import { cookies } from "@/lib/runtime/headers";
 import { redirect } from "@/lib/runtime/navigation";
 import { oauthResponseToSmartResponse } from "../../oauth-helpers";
-
-/**
- * Create a project user OAuth account with the provided data.
- * Used for the "link" flow which doesn't go through the standard sign-up path.
- */
-async function createProjectUserOAuthAccountForLink(prisma: PrismaClientTransaction, params: {
-  tenancyId: string,
-  providerId: string,
-  providerAccountId: string,
-  email: string | null,
-  projectUserId: string,
-}) {
-  return await prisma.projectUserOAuthAccount.create({
-    data: {
-      configOAuthProviderId: params.providerId,
-      providerAccountId: params.providerAccountId,
-      email: params.email,
-      projectUser: {
-        connect: {
-          tenancyId_projectUserId: {
-            tenancyId: params.tenancyId,
-            projectUserId: params.projectUserId,
-          },
-        },
-      },
-    },
-  });
-}
 
 const redirectOrThrowError = (error: KnownError, tenancy: Tenancy, options: {
   oauthCallbackRedirectUrl?: string,
@@ -196,7 +169,9 @@ const handler = createSmartRouteHandler({
     // those hosts, so when the landing host legitimately differs from the
     // authorize host we skip the cookie check and rely on the single-use,
     // server-side outer info plus the outer flow's PKCE — the same protection
-    // JSON mode already uses.
+    // JSON mode already uses. Any side effect that binds the provider identity to
+    // the initiator's user is deferred to the PKCE-protected code exchange
+    // (see PendingOAuthAction), so skipping the cookie can't be abused for login CSRF.
     const isCrossHostCallback = !!outerInfo.authorizeApiUrl && outerInfo.authorizeApiUrl !== apiUrl;
 
     // JSON-mode requests use PKCE for CSRF protection and don't set a cookie.
@@ -324,28 +299,14 @@ const handler = createSmartRouteHandler({
         }
       });
 
+      const providerTokens: PendingOAuthProviderTokens = {
+        accessToken: tokenSet.accessToken,
+        refreshToken: tokenSet.refreshToken ?? null,
+        accessTokenExpiresAtMillis: tokenSet.accessTokenExpiredAt?.getTime() ?? null,
+        scopes: extractScopes(mergeScopeStrings(providerObj.scope, providerScope ?? "")),
+      };
       const storeTokens = async (oauthAccountId: string) => {
-        const tokenScopes = extractScopes(mergeScopeStrings(providerObj.scope, providerScope ?? ""));
-        if (tokenSet.refreshToken) {
-          await prisma.oAuthToken.create({
-            data: {
-              tenancyId: outerInfo.tenancyId,
-              refreshToken: tokenSet.refreshToken,
-              scopes: tokenScopes,
-              oauthAccountId,
-            }
-          });
-        }
-
-        await prisma.oAuthAccessToken.create({
-          data: {
-            tenancyId: outerInfo.tenancyId,
-            accessToken: tokenSet.accessToken,
-            scopes: tokenScopes,
-            expiresAt: tokenSet.accessTokenExpiredAt,
-            oauthAccountId,
-          }
-        });
+        await storeOAuthProviderTokens(prisma, { tenancyId: outerInfo.tenancyId, oauthAccountId, providerTokens });
       };
 
       const oauthResponse = new OAuthResponse();
@@ -384,35 +345,29 @@ const handler = createSmartRouteHandler({
                   );
 
                   // ========================== link account with user ==========================
-                  // This flow is when a signed-in user wants to connect an OAuth account
+                  // This flow is when a signed-in user wants to connect an OAuth account.
+                  // The link itself is deferred to the PKCE-protected code exchange; see PendingOAuthAction.
                   if (type === "link") {
                     if (!projectUserId) {
                       throw new HexclaveAssertionError("projectUserId not found in cookie when authorizing signed in user");
                     }
 
-                    if (oldAccount) {
-                      // ========================== account already connected ==========================
-                      if (oldAccount.projectUserId !== projectUserId) {
-                        throw new KnownErrors.OAuthConnectionAlreadyConnectedToAnotherUser();
-                      }
-                      await storeTokens(oldAccount.id);
-                    } else {
-                      // ========================== connect account with user ==========================
-                      const newOAuthAccount = await createProjectUserOAuthAccountForLink(prisma, {
-                        tenancyId: outerInfo.tenancyId,
-                        providerId: provider.id,
-                        providerAccountId: userInfo.accountId,
-                        email: userInfo.email ?? null,
-                        projectUserId,
-                      });
-
-                      await storeTokens(newOAuthAccount.id);
+                    // Checked here too (and again on exchange) so the user gets the error redirect early
+                    if (oldAccount && oldAccount.projectUserId !== projectUserId) {
+                      throw new KnownErrors.OAuthConnectionAlreadyConnectedToAnotherUser();
                     }
 
                     return {
                       id: projectUserId,
                       newUser: false,
                       afterCallbackRedirectUrl,
+                      pendingOAuthAction: {
+                        type: "link",
+                        providerId: provider.id,
+                        providerAccountId: userInfo.accountId,
+                        email: userInfo.email ?? null,
+                        providerTokens,
+                      } satisfies PendingOAuthAction,
                     };
                   }
 
@@ -485,6 +440,49 @@ const handler = createSmartRouteHandler({
                   }
 
                   const requestContext = await getBestEffortEndUserRequestContext();
+                  const signUpRuleOptions = buildSignUpRuleOptions({
+                    authMethod: 'oauth',
+                    oauthProvider: provider.id,
+                    oauthAccountCreatedAtMillis: userInfo.accountCreatedAtMillis,
+                    requestContext,
+                    turnstileAssessment: reconstructTurnstileAssessment(
+                      outerInfo.turnstileResult ?? "invalid",
+                      outerInfo.turnstileVisibleChallengeResult,
+                    ),
+                  });
+
+                  if (currentUser?.is_anonymous) {
+                    // ========================== upgrade anonymous user (deferred) ==========================
+                    // The anonymous user was chosen by the flow's initiator, so the upgrade is deferred to the
+                    // PKCE-protected code exchange; see PendingOAuthAction. The sign-up checks run here though,
+                    // so that rejections get the error redirect below instead of failing the code exchange.
+                    const evaluatedSignUp = await evaluateOAuthSignUp(tenancy, {
+                      email: userInfo.email ?? null,
+                      emailVerified: userInfo.emailVerified,
+                      currentUser,
+                      signUpRuleOptions,
+                    });
+                    return {
+                      id: currentUser.id,
+                      newUser: true,
+                      afterCallbackRedirectUrl,
+                      email: userInfo.email ?? null,
+                      oauthProvider: provider.id,
+                      pendingOAuthAction: {
+                        type: "upgrade-anonymous-user",
+                        providerId: provider.id,
+                        providerAccountId: userInfo.accountId,
+                        email: userInfo.email ?? null,
+                        emailVerified: userInfo.emailVerified,
+                        primaryEmailAuthEnabled,
+                        displayName: userInfo.displayName ?? null,
+                        profileImageUrl: userInfo.profileImageUrl ?? null,
+                        evaluatedSignUp,
+                        providerTokens,
+                      } satisfies PendingOAuthAction,
+                    };
+                  }
+
                   const { projectUserId: newUserId, oauthAccountId } = await createOAuthUserAndAccount(
                     prisma,
                     tenancy,
@@ -497,16 +495,7 @@ const handler = createSmartRouteHandler({
                       currentUser,
                       displayName: userInfo.displayName ?? null,
                       profileImageUrl: userInfo.profileImageUrl ?? null,
-                      signUpRuleOptions: buildSignUpRuleOptions({
-                        authMethod: 'oauth',
-                        oauthProvider: provider.id,
-                        oauthAccountCreatedAtMillis: userInfo.accountCreatedAtMillis,
-                        requestContext,
-                        turnstileAssessment: reconstructTurnstileAssessment(
-                          outerInfo.turnstileResult ?? "invalid",
-                          outerInfo.turnstileVisibleChallengeResult,
-                        ),
-                      }),
+                      signUpRuleOptions,
                     }
                   );
 

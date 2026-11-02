@@ -40,16 +40,18 @@ export function getDiscordAccountCreatedAtMillis(accountId: unknown): number | n
 }
 
 /**
- * Apple emits the `email_verified` claim as either a boolean or its string
- * representation ("true"/"false"). A naive `!!value` coerces the string "false"
- * into `true`, which would let an UNVERIFIED Apple email satisfy the account-merge
- * verification gate in `handleOAuthEmailMergeStrategy` and silently link into an
- * existing account (account takeover). Treat only a real `true` or the exact
- * string "true" as verified; anything else (including "false") is unverified.
+ * Parses an OIDC `email_verified` claim. The spec says it's a boolean, but some
+ * IdPs emit its string representation ("true"/"false") instead — Apple does, and
+ * so do some providers configured as custom OIDC (eg. AWS Cognito's userinfo
+ * endpoint). A naive `!!value` coerces the string "false" into `true`, which
+ * would let an UNVERIFIED email satisfy the account-merge verification gate in
+ * `handleOAuthEmailMergeStrategy` and silently link into an existing account
+ * (account takeover). Treat only a real `true` or the exact string "true" as
+ * verified; anything else (including "false") is unverified.
  *
- * Shared between the web provider (`providers/apple.tsx`) and the native sign-in
- * route so the two can never drift apart again.
+ * Use this for every provider that reads a raw `email_verified` claim (Apple web,
+ * Apple native, custom OIDC) so they can never drift apart again.
  */
-export function isAppleEmailVerified(value: unknown): boolean {
+export function parseEmailVerifiedClaim(value: unknown): boolean {
   return value === true || value === "true";
 }

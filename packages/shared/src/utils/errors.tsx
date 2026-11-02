@@ -161,6 +161,10 @@ export function registerErrorSink(sink: ErrorSink): void {
   }
   errorSinks.add(sink);
 }
+/** Stops sending errors to a sink added with `registerErrorSink`, eg. one a test added to observe reports. */
+export function unregisterErrorSink(sink: ErrorSink): void {
+  errorSinks.delete(sink);
+}
 registerErrorSink((location, error, level, ...extraArgs) => {
   const logger = level === "warning" ? console.warn : console.error;
   const colorCode = level === "warning" ? "\x1b[43m" : "\x1b[41m";
@@ -210,6 +214,18 @@ export function captureError(location: string, error: unknown): void {
 export function captureWarning(location: string, error: unknown): void {
   dispatchToSinks(location, error, "warning");
 }
+
+import.meta.vitest?.test("unregisterErrorSink", ({ expect }) => {
+  const locations: string[] = [];
+  const sink = (location: string) => {
+    locations.push(location);
+  };
+  registerErrorSink(sink);
+  captureWarning("unregister-error-sink-test-before", new Error("Expected test warning"));
+  unregisterErrorSink(sink);
+  captureWarning("unregister-error-sink-test-after", new Error("Expected test warning"));
+  expect(locations).toEqual(["unregister-error-sink-test-before"]);
+});
 
 
 type Status = {

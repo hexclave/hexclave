@@ -1,12 +1,13 @@
 import { usersCrudHandlers } from "@/app/api/latest/users/crud";
 import { getPrismaClientForTenancy, getPrismaSchemaForTenancy, sqlQuoteIdent } from "@/prisma-client";
 import { KnownErrors } from "@hexclave/shared";
-import { UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
-import { isValidCountryCode, normalizeCountryCode } from "@hexclave/shared/dist/schema-fields";
+import { signUpRiskScoresSchema, UsersCrud } from "@hexclave/shared/dist/interface/crud/users";
+import { isValidCountryCode, normalizeCountryCode, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { SignUpAuthMethod } from "@hexclave/shared/dist/utils/auth-methods";
 import { getEnvBoolean, getNodeEnvironment } from "@hexclave/shared/dist/utils/env";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { KeyIntersect } from "@hexclave/shared/dist/utils/types";
+import * as yup from "yup";
 import { createSignUpRuleContext } from "./cel-evaluator";
 import { BestEffortEndUserRequestContext, getBestEffortEndUserRequestContext } from "./end-users";
 import { calculateSignUpRiskAssessment } from "./risk-scores";
@@ -157,37 +158,46 @@ import.meta.vitest?.describe("visible bot challenge sign-up policy", () => {
 });
 
 /**
- * Creates or upgrades an anonymous user with sign-up rule evaluation.
+ * The outcome of the sign-up checks (bot challenge, risk scores, sign-up rules) for a sign-up that was allowed, with
+ * everything needed to create or upgrade the user afterwards.
  *
- * This function evaluates sign-up rules before creating/upgrading the user.
- * Use this for all signup paths:
- * - Password signup
- * - OTP signup
- * - OAuth signup
- * - Passkey signup
- * - Anonymous user conversion
+ * It's JSON so that the checks can run in one request and the sign-up be applied in a later one: OAuth upgrades of
+ * anonymous users run the checks in /callback, so that rejections still go through the callback's error redirect,
+ * but are only applied at the PKCE-protected code exchange (see PendingOAuthAction).
+ */
+export const evaluatedSignUpSchema = yupObject({
+  /** Set iff a `restrict` sign-up rule matched. */
+  restrictionPrivateDetails: yupString().nullable().defined(),
+  countryCodeToPersist: yupString().nullable().defined(),
+  riskScores: signUpRiskScoresSchema.defined(),
+  heuristicFacts: yupObject({
+    signedUpAtMillis: yupNumber().defined(),
+    signUpIp: yupString().nullable().defined(),
+    signUpIpTrusted: yupBoolean().nullable().defined(),
+    signUpEmailNormalized: yupString().nullable().defined(),
+    signUpEmailBase: yupString().nullable().defined(),
+  }).defined(),
+}).defined();
+
+export type EvaluatedSignUp = yup.InferType<typeof evaluatedSignUpSchema>;
+
+/**
+ * Runs the sign-up checks for creating a user (or upgrading `currentUser` if it's anonymous) with the given primary
+ * email, without writing the user. Logs sign-up rule triggers, so call it once per sign-up attempt.
  *
- * Do NOT use this for creating anonymous users (use createOrUpgradeAnonymousUserWithoutRules directly).
- *
- * @param tenancy - The tenancy context
- * @param currentUser - Current user (if any, for anonymous upgrade)
- * @param createOrUpdate - User creation/update data
- * @param allowedErrorTypes - Error types to allow
- * @param signUpRuleOptions - Options for sign-up rule evaluation
- * @returns Created or updated user
+ * @throws KnownErrors.BotChallengeFailed if the visible bot challenge failed
  * @throws KnownErrors.SignUpRejected if a sign-up rule rejects the signup
  */
-export async function createOrUpgradeAnonymousUserWithRules(
+export async function evaluateSignUp(
   tenancy: Tenancy,
   currentUser: UsersCrud["Admin"]["Read"] | null,
-  createOrUpdate: KeyIntersect<UsersCrud["Admin"]["Create"], UsersCrud["Admin"]["Update"]>,
-  allowedErrorTypes: (new (...args: any) => any)[],
+  primaryEmail: { primary_email?: string | null, primary_email_verified?: boolean },
   signUpRuleOptions: SignUpRuleOptions,
-): Promise<UsersCrud["Admin"]["Read"]> {
+): Promise<EvaluatedSignUp> {
   assertVisibleBotChallengePassedForSignUp(signUpRuleOptions.turnstileAssessment);
 
-  const email = createOrUpdate.primary_email ?? currentUser?.primary_email ?? null;
-  const primaryEmailVerified = createOrUpdate.primary_email_verified ?? currentUser?.primary_email_verified ?? false;
+  const email = primaryEmail.primary_email ?? currentUser?.primary_email ?? null;
+  const primaryEmailVerified = primaryEmail.primary_email_verified ?? currentUser?.primary_email_verified ?? false;
   const endUserRequestContext = signUpRuleOptions.requestContext !== undefined
     ? signUpRuleOptions.requestContext
     : signUpRuleOptions.ipAddress !== null && signUpRuleOptions.ipTrusted !== null
@@ -227,38 +237,54 @@ export async function createOrUpgradeAnonymousUserWithRules(
     throw new KnownErrors.SignUpRejected();
   }
 
-  const existingRestrictionPrivateDetails = createOrUpdate.restricted_by_admin_private_details ?? currentUser?.restricted_by_admin_private_details;
   const restrictionRuleId = ruleResult.restrictedBecauseOfSignUpRuleId;
   const restrictionRuleDisplayName = restrictionRuleId
     ? (tenancy.config.auth.signUpRules[restrictionRuleId].displayName ?? "")
     : "";
-  const restrictionPrivateDetails = restrictionRuleId
-    ? `Restricted by sign-up rule: ${restrictionRuleId}${restrictionRuleDisplayName ? ` (${restrictionRuleDisplayName})` : ""}`
-    : null;
 
-  const enrichedCreateOrUpdate = {
-    ...createOrUpdate,
-    ...(ruleResult.restrictedBecauseOfSignUpRuleId != null ? {
-      restricted_by_admin: true,
-      restricted_by_admin_private_details: existingRestrictionPrivateDetails != null ? `${existingRestrictionPrivateDetails}\n\n${restrictionPrivateDetails}` : restrictionPrivateDetails,
-    } : {}),
-    ...(countryCodeToPersist !== null ? { country_code: countryCodeToPersist } : {}),
-    risk_scores: {
+  return {
+    restrictionPrivateDetails: restrictionRuleId
+      ? `Restricted by sign-up rule: ${restrictionRuleId}${restrictionRuleDisplayName ? ` (${restrictionRuleDisplayName})` : ""}`
+      : null,
+    countryCodeToPersist,
+    riskScores: {
       sign_up: {
         bot: riskScores.bot,
         free_trial_abuse: riskScores.free_trial_abuse,
       },
     },
+    heuristicFacts: {
+      signedUpAtMillis: riskAssessment.heuristicFacts.signedUpAt.getTime(),
+      signUpIp: riskAssessment.heuristicFacts.signUpIp,
+      signUpIpTrusted: riskAssessment.heuristicFacts.signUpIpTrusted,
+      signUpEmailNormalized: riskAssessment.heuristicFacts.signUpEmailNormalized,
+      signUpEmailBase: riskAssessment.heuristicFacts.signUpEmailBase,
+    },
   };
+}
 
-  const signUpHeuristicFactsToPersist = {
-    tenancy,
-    signedUpAt: riskAssessment.heuristicFacts.signedUpAt,
-    signUpIp: riskAssessment.heuristicFacts.signUpIp,
-    signUpIpTrusted: riskAssessment.heuristicFacts.signUpIpTrusted,
-    signUpEmailNormalized: riskAssessment.heuristicFacts.signUpEmailNormalized,
-    signUpEmailBase: riskAssessment.heuristicFacts.signUpEmailBase,
-  } as const;
+/**
+ * Creates a user (or upgrades `currentUser` if it's anonymous) for a sign-up that already passed `evaluateSignUp`.
+ */
+export async function createOrUpgradeAnonymousUserWithEvaluatedSignUp(
+  tenancy: Tenancy,
+  currentUser: UsersCrud["Admin"]["Read"] | null,
+  createOrUpdate: KeyIntersect<UsersCrud["Admin"]["Create"], UsersCrud["Admin"]["Update"]>,
+  allowedErrorTypes: (new (...args: any) => any)[],
+  evaluatedSignUp: EvaluatedSignUp,
+): Promise<UsersCrud["Admin"]["Read"]> {
+  const { restrictionPrivateDetails, countryCodeToPersist, heuristicFacts } = evaluatedSignUp;
+  const existingRestrictionPrivateDetails = createOrUpdate.restricted_by_admin_private_details ?? currentUser?.restricted_by_admin_private_details;
+
+  const enrichedCreateOrUpdate = {
+    ...createOrUpdate,
+    ...(restrictionPrivateDetails != null ? {
+      restricted_by_admin: true,
+      restricted_by_admin_private_details: existingRestrictionPrivateDetails != null ? `${existingRestrictionPrivateDetails}\n\n${restrictionPrivateDetails}` : restrictionPrivateDetails,
+    } : {}),
+    ...(countryCodeToPersist !== null ? { country_code: countryCodeToPersist } : {}),
+    risk_scores: evaluatedSignUp.riskScores,
+  };
 
   const user = await createOrUpgradeAnonymousUserWithoutRules(
     tenancy,
@@ -269,14 +295,51 @@ export async function createOrUpgradeAnonymousUserWithRules(
 
   try {
     await persistSignUpHeuristicFacts({
-      ...signUpHeuristicFactsToPersist,
+      tenancy,
       userId: user.id,
+      signedUpAt: new Date(heuristicFacts.signedUpAtMillis),
+      signUpIp: heuristicFacts.signUpIp,
+      signUpIpTrusted: heuristicFacts.signUpIpTrusted,
+      signUpEmailNormalized: heuristicFacts.signUpEmailNormalized,
+      signUpEmailBase: heuristicFacts.signUpEmailBase,
     });
   } catch (error) {
     captureError("persist-sign-up-heuristic-facts", error);
   }
 
   return user;
+}
+
+/**
+ * Creates or upgrades an anonymous user with sign-up rule evaluation.
+ *
+ * This function evaluates sign-up rules before creating/upgrading the user.
+ * Use this for all signup paths:
+ * - Password signup
+ * - OTP signup
+ * - OAuth signup
+ * - Passkey signup
+ * - Anonymous user conversion
+ *
+ * Do NOT use this for creating anonymous users (use createOrUpgradeAnonymousUserWithoutRules directly).
+ *
+ * @param tenancy - The tenancy context
+ * @param currentUser - Current user (if any, for anonymous upgrade)
+ * @param createOrUpdate - User creation/update data
+ * @param allowedErrorTypes - Error types to allow
+ * @param signUpRuleOptions - Options for sign-up rule evaluation
+ * @returns Created or updated user
+ * @throws KnownErrors.SignUpRejected if a sign-up rule rejects the signup
+ */
+export async function createOrUpgradeAnonymousUserWithRules(
+  tenancy: Tenancy,
+  currentUser: UsersCrud["Admin"]["Read"] | null,
+  createOrUpdate: KeyIntersect<UsersCrud["Admin"]["Create"], UsersCrud["Admin"]["Update"]>,
+  allowedErrorTypes: (new (...args: any) => any)[],
+  signUpRuleOptions: SignUpRuleOptions,
+): Promise<UsersCrud["Admin"]["Read"]> {
+  const evaluatedSignUp = await evaluateSignUp(tenancy, currentUser, createOrUpdate, signUpRuleOptions);
+  return await createOrUpgradeAnonymousUserWithEvaluatedSignUp(tenancy, currentUser, createOrUpdate, allowedErrorTypes, evaluatedSignUp);
 }
 
 /**

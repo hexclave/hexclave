@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { COMMENT_BLOCK, COMMENT_LINE, PLATFORMS, copyFromSrcToDest, processMacros, withGeneratorLock, writeFileSyncIfChanged } from "./utils";
+import { COMMENT_BLOCK, COMMENT_LINE, PLATFORMS, copyFromSrcToDest, processMacros, withGeneratorLock, writeFileSyncIfChanged } from "./utils.ts";
 
 /**
  * Main function to generate from a template:
@@ -129,7 +129,7 @@ function baseEditFn(options: {
 
 
 withGeneratorLock(async () => {
-  const baseDir = path.resolve(__dirname, "..", "packages");
+  const baseDir = path.resolve(import.meta.dirname, "..", "packages");
   const srcDir = path.resolve(baseDir, "template");
   const tanstackStartOnlyTemplateFiles = new Set([
     "src/tanstack-start-server-context.combined.ts",

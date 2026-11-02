@@ -16,5 +16,6 @@
       "~/*": ["./src/*"]
     }
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["node_modules", "**/*.untracked.*", "**/*.untracked/**"]
 }

@@ -10,11 +10,12 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getHeapStatistics } from "node:v8";
+import { createServicePiledriver } from "./create-piledriver.js";
 import { isBulldozerRequestAuthorized } from "./auth.js";
 import { declareBulldozerDatabase, type BulldozerDatabase } from "./databases/bulldozer/index.js";
 import { declareInMemoryLowLevelDatabase } from "./databases/low-level/implementations/in-memory.js";
 import { declareInstantAvailabilityLowLevelDatabase } from "./databases/low-level/implementations/instant-availability.js";
-import { declareLmdbLowLevelDatabase, getLmdbDiagnostics } from "./databases/low-level/implementations/lmdb.js";
+import { declareLmdbLowLevelDatabase } from "./databases/low-level/implementations/lmdb.js";
 import type { LowLevelDatabase } from "./databases/low-level/index.js";
 import { declareBasePiledriverDatabase } from "./databases/piledriver/implementations/base.js";
 import { declareBufferedPiledriverDatabase } from "./databases/piledriver/implementations/buffered.js";
@@ -26,6 +27,7 @@ import { instrumentation, traceSpan } from "./otel.js";
 import { createPaymentsSchema, itemQuantitiesLedgerUpperBoundAsOf } from "./payments/schema/index.js";
 import type { CustomerType, Json, ManualTransactionRow, SubscriptionRow, TransactionRow } from "./payments/schema/types.js";
 import { handleVerifyDataIntegrityRequest, verifyDataIntegrity } from "./payments/verify-data-integrity.js";
+import { handleReleaseFreePagesRequest } from "./release-free-pages-request.js";
 import { initSentry, resolveBulldozerSentryEnvironment } from "./sentry.js";
 
 const sentryEnabled = initSentry();
@@ -78,9 +80,10 @@ function createLowLevelDatabase(): LowLevelDatabase {
   }));
 }
 
-const basePiledriver = declareBasePiledriverDatabase(createLowLevelDatabase(), {
+const servicePiledriver = await createServicePiledriver(process.env, () => declareBasePiledriverDatabase(createLowLevelDatabase(), {
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
-});
+}));
+const basePiledriver = servicePiledriver.piledriver;
 // Buffering keeps availability instant while durability/replication waits for the wrapped root write;
 // it is worthwhile for write-lock occupancy and throughput, not per-call latency.
 const bufferedPiledriverEnabled = process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_BUFFERED_PILEDRIVER !== "1";
@@ -981,7 +984,7 @@ const app = new Elysia({ adapter: node() })
     }
   })
   .get("/health", () => ({ ok: true }))
-  .get("/diagnostics", () => getLmdbDiagnostics() ?? { available: false })
+  .get("/diagnostics", () => handler("diagnostics", async () => servicePiledriver.getDiagnostics()))
   .get("/v1/manual-transactions", ({ query }) => handler("list-manual-transactions", async () => {
     // Cross-instance export surface: backend pages this to back up refunds into Prisma.
     const { limit, cursor } = parseManualTransactionsListQuery(query);
@@ -1007,6 +1010,11 @@ const app = new Elysia({ adapter: node() })
       request.maxObjects === undefined ? undefined : readPositiveSafeIntegerField(request, "maxObjects"),
     );
   }))
+  .post("/internal/piledriver-release-free-pages", ({ body }) => handler("piledriver-release-free-pages", async () => await handleReleaseFreePagesRequest(
+    body,
+    servicePiledriver.releaseFreePages,
+    String(servicePiledriver.startupSettings.piledriverImplementation),
+  )))
   .get("/v1/:tenancyId/transactions", ({ params, query }) => handler("list-transactions", async () => {
     const parsedLimit = Number.parseInt(typeof query.limit === "string" ? query.limit : "50", 10);
     const result = await listTransactions({
@@ -1169,9 +1177,7 @@ const startupFields = {
   pid: process.pid,
   nodeVersion: process.version,
   sentryEnvironment: resolveBulldozerSentryEnvironment(),
-  lowLevelBackend: process.env.HEXCLAVE_BULLDOZER_JS_LOW_LEVEL_BACKEND ?? "lmdb",
-  usingTmpLmdb: process.env.HEXCLAVE_BULLDOZER_JS_USE_TMP_LMDB === "1",
-  lmdbCompression: process.env.HEXCLAVE_BULLDOZER_JS_LMDB_COMPRESSION === "1",
+  ...servicePiledriver.startupSettings,
   disableHeapReadCache: process.env.HEXCLAVE_BULLDOZER_JS_DISABLE_PILEDRIVER_HEAP_READ_CACHE === "1",
   bufferedPiledriverEnabled,
   gcExposed: globalThis.gc !== undefined,

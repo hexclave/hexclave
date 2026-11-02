@@ -5,9 +5,9 @@ import { StyledLink } from "@/components/link";
 import { Alert, Button, SimpleTooltip, Skeleton } from "@/components/ui";
 import { UserDialog } from "@/components/user-dialog";
 import {
-  fetchMetricsOrThrow,
+  fetchEntityKpisOrThrow,
   fetchMetricsUserCountsOrThrow,
-  type MetricsResponse,
+  type MetricsEntityKpis,
   type MetricsUserCounts,
   useMetricsUserCountsOrThrow,
 } from "@/lib/hexclave-app-internals";
@@ -70,23 +70,37 @@ function TotalUsersErrorComponent(props: { error: unknown }) {
   return <>Unavailable</>;
 }
 
-type UsersMetricsSnapshot = {
-  metrics: MetricsResponse,
-  userCounts: MetricsUserCounts,
-};
-
 export default function PageClient() {
   const hexclaveAdminApp = useAdminApp();
   const firstUserPage = hexclaveAdminApp.useUsers({ limit: 1 });
   const tableReloadRef = useRef<() => void>(() => {});
-  const [usersMetricsSnapshot, setUsersMetricsSnapshot] = useState<UsersMetricsSnapshot | null>(null);
+  const [userCounts, setUserCounts] = useState<MetricsUserCounts | null>(null);
+  const [kpis, setKpis] = useState<MetricsEntityKpis | null>(null);
+  const [kpisError, setKpisError] = useState<unknown>(null);
 
+  // The KPI queries are much slower than the user count on large projects, so
+  // each one updates its part of the page as soon as it arrives.
+  // Refreshes can overlap (refresh button, mutations, page restore); only the
+  // latest one may update state.
+  const latestRefreshRef = useRef(0);
   const refreshUsersMetrics = useCallback(async () => {
-    const [metrics, userCounts] = await Promise.all([
-      fetchMetricsOrThrow(hexclaveAdminApp, false),
-      fetchMetricsUserCountsOrThrow(hexclaveAdminApp),
-    ]);
-    setUsersMetricsSnapshot({ metrics, userCounts });
+    const refreshId = ++latestRefreshRef.current;
+    const isLatest = () => refreshId === latestRefreshRef.current;
+    // Show the skeleton again on retry instead of keeping the cards hidden.
+    setKpisError(null);
+    const kpisPromise = fetchEntityKpisOrThrow(hexclaveAdminApp, "users").then(
+      (result) => {
+        if (!isLatest()) return;
+        setKpis(result);
+        setKpisError(null);
+      },
+      (error: unknown) => {
+        if (isLatest()) setKpisError(error);
+      },
+    );
+    const counts = await fetchMetricsUserCountsOrThrow(hexclaveAdminApp);
+    if (isLatest()) setUserCounts(counts);
+    await kpisPromise;
   }, [hexclaveAdminApp]);
 
   useEffect(() => {
@@ -115,8 +129,8 @@ export default function PageClient() {
     runAsynchronouslyWithAlert(refreshUsersMetrics);
   }, [refreshUsersMetrics]);
 
-  const hasUsers = usersMetricsSnapshot != null
-    ? usersMetricsSnapshot.userCounts.total_users - usersMetricsSnapshot.userCounts.anonymous_users > 0
+  const hasUsers = userCounts != null
+    ? userCounts.total_users - userCounts.anonymous_users > 0
     : firstUserPage.length > 0;
 
   return (
@@ -126,8 +140,8 @@ export default function PageClient() {
         description={<>
           Total:{" "}
           <ErrorBoundary errorComponent={TotalUsersErrorComponent}>
-            {usersMetricsSnapshot != null ? (
-              <TotalUsersText metrics={usersMetricsSnapshot.userCounts} />
+            {userCounts != null ? (
+              <TotalUsersText metrics={userCounts} />
             ) : (
               <Suspense fallback={<Skeleton className="inline"><span>Calculating</span></Skeleton>}>
                 <TotalUsersDisplay />
@@ -156,7 +170,7 @@ export default function PageClient() {
           </Alert>
         )}
 
-        <UsersKpiCards metrics={usersMetricsSnapshot?.metrics} />
+        <UsersKpiCards kpis={kpis} error={kpisError} />
 
         <div data-walkthrough="users-table">
           <UserTable onUserMutated={handleUserMutated} onReloadChange={handleTableReloadChange} />

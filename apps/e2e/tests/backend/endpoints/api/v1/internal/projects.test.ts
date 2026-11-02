@@ -1,3 +1,4 @@
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { it } from "../../../../../helpers";
 import { Auth, InternalProjectClientKeys, InternalProjectKeys, Project, backendContext, niceBackendFetch } from "../../../../backend-helpers";
 
@@ -859,4 +860,30 @@ it("lets user update logo_url to a valid image", async ({ expect }) => {
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
+});
+
+it("still lists a project whose config has a trusted domain the projects API can't represent, leaving that domain out", async ({ expect }) => {
+  await Auth.fastSignUp();
+  const { projectId } = await Project.create();
+  const adminAccessToken = backendContext.value.userAuth?.accessToken ?? throwErr("fastSignUp should have signed in a user");
+
+  // Config overrides only warn about invalid values like this one on write, so they can end up stored.
+  const overrideResponse = await backendContext.with({ projectKeys: { projectId, adminAccessToken }, userAuth: null }, async () => {
+    return await niceBackendFetch("/api/v1/internal/config/override/environment", {
+      method: "PATCH",
+      accessType: "admin",
+      body: {
+        config_override_string: JSON.stringify({
+          "domains.trustedDomains.valid-domain": { baseUrl: "https://example.com", handlerPath: "/handler" },
+          "domains.trustedDomains.invalid-domain": { baseUrl: "https://not a url", handlerPath: "/handler" },
+        }),
+      },
+    });
+  });
+  expect(overrideResponse.status).toBe(200);
+
+  const response = await niceBackendFetch("/api/v1/internal/projects", { accessType: "client" });
+  expect(response.status).toBe(200);
+  const project = response.body.items.find((item: { id: string }) => item.id === projectId);
+  expect(project.config.domains).toEqual([{ domain: "https://example.com", handler_path: "/handler" }]);
 });

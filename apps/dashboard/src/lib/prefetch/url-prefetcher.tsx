@@ -5,6 +5,7 @@ import { useDashboardInternalUser } from "@/lib/dashboard-user";
 import { hexclaveAppInternalsSymbol } from "@hexclave/next";
 import { previewTemplateSource } from "@hexclave/shared/dist/helpers/emails";
 import { createCachedRegex } from "@hexclave/shared/dist/utils/regex";
+import { firstTeamsPageOptions } from "@hexclave/shared/dist/utils/team-lists";
 import { memo, useEffect, useMemo, useState } from "react";
 import { HookPrefetcher, HookPrefetcherCallback } from "./hook-prefetcher";
 
@@ -49,7 +50,7 @@ const urlPrefetchers: Record<string, ((match: RegExpMatchArray, query: URLSearch
             user.useContactChannels();
           },
           () => {
-            user.useTeams();
+            user.useTeams(firstTeamsPageOptions);
           },
           () => {
             user.useOAuthProviders();

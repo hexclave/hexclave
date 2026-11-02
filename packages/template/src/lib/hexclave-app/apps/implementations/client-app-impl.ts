@@ -898,12 +898,13 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       this._initUniqueIdentifier();
     }
 
-    const getAnalyticsSession = async (): Promise<InternalSession> => {
+    const getAnalyticsSession = async (): Promise<InternalSession | null> => {
       this._ensurePersistentTokenStore();
       const partialUser = await this.getPartialUser({ from: 'token', or: 'anonymous-if-exists' });
       if (partialUser) {
         return await this._getSession();
       }
+      if (this.isExternalAuthApp()) return null;
       const anonUser = await this.getUser({ or: "anonymous" });
       return anonUser._internalSession;
     };
@@ -915,8 +916,10 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       this._sessionRecorder = new SessionRecorder({
         projectId: this.projectId,
         sendBatch: async (body, opts) => {
+          const session = await getAnalyticsSession();
+          if (session == null) return Result.ok(new Response(null, { status: 204 }));
           return this._handleAnalyticsUploadResult(
-            await this._interface.sendSessionReplayBatch(body, await getAnalyticsSession(), opts),
+            await this._interface.sendSessionReplayBatch(body, session, opts),
           );
         },
       }, sessionReplayOptions);
@@ -927,11 +930,13 @@ export class _HexclaveClientAppImplIncomplete<HasTokenStore extends boolean, Pro
       this._eventTracker = new EventTracker({
         projectId: this.projectId,
         sendBatch: async (body, opts) => {
+          const session = await getAnalyticsSession();
+          if (session == null) return Result.ok(new Response(null, { status: 204 }));
           return this._handleAnalyticsUploadResult(
-            await this._interface.sendAnalyticsEventBatch(body, await getAnalyticsSession(), opts),
+            await this._interface.sendAnalyticsEventBatch(body, session, opts),
           );
         },
-      });
+      }, this._analyticsOptions);
       this._eventTracker.start();
     }
 

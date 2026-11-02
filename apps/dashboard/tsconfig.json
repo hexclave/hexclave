@@ -45,6 +45,8 @@
   ],
   "exclude": [
     "node_modules",
-    ".next/dev"
+    ".next/dev",
+    "**/*.untracked.*",
+    "**/*.untracked/**"
   ]
 }

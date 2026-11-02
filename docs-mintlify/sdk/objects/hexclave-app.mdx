@@ -1008,7 +1008,7 @@ Creates a new `HexclaveServerApp` instance.
       </ParamField>
 
       <ParamField body="options.limit" type="number">
-        Maximum number of items to return per page, up to 200. If omitted, at most 200 teams are returned; if there are more, `nextCursor` is set and can be passed as `cursor` (together with `limit`) to fetch the rest.
+        Maximum number of items to return per page, up to 200. If omitted, all teams are returned, but the request fails if more than 500 teams match, so prefer setting `limit`. When there are more teams than `limit`, `nextCursor` is set and can be passed as `cursor` (together with `limit`) to fetch the rest.
       </ParamField>
 
       <ParamField body="options.orderBy" type='"createdAt"'>

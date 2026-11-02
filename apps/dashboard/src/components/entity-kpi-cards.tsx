@@ -1,25 +1,10 @@
 "use client";
 
 import { Skeleton } from "@/components/ui";
-import { useMetricsOrThrow } from "@/lib/hexclave-app-internals";
+import type { MetricsEntityKpis } from "@/lib/hexclave-app-internals";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { ErrorBoundary } from "next/dist/client/components/error-boundary";
-import { Suspense } from "react";
-import { useAdminApp } from "../app/(main)/(protected)/projects/[projectId]/use-admin-app";
 import { UserPageMetricCard } from "../app/(main)/(protected)/projects/[projectId]/users/[userId]/user-page-metric-card";
-
-type Metrics = ReturnType<typeof useMetricsOrThrow>;
-
-export type EntityKpiSeries = {
-  /** Daily new-entity series — pure creation (users) or new-active (teams). */
-  dailyNew: number[],
-  /** Daily-active split: total active per day. */
-  splitTotal: number[],
-  /** Daily-active split: subset that are new on that day. */
-  splitNew: number[],
-  /** All-time count of the entity. */
-  totalCount: number,
-};
 
 export type EntityKpiLabels = {
   newCard: { label: string, comparisonLabel: string },
@@ -31,10 +16,11 @@ export type EntityKpiLabels = {
 type EntityKpiCardsProps = {
   /** Used as the captureError tag for the React error-boundary. */
   errorTag: string,
-  /** Pulls the four series out of the shared metrics response. */
-  source: (metrics: Metrics) => EntityKpiSeries,
   labels: EntityKpiLabels,
-  metrics?: Metrics,
+  /** `null` while loading; the cards render a skeleton. */
+  kpis: MetricsEntityKpis | null,
+  /** Set when loading the KPIs failed; the cards are hidden. */
+  error?: unknown,
 };
 
 const capturedKpiErrors = new WeakMap<Error, Set<string>>();
@@ -61,12 +47,14 @@ function formatCompact(n: number): string {
 }
 
 function KpiGrid(props: {
-  metrics: Metrics,
-  source: EntityKpiCardsProps["source"],
+  kpis: MetricsEntityKpis,
   labels: EntityKpiLabels,
 }) {
-  const { metrics, source, labels } = props;
-  const { dailyNew, splitTotal, splitNew, totalCount } = source(metrics);
+  const { kpis, labels } = props;
+  const dailyNew = kpis.daily_new.map((p) => p.activity);
+  const splitTotal = kpis.daily_active_split.total.map((p) => p.activity);
+  const splitNew = kpis.daily_active_split.new.map((p) => p.activity);
+  const totalCount = kpis.total;
 
   const new7 = sumLast(dailyNew, 7);
   const newPrev7 = sumLast(dailyNew.slice(0, -7), 7);
@@ -149,12 +137,6 @@ function KpiGrid(props: {
   );
 }
 
-function KpiGridContent({ source, labels }: { source: EntityKpiCardsProps["source"], labels: EntityKpiLabels }) {
-  const hexclaveAdminApp = useAdminApp();
-  const metrics = useMetricsOrThrow(hexclaveAdminApp, false);
-  return <KpiGrid metrics={metrics} source={source} labels={labels} />;
-}
-
 function KpiSkeletonGrid() {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -165,21 +147,22 @@ function KpiSkeletonGrid() {
   );
 }
 
-export function EntityKpiCards({ errorTag, source, labels, metrics }: EntityKpiCardsProps) {
+export function EntityKpiCards({ errorTag, labels, kpis, error }: EntityKpiCardsProps) {
   const ErrorComponent = ({ error }: { error: unknown }) => {
     if (error instanceof Error) {
       captureKpiErrorOnce(error, errorTag);
     }
     return null;
   };
+  if (error != null) {
+    return <ErrorComponent error={error} />;
+  }
   return (
     <ErrorBoundary errorComponent={ErrorComponent}>
-      {metrics != null ? (
-        <KpiGrid metrics={metrics} source={source} labels={labels} />
+      {kpis != null ? (
+        <KpiGrid kpis={kpis} labels={labels} />
       ) : (
-        <Suspense fallback={<KpiSkeletonGrid />}>
-          <KpiGridContent source={source} labels={labels} />
-        </Suspense>
+        <KpiSkeletonGrid />
       )}
     </ErrorBoundary>
   );

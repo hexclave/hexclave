@@ -53,6 +53,7 @@ import { normalizeCountryCode } from "@hexclave/shared/dist/schema-fields";
 import { fromNow } from "@hexclave/shared/dist/utils/dates";
 import { captureError, HexclaveAssertionError, throwErr } from '@hexclave/shared/dist/utils/errors';
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
+import { teamsPageSize } from "@hexclave/shared/dist/utils/team-lists";
 
 import { usePathname, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
@@ -1092,7 +1093,7 @@ function UserTeamsSection({ user }: { user: ServerUser }) {
   const sortOptions = useMemo(() => sortDesc === undefined ? undefined : { orderBy: 'createdAt' as const, desc: sortDesc }, [sortDesc]);
   // The first page comes from the hook so it refreshes after team mutations; later pages (the backend returns at
   // most 200 teams per request) are fetched on scroll and dropped whenever the first page changes.
-  const firstPage = user.useTeams(sortOptions);
+  const firstPage = user.useTeams({ ...sortOptions, limit: teamsPageSize });
   const [laterPages, setLaterPages] = useState<{ after: typeof firstPage, teams: ServerTeam[], nextCursor: string | null } | null>(null);
   const loadedLaterPages = laterPages?.after === firstPage ? laterPages : null;
   const teams = useMemo(() => loadedLaterPages == null ? firstPage : [...firstPage, ...loadedLaterPages.teams], [firstPage, loadedLaterPages]);
@@ -1103,7 +1104,7 @@ function UserTeamsSection({ user }: { user: ServerUser }) {
     runAsynchronouslyWithAlert(async () => {
       setIsLoadingMoreTeams(true);
       try {
-        const page = await user.listTeams({ ...sortOptions, limit: 200, cursor: nextCursor });
+        const page = await user.listTeams({ ...sortOptions, limit: teamsPageSize, cursor: nextCursor });
         setLaterPages({ after: firstPage, teams: [...loadedLaterPages?.teams ?? [], ...page], nextCursor: page.nextCursor });
       } finally {
         setIsLoadingMoreTeams(false);

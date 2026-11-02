@@ -639,11 +639,11 @@ async function loadDailyActiveSplitFromClickhouse(options: {
   return split;
 }
 
-async function loadDailyActiveUsersSplit(tenancy: Tenancy, now: Date, includeAnonymous: boolean): Promise<ActivitySplit> {
+export async function loadDailyActiveUsersSplit(tenancy: Tenancy, now: Date, includeAnonymous: boolean): Promise<ActivitySplit> {
   return await loadDailyActiveSplitFromClickhouse({ tenancy, now, entity: "user", includeAnonymous });
 }
 
-async function loadDailyActiveTeamsSplit(tenancy: Tenancy, now: Date): Promise<ActivitySplit> {
+export async function loadDailyActiveTeamsSplit(tenancy: Tenancy, now: Date): Promise<ActivitySplit> {
   return await loadDailyActiveSplitFromClickhouse({ tenancy, now, entity: "team", includeAnonymous: false });
 }
 

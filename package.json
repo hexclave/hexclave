@@ -4,8 +4,8 @@
   "private": true,
   "repository": "https://github.com/hexclave/hexclave",
   "scripts": {
-    "pre-no-codegen": "pnpm exec only-allow pnpm",
-    "pre-preinstall": "pnpx only-allow@1.2.2 pnpm && node -e \"if(process.env.HEXCLAVE_SKIP_TEMPLATE_GENERATION !== 'true') require('child_process').execSync('pnpm exec tsx ./scripts/generate-sdks.ts', {stdio: 'inherit'})\"",
+    "pre-no-codegen": "node ./scripts/check-package-manager.mjs",
+    "pre-preinstall": "node ./scripts/check-package-manager.mjs && node -e \"if(process.env.HEXCLAVE_SKIP_TEMPLATE_GENERATION !== 'true') require('child_process').execSync('node ./scripts/generate-sdks.ts', {stdio: 'inherit'})\"",
     "pre": "pnpm pre-preinstall",
     "preinstall": "pnpm pre-preinstall",
     "postinstall": "node ./scripts/postinstall-patch-next-async-debug-info.mjs",
@@ -77,7 +77,7 @@
     "test:unit": "pnpm pre && vitest src",
     "verify-data-integrity": "pnpm pre && pnpm -C apps/backend run verify-data-integrity",
     "generate-keys": "pnpm pre && turbo run generate-keys",
-    "generate-sdks": "pnpm exec tsx ./scripts/generate-sdks.ts",
+    "generate-sdks": "node ./scripts/generate-sdks.ts",
     "generate-setup-prompt-docs": "pnpm exec tsx ./scripts/generate-setup-prompt-docs.ts",
     "generate-sdks:watch": "chokidar --silent -c 'pnpm run generate-sdks' './packages/template' --ignore './packages/template/package.json' --ignore '**/node_modules/**' --ignore '**/dist/**' --ignore '**/.turbo/**' --throttle 2000",
     "generate-openapi-docs:watch": "pnpm exec tsx ./scripts/wait-for-dev-package-imports.ts && pnpm run --filter=@hexclave/backend codegen-docs && chokidar --silent -c 'pnpm run --filter=@hexclave/backend codegen-docs' './apps/backend/src/app/api/latest/**/route.{js,jsx,ts,tsx}' './apps/backend/src/lib/openapi.ts' './packages/shared/src/interface/webhooks.ts' --throttle 2000",
@@ -113,7 +113,7 @@
   "engines": {
     "node": ">=24.0.0"
   },
-  "packageManager": "pnpm@11.5.0+sha512.dbfcc4f81cf48597afd4bc391ffdf12c11f1a9fb83a395bfa6b0a2d9cc2fd8ffebafdb1ccbd529632153f793904c2615b7f09fe1a345473fd1c35845172a8eb1",
+  "packageManager": "pnpm@11.28.5+sha512.484563d30b4c2ad27cb48aa94ff2b302dbcebc8ff6bf28816c2589886e146ce7f76f354f3bc1a438e6f5e9768c302aa0a6f7add8232903cd4cf81426cbc14d9e",
   "dependencies": {
     "commander": "^13.1.0",
     "tsx": "^4.19.3",

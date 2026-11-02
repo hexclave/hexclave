@@ -1,5 +1,6 @@
+import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
 import { describe, expect, it } from "vitest";
-import { isPiledriverHeapObjectSymbol, PiledriverHeapObject } from "../../index.js";
+import { asHeapObject, isPiledriverHeapObjectSymbol, PiledriverHeapObject, PiledriverObject } from "../../index.js";
 import { encodePiledriverObject } from "./codec.js";
 import { planHeapObjects } from "./heap-plan.js";
 
@@ -51,17 +52,37 @@ describe("Breezy heap planning", () => {
     );
 
     expect(planned.heapObjects.map(({ object }) => object)).toEqual([child, firstParent, secondParent]);
-    expect(planned.heapObjects.map(({ key }) => [...new Uint8Array(key)])).toEqual([[1], [0], [2]]);
+    // Which key each object gets depends on reservation order, which callers can't observe; what
+    // matters is that the shared child is saved once and every reference points at the right key.
+    const [childKey, firstParentKey, secondParentKey] = planned.heapObjects.map(({ key }) => encodeBase64(new Uint8Array(key)));
+    expect(new Set([childKey, firstParentKey, secondParentKey]).size).toBe(3);
     expect(planned.heapObjects.map(({ value }) => decodePlanned(value))).toEqual([
       { value: "child" },
-      { child: ["heap-reference", "AQ=="] },
-      { child: ["heap-reference", "AQ=="] },
+      { child: ["heap-reference", childKey] },
+      { child: ["heap-reference", childKey] },
     ]);
     expect(decodePlanned(planned.root)).toEqual({
-      firstParent: ["heap-reference", "AA=="],
-      secondParent: ["heap-reference", "Ag=="],
+      firstParent: ["heap-reference", firstParentKey],
+      secondParent: ["heap-reference", secondParentKey],
     });
     expect([childGets, firstParentGets, secondParentGets]).toEqual([0, 0, 0]);
+  });
+
+  it("rejects heap objects that contain themselves", () => {
+    const reserve = () => new ArrayBuffer(1);
+    const selfValue: { [key: string]: PiledriverObject } = {};
+    const self = asHeapObject(selfValue);
+    selfValue.self = self;
+    expect(() => planHeapObjects({ self }, () => undefined, reserve)).toThrow("cycle of heap objects");
+
+    // Both b and c are first seen as children of a, and only then point at each other.
+    const bValue: { [key: string]: PiledriverObject } = {};
+    const cValue: { [key: string]: PiledriverObject } = {};
+    const b = asHeapObject(bValue);
+    const c = asHeapObject(cValue);
+    bValue.c = c;
+    cValue.b = b;
+    expect(() => planHeapObjects(asHeapObject({ b, c }), () => undefined, reserve)).toThrow("cycle of heap objects");
   });
 
   it("does not traverse known heap objects", () => {

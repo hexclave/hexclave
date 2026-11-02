@@ -16,8 +16,8 @@ import {
 // issuer; these constants pin WHICH issuers/audience this module trusts, so a
 // valid token from any other OIDC provider cannot be replayed here. The
 // trusted issuer is the internal tool itself — it serves the discovery
-// document + JWKS and mints tokens only for signed-in Stack Auth users of the
-// tool's project (see ../../src/lib/server/spacetimedb-token.ts).
+// document + JWKS and mints user tokens only for approved reviewers (see
+// ../../src/lib/server/internal-auth.ts and spacetimedb-token.ts).
 const ALLOWED_ISSUERS: readonly string[] = ['__SPACETIMEDB_ALLOWED_ISSUERS__'];
 const EXPECTED_AUDIENCE = '__SPACETIMEDB_EXPECTED_AUDIENCE__';
 
@@ -37,9 +37,10 @@ type SenderAuthLike = Readonly<{
 }>;
 
 // Holding a token from the trusted issuer IS the authorization: the internal
-// tool only mints tokens for signed-in members of its Stack Auth project, and
-// that project's sign-up rules restrict membership to the team. Any member
-// may read and write everything here.
+// tool only mints user tokens for approved reviewers (`isAiChatReviewer` in
+// their client read-only metadata, checked by `requireInternalAiChatReviewer`),
+// plus service tokens for its own server-side calls. Any token holder may read
+// and write everything here.
 function isProjectMember(senderAuth: SenderAuthLike): boolean {
   if (senderAuth.isInternal) {
     // Scheduled reducers / module-internal calls are already trusted.

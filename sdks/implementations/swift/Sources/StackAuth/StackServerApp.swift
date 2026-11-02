@@ -120,8 +120,8 @@ public actor StackServerApp {
     
     // MARK: - Teams
     
-    /// Lists teams in the project (or the given user's teams). Returns at most 200 teams; use `listTeamsPage` to page
-    /// through more.
+    /// Lists all teams in the project (or all of the given user's teams). Fails if more than 500 teams match; use
+    /// `listTeamsPage` with a `limit` to page through them instead.
     public func listTeams(
         userId: String? = nil
     ) async throws -> [ServerTeam] {

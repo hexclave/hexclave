@@ -938,11 +938,11 @@ Use `useUser()` to get `CurrentUser` (client). Use `hexclaveServerApp.getUser()`
     <MethodContent>
       Lists the teams the user is a member of.
 
-      Returns at most 200 teams per call. If the user is in more teams, `nextCursor` on the result is set; pass it as `cursor` (together with `limit`) to fetch the next page. Otherwise, `nextCursor` is `null`.
+      If there are more teams than the requested `limit`, `nextCursor` on the result is set; pass it as `cursor` (together with `limit`) to fetch the next page. Otherwise, `nextCursor` is `null`.
 
       <ContentSection title="Parameters">
         <ParamField body="options.limit" type="number">
-          The maximum number of teams to return (at most 200). Defaults to 200.
+          The maximum number of teams to return (at most 200). If omitted, all teams are returned, but the request fails if the user is in more than 500 teams, so prefer setting `limit`.
         </ParamField>
 
         <ParamField body="options.cursor" type="string">
@@ -2820,7 +2820,7 @@ Accessible via `hexclaveServerApp.getUser()` on the server. `ServerUser` inherit
 <ServerUserSection type="serverUser" property="listTeams" signature="[options]" defaultOpen={false}>
   <MethodLayout>
     <MethodContent>
-      Lists the teams the user belongs to, as `ServerTeam` objects. Accepts the same options as [`CurrentUser.listTeams`](#currentuserlistteams): if `limit` is omitted, at most 200 teams are returned, and `nextCursor` is set when there are more.
+      Lists the teams the user belongs to, as `ServerTeam` objects. Accepts the same options as [`CurrentUser.listTeams`](#currentuserlistteams): if `limit` is omitted, all teams are returned (and the request fails if the user is in more than 500 teams), and `nextCursor` is set when there are more teams than the requested `limit`.
 
       <ContentSection title="Parameters">
         <ParamField body="options.cursor" type="string">

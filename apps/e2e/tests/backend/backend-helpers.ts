@@ -819,7 +819,11 @@ export namespace Auth {
     export const testCodeVerifier = "some-code-challenge";
     export const testCodeChallenge = createHash("sha256").update(testCodeVerifier).digest("base64url");
 
-    export async function getAuthorizeQuery(options: TurnstileTestOptions & {
+    type OAuthFlowTypeOptions = {
+      type?: "authenticate" | "link",
+    };
+
+    export async function getAuthorizeQuery(options: TurnstileTestOptions & OAuthFlowTypeOptions & {
       forceBranchId?: string,
       includeClientSecret?: boolean,
     } = {}) {
@@ -843,13 +847,14 @@ export namespace Auth {
         code_challenge: Auth.OAuth.testCodeChallenge,
         code_challenge_method: "S256",
         token: userAuth?.accessToken ?? undefined,
+        type: options.type,
         bot_challenge_token: options.turnstileToken ?? mockTurnstileTokens.oauthOk,
         bot_challenge_phase: options.turnstilePhase,
 
       });
     }
 
-    export async function authorize(options: TurnstileTestOptions & {
+    export async function authorize(options: TurnstileTestOptions & OAuthFlowTypeOptions & {
       redirectUrl?: string,
       errorRedirectUrl?: string,
       afterCallbackRedirectUrl?: string,
@@ -891,7 +896,7 @@ export namespace Auth {
       };
     }
 
-    export async function getInnerCallbackUrl(options: TurnstileTestOptions & {
+    export async function getInnerCallbackUrl(options: TurnstileTestOptions & OAuthFlowTypeOptions & {
       authorizeResponse?: NiceResponse,
       forceBranchId?: string,
       includeClientSecret?: boolean,
@@ -976,7 +981,7 @@ export namespace Auth {
       };
     }
 
-    export async function getMaybeFailingAuthorizationCode(options: TurnstileTestOptions & {
+    export async function getMaybeFailingAuthorizationCode(options: TurnstileTestOptions & OAuthFlowTypeOptions & {
       innerCallbackUrl?: URL,
       authorizeResponse?: NiceResponse,
       forceBranchId?: string,
@@ -1005,7 +1010,7 @@ export namespace Auth {
       };
     }
 
-    export async function getAuthorizationCode(options: TurnstileTestOptions & {
+    export async function getAuthorizationCode(options: TurnstileTestOptions & OAuthFlowTypeOptions & {
       innerCallbackUrl?: URL,
       authorizeResponse?: NiceResponse,
       forceBranchId?: string,

@@ -21,6 +21,10 @@ import { isUuid } from "@hexclave/shared/dist/utils/uuids";
 import { addUserToTeam } from "../team-memberships/crud";
 
 const maxListPageSize = 200;
+// Requests without `limit` predate pagination and return every matching team unpaginated. Past this many we reject
+// them instead of truncating, since callers that don't paginate (eg. older SDKs) can't tell a truncated list apart
+// from a complete one. It's higher than `maxListPageSize` so that existing callers just above 200 teams keep working.
+const maxUnpaginatedListSize = 500;
 
 // A team list cursor is the position of the previous page's last team, `<createdAt millis>_<teamId>`, rather than just
 // its ID, so a page can still be (re)fetched after that team is deleted; eg. the SDK's caches refresh mounted pages
@@ -72,7 +76,7 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
     add_current_user: yupString().oneOf(["true", "false"]).optional().meta({ openapiField: { onlyShowInOperations: ['Create'], hidden: true } }),
     order_by: yupString().oneOf(["created_at"]).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'Field to order results by. Currently only `created_at` is supported.', exampleValue: 'created_at' } }),
     desc: yupString().oneOf(["true", "false"]).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: 'Whether to order results in descending order. Defaults to false (ascending).', exampleValue: 'false' } }),
-    limit: yupNumber().integer().min(1).max(maxListPageSize).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: `The maximum number of items to return (capped at ${maxListPageSize}). If omitted, at most ${maxListPageSize} teams are returned; if there are more, the response is paginated and \`pagination.next_cursor\` can be passed as \`cursor\` (together with \`limit\`) to fetch the rest.` } }),
+    limit: yupNumber().integer().min(1).max(maxListPageSize).optional().meta({ openapiField: { onlyShowInOperations: ['List'], description: `The maximum number of items to return (capped at ${maxListPageSize}). If omitted, all matching teams are returned unpaginated, unless more than ${maxUnpaginatedListSize} teams match, in which case the request fails with a 400 error; set \`limit\` and follow \`pagination.next_cursor\` instead.` } }),
     cursor: yupString().optional().test(
       "team-list-cursor",
       "cursor must be a `next_cursor` returned by a previous request",
@@ -336,7 +340,7 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
 
     const prisma = await getPrismaClientForTenancy(auth.tenancy);
     const sortDirection = query.desc === 'true' ? 'desc' : 'asc';
-    const limit = query.limit ?? maxListPageSize;
+    const limit = query.limit;
 
     let queryFilter: Prisma.TeamWhereInput | undefined;
     if (query.query) {
@@ -408,21 +412,23 @@ export const teamsCrudHandlers = createLazyProxy(() => createCrudHandlers(teamsC
         { createdAt: sortDirection },
         { teamId: sortDirection },
       ],
-      // +1 to detect whether a next page exists without a separate count.
-      take: limit + 1,
+      // +1 to detect whether a next page exists (or, without `limit`, whether the unpaginated cap is exceeded)
+      // without a separate count.
+      take: (limit ?? maxUnpaginatedListSize) + 1,
     });
 
-    const items = db.slice(0, limit).map(teamPrismaToCrud);
-    const hasMore = db.length > limit;
-
-    // Requests without `limit` predate pagination and keep the unpaginated shape when everything fits.
-    // When the default cap truncates the result, return a cursor so callers can tell there's more.
-    if (query.limit == null && !hasMore) {
+    if (limit == null) {
+      if (db.length > maxUnpaginatedListSize) {
+        throw new StatusError(StatusError.BadRequest, `More than ${maxUnpaginatedListSize} teams match this request, which is too many to return without pagination. Set \`limit\` (at most ${maxListPageSize}) and pass each response's \`pagination.next_cursor\` as \`cursor\` to fetch the rest, or narrow the results with \`query\` or \`user_id\`.`);
+      }
       return {
-        items,
+        items: db.map(teamPrismaToCrud),
         is_paginated: false,
       };
     }
+
+    const items = db.slice(0, limit).map(teamPrismaToCrud);
+    const hasMore = db.length > limit;
 
     return {
       items,

@@ -11,6 +11,7 @@ import { KnowledgeBase } from "../components/KnowledgeBase";
 import { Usage } from "../components/Usage";
 import { UsageDetail } from "../components/UsageDetail";
 import { type GetSpacetimeToken, useAiQueryLogs, useFeedbackLog, useMcpCallLogs, useQaEntries } from "../hooks/useSpacetimeDB";
+import { isAiChatReviewer } from "../lib/ai-chat-reviewer";
 import { retryReview } from "../lib/mcp-review-api";
 import type { AiQueryLogRow, FeedbackLogRow, McpCallLogRow } from "../types";
 
@@ -31,6 +32,23 @@ function readInitialTab(): Tab {
 
 export default function App() {
   const user = useUser({ or: "redirect" });
+  if (!isAiChatReviewer(user.clientReadOnlyMetadata)) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-50">
+        <div className="text-center">
+          <h1 className="text-lg font-semibold text-gray-900 mb-2">Access denied</h1>
+          <p className="text-sm text-gray-500">
+            You are signed in as {user.displayName ?? user.primaryEmail ?? user.id}, but your account is not approved as a reviewer.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return <ReviewerApp />;
+}
+
+function ReviewerApp() {
+  const user = useUser({ or: "redirect" });
   const [selectedRow, setSelectedRow] = useState<McpCallLogRow | null>(null);
   const [selectedUsageRow, setSelectedUsageRow] = useState<AiQueryLogRow | null>(null);
   const [selectedFeedbackRow, setSelectedFeedbackRow] = useState<FeedbackLogRow | null>(null);
@@ -42,11 +60,10 @@ export default function App() {
     window.sessionStorage.setItem(TAB_STORAGE_KEY, tab);
   }, [tab]);
 
-  // Any signed-in user may use the tool: membership in the Stack Auth project
-  // is the authorization (its sign-up rules restrict membership to the team).
-  // The server verifies the cookie session and mints a short-lived
-  // SpacetimeDB JWT under the tool's own OIDC issuer — Stack Auth session
-  // tokens themselves aren't OIDC-discoverable by SpacetimeDB.
+  // The server verifies the cookie session and the reviewer flag (see
+  // ai-chat-reviewer.ts), then mints a short-lived SpacetimeDB JWT under the
+  // tool's own OIDC issuer — Stack Auth session tokens themselves aren't
+  // OIDC-discoverable by SpacetimeDB.
   const getSpacetimeToken = useCallback<GetSpacetimeToken>(async () => {
     const res = await fetch("/api/spacetimedb-token", {
       method: "POST",

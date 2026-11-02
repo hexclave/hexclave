@@ -982,6 +982,10 @@ model ProjectUserAuthorizationCode {
   /// Refresh token ID that should be granted when this authorization code is exchanged.
   /// NULL means no specific refresh token is preselected, so the token endpoint follows normal issuance/reuse logic.
   grantedRefreshTokenId    String? @db.Uuid
+  /// OAuth callback side effect (linking a provider account to `projectUserId`, or upgrading the anonymous
+  /// `projectUserId`) that must only be applied once this code is exchanged with a valid PKCE verifier.
+  /// See `PendingOAuthAction` in the backend for the shape. NULL means there is nothing to apply.
+  pendingOAuthAction       Json?
 
   @@id([tenancyId, authorizationCode])
 }

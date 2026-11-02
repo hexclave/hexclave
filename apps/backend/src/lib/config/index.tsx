@@ -2,7 +2,7 @@ import { Prisma } from "@/generated/prisma/client";
 import type { ConfigAgentRun as ConfigAgentRunRow } from "@/generated/prisma/client";
 import { Config, getInvalidConfigReason, normalize, override, removeKeysFromConfig } from "@hexclave/shared/dist/config/format";
 import { BranchConfigOverride, BranchConfigOverrideOverride, BranchIncompleteConfig, BranchRenderedConfig, CompleteConfig, EnvironmentConfigOverride, EnvironmentConfigOverrideOverride, EnvironmentIncompleteConfig, EnvironmentRenderedConfig, OrganizationConfigOverride, OrganizationConfigOverrideOverride, OrganizationIncompleteConfig, ProjectConfigOverride, ProjectConfigOverrideOverride, ProjectIncompleteConfig, ProjectRenderedConfig, applyBranchDefaults, applyEnvironmentDefaults, applyOrganizationDefaults, applyProjectDefaults, branchConfigSchema, environmentConfigSchema, getConfigOverrideErrors, getIncompleteConfigWarnings, migrateConfigOverride, organizationConfigSchema, projectConfigSchema, sanitizeBranchConfig, sanitizeEnvironmentConfig, sanitizeOrganizationConfig, sanitizeProjectConfig } from "@hexclave/shared/dist/config/schema";
-import { ProjectsCrud } from "@hexclave/shared/dist/interface/crud/projects";
+import { ProjectsCrud, projectDomainSchema } from "@hexclave/shared/dist/interface/crud/projects";
 import { branchConfigSourceSchema, type ConfigAgentRunApi, type ConfigAgentSafeErrorMessage, yupBoolean, yupMixed, yupObject, yupRecord, yupString, yupUnion } from "@hexclave/shared/dist/schema-fields";
 import { isTruthy } from "@hexclave/shared/dist/utils/booleans";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
@@ -1590,10 +1590,21 @@ export const renderedOrganizationConfigToProjectCrud = (renderedConfig: Complete
     enabled_oauth_providers: oauthProviders,
 
     domains: typedEntries(renderedConfig.domains.trustedDomains)
-      .map(([_, domainConfig]) => domainConfig.baseUrl === undefined ? undefined : ({
-        domain: domainConfig.baseUrl,
-        handler_path: domainConfig.handlerPath,
-      }))
+      .map(([trustedDomainId, domainConfig]) => {
+        if (domainConfig.baseUrl === undefined) return undefined;
+        const domain = {
+          domain: domainConfig.baseUrl,
+          handler_path: domainConfig.handlerPath,
+        };
+        // Config overrides can store values this API can't represent (they're only warned about on
+        // write). Leave such a domain out instead of failing every request that reads the project,
+        // like listing a user's projects.
+        if (!projectDomainSchema.isValidSync(domain)) {
+          captureError("invalid-trusted-domain-in-config", new HexclaveAssertionError("Skipping a trusted domain that isn't valid in the projects API", { trustedDomainId, domain }));
+          return undefined;
+        }
+        return domain;
+      })
       .filter(isTruthy)
       .sort((a, b) => stringCompare(a.domain, b.domain)),
 

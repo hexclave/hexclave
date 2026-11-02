@@ -1,8 +1,11 @@
 "use client";
 
+import { hexclaveClientApp } from "@/hexclave/client";
+import type { CurrentUser } from "@hexclave/next";
+import { runAsynchronously, runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import * as Sentry from "@sentry/nextjs";
 import { recordGlobalErrorRecoveryAttempt } from "./global-error-recovery";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type GlobalErrorProps = {
   error: Error & { digest?: string };
@@ -30,6 +33,35 @@ export default function GlobalError({ error }: GlobalErrorProps) {
       cancelled = true;
     };
   }, []);
+
+  // This boundary replaces the root layout, so there is no StackProvider and `useUser()` is
+  // unavailable. Query the app directly instead. Errors are only logged: the backend being
+  // unreachable may well be what caused this screen, and the retry button must still work.
+  const [signedInUser, setSignedInUser] = useState<CurrentUser | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    runAsynchronously(async () => {
+      const user = await hexclaveClientApp.getUser();
+      if (!cancelled) {
+        setSignedInUser(user);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const signOut = (user: CurrentUser) => {
+    runAsynchronouslyWithAlert(async () => {
+      setIsSigningOut(true);
+      try {
+        await user.signOut();
+      } finally {
+        setIsSigningOut(false);
+      }
+    });
+  };
 
   return (
     <html>
@@ -117,6 +149,26 @@ export default function GlobalError({ error }: GlobalErrorProps) {
             font: inherit;
             font-weight: 600;
           }
+          .error-secondary {
+            margin: 20px 0 0;
+            color: var(--error-muted);
+            font-size: 14px;
+            line-height: 1.5;
+          }
+          .error-secondary-action {
+            border: 0;
+            padding: 0;
+            background: none;
+            color: var(--error-foreground);
+            cursor: pointer;
+            font: inherit;
+            font-weight: 600;
+            text-decoration: underline;
+          }
+          .error-secondary-action:disabled {
+            cursor: default;
+            opacity: 0.6;
+          }
         `}</style>
       </head>
       <body>
@@ -126,6 +178,19 @@ export default function GlobalError({ error }: GlobalErrorProps) {
           <button type="button" className="error-action" onClick={() => window.location.assign("/")}>
             Try again
           </button>
+          {signedInUser != null && (
+            <p className="error-secondary">
+              Signed in as {signedInUser.primaryEmail ?? signedInUser.displayName ?? signedInUser.id}.{" "}
+              <button
+                type="button"
+                className="error-secondary-action"
+                disabled={isSigningOut}
+                onClick={() => signOut(signedInUser)}
+              >
+                {isSigningOut ? "Signing out…" : "Sign out"}
+              </button>
+            </p>
+          )}
         </main>
       </body>
     </html>

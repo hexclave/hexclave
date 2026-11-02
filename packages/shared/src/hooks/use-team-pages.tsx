@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { captureError } from "../utils/errors";
 import { runAsynchronously } from "../utils/promises";
 import { Result } from "../utils/results";
-import { teamsPageSize, type TeamList, type TeamPageLister } from "../utils/team-lists";
+import { firstTeamsPageOptions, teamsPageSize, type TeamList, type TeamPageLister } from "../utils/team-lists";
 
 const searchDebounceMs = 250;
 
@@ -11,7 +11,7 @@ const searchDebounceMs = 250;
  * passed directly.
  */
 export type TeamPagesSource<T> = TeamPageLister<T> & {
-  useTeams: () => TeamList<T>,
+  useTeams: (options: { limit: number }) => TeamList<T>,
 };
 
 type SearchOutcome = { query: string, attempt: number, failed: boolean };
@@ -32,7 +32,7 @@ type SearchOutcome = { query: string, attempt: number, failed: boolean };
  */
 export function useTeamPages<T extends { id: string }>(source: TeamPagesSource<T>, rawQuery: string) {
   const query = useDebouncedValue(rawQuery.trim(), searchDebounceMs);
-  const unfilteredFirstPage = source.useTeams();
+  const unfilteredFirstPage = source.useTeams(firstTeamsPageOptions);
 
   const [attempt, setAttempt] = useState(0);
   // The outcome of the most recent search request, success or failure.

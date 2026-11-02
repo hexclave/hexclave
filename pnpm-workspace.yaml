@@ -14,35 +14,15 @@ minimumReleaseAge: 10080
 # Keep this version-pinned so future releases still go through minimumReleaseAge.
 minimumReleaseAgeExclude:
   - next@16.4.1
-  - '@next/env@16.4.1'
-  - '@next/swc-darwin-arm64@16.4.1'
-  - '@next/swc-darwin-x64@16.4.1'
-  - '@next/swc-linux-arm64-gnu@16.4.1'
-  - '@next/swc-linux-arm64-musl@16.4.1'
-  - '@next/swc-linux-x64-gnu@16.4.1'
-  - '@next/swc-linux-x64-musl@16.4.1'
-  - '@next/swc-win32-arm64-msvc@16.4.1'
-  - '@next/swc-win32-x64-msvc@16.4.1'
-  # GHSA-qx66-fv34-fjm8: @tanstack/start-server-core <1.169.39 is vulnerable. The fixed
-  # TanStack Start release chain (react-start 1.168.60) was published 2026-09-30.
-  # Keep these version-pinned so future releases still go through minimumReleaseAge.
-  - '@tanstack/react-router@1.170.41'
-  - '@tanstack/react-start-client@1.168.39'
-  - '@tanstack/react-start-rsc@0.1.59'
-  - '@tanstack/react-start-server@1.167.46'
-  - '@tanstack/react-start@1.168.60'
-  - '@tanstack/react-store@0.11.2'
-  - '@tanstack/router-core@1.171.34'
-  - '@tanstack/router-generator@1.167.40'
-  - '@tanstack/router-plugin@1.168.42'
-  - '@tanstack/start-client-core@1.170.34'
-  - '@tanstack/start-plugin-core@1.171.49'
-  - '@tanstack/start-server-core@1.169.39'
-  - '@tanstack/start-storage-context@1.167.36'
-  - '@tanstack/store@0.11.2'
-  # One-time bypass so the backend can use freestyle 0.2.17 before it passes the 7-day window.
-  # Keep this version-pinned so future releases still go through minimumReleaseAge.
-  - freestyle@0.2.17
+  - "@next/env@16.4.1"
+  - "@next/swc-darwin-arm64@16.4.1"
+  - "@next/swc-darwin-x64@16.4.1"
+  - "@next/swc-linux-arm64-gnu@16.4.1"
+  - "@next/swc-linux-arm64-musl@16.4.1"
+  - "@next/swc-linux-x64-gnu@16.4.1"
+  - "@next/swc-linux-x64-musl@16.4.1"
+  - "@next/swc-win32-arm64-msvc@16.4.1"
+  - "@next/swc-win32-x64-msvc@16.4.1"
 
 blockExoticSubdeps: true
 
@@ -64,24 +44,44 @@ patchedDependencies:
   openid-client@5.6.4: patches/openid-client@5.6.4.patch
 
 allowBuilds:
-  '@prisma/engines': true
-  '@quetzallabs/i18n': false
-  '@scarf/scarf': false
-  '@sentry/cli': true
-  '@tailwindcss/oxide': true
-  '@vercel/speed-insights': true
-  bcrypt: true
-  codebuff: false
-  core-js: true
-  esbuild: true
-  iframe-resizer: false
-  keytar: false
-  prisma: true
-  protobufjs: true
-  puppeteer: true
-  sharp: true
-  lmdb: true
-  msgpackr-extract: true
-  unrs-resolver: false
-  better-sqlite3: true
-  pprof: true
+  "@prisma/engines@7.10.0": true
+  "@quetzallabs/i18n@0.1.19": false
+  "@sentry/cli@2.53.0 || 2.58.5": true
+  "@tailwindcss/oxide@4.1.9": true
+  "@vercel/speed-insights@1.0.12": true
+  core-js@3.41.0: true
+  esbuild@0.20.2 || 0.21.5 || 0.23.1 || 0.24.2 || 0.25.11 || 0.25.3 || 0.25.4 || 0.27.1: true
+  iframe-resizer@4.4.5: false
+  keytar@7.9.0: false
+  prisma@7.10.0: true
+  protobufjs@7.5.4 || 7.5.9 || 7.6.6: true
+  puppeteer@22.14.0: true
+  sharp@0.33.5 || 0.34.5 || 0.35.3 || 0.35.5: true
+  lmdb@3.5.5: true
+  msgpackr-extract@3.0.4: true
+  better-sqlite3@11.10.0: true
+  pprof@5.0.0: true
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+trustPolicy: no-downgrade
+trustLockfile: false
+strictDepBuilds: true
+verifyDepsBeforeRun: error
+ignoreScripts: false
+ignorePnpmfile: true
+trustPolicyExclude:
+  - "@vercel/cli-config@0.2.2"
+  - "@vercel/cli-exec@1.0.1"
+  - "@vercel/functions@3.9.0"
+  - "@vercel/mcp-adapter@1.0.0"
+  - "@vercel/oidc@3.8.2"
+  - jose@4.15.5
+  - prisma@7.10.0
+  - semver@5.7.2
+  - semver@6.3.1
+  - tailwind-merge@2.6.0
+  - tailwindcss@3.4.18
+  - undici-types@6.19.8
+  - undici-types@6.21.0
+  - undici@6.19.8
+  - vite@5.4.21

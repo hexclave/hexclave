@@ -113,9 +113,9 @@ Returns: ServerTeam[] & { nextCursor: string | null }
 
 GET /api/v1/teams?user_id={userId} [server-only], plus the query params from options
 
-Returns at most 200 teams per call; see StackServerApp.listTeams for pagination.
+See StackServerApp.listTeams for pagination and the behavior without limit.
 
-Does not error.
+Errors: same as StackServerApp.listTeams (400 when limit is omitted and the user is in more than 500 teams).
 
 
 ### getTeam(teamId)
@@ -125,7 +125,8 @@ teamId: string
 Returns: ServerTeam | null
 
 Call listTeams({ query: teamId }) and return the item whose id equals teamId, or null. Filtering on the ID (rather
-than searching the unfiltered list) is required because the unfiltered list is capped at 200 teams.
+than searching the unfiltered list) is required because a page holds at most 200 teams, and an unfiltered request
+without limit fails past 500 teams. The React hook variant (useTeam) works like CurrentUser.useTeam.
 
 This is deliberately scoped to the user's own team memberships (unlike the app-level getTeam), so it returns null for teams the user is not a member of.
 

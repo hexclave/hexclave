@@ -190,12 +190,17 @@ it("finds a user's team with getTeam even when the user is in more than 200 team
   }
   const newestTeam = teams[teams.length - 1];
 
-  // The unfiltered list is capped at 200 (oldest first), so the newest team is not in it, but the cursor leads to it.
+  // Without a limit, the backend returns every team unpaginated (up to 500).
   const listedTeams = await user.listTeams();
-  expect(listedTeams).toHaveLength(200);
-  expect(listedTeams.some((team) => team.id === newestTeam.id)).toBe(false);
-  expect(listedTeams.nextCursor).toMatch(new RegExp(`_${listedTeams[199].id}$`));
-  const nextPage = await user.listTeams({ limit: 200, cursor: listedTeams.nextCursor ?? throwErr("expected a next cursor") });
+  expect(listedTeams).toHaveLength(201);
+  expect(listedTeams.nextCursor).toBeNull();
+
+  // Explicit pages of 200 still lead to the newest team through the cursor.
+  const firstPage = await user.listTeams({ limit: 200 });
+  expect(firstPage).toHaveLength(200);
+  expect(firstPage.some((team) => team.id === newestTeam.id)).toBe(false);
+  expect(firstPage.nextCursor).toMatch(new RegExp(`_${firstPage[199].id}$`));
+  const nextPage = await user.listTeams({ limit: 200, cursor: firstPage.nextCursor ?? throwErr("expected a next cursor") });
   expect(nextPage.map((team) => team.id)).toEqual([newestTeam.id]);
   expect(nextPage.nextCursor).toBeNull();
 

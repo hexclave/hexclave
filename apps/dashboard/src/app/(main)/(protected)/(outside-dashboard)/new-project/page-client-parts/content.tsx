@@ -21,6 +21,7 @@ import { getPublicEnvVar } from "@/lib/env";
 import { PlusCircleIcon } from "@phosphor-icons/react";
 import { type AdminOwnedProject, type Team } from "@hexclave/next";
 import { runAsynchronouslyWithAlert, wait } from "@hexclave/shared/dist/utils/promises";
+import { firstTeamsPageOptions } from "@hexclave/shared/dist/utils/team-lists";
 import { useSearchParams } from "next/navigation";
 import { type FormEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -62,7 +63,7 @@ export default function PageClient() {
 
 function PageClientInner() {
   const user = useDashboardInternalUser();
-  const teams = user.useTeams();
+  const teams = user.useTeams(firstTeamsPageOptions);
   const projects = user.useOwnedProjects();
   const router = useRouter();
   const searchParams = useSearchParams();

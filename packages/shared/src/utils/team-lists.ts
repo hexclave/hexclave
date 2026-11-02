@@ -8,6 +8,14 @@ export type TeamList<T> = T[] & { nextCursor: string | null };
 /** Matches the backend's per-request cap for `/teams`. */
 export const teamsPageSize = 200;
 
+/**
+ * Options for reading the first (unfiltered) page of a user's teams. Internal callers must always pass a limit: without
+ * one, the backend returns every team unpaginated and rejects the request once more than 500 teams match. All
+ * first-page reads use these same options so they share one SDK cache entry (eg. `useTeams` and the ID lookups that
+ * fall back to it).
+ */
+export const firstTeamsPageOptions = { limit: teamsPageSize };
+
 /** The subset of the SDK's `ListTeamsOptions` used here: a cursor is only valid together with a limit. */
 export type TeamPageRequest =
   | { query?: string, limit: number, cursor?: undefined }

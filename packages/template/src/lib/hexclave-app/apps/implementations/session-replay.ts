@@ -33,6 +33,12 @@ export type AnalyticsReplayOptions = {
   blockSelector?: string,
 };
 
+export type AnalyticsEvent = {
+  event_type: "$page-view" | "$click",
+  event_at_ms: number,
+  data: Record<string, unknown>,
+};
+
 export type AnalyticsOptions = {
   /**
    * Whether SDK-managed analytics capture is enabled.
@@ -40,6 +46,10 @@ export type AnalyticsOptions = {
    * @default true
    */
   enabled?: boolean,
+  /** Transform automatic page-view/click events before buffering, or return null to drop them. Does not filter replay data. */
+  sanitizeEvent?: (event: AnalyticsEvent) => AnalyticsEvent | null,
+  /** Skip clicks on elements matching this CSS selector, including their descendants. */
+  ignoreClickSelector?: string,
   /**
    * Options for session replay recording. Replays are enabled by default;
    * set `enabled: false` to opt out.
@@ -61,6 +71,9 @@ export function getSessionReplayOptions(analyticsOptions: AnalyticsOptions | und
  * the actual runtime value is JSON-safe.
  */
 export function analyticsOptionsToJson(options: AnalyticsOptions | undefined): AnalyticsOptions | undefined {
+  if (options?.sanitizeEvent != null) {
+    throw new Error("Cannot serialize analytics.sanitizeEvent because callbacks are not serializable. Construct this app in the client runtime instead.");
+  }
   if (!options?.replays?.blockClass) return options;
   const { blockClass, ...rest } = options.replays;
   if (!(blockClass instanceof RegExp)) return options;

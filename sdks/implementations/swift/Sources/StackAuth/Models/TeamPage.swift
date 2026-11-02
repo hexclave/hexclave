@@ -2,8 +2,8 @@ import Foundation
 
 /// One page of teams from `GET /teams`.
 ///
-/// The backend returns at most 200 teams per request. `nextCursor` is set when there are more teams; pass it back as
-/// `cursor` (together with `limit`) to fetch the next page.
+/// With a `limit` (at most 200), `nextCursor` is set when there are more teams; pass it back as `cursor` (together with
+/// `limit`) to fetch the next page. Without a `limit`, the backend returns every matching team, or a 400 error past 500.
 public struct TeamPage<T: Sendable>: Sendable {
     public let items: [T]
     public let nextCursor: String?

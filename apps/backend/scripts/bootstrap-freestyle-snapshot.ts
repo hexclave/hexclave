@@ -3,11 +3,11 @@ import { readFile } from "node:fs/promises";
 import { Freestyle, FreestyleApiError } from "freestyle";
 import { DEFAULT_FREESTYLE_SNAPSHOT_ID } from "../src/lib/freestyle-vm-constants";
 
-const NODE_VERSION = "24.18.1";
+const NODE_VERSION = "24.22.1";
 // The unofficial-builds glibc-217 build has static libstdc++/libgcc and works on
 // BusyBox's glibc-only userland. Use .tar.gz because xz needs a 64 MiB dictionary.
 const NODE_ARCHIVE_URL = `https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64-glibc-217.tar.gz`;
-const NODE_ARCHIVE_SHA256 = "b7c5c7a46838c4b6b68586e0ad224e019dda0ed29b0ed8907568bb89617fc784";
+const NODE_ARCHIVE_SHA256 = "422ddeec2c08902a34ef80ae25de388c7b7e2920763030a5262d56b10675c570";
 const snapshotId = readHexclaveEnvironmentVariable(
   "HEXCLAVE_FREESTYLE_SNAPSHOT_ID",
   "STACK_FREESTYLE_SNAPSHOT_ID",
@@ -46,7 +46,16 @@ if (apiKey == null) {
   throw new Error("Set HEXCLAVE_FREESTYLE_API_KEY, STACK_FREESTYLE_API_KEY, or FREESTYLE_API_KEY before bootstrapping the snapshot.");
 }
 
+// A full run takes several minutes (a ~64 MB download, the same upload into the
+// VM, then two in-VM steps with 5-minute timeouts) and was otherwise silent until
+// the end, which is indistinguishable from a hang. Log each step with elapsed time.
+const startedAt = performance.now();
+function logStep(message: string) {
+  process.stdout.write(`[${((performance.now() - startedAt) / 1000).toFixed(1)}s] ${message}\n`);
+}
+
 const freestyle = new Freestyle({ apiKey, baseUrl });
+logStep(`Checking that snapshot slug ${snapshotId} is unused...`);
 try {
   const existing = await freestyle.vms.snapshots.get(snapshotId);
   throw new Error(`Snapshot slug ${snapshotId} already belongs to ${existing.id}; choose a new HEXCLAVE_FREESTYLE_SNAPSHOT_ID or delete the old snapshot explicitly.`);
@@ -54,6 +63,7 @@ try {
   if (!(error instanceof FreestyleApiError) || error.status !== 404) throw error;
 }
 
+logStep(`Downloading ${NODE_ARCHIVE_URL}...`);
 const archiveResponse = await fetch(NODE_ARCHIVE_URL);
 if (!archiveResponse.ok) {
   throw new Error(`Failed to download Node ${NODE_VERSION} (HTTP ${archiveResponse.status})`);
@@ -69,6 +79,7 @@ const bootstrapScript = await readFile(
   "utf8",
 );
 
+logStep(`Downloaded and verified Node archive (${archive.byteLength} bytes). Creating builder VM...`);
 const { vm } = await freestyle.vms.create({
   snapshotId: "freestyle/busybox",
   ttlSeconds: 30 * 60,
@@ -82,8 +93,10 @@ const { vm } = await freestyle.vms.create({
   },
 });
 
+logStep(`Created builder VM ${vm.id}. Resizing...`);
 try {
   await vm.resize({ memory: 1024, storage: 2048 });
+  logStep("Uploading Node archive and bootstrap script into the VM...");
   await Promise.all([
     vm.fs.writeFile("/opt/hexclave-node-archive.tar.gz", archive),
     vm.fs.writeTextFile("/opt/hexclave-node-archive.sha256", `${NODE_ARCHIVE_SHA256}\n`),
@@ -93,6 +106,7 @@ try {
       { mode: 0o700 },
     ),
   ]);
+  logStep("Running bootstrap script in the VM (up to 5 minutes)...");
   const bootstrap = await vm.exec({
     command: `NODE_VERSION=${NODE_VERSION} /tmp/freestyle-snapshot-bootstrap.sh`,
     timeoutMs: 300_000,
@@ -101,6 +115,7 @@ try {
     throw new Error(`Snapshot bootstrap exited with status ${bootstrap.statusCode}: ${bootstrap.stderr ?? ""}`);
   }
 
+  logStep("Bootstrap done. Verifying that npm can install a package (up to 5 minutes)...");
   const verificationId = "00000000-0000-4000-8000-000000000000";
   const verificationHostDirectory = `/opt/hexclave-runtime/work/${verificationId}`;
   await vm.fs.mkdir(verificationHostDirectory);
@@ -130,11 +145,13 @@ try {
     throw new Error(`Snapshot verification expected Node 24, received ${verifiedNodeVersion}`);
   }
 
+  logStep(`Verified ${verifiedNodeVersion}. Taking snapshot...`);
   const { snapshot, snapshotId: createdSnapshotId } = await vm.snapshot({
     slug: snapshotId,
     displayName: "Hexclave BusyBox JavaScript sandbox (Node 24)",
   });
-  process.stdout.write(`Created Freestyle snapshot ${snapshot.slug ?? createdSnapshotId} (${createdSnapshotId})\n`);
+  logStep(`Created Freestyle snapshot ${snapshot.slug ?? createdSnapshotId} (${createdSnapshotId})`);
 } finally {
+  logStep(`Deleting builder VM ${vm.id}...`);
   await vm.delete();
 }

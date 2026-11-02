@@ -1,4 +1,5 @@
 import { input, select } from "@inquirer/prompts";
+import { teamsPageSize } from "@hexclave/shared/dist/utils/team-lists";
 import { CliError } from "./errors.js";
 import { isNonInteractiveEnv } from "./interactive.js";
 
@@ -8,12 +9,12 @@ export type ResolveTeamItem = {
 };
 
 /**
- * Where to look up the user's teams. `listTeams()` only returns the first page (the backend caps it at 200 teams),
+ * Where to look up the user's teams. `listTeams` is only used for the first page (a request is capped at 200 teams),
  * so lookups by ID must go through `getTeam`.
  */
 export type ResolveTeamSource<T extends ResolveTeamItem> = {
   getTeam: (teamId: string) => Promise<T | null>,
-  listTeams: () => Promise<T[] & { nextCursor: string | null }>,
+  listTeams: (options: { limit: number, cursor: string | undefined }) => Promise<T[] & { nextCursor: string | null }>,
 };
 
 export type ResolveTeamOptions<T extends ResolveTeamItem> = {
@@ -34,7 +35,7 @@ export async function resolveTeam<T extends ResolveTeamItem>(
     return team;
   }
 
-  const teams = await source.listTeams();
+  const teams = await source.listTeams({ limit: teamsPageSize, cursor: undefined });
   if (teams.length === 0) {
     if (options.createTeam != null) {
       if (isNonInteractiveEnv()) {
@@ -84,7 +85,7 @@ export async function listAllTeams<T>(user: {
   const teams: T[] = [];
   let cursor: string | undefined = undefined;
   do {
-    const page: T[] & { nextCursor: string | null } = await user.listTeams({ limit: 200, cursor });
+    const page: T[] & { nextCursor: string | null } = await user.listTeams({ limit: teamsPageSize, cursor });
     teams.push(...page);
     cursor = page.nextCursor ?? undefined;
   } while (cursor != null);

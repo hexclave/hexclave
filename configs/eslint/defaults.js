@@ -1,5 +1,6 @@
 module.exports = {
   extends: [],
+  ignorePatterns: ["**/*.untracked", "**/*.untracked.*", "**/*.untracked/**"],
   parser: "@typescript-eslint/parser",
   plugins: ["@typescript-eslint"],
   parserOptions: {

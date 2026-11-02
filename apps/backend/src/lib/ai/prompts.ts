@@ -617,7 +617,7 @@ Users:
 
 Teams:
 - hexclaveServerApp.listTeams(options?: { limit?, cursor?, query?, orderBy?: "createdAt", desc? }) → Promise<ServerTeam[] & { nextCursor: string | null }>
-  - Returns at most 200 teams per call; to load more, pass nextCursor as cursor together with limit
+  - Always pass limit (at most 200); without it, the call fails when more than 500 teams match. To load more, pass nextCursor as cursor together with limit
   - Use query to search by display name or exact team ID instead of loading every team
 
 Project:

@@ -5,10 +5,14 @@ export default mergeConfig(
   sharedConfig,
   defineConfig({
     test: {
+      // Child processes, not worker threads: tests then run on a main thread with the same stack size
+      // as the production server. Worker threads get ~4x more stack, which hid stack-overflow bugs that
+      // crashed prod (see src/test-stack-size.test.ts).
+      pool: "forks",
       poolOptions: {
-        threads: {
-          minThreads: 1,
-          maxThreads: 8,
+        forks: {
+          minForks: 1,
+          maxForks: 8,
         },
       },
       exclude: [

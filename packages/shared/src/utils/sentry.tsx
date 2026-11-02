@@ -8,8 +8,8 @@ export const sentryBaseConfig = {
   normalizeDepth: 5,
   maxValueLength: 5000,
 
-  // Adjust this value in production, or use tracesSampler for greater control
-  tracesSampleRate: 1.0,
+  // Spans/transactions are disabled because they used up our Sentry quota; errors are reported independently of this.
+  tracesSampleRate: 0,
 
   // Setting this option to true will print useful information to the console while you're setting up Sentry.
   debug: false,

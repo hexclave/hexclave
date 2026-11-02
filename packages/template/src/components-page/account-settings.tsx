@@ -1,6 +1,6 @@
 'use client';
 
-import { findTeamsWithProducts } from "@hexclave/shared/dist/utils/team-lists";
+import { findTeamsWithProducts, firstTeamsPageOptions } from "@hexclave/shared/dist/utils/team-lists";
 import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { Skeleton, Typography } from '@hexclave/ui';
 import { Contact, ShieldCheck, Bell, Monitor, Key, Settings, CirclePlus, CreditCard, Users } from 'lucide-react';
@@ -93,14 +93,14 @@ export function AccountSettings(props: {
   } : userFromHook;
 
   const project = props.mockProject || projectFromHook;
-  const teams = user?.useTeams() ?? emptyTeamList;
+  const teams = user?.useTeams(firstTeamsPageOptions) ?? emptyTeamList;
   // The sidebar only lists the first (capped) page of teams. A `#team-<id>` link to any other team (e.g. from a
   // team switcher, or the "All teams" page) is resolved by ID so its page still opens. The lookup hook is always
   // called; without a lookup it reuses the unfiltered cache entry, so it costs no extra request.
   const hash = useHash();
   const hashTeamId = hash.startsWith("team-") && hash !== "team-creation" ? hash.slice("team-".length) : null;
   const needsHashTeamLookup = hashTeamId != null && teams.nextCursor != null && !teams.some(team => team.id === hashTeamId);
-  const hashTeamLookup = user?.useTeams(needsHashTeamLookup ? { query: hashTeamId } : undefined) ?? emptyTeamList;
+  const hashTeamLookup = user?.useTeams(needsHashTeamLookup ? { query: hashTeamId, limit: firstTeamsPageOptions.limit } : firstTeamsPageOptions) ?? emptyTeamList;
   const hashTeamOutsideSidebar = needsHashTeamLookup ? hashTeamLookup.find(team => team.id === hashTeamId) ?? null : null;
   const sidebarTeams = hashTeamOutsideSidebar == null ? teams : [...teams, hashTeamOutsideSidebar];
   const billing = user?.useBilling() || null;

@@ -27,6 +27,11 @@
  *   (omit both)                   copy every tenancy
  *   --only-tenancy-ids=...        copy JUST these tenancies
  *   --exclude-tenancy-ids=...     copy everyone EXCEPT these
+ *
+ * Partial copies (optional):
+ *   --skip-tables=...                       don't process these tables at all
+ *   --exclude-subscription-product-ids=...  leave out subscriptions with these
+ *                                           productIds (needs --only-tenancy-ids)
  */
 
 import { Prisma } from "@/generated/prisma/client";
@@ -110,6 +115,11 @@ export type BackfillResumeOptions = {
   // DEFAULT_BATCH_SIZE when omitted.
   batchSize?: number,
   tenancyFilter?: TenancyIdFilter,
+  skipTables?: BackfillTableName[],
+  // Invoices are deliberately not filtered to match: an invoice whose
+  // subscription isn't in bulldozer-js has no effect there (the renewal pipeline
+  // drops unjoined invoices), so copying it keeps this filter on one table.
+  excludeSubscriptionProductIds?: string[],
 };
 
 /** A row bulldozer-js refused, captured under --continue-on-error. */
@@ -330,6 +340,16 @@ function tenancyFilterSql(filter: TenancyIdFilter | undefined): Prisma.Sql {
     : Prisma.sql`AND "tenancyId" IN (${list})`;
 }
 
+/**
+ * SQL fragment leaving out subscriptions with the given productIds. Inline
+ * products have a NULL productId, and a bare NOT IN would silently drop them.
+ */
+function subscriptionProductExclusionSql(productIds: string[] | undefined): Prisma.Sql {
+  if (productIds === undefined) return Prisma.empty;
+  const list = Prisma.join(productIds.map((id) => Prisma.sql`${id}`));
+  return Prisma.sql`AND ("productId" IS NULL OR "productId" NOT IN (${list}))`;
+}
+
 /** Keyset predicate for UUID primary-key tables ordered by (tenancyId, id). */
 function uuidIdCursorSql(cursor: Cursor | null): Prisma.Sql {
   if (cursor === null) return Prisma.empty;
@@ -464,6 +484,7 @@ async function fetchSubscriptionBatch(
   cursor: Cursor | null,
   batchSize: number,
   tenancyFilter: TenancyIdFilter | undefined,
+  excludedProductIds: string[] | undefined,
 ): Promise<SubscriptionBackfillRow[]> {
   return await replica.$queryRaw<SubscriptionBackfillRow[]>`
     SELECT
@@ -489,6 +510,7 @@ async function fetchSubscriptionBatch(
     FROM "Subscription"
     WHERE TRUE
     ${tenancyFilterSql(tenancyFilter)}
+    ${subscriptionProductExclusionSql(excludedProductIds)}
     ${uuidIdCursorSql(cursor)}
     ORDER BY "tenancyId" ASC, "id" ASC
     LIMIT ${batchSize}
@@ -609,8 +631,9 @@ async function fetchManualTransactionBatch(
   return rows.map((row) => ({ ...row, id: row.txnId }));
 }
 
-/** Tables before `resumeTable` are treated as already done; the rest run. */
-function shouldRunTable(table: BackfillTableName, resumeTable: BackfillTableName | undefined): boolean {
+/** Tables before `resumeTable` are treated as already done; the rest run unless skipped. */
+function shouldRunTable(table: BackfillTableName, resumeTable: BackfillTableName | undefined, skipTables: BackfillTableName[] = []): boolean {
+  if (skipTables.includes(table)) return false;
   if (resumeTable === undefined) return true;
   return BACKFILL_TABLES.indexOf(table) >= BACKFILL_TABLES.indexOf(resumeTable);
 }
@@ -660,6 +683,96 @@ function parseTenancyIdList(raw: string, flagName: string): string[] {
   return ids.map((id) => id.toLowerCase());
 }
 
+const BACKFILL_COMMAND = "backfill-bulldozer-from-prisma";
+const BACKFILL_VALUE_FLAGS = new Set([
+  "resume-table",
+  "resume-cursor",
+  "only-tenancy-ids",
+  "exclude-tenancy-ids",
+  "skip-tables",
+  "exclude-subscription-product-ids",
+  "batch-size",
+]);
+const BACKFILL_BOOLEAN_FLAGS = new Set(["continue-on-error"]);
+
+export const BACKFILL_USAGE = `Usage: ${BACKFILL_COMMAND} [options]
+
+One-way, idempotent copy of the payment tables from Postgres into the bulldozer-js
+at HEXCLAVE_BULLDOZER_SERVER_URL. Values use --flag=value or --flag value.
+
+Tables, in run order: ${BACKFILL_TABLES.join(", ")}
+
+Options:
+  --only-tenancy-ids=<uuid,...>      Copy just these tenancies. Not with --exclude-tenancy-ids.
+  --exclude-tenancy-ids=<uuid,...>   Copy every tenancy except these. Not with --only-tenancy-ids.
+  --skip-tables=<table,...>          Don't process these tables. At least one table must still run.
+  --exclude-subscription-product-ids=<id,...>
+                                     Leave out subscriptions with these productIds; invoices are
+                                     not filtered. Requires --only-tenancy-ids. Not with
+                                     --skip-tables containing Subscription.
+  --resume-table=<table>             Treat earlier tables as done. Not a table in --skip-tables.
+  --resume-cursor=<tenancyId>,<id>   Continue --resume-table after this row; copy it from a batch
+                                     log line (ManualTransaction: id means txnId). Its tenancy
+                                     must match the tenancy filter. Requires --resume-table.
+  --batch-size=<n>                   Rows per page and per POST (default ${DEFAULT_BATCH_SIZE}).
+  --continue-on-error                Skip rows bulldozer-js rejects and list them at the end.
+  --help                             Print this and exit.
+
+When resuming, repeat the same filters: only the cursor's tenancy is checked against them.
+Excluding a table or product only stops it being copied; existing rows stay in bulldozer-js.`;
+
+/**
+ * readFlag only looks up the flags it's asked for, so without this a typo like
+ * --skip-table would be ignored and the run would copy the table it was meant
+ * to skip. A repeated flag is rejected for the same reason: readFlag would keep
+ * only the first one.
+ */
+function assertBackfillArgsAreRecognized(args: string[]): void {
+  const seenFlags = new Set<string>();
+  let nextArgIsValue = false;
+  for (const [index, arg] of args.entries()) {
+    if (!arg.startsWith("--")) {
+      const isCommand = index === 0 && arg === BACKFILL_COMMAND;
+      if (!nextArgIsValue && !isCommand) {
+        throw new Error(`Unexpected argument "${arg}". Run with --help to see the options.`);
+      }
+      nextArgIsValue = false;
+      continue;
+    }
+    const equalsIndex = arg.indexOf("=");
+    const name = arg.slice(2, equalsIndex === -1 ? undefined : equalsIndex);
+    const isValueFlag = BACKFILL_VALUE_FLAGS.has(name);
+    if (!isValueFlag && !BACKFILL_BOOLEAN_FLAGS.has(name)) {
+      throw new Error(`Unknown flag --${name}. Run with --help to see the options.`);
+    }
+    if (!isValueFlag && equalsIndex !== -1) {
+      throw new Error(`--${name} does not take a value`);
+    }
+    if (seenFlags.has(name)) {
+      throw new Error(`--${name} was passed more than once; pass one comma-separated list instead`);
+    }
+    seenFlags.add(name);
+    nextArgIsValue = isValueFlag && equalsIndex === -1;
+  }
+}
+
+function parseSkipTables(raw: string): BackfillTableName[] {
+  const names = raw.split(",").map((name) => name.trim()).filter((name) => name.length > 0);
+  if (names.length === 0) {
+    throw new Error("--skip-tables requires at least one table name");
+  }
+  return names.map((name) => BACKFILL_TABLES.find((table) => table === name)
+    ?? throwErr(`--skip-tables must only contain: ${BACKFILL_TABLES.join(", ")} (got "${name}")`));
+}
+
+function parseExcludedSubscriptionProductIds(raw: string): string[] {
+  const ids = raw.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+  if (ids.length === 0) {
+    throw new Error("--exclude-subscription-product-ids requires at least one product id");
+  }
+  return ids;
+}
+
 /**
  * Reads `--name=value` or `--name value`. Missing value fails loud so we never
  * silently fall back to a default.
@@ -692,11 +805,14 @@ function describeTenancyFilter(filter: TenancyIdFilter | undefined): string {
  * Parses the optional flags from a raw argv list:
  *   --resume-table=<TableName>  --resume-cursor=<tenancyId>,<id>
  *   --exclude-tenancy-ids=<uuid,uuid> | --only-tenancy-ids=<uuid,uuid>
+ *   --skip-tables=<TableName,TableName>
+ *   --exclude-subscription-product-ids=<productId,productId>
  * All value flags accept both `--flag=value` and `--flag value`.
  * Lives here (not in the CLI entrypoint) so it's testable without importing the
  * db-migrations entrypoint, which runs `main()` on import.
  */
 export function parseBackfillResumeOptions(args: string[]): BackfillResumeOptions {
+  assertBackfillArgsAreRecognized(args);
   const continueOnError = args.includes("--continue-on-error");
 
   const batchSizeArg = readFlag(args, "batch-size");
@@ -721,11 +837,32 @@ export function parseBackfillResumeOptions(args: string[]): BackfillResumeOption
     tenancyFilter = { mode: "only", tenancyIds: parseTenancyIdList(onlyTenancyIdsRaw, "--only-tenancy-ids") };
   }
 
+  const skipTablesRaw = readFlag(args, "skip-tables");
+  const skipTables = skipTablesRaw === undefined ? undefined : parseSkipTables(skipTablesRaw);
+  if (skipTables !== undefined && BACKFILL_TABLES.every((table) => skipTables.includes(table))) {
+    throw new Error("--skip-tables leaves no tables to process");
+  }
+
+  const excludedProductIdsRaw = readFlag(args, "exclude-subscription-product-ids");
+  // Product ids are only unique within a project, so a run spanning several
+  // tenancies would also drop customer projects' own products with the same id.
+  if (excludedProductIdsRaw !== undefined && tenancyFilter?.mode !== "only") {
+    throw new Error("--exclude-subscription-product-ids requires --only-tenancy-ids");
+  }
+  if (excludedProductIdsRaw !== undefined && skipTables?.includes("Subscription")) {
+    throw new Error("--exclude-subscription-product-ids has no effect when --skip-tables contains Subscription");
+  }
+  const excludeSubscriptionProductIds = excludedProductIdsRaw === undefined
+    ? undefined
+    : parseExcludedSubscriptionProductIds(excludedProductIdsRaw);
+
   // Common options that apply regardless of whether a resume cursor was passed.
   const base: BackfillResumeOptions = {
     continueOnError,
     ...(batchSize !== undefined ? { batchSize } : {}),
     ...(tenancyFilter !== undefined ? { tenancyFilter } : {}),
+    ...(skipTables !== undefined ? { skipTables } : {}),
+    ...(excludeSubscriptionProductIds !== undefined ? { excludeSubscriptionProductIds } : {}),
   };
 
   const resumeTableArg = readFlag(args, "resume-table");
@@ -739,6 +876,9 @@ export function parseBackfillResumeOptions(args: string[]): BackfillResumeOption
   const resumeTable = BACKFILL_TABLES.find((table) => table === resumeTableArg);
   if (resumeTable === undefined) {
     throw new Error(`--resume-table must be one of: ${BACKFILL_TABLES.join(", ")}`);
+  }
+  if (skipTables?.includes(resumeTable)) {
+    throw new Error(`--resume-table ${resumeTable} is also listed in --skip-tables`);
   }
   if (resumeCursorArg === undefined) {
     return { ...base, resumeTable };
@@ -799,12 +939,14 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
   const tenancyFilter = options.tenancyFilter;
   assertResumeCursorMatchesTenancyFilter(options.resumeCursor, tenancyFilter);
   const runStartedAt = performance.now();
-  log(`Backfilling bulldozer-js from Prisma... (batchSize=${batchSize}, ${describeTenancyFilter(tenancyFilter)})`);
+  const skipTables = options.skipTables ?? [];
+  const excludedProductIds = options.excludeSubscriptionProductIds;
+  log(`Backfilling bulldozer-js from Prisma... (batchSize=${batchSize}, ${describeTenancyFilter(tenancyFilter)}, skipping tables: ${skipTables.join(", ") || "none"}, excluding subscription products: ${excludedProductIds?.join(", ") ?? "none"})`);
 
   const tables: BackfillTable[] = [
     makeTable(
       "Subscription",
-      (cursor) => fetchSubscriptionBatch(replica, cursor, batchSize, tenancyFilter),
+      (cursor) => fetchSubscriptionBatch(replica, cursor, batchSize, tenancyFilter, excludedProductIds),
       async (subs) => {
         await bulldozerWriteSubscriptions(subs);
         // Synthesize refund transactions for the refunded rows in this page and
@@ -863,7 +1005,7 @@ export async function runBulldozerPaymentsInit(options: BackfillResumeOptions = 
   };
 
   for (const table of tables) {
-    if (!shouldRunTable(table.name, options.resumeTable)) continue;
+    if (!shouldRunTable(table.name, options.resumeTable, skipTables)) continue;
     await table.run(startCursorFor(table.name, options), ctx);
   }
 
@@ -1059,6 +1201,68 @@ import.meta.vitest?.describe("parseBackfillResumeOptions", (test) => {
     });
   });
 
+  test("parses --skip-tables and rejects unknown or empty table lists", ({ expect }) => {
+    expect(parseBackfillResumeOptions(["--skip-tables=ItemQuantityChange, OneTimePurchase"]))
+      .toEqual({ continueOnError: false, skipTables: ["ItemQuantityChange", "OneTimePurchase"] });
+    expect(() => parseBackfillResumeOptions(["--skip-tables=Bogus"]))
+      .toThrow('--skip-tables must only contain');
+    expect(() => parseBackfillResumeOptions(["--skip-tables="]))
+      .toThrow("--skip-tables requires at least one table name");
+  });
+
+  test("rejects unknown flags, repeated flags and stray arguments", ({ expect }) => {
+    expect(() => parseBackfillResumeOptions(["--skip-table=ItemQuantityChange"]))
+      .toThrow("Unknown flag --skip-table");
+    expect(() => parseBackfillResumeOptions(["--skip-tables=OneTimePurchase", "--skip-tables=ItemQuantityChange"]))
+      .toThrow("--skip-tables was passed more than once");
+    expect(() => parseBackfillResumeOptions(["skip-tables=OneTimePurchase"]))
+      .toThrow('Unexpected argument "skip-tables=OneTimePurchase"');
+    expect(() => parseBackfillResumeOptions(["--batch-size", "100", "200"]))
+      .toThrow('Unexpected argument "200"');
+    expect(() => parseBackfillResumeOptions(["--continue-on-error=false"]))
+      .toThrow("--continue-on-error does not take a value");
+  });
+
+  test("usage documents every flag", ({ expect }) => {
+    for (const flag of [...BACKFILL_VALUE_FLAGS, ...BACKFILL_BOOLEAN_FLAGS]) {
+      expect(BACKFILL_USAGE).toContain(`--${flag}`);
+    }
+  });
+
+  test("rejects excluding subscription products while skipping Subscription", ({ expect }) => {
+    expect(() => parseBackfillResumeOptions([
+      "--only-tenancy-ids=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "--skip-tables=Subscription",
+      "--exclude-subscription-product-ids=free",
+    ])).toThrow("has no effect when --skip-tables contains Subscription");
+  });
+
+  test("rejects skipping every table", ({ expect }) => {
+    expect(() => parseBackfillResumeOptions([`--skip-tables=${BACKFILL_TABLES.join(",")}`]))
+      .toThrow("--skip-tables leaves no tables to process");
+  });
+
+  test("rejects a --resume-table that is also skipped", ({ expect }) => {
+    expect(() => parseBackfillResumeOptions(["--skip-tables=OneTimePurchase", "--resume-table=OneTimePurchase"]))
+      .toThrow("is also listed in --skip-tables");
+  });
+
+  test("--exclude-subscription-product-ids only works with --only-tenancy-ids", ({ expect }) => {
+    const tenA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    expect(() => parseBackfillResumeOptions(["--exclude-subscription-product-ids=free"]))
+      .toThrow("requires --only-tenancy-ids");
+    expect(() => parseBackfillResumeOptions([`--exclude-tenancy-ids=${tenA}`, "--exclude-subscription-product-ids=free"]))
+      .toThrow("requires --only-tenancy-ids");
+    expect(() => parseBackfillResumeOptions([`--only-tenancy-ids=${tenA}`, "--exclude-subscription-product-ids="]))
+      .toThrow("requires at least one product id");
+    expect(parseBackfillResumeOptions([`--only-tenancy-ids=${tenA}`, "--exclude-subscription-product-ids=free, old"]))
+      .toEqual({
+        continueOnError: false,
+        tenancyFilter: { mode: "only", tenancyIds: [tenA] },
+        excludeSubscriptionProductIds: ["free", "old"],
+      });
+  });
+
   test("rejects resume cursor tenancy that conflicts with tenancy filters", ({ expect }) => {
     const tenA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const tenB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -1180,6 +1384,13 @@ import.meta.vitest?.describe("shouldRunTable / startCursorFor", (test) => {
     expect(shouldRunTable("ManualTransaction", "ManualTransaction")).toBe(true);
   });
 
+  test("never runs a skipped table, with or without a resume table", ({ expect }) => {
+    expect(shouldRunTable("ItemQuantityChange", undefined, ["ItemQuantityChange"])).toBe(false);
+    expect(shouldRunTable("ManualTransaction", undefined, ["ItemQuantityChange"])).toBe(true);
+    expect(shouldRunTable("ItemQuantityChange", "OneTimePurchase", ["ItemQuantityChange"])).toBe(false);
+    expect(shouldRunTable("ManualTransaction", "OneTimePurchase", ["ItemQuantityChange"])).toBe(true);
+  });
+
   test("applies the resume cursor only to the resume table", ({ expect }) => {
     const options = { resumeTable: "OneTimePurchase" as const, resumeCursor: { tenancyId: "t", id: "p" } };
     expect(startCursorFor("OneTimePurchase", options)).toEqual({ tenancyId: "t", id: "p" });
@@ -1188,6 +1399,45 @@ import.meta.vitest?.describe("shouldRunTable / startCursorFor", (test) => {
 
   test("starts from the top when the resume table has no cursor", ({ expect }) => {
     expect(startCursorFor("Subscription", { resumeTable: "Subscription" })).toBe(null);
+  });
+});
+
+import.meta.vitest?.describe("fetchSubscriptionBatch product exclusion (real DB)", (test) => {
+  test("drops excluded products but keeps other products and inline (NULL productId) subscriptions", async ({ expect }) => {
+    const tenancy = await globalPrismaClient.tenancy.findFirstOrThrow({ where: { projectId: "internal" }, select: { id: true } });
+    const customerId = crypto.randomUUID();
+    const insertSubscription = async (productId: string | null) => await globalPrismaClient.subscription.create({
+      data: {
+        tenancyId: tenancy.id,
+        customerId,
+        customerType: "TEAM",
+        status: "active",
+        productId,
+        priceId: "monthly",
+        product: {},
+        quantity: 1,
+        currentPeriodStart: new Date(),
+        currentPeriodEnd: new Date(),
+        cancelAtPeriodEnd: false,
+        creationSource: "API_GRANT",
+      },
+    });
+    const inserted = [await insertSubscription("free"), await insertSubscription("team"), await insertSubscription(null)];
+    try {
+      const rows = await fetchSubscriptionBatch(
+        // Reads the primary: the replica may not have these just-inserted rows yet.
+        globalPrismaClient,
+        null,
+        100_000,
+        { mode: "only", tenancyIds: [tenancy.id] },
+        ["free"],
+      );
+      const productIds = rows.filter((row) => row.customerId === customerId).map((row) => row.productId);
+      expect(productIds).toHaveLength(2);
+      expect(productIds).toEqual(expect.arrayContaining(["team", null]));
+    } finally {
+      await globalPrismaClient.subscription.deleteMany({ where: { tenancyId: tenancy.id, id: { in: inserted.map((sub) => sub.id) } } });
+    }
   });
 });
 
