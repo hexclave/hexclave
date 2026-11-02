@@ -25,6 +25,22 @@ const loopWindowMillis = 30_000;
 const maxIdenticalRedirectsPerWindow = 5;
 const maxStoredBreadcrumbs = 50;
 
+// One page load often asks for the same redirect several times before the browser actually
+// navigates away: every component that calls `useUser({ or: "redirect" })` (and every re-render of
+// it while suspended) starts its own redirect to the sign-in page. Those are one redirect, not a
+// loop, so identical redirects from the same page load within this window are only counted once.
+// The window matches the 2s `_redirectTo` itself waits for a navigation to take effect. Client-side
+// (same page load) loops still get counted, once per window, so they're still caught.
+const samePageLoadDuplicateWindowMillis = 2_000;
+
+// Identifies this JS context, ie. this page load: a full page load (the usual loop iteration)
+// starts a fresh one, so its redirects are always counted.
+let currentPageLoadId = createPageLoadId();
+
+function createPageLoadId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 type RedirectBreadcrumb = {
   from: string,
   to: string,
@@ -34,6 +50,8 @@ type RedirectBreadcrumb = {
    * and performance.now() restarts at zero on every navigation.
    */
   at: number,
+  /** The page load that recorded it (missing on breadcrumbs written by older SDK versions). */
+  pageLoadId?: string,
 };
 
 function isRedirectBreadcrumb(value: unknown): value is RedirectBreadcrumb {
@@ -43,6 +61,7 @@ function isRedirectBreadcrumb(value: unknown): value is RedirectBreadcrumb {
     && "from" in value && typeof value.from === "string"
     && "to" in value && typeof value.to === "string"
     && "at" in value && typeof value.at === "number"
+    && (!("pageLoadId" in value) || value.pageLoadId === undefined || typeof value.pageLoadId === "string")
   );
 }
 
@@ -87,6 +106,18 @@ export function recordRedirectAndThrowIfLoopDetected(options: { currentUrl: URL,
   // Clock jumps backwards (eg. NTP sync) would make breadcrumbs appear to be from the future;
   // treat those as expired rather than counting them towards a loop.
   const recentBreadcrumbs = readBreadcrumbs().filter((b) => now - b.at >= 0 && now - b.at < loopWindowMillis);
+
+  const isDuplicateFromThisPageLoad = recentBreadcrumbs.some((b) => (
+    b.pageLoadId === currentPageLoadId
+    && b.from === from
+    && b.to === to
+    && now - b.at < samePageLoadDuplicateWindowMillis
+  ));
+  if (isDuplicateFromThisPageLoad) {
+    // Same redirect this page already started; let it through without counting it again.
+    return;
+  }
+
   const identicalRedirectCount = recentBreadcrumbs.filter((b) => b.from === from && b.to === to).length + 1;
 
   if (identicalRedirectCount >= maxIdenticalRedirectsPerWindow) {
@@ -109,5 +140,12 @@ export function recordRedirectAndThrowIfLoopDetected(options: { currentUrl: URL,
     throw error;
   }
 
-  writeBreadcrumbs([...recentBreadcrumbs, { from, to, at: now }].slice(-maxStoredBreadcrumbs));
+  writeBreadcrumbs([...recentBreadcrumbs, { from, to, at: now, pageLoadId: currentPageLoadId }].slice(-maxStoredBreadcrumbs));
 }
+
+export const _forTesting = {
+  /** Simulates a full page load (a fresh JS context), which is what most redirect loops go through. */
+  startNewPageLoad() {
+    currentPageLoadId = createPageLoadId();
+  },
+};
