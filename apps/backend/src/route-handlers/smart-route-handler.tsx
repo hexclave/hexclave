@@ -138,6 +138,7 @@ export function handleApiRequest(handler: (req: Request, options: any, requestId
             "/api/latest/ai/query/generate",
             "/health/email",
             "/api/latest/internal/metrics",
+            "/api/latest/internal/metrics/entity-kpis",
             "/api/latest/internal/external-db-sync/poller",
             "/api/latest/internal/external-db-sync/sequencer",
             "/api/latest/internal/external-db-sync/sync-engine",

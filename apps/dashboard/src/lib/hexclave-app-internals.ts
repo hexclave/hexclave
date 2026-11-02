@@ -1,4 +1,6 @@
 import {
+  MetricsEntityKpisSchema,
+  type MetricsEntityKpis,
   MetricsResponseBodySchema,
   type MetricsResponse,
   MetricsUserCountsSchema,
@@ -34,6 +36,7 @@ export type {
   MetricsDailyRevenuePoint,
   MetricsDataPoint,
   MetricsEmailOverview,
+  MetricsEntityKpis,
   MetricsLoginMethodEntry,
   MetricsNamedCount,
   MetricsPaymentsOverview,
@@ -202,6 +205,10 @@ export async function fetchMetricsOrThrow(
 
 export async function fetchMetricsUserCountsOrThrow(adminApp: object): Promise<MetricsUserCounts> {
   return await MetricsUserCountsSchema.validate(await fetchJsonOrThrow(adminApp, "/internal/metrics/user-counts"));
+}
+
+export async function fetchEntityKpisOrThrow(adminApp: object, entity: "users" | "teams"): Promise<MetricsEntityKpis> {
+  return await MetricsEntityKpisSchema.validate(await fetchJsonOrThrow(adminApp, `/internal/metrics/entity-kpis?entity=${entity}`));
 }
 
 export function getTvSnapshotPath(profileId: string): string {

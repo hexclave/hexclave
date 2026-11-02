@@ -359,6 +359,50 @@ it("should expose lightweight user counts without loading the full metrics route
   `);
 });
 
+// Sums a whole series, so the checks still hold if a test crosses midnight UTC.
+function sumActivity(series: { activity: number }[]): number {
+  return series.reduce((total, point) => total + point.activity, 0);
+}
+
+it("should expose the users/teams page KPIs without loading the full metrics route", async ({ expect }) => {
+  await Project.createAndSwitch({
+    config: {
+      magic_link_enabled: true,
+    }
+  });
+
+  await InternalApiKey.createAndSetProjectKeys();
+
+  backendContext.set({ mailbox: createMailbox() });
+  await Auth.Otp.signIn();
+  await Auth.Anonymous.signUp();
+  await Team.create();
+
+  // daily_new comes from ClickHouse, which the users table syncs to
+  // asynchronously; wait until both sign-ups (including the anonymous one)
+  // have landed, so the exclusion check below actually tests something.
+  await waitForMetricsMatch(true, (r) => r.status === 200 && sumActivity(r.body.daily_users) === 2);
+
+  const users = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=users", { accessType: 'admin' });
+  expect(users.status).toBe(200);
+  // Anonymous users are excluded from both the total and the sign-up series.
+  expect(users.body.total).toBe(1);
+  expect(users.body.daily_new).toHaveLength(31);
+  expect(sumActivity(users.body.daily_new)).toBe(1);
+  expect(users.body.daily_active_split.total).toHaveLength(31);
+  expect(users.body.daily_active_split.new).toHaveLength(31);
+
+  const teams = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=teams", { accessType: 'admin' });
+  expect(teams.status).toBe(200);
+  expect(teams.body.total).toBe(1);
+  expect(teams.body.daily_active_split.total).toHaveLength(31);
+
+  const invalid = await niceBackendFetch("/api/v1/internal/metrics/entity-kpis?entity=projects", { accessType: 'admin' });
+  expect(invalid.status).toBe(400);
+}, {
+  timeout: 120_000,
+});
+
 it("should handle mixed auth methods excluding anonymous users", async ({ expect }) => {
   await Project.createAndSwitch({
     config: {

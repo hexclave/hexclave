@@ -1,19 +1,37 @@
 "use client";
 
 import { EntityKpiCards } from "@/components/entity-kpi-cards";
+import { fetchEntityKpisOrThrow, type MetricsEntityKpis } from "@/lib/hexclave-app-internals";
+import { useEffect, useState } from "react";
+import { useAdminApp } from "../use-admin-app";
 
 export function TeamsKpiCards() {
+  const hexclaveAdminApp = useAdminApp();
+  const [kpis, setKpis] = useState<MetricsEntityKpis | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setKpis(null);
+    setError(null);
+    fetchEntityKpisOrThrow(hexclaveAdminApp, "teams").then(
+      (result) => {
+        if (!cancelled) setKpis(result);
+      },
+      (e: unknown) => {
+        if (!cancelled) setError(e);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [hexclaveAdminApp]);
+
   return (
     <EntityKpiCards
       errorTag="teams-kpi-cards-error-boundary"
-      source={(metrics) => ({
-        // No pure team-creation series exists; new-active teams is the closest
-        // proxy and matches the activity-split semantics used by cards 2 & 3.
-        dailyNew: metrics.auth_overview.daily_active_teams_split.new.map((p) => p.activity),
-        splitTotal: metrics.auth_overview.daily_active_teams_split.total.map((p) => p.activity),
-        splitNew: metrics.auth_overview.daily_active_teams_split.new.map((p) => p.activity),
-        totalCount: metrics.auth_overview.total_teams,
-      })}
+      kpis={kpis}
+      error={error}
       labels={{
         newCard: { label: "New Active Teams", comparisonLabel: "new teams" },
         activeCard: { label: "Daily Active Teams", comparisonLabel: "DAT" },
