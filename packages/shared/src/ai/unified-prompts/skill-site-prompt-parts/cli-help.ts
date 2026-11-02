@@ -27,7 +27,7 @@ export const cliHelpPrompt = deindent`
   \`\`\`
 
   - Look up a method's exact signature before calling it. The SDK interfaces are in the \`src/lib/hexclave-app\` folder of the installed SDK package, and the API reference is at https://docs.hexclave.com/sdk/overview.
-  - For analytics questions, use \`hexclaveServerApp.queryAnalytics("<clickhouse-sql>")\`. Start with \`SHOW TABLES\` and \`DESCRIBE TABLE\`.
+  - For analytics questions, use \`hexclaveServerApp.queryAnalytics({ query: "<clickhouse-sql>" })\`. Start with \`SHOW TABLES\` and \`DESCRIBE TABLE\`.
   - Read before you write, and confirm with the user before destructive or production-affecting changes (deleting users or teams, changing a cloud project).
   - Use exec for data only. Change configuration through the config file and \`config push\`, not through exec.
 
@@ -35,7 +35,7 @@ export const cliHelpPrompt = deindent`
 
   | Command | What it does |
   |---|---|
-  | \`init\` | Set up Hexclave in the current project. \`--mode create \\| create-cloud \\| link-config \\| link-cloud\` skips the mode prompt only; to avoid the remaining prompts, also pass \`--apps\` (create), \`--config-file\` (link-config), or \`--select-project-id\` (link-cloud). |
+  | \`init\` | Set up Hexclave in the current project. \`--mode create \\| create-cloud \\| link-config \\| link-cloud\` skips the mode prompt only. Pass \`--apps\` (create), \`--config-file\` (link-config), or \`--select-project-id\` (link-cloud) to also skip the app, path, or project selection prompt. It can still ask to overwrite an existing config file or append keys to an existing \`.env\`. |
   | \`dev --config-file <path> -- <command>\` | Run your app's dev command with the development environment's credentials injected as environment variables, and sync the config file. |
   | \`config pull\` / \`config push\` | Pull a cloud project's config into a local \`hexclave.config.ts\`, or push a local config file to it. Pull first and compare before pushing, so you don't overwrite changes made elsewhere. |
   | \`deploy\` | Deploy the services defined in \`hexclave.deploy.ts\`, in dependency order (\`--service-id\` deploys one service). |
