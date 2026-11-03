@@ -48,10 +48,21 @@ export class AccessToken {
   }
 
   /**
+   * `exp` is the server's clock and `Date.now()` the client's, so on a device whose clock runs ahead by more than the
+   * token's lifetime (10min by default) a token fetched a moment ago looks already expired. For tokens this client
+   * fetched itself we therefore measure the remaining lifetime from when the fetch started instead: the server issued
+   * the token after that, so `fetchStartedAt + (exp - iat) - now` is a lower bound for the time left that doesn't
+   * depend on the two clocks agreeing.
+   *
    * @returns The number of milliseconds until the access token expires, or 0 if it has already expired.
    */
   get expiresInMillis(): number {
-    return Math.max(0, this.expiresAt.getTime() - Date.now());
+    const byServerClock = Math.max(0, this.expiresAt.getTime() - Date.now());
+    if (this._fetchStartedAtLocalMillis === null || this.payload.exp === undefined) return byServerClock;
+    const lifetimeMillis = Math.max(0, this.expiresAt.getTime() - this.issuedAt.getTime());
+    const byLocalClock = this._fetchStartedAtLocalMillis + lifetimeMillis - Date.now();
+    // capped at the lifetime in case the local clock was set back since the fetch
+    return Math.max(0, Math.min(lifetimeMillis, byLocalClock));
   }
 
   /**

@@ -321,6 +321,57 @@ describe("InternalSession#getOrFetchLikelyValidTokens", () => {
     await session.getOrFetchLikelyValidTokens(30_000, 60_000);
     expect(refreshCount).toBe(1);
   });
+  it.each([
+    ["2 minutes", 122],
+    ["15 minutes", 900],
+    ["57 minutes", 3_432],
+  ])("accepts a fresh 10-minute token when the device clock runs %s ahead of the server", async (_name, skewSeconds) => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        // Server-stamped iat/exp with the server's default 10min lifetime: by the device's clock, already expired
+        return createAccessToken("rtid-1", { iatOffsetSeconds: -skewSeconds, lifetimeSeconds: 600 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    const tokens = await session.getOrFetchLikelyValidTokens(30_000, 60_000);
+
+    expect(refreshCount).toBe(1);
+    expect(tokens?.accessToken.expiresInMillis).toBeGreaterThan(590_000);
+    expect(tokens?.accessToken.isExpired()).toBe(false);
+    // and the cached token is reused instead of being refetched on every call
+    await session.getOrFetchLikelyValidTokens(30_000, 60_000);
+    expect(refreshCount).toBe(1);
+  });
+});
+
+describe("AccessToken#expiresInMillis", () => {
+  it("uses the server's expiry for tokens the client didn't fetch itself", () => {
+    const accessToken = createAccessToken("rtid-1", { iatOffsetSeconds: -900, lifetimeSeconds: 600 });
+    expect(accessToken.expiresInMillis).toBe(0);
+    expect(accessToken.isExpired()).toBe(true);
+  });
+
+  it("counts the lifetime from when the fetch started for tokens the client fetched", () => {
+    const accessToken = createAccessToken("rtid-1", { iatOffsetSeconds: -900, lifetimeSeconds: 600 });
+    accessToken._recordFetchStartedAt(Date.now() - 100_000);
+    expect(accessToken.expiresInMillis).toBeGreaterThan(490_000);
+    expect(accessToken.expiresInMillis).toBeLessThanOrEqual(500_000);
+  });
+
+  it("expires once the lifetime has elapsed locally", () => {
+    const accessToken = createAccessToken("rtid-1", { iatOffsetSeconds: -900, lifetimeSeconds: 600 });
+    accessToken._recordFetchStartedAt(Date.now() - 601_000);
+    expect(accessToken.isExpired()).toBe(true);
+  });
+
+  it("never exceeds the token's lifetime if the local clock was set back", () => {
+    const accessToken = createAccessToken("rtid-1", { lifetimeSeconds: 600 });
+    accessToken._recordFetchStartedAt(Date.now() + 3_600_000);
+    expect(accessToken.expiresInMillis).toBeLessThanOrEqual(600_000);
+  });
 });
 
 describe("AccessToken#issuedMillisAgo", () => {
