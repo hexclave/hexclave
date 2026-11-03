@@ -1,6 +1,7 @@
 import { CustomerType, PurchaseCreationSource, SubscriptionStatus } from "@/generated/prisma/client";
 import { bulldozerWriteOneTimePurchase, bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { getOwnedProductsForCustomer } from "@/lib/payments/customer-data";
+import { customerTypeToStripeCustomerType, stripeCustomerMatchesCustomerType } from "@/lib/payments/stripe-customer-type";
 import type { OwnedProductsRow } from "@/lib/payments/schema/types";
 import { ensureUserTeamPermissionExists } from "@/lib/request-checks";
 import { getPrismaClientForTenancy, PrismaClientTransaction } from "@/prisma-client";
@@ -182,10 +183,6 @@ export async function ensureCustomerExists(options: {
   }
 }
 
-function customerTypeToStripeCustomerType(customerType: "user" | "team") {
-  return customerType === "user" ? CustomerType.USER : CustomerType.TEAM;
-}
-
 export async function getStripeCustomerForCustomerOrNull(options: {
   stripe: Stripe,
   prisma: PrismaClientTransaction,
@@ -200,12 +197,7 @@ export async function getStripeCustomerForCustomerOrNull(options: {
     customerId: options.customerId,
   });
 
-  const stripeCustomerType = customerTypeToStripeCustomerType(options.customerType);
-  const matchesCustomer = (customer: Stripe.Customer) => {
-    const storedType = customer.metadata.customerType;
-    if (!storedType) return true;
-    return storedType === stripeCustomerType;
-  };
+  const matchesCustomer = (customer: Stripe.Customer) => stripeCustomerMatchesCustomerType(customer, options.customerType);
 
   const stripeCustomerSearch = await options.stripe.customers.search({
     query: `metadata['customerId']:'${options.customerId}'`,
