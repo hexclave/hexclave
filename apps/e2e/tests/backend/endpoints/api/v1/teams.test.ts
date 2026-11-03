@@ -1,5 +1,6 @@
 import { it } from "../../../../helpers";
 import { Auth, InternalApiKey, Project, Team, Webhook, bumpEmailAddress, niceBackendFetch } from "../../../backend-helpers";
+import { waitUntilReplicasHaveCaughtUp } from "../../../helpers/replication";
 import { withInternalDatabase } from "./external-db-sync-utils";
 
 
@@ -167,7 +168,8 @@ it("returns up to 500 teams unpaginated without a limit, and rejects the request
 
   ids.push(...await createTeams(1));
   const tooMany = await niceBackendFetch("/api/v1/teams", { accessType: "server" });
-  expect(tooMany).toMatchInlineSnapshot();
+  expect(tooMany.status).toBe(400);
+  expect(tooMany.body).toContain("More than 500 teams match this request");
 
   // Paginating still reaches every team.
   const paginated = await listAllTeamIds("order_by=created_at", 200);
@@ -308,6 +310,9 @@ it("pages through teams with identical created_at timestamps, ties broken by tea
     await client.query(`UPDATE "Team" SET "createdAt" = '2020-01-01 00:00:00.123' WHERE "tenancyId" = $1 AND "teamId" = ANY($2::uuid[])`, [tenancyId, ids.slice(0, 20)]);
     await client.query(`UPDATE "Team" SET "createdAt" = '2020-01-01 00:00:00.124' WHERE "tenancyId" = $1 AND "teamId" = ANY($2::uuid[])`, [tenancyId, ids.slice(20)]);
     const rows = await client.query(`SELECT "teamId" FROM "Team" WHERE "tenancyId" = $1 ORDER BY "createdAt", "teamId"`, [tenancyId]);
+    // The teams endpoint reads from the read replica, and these raw updates skip the Prisma extension that waits for
+    // replication, so without this the first pages can still see the old timestamps and the cursor skips teams.
+    await waitUntilReplicasHaveCaughtUp(client);
     return rows.rows.map((row) => row.teamId);
   });
 

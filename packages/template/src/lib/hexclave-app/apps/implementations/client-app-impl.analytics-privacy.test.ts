@@ -1,17 +1,17 @@
 // @vitest-environment jsdom
 
 import { HexclaveClientInterface } from "@hexclave/shared";
-import { clerkTokenStore, HexclaveClientApp } from "@hexclave/js";
 import { Result } from "@hexclave/shared/dist/utils/results";
-import { afterEach, vi } from "vitest";
-import { it } from "../helpers";
+import { afterEach, expect, it, vi } from "vitest";
+import { clerkTokenStore } from "../../common";
+import { HexclaveClientApp } from "../interfaces/client-app";
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
-it("does not create anonymous users or upload analytics for signed-out external-auth apps", async ({ expect }) => {
+it("does not create anonymous users or upload analytics for signed-out external-auth apps", async () => {
   vi.useFakeTimers();
   const app = new HexclaveClientApp({
     baseUrl: "http://localhost:12345",
