@@ -10,7 +10,7 @@ import { getPrismaClientForTenancy, globalPrismaClient } from '@/prisma-client';
 import { ALL_APPS } from '@hexclave/shared/dist/apps/apps-config';
 import { DEFAULT_EMAIL_THEME_ID } from '@hexclave/shared/dist/helpers/emails';
 import { AdminUserProjectsCrud } from '@hexclave/shared/dist/interface/crud/projects';
-import { ITEM_IDS, PLAN_LIMITS } from '@hexclave/shared/dist/plans';
+import { ITEM_IDS, PLAN_LIMITS, PLAN_MONTHLY_PRICES_USD } from '@hexclave/shared/dist/plans';
 import { DayInterval } from '@hexclave/shared/dist/utils/dates';
 import { getEnvVariable } from '@hexclave/shared/dist/utils/env';
 import { throwErr } from '@hexclave/shared/dist/utils/errors';
@@ -174,7 +174,7 @@ export async function seed() {
             stackable: false,
             prices: {
               monthly: {
-                USD: "49",
+                USD: String(PLAN_MONTHLY_PRICES_USD.team),
                 interval: MONTHLY_REPEAT,
                 serverOnly: false,
               },
@@ -197,7 +197,7 @@ export async function seed() {
             stackable: false,
             prices: {
               monthly: {
-                USD: "299",
+                USD: String(PLAN_MONTHLY_PRICES_USD.growth),
                 interval: MONTHLY_REPEAT,
                 serverOnly: false,
               },
