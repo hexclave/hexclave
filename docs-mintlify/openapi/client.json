@@ -1018,7 +1018,7 @@
                 "properties": {
                   "expires_in_millis": {
                     "type": "number",
-                    "default": 120000
+                    "default": 7200000
                   },
                   "anon_refresh_token": {
                     "type": "string"
