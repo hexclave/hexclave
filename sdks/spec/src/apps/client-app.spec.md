@@ -987,7 +987,7 @@ Only available in languages/platforms with an interactive terminal.
 
 Arguments:
   options.appUrl: string - base URL of your app (for the login page)
-  options.expiresInMillis: number? - how long the login attempt is valid
+  options.expiresInMillis: number? - how long the login attempt is valid (server default: 2 hours, max: 24 hours)
   options.maxAttempts: number? - max polling attempts (default: Infinity)
   options.waitTimeMillis: number? - time between poll attempts (default: 2000ms)
   options.promptLink: function(url: string, loginCode: string)? - callback to display login URL and verification code to user
