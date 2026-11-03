@@ -263,9 +263,9 @@ describe.skipIf(!replicaConfigured)("read replica fallback to primary", () => {
     const marker = `replica-fallback-test-${crypto.randomUUID()}`;
     // Prisma queries are lazy and only run once awaited or `.then`-ed, so attach a handler right away to start the
     // query on the replica before we look for it in pg_stat_activity. Sleep long enough that a busy runner still
-    // finds it running.
+    // finds it running. pg_sleep goes in FROM because Prisma can't deserialize its `void` result column.
     const queryPromise = client.$queryRawUnsafe<[{ in_recovery: boolean }]>(
-      `SELECT pg_is_in_recovery() AS in_recovery, pg_sleep(3) /* ${marker} */`,
+      `SELECT pg_is_in_recovery() AS in_recovery FROM pg_sleep(3) /* ${marker} */`,
     ).then((rows) => rows);
 
     // Same as what happens to open connections when an Aurora reader is restarted
