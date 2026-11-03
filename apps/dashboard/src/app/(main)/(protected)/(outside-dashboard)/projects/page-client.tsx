@@ -23,7 +23,7 @@ import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as yup from "yup";
 import { getArePlanLimitsEnforced, inviteUser, listInvitations, revokeInvitation } from "./actions";
-import { formatAdminSeatUsage } from "./admin-seat-usage";
+import { formatAdminSeatUsage, getAdminSeatPurchase } from "./admin-seat-usage";
 import Footer from "./footer";
 import PreviewProjectRedirect from "./preview-project-redirect";
 
@@ -763,17 +763,12 @@ function TeamAddUserDialog(props: { team: Team }) {
     }
   };
 
-  const handleAddSeat = async () => {
-    const checkoutUrl = await props.team.createCheckoutUrl({
-      productId: "extra-seats",
-      returnUrl: window.location.href,
-    });
-    window.location.assign(checkoutUrl);
-  };
+  const seatPurchase = dialogData == null ? null : getAdminSeatPurchase({ hasPaidPlan: dialogData.hasPaidPlan });
 
-  const handleUpgrade = async () => {
+  const handleBuySeats = async () => {
+    const productId = seatPurchase?.productId ?? throwErr("The seat purchase button is only shown once the dialog data has loaded");
     const checkoutUrl = await props.team.createCheckoutUrl({
-      productId: "team",
+      productId,
       returnUrl: window.location.href,
     });
     window.location.assign(checkoutUrl);
@@ -784,16 +779,10 @@ function TeamAddUserDialog(props: { team: Team }) {
       <DesignButton variant="secondary" size="sm" type="button" onClick={() => setOpen(false)}>
         Close
       </DesignButton>
-      {atCapacity ? (
-        dialogData.hasPaidPlan ? (
-          <DesignButton size="sm" type="button" onClick={handleAddSeat}>
-            Add seat ($29/mo)
-          </DesignButton>
-        ) : (
-          <DesignButton size="sm" type="button" onClick={handleUpgrade}>
-            Upgrade plan
-          </DesignButton>
-        )
+      {atCapacity && seatPurchase != null ? (
+        <DesignButton size="sm" type="button" onClick={handleBuySeats}>
+          {seatPurchase.buttonLabel}
+        </DesignButton>
       ) : (
         <DesignButton
           size="sm"
@@ -872,13 +861,11 @@ function TeamAddUserDialog(props: { team: Team }) {
           </DesignAlert>
         )}
 
-        {atCapacity && (
+        {atCapacity && seatPurchase != null && (
           <DesignAlert
             variant="warning"
             title="No admin seats available"
-            description={dialogData.hasPaidPlan
-              ? "Add an extra seat for $29/month to invite another dashboard admin."
-              : "Upgrade your plan to invite more dashboard admins."}
+            description={seatPurchase.description}
             className="p-3"
           />
         )}

@@ -23,6 +23,15 @@ export const ITEM_IDS = {
 export type ItemId = typeof ITEM_IDS[keyof typeof ITEM_IDS];
 
 /**
+ * The internal project's add-on product that buys one more dashboard admin
+ * seat, and its monthly USD price. Production's payments config and the seed
+ * both use this id and price; the checkout page always charges whatever the
+ * live product config says.
+ */
+export const EXTRA_SEAT_PRODUCT_ID = "extra-seat";
+export const EXTRA_SEAT_MONTHLY_PRICE_USD = 49;
+
+/**
  * The offerings/limits included in a plan.
  */
 export type PlanProductOfferings = {
