@@ -1058,7 +1058,11 @@ export class HexclaveClientInterface {
     }
   }
 
-  async verifyEmail(code: string): Promise<Result<undefined, KnownErrors["VerificationCodeError"]>> {
+  async verifyEmail(
+    code: string,
+    options: { requirePasswordIfSet?: boolean, password?: string } = {},
+    session: InternalSession | null = null,
+  ): Promise<Result<undefined, KnownErrors["VerificationCodeError"] | KnownErrors["EmailVerificationRequiresPassword"] | KnownErrors["PasswordConfirmationMismatch"]>> {
     const res = await this.sendClientRequestAndCatchKnownError(
       "/contact-channels/verify",
       {
@@ -1068,10 +1072,12 @@ export class HexclaveClientInterface {
         },
         body: JSON.stringify({
           code,
+          ...options.requirePasswordIfSet ? { require_password_if_set: true } : {},
+          ...options.password !== undefined ? { password: options.password } : {},
         }),
       },
-      null,
-      [KnownErrors.VerificationCodeError]
+      session,
+      [KnownErrors.VerificationCodeError, KnownErrors.EmailVerificationRequiresPassword, KnownErrors.PasswordConfirmationMismatch]
     );
 
     if (res.status === "error") {

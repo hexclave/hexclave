@@ -972,6 +972,16 @@ const PasswordConfirmationMismatch = createKnownErrorConstructor(
   () => [] as const,
 );
 
+const EmailVerificationRequiresPassword = createKnownErrorConstructor(
+  KnownError,
+  "EMAIL_VERIFICATION_REQUIRES_PASSWORD",
+  () => [
+    400,
+    "This account has a password. Enter the account's password to verify this e-mail.",
+  ] as const,
+  () => [] as const,
+);
+
 const EmailAlreadyVerified = createKnownErrorConstructor(
   KnownError,
   "EMAIL_ALREADY_VERIFIED",
@@ -2034,6 +2044,7 @@ export const KnownErrors = {
   VerificationCodeAlreadyUsed,
   VerificationCodeMaxAttemptsReached,
   PasswordConfirmationMismatch,
+  EmailVerificationRequiresPassword,
   EmailAlreadyVerified,
   EmailNotAssociatedWithUser,
   EmailIsNotPrimaryEmail,

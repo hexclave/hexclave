@@ -71,7 +71,8 @@ For REST API calls, read the `code` field from the JSON response body.
 | `KnownErrors["OAuthAccessTokenNotAvailable"]` | `OAUTH_ACCESS_TOKEN_NOT_AVAILABLE` | `connectedAccount.getAccessToken()`, `connectedAccount.useAccessToken()` |
 | `KnownErrors["OAuthProviderAccountIdAlreadyUsedForSignIn"]` | `OAUTH_PROVIDER_ACCOUNT_ID_ALREADY_USED_FOR_SIGN_IN` | `oauthProvider.update()`, `serverOAuthProvider.update()`, `hexclaveServerApp.createOAuthProvider()` |
 | `KnownErrors["EmailAlreadyVerified"]` | `EMAIL_ALREADY_VERIFIED` | `user.sendVerificationEmail()` |
-| `KnownErrors["PasswordConfirmationMismatch"]` | `PASSWORD_CONFIRMATION_MISMATCH` | `user.updatePassword()` |
+| `KnownErrors["PasswordConfirmationMismatch"]` | `PASSWORD_CONFIRMATION_MISMATCH` | `user.updatePassword()`, `hexclaveClientApp.verifyEmail()` |
+| `KnownErrors["EmailVerificationRequiresPassword"]` | `EMAIL_VERIFICATION_REQUIRES_PASSWORD` | `hexclaveClientApp.verifyEmail()` |
 
 ## Parent error types
 

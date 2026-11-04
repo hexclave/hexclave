@@ -1,8 +1,12 @@
 import { KnownErrors } from "@hexclave/shared";
 import { useStackApp } from "@hexclave/react";
+import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
 import { useState } from "react";
 
-import { HostedAuthMessage } from "./supporting/layout";
+import { Button, Label, PasswordInput } from "~/components/ui";
+
+import { FormWarningText } from "./supporting/form-elements";
+import { HostedAuthHeading, HostedAuthMessage, HostedAuthShell } from "./supporting/layout";
 import { getSearchParams } from "./supporting/utils";
 
 export function HostedEmailVerification(props: {
@@ -13,6 +17,10 @@ export function HostedEmailVerification(props: {
   const code = searchParams.code;
   const [cancelled, setCancelled] = useState(false);
   const [result, setResult] = useState<Awaited<ReturnType<typeof app.verifyEmail>> | null>(null);
+  const [needsPassword, setNeedsPassword] = useState(false);
+  const [password, setPassword] = useState("");
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   const invalid = (
     <HostedAuthMessage
@@ -35,13 +43,77 @@ export function HostedEmailVerification(props: {
     );
   }
 
+  async function verify(verifyCode: string, passwordToSend?: string) {
+    const verifyResult = await app.verifyEmail(verifyCode, { requirePasswordIfSet: true, password: passwordToSend });
+    if (verifyResult.status === "error" && KnownErrors.EmailVerificationRequiresPassword.isInstance(verifyResult.error)) {
+      setNeedsPassword(true);
+      return;
+    }
+    if (verifyResult.status === "error" && KnownErrors.PasswordConfirmationMismatch.isInstance(verifyResult.error)) {
+      setPasswordError("Wrong password");
+      return;
+    }
+    setResult(verifyResult);
+  }
+
+  if (result == null && needsPassword) {
+    return (
+      <HostedAuthShell fullPage={props.fullPage}>
+        <HostedAuthHeading title="Enter your password">
+          To verify this email, enter the password of the account it belongs to.
+        </HostedAuthHeading>
+
+        <form
+          className="stack-scope flex flex-col items-stretch"
+          onSubmit={(event) => {
+            event.preventDefault();
+            runAsynchronouslyWithAlert(async () => {
+              if (password.length === 0) {
+                setPasswordError("Please enter your password");
+                return;
+              }
+              setLoading(true);
+              try {
+                await verify(code, password);
+              } finally {
+                setLoading(false);
+              }
+            });
+          }}
+          noValidate
+        >
+          <Label htmlFor="password" className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Password</Label>
+          <PasswordInput
+            id="password"
+            autoComplete="current-password"
+            className="h-10 rounded-xl border-border bg-background"
+            value={password}
+            onChange={(event) => {
+              setPassword(event.target.value);
+              setPasswordError(null);
+            }}
+          />
+          <FormWarningText text={passwordError} />
+
+          <Button type="submit" className="mt-6 h-10 rounded-xl font-semibold shadow-sm hover:shadow" loading={loading}>
+            Verify email
+          </Button>
+        </form>
+
+        <p className="mt-6 text-center text-xs text-muted-foreground">
+          If you did not create this account, do not verify it. Someone may have signed up with your email address.
+        </p>
+      </HostedAuthShell>
+    );
+  }
+
   if (result == null) {
     return (
       <HostedAuthMessage
         title="Verify your email"
         primaryText="Verify email"
         primaryAction={async () => {
-          setResult(await app.verifyEmail(code));
+          await verify(code);
         }}
         secondaryText="Cancel"
         secondaryAction={() => setCancelled(true)}

@@ -1,6 +1,6 @@
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { it } from "../../../../../helpers";
-import { Auth, ContactChannels, backendContext, niceBackendFetch } from "../../../../backend-helpers";
+import { Auth, ContactChannels, backendContext, createMailbox, niceBackendFetch } from "../../../../backend-helpers";
 
 it("should verify user's email", async ({ expect }) => {
   await Auth.Password.signUpWithEmail({ sendVerificationEmail: true });
@@ -129,4 +129,142 @@ it("should not allow verification of a code that is sent from a different endpoi
       },
     }
   `);
+});
+
+async function signUpWithPasswordAndGetVerificationCode() {
+  const signUp = await Auth.Password.signUpWithEmail({ sendVerificationEmail: true });
+  const messages = await backendContext.value.mailbox.waitForMessagesWithSubject("Verify your email");
+  const message = messages.findLast((message) => message.subject.includes("Verify your email")) ?? throwErr("Verification code message not found");
+  const code = message.body?.text.match(/http:\/\/localhost:12345\/some-callback-url\?code=([a-zA-Z0-9]+)/)?.[1] ?? throwErr("Verification code not found");
+  return { ...signUp, code, userAuth: backendContext.value.userAuth };
+}
+
+async function isPrimaryEmailVerified(userAuth: typeof backendContext.value.userAuth) {
+  return await backendContext.with({ userAuth }, async () => {
+    const response = await niceBackendFetch("/api/v1/users/me", { accessType: "client" });
+    return response.body.primary_email_verified;
+  });
+}
+
+it("verification email warns the recipient not to click the link if they did not sign up", async ({ expect }) => {
+  await Auth.Password.signUpWithEmail({ sendVerificationEmail: true });
+  const messages = await backendContext.value.mailbox.waitForMessagesWithSubject("Verify your email");
+  expect(messages[0].body?.text).toContain("do not click this button. Someone may have signed up with your email address.");
+});
+
+it("requires the account's password when require_password_if_set is passed and the user is signed out", async ({ expect }) => {
+  const { code, password, userAuth } = await signUpWithPasswordAndGetVerificationCode();
+  backendContext.set({ userAuth: null });
+
+  const withoutPassword = await niceBackendFetch("/api/v1/contact-channels/verify", {
+    method: "POST",
+    accessType: "client",
+    body: { code, require_password_if_set: true },
+  });
+  expect(withoutPassword).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "EMAIL_VERIFICATION_REQUIRES_PASSWORD",
+        "error": "This account has a password. Enter the account's password to verify this e-mail.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "EMAIL_VERIFICATION_REQUIRES_PASSWORD",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+
+  const wrongPassword = await niceBackendFetch("/api/v1/contact-channels/verify", {
+    method: "POST",
+    accessType: "client",
+    body: { code, require_password_if_set: true, password: "definitely-not-the-password" },
+  });
+  expect(wrongPassword).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "PASSWORD_CONFIRMATION_MISMATCH",
+        "error": "Passwords do not match.",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "PASSWORD_CONFIRMATION_MISMATCH",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+  expect(await isPrimaryEmailVerified(userAuth)).toBe(false);
+
+  // Neither failed attempt used up the code
+  const correctPassword = await niceBackendFetch("/api/v1/contact-channels/verify", {
+    method: "POST",
+    accessType: "client",
+    body: { code, require_password_if_set: true, password },
+  });
+  expect(correctPassword).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": { "success": true },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+  expect(await isPrimaryEmailVerified(userAuth)).toBe(true);
+});
+
+it("checks the password whenever one is passed, even without require_password_if_set", async ({ expect }) => {
+  const { code, userAuth } = await signUpWithPasswordAndGetVerificationCode();
+  backendContext.set({ userAuth: null });
+
+  const response = await niceBackendFetch("/api/v1/contact-channels/verify", {
+    method: "POST",
+    accessType: "client",
+    body: { code, password: "definitely-not-the-password" },
+  });
+  expect(response.body.code).toBe("PASSWORD_CONFIRMATION_MISMATCH");
+  expect(await isPrimaryEmailVerified(userAuth)).toBe(false);
+});
+
+it("does not require the password when signed in as the account being verified", async ({ expect }) => {
+  const { code, userAuth } = await signUpWithPasswordAndGetVerificationCode();
+
+  const response = await niceBackendFetch("/api/v1/contact-channels/verify", {
+    method: "POST",
+    accessType: "client",
+    body: { code, require_password_if_set: true },
+  });
+  expect(response).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 200,
+      "body": { "success": true },
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+  expect(await isPrimaryEmailVerified(userAuth)).toBe(true);
+});
+
+it("still requires the password when signed in as a different account", async ({ expect }) => {
+  const { code, userAuth } = await signUpWithPasswordAndGetVerificationCode();
+  backendContext.set({ mailbox: createMailbox() });
+  await Auth.Password.signUpWithEmail();
+
+  const response = await niceBackendFetch("/api/v1/contact-channels/verify", {
+    method: "POST",
+    accessType: "client",
+    body: { code, require_password_if_set: true },
+  });
+  expect(response.body.code).toBe("EMAIL_VERIFICATION_REQUIRES_PASSWORD");
+  expect(await isPrimaryEmailVerified(userAuth)).toBe(false);
+});
+
+it("keeps verifying without a password for clients that don't pass require_password_if_set", async ({ expect }) => {
+  const { code, userAuth } = await signUpWithPasswordAndGetVerificationCode();
+  backendContext.set({ userAuth: null });
+
+  const response = await niceBackendFetch("/api/v1/contact-channels/verify", {
+    method: "POST",
+    accessType: "client",
+    body: { code },
+  });
+  expect(response.status).toBe(200);
+  expect(await isPrimaryEmailVerified(userAuth)).toBe(true);
 });
