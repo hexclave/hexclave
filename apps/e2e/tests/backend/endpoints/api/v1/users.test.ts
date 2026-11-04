@@ -1123,6 +1123,115 @@ describe("with server access", () => {
     expect(concatenatedUserIds).toEqual(allUserIds);
   });
 
+  async function createUsersForPagination(count: number) {
+    const users: { id: string, signed_up_at_millis: number, last_active_at_millis: number }[] = [];
+    for (let i = 0; i < count; i++) {
+      const response = await niceBackendFetch("/api/v1/users", {
+        accessType: "server",
+        method: "POST",
+        body: {
+          display_name: `Pagination User ${i.toString().padStart(2, "0")}`,
+          primary_email: `pagination-user-${i}@example.com`,
+          primary_email_verified: true,
+        },
+      });
+      if (response.status !== 201) throw new Error(`Failed to create user: ${response.status}`);
+      users.push({
+        id: response.body.id,
+        signed_up_at_millis: response.body.signed_up_at_millis,
+        last_active_at_millis: response.body.last_active_at_millis,
+      });
+    }
+    return users;
+  }
+
+  async function listAllUserIds(query: string, limit = 3) {
+    const ids: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const response = await niceBackendFetch(`/api/v1/users?${query}&limit=${limit}${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`, { accessType: "server" });
+      if (response.status !== 200) throw new Error(`Failed to list users: ${response.status} ${JSON.stringify(response.body)}`);
+      ids.push(...response.body.items.map((user: { id: string }) => user.id));
+      cursor = response.body.pagination.next_cursor;
+    } while (cursor != null);
+    return ids;
+  }
+
+  it("paginates users across pages without duplicates or skips for both sort fields", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await createUsersForPagination(7);
+
+    const bySignedUp = (await niceBackendFetch("/api/v1/users?order_by=signed_up_at", { accessType: "server" })).body.items as { id: string, signed_up_at_millis: number }[];
+    const byLastActive = (await niceBackendFetch("/api/v1/users?order_by=last_active_at", { accessType: "server" })).body.items as { id: string, last_active_at_millis: number }[];
+    const signedUpIds = bySignedUp.map((user) => user.id);
+    const lastActiveIds = byLastActive.map((user) => user.id);
+
+    for (const limit of [1, 3, 5]) {
+      expect(await listAllUserIds("order_by=signed_up_at", limit), `signed_up_at limit=${limit}`).toEqual(signedUpIds);
+      expect(await listAllUserIds("order_by=signed_up_at&desc=true", limit), `signed_up_at desc limit=${limit}`).toEqual([...signedUpIds].reverse());
+      expect(await listAllUserIds("order_by=last_active_at", limit), `last_active_at limit=${limit}`).toEqual(lastActiveIds);
+      expect(await listAllUserIds("order_by=last_active_at&desc=true", limit), `last_active_at desc limit=${limit}`).toEqual([...lastActiveIds].reverse());
+    }
+
+    const page1 = await niceBackendFetch("/api/v1/users?limit=3", { accessType: "server" });
+    expect(page1.status).toBe(200);
+    expect(page1.body.items).toHaveLength(3);
+    expect(page1.body.pagination.next_cursor).toBe(`${page1.body.items[2].signed_up_at_millis}_${page1.body.items[2].id}`);
+  });
+
+  it("accepts a legacy bare-ID user cursor", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await createUsersForPagination(5);
+    const allIds = (await niceBackendFetch("/api/v1/users", { accessType: "server" })).body.items.map((user: { id: string }) => user.id);
+    const rest = await niceBackendFetch(`/api/v1/users?limit=10&cursor=${allIds[1]}`, { accessType: "server" });
+    expect(rest.status).toBe(200);
+    expect(rest.body.items.map((user: { id: string }) => user.id)).toEqual(allIds.slice(2));
+  });
+
+  it("keeps paginating from a position cursor after its user is deleted", async ({ expect }) => {
+    await Project.createAndSwitch();
+    await createUsersForPagination(7);
+    const allIds = (await niceBackendFetch("/api/v1/users", { accessType: "server" })).body.items.map((user: { id: string }) => user.id);
+    const page1 = await niceBackendFetch("/api/v1/users?limit=3", { accessType: "server" });
+    const cursor = page1.body.pagination.next_cursor;
+    expect(cursor).toBe(`${page1.body.items[2].signed_up_at_millis}_${page1.body.items[2].id}`);
+
+    const deleted = await niceBackendFetch(`/api/v1/users/${page1.body.items[2].id}`, { accessType: "server", method: "DELETE" });
+    expect(deleted.status).toBe(200);
+
+    const rest = await niceBackendFetch(`/api/v1/users?limit=10&cursor=${encodeURIComponent(cursor)}`, { accessType: "server" });
+    expect(rest.status).toBe(200);
+    expect(rest.body.items.map((user: { id: string }) => user.id)).toEqual(allIds.slice(3));
+  });
+
+  it("rejects a legacy (bare user ID) cursor whose user was deleted", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const [user] = await createUsersForPagination(1);
+    const deleted = await niceBackendFetch(`/api/v1/users/${user.id}`, { accessType: "server", method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    const response = await niceBackendFetch(`/api/v1/users?limit=10&cursor=${user.id}`, { accessType: "server" });
+    expect(response).toMatchInlineSnapshot(`
+      NiceResponse {
+        "status": 400,
+        "body": "The user referenced by \`cursor\` does not exist (it may have been deleted). Restart pagination without a cursor.",
+        "headers": Headers { <some fields may have been hidden> },
+      }
+    `);
+  });
+
+  it("rejects invalid user list cursors", async ({ expect }) => {
+    await Project.createAndSwitch();
+    const [user] = await createUsersForPagination(1);
+    for (const cursor of [
+      "", "null", "undefined", "not-a-cursor", "123", `abc_${user.id}`, `123_not-a-uuid`, `-5_${user.id}`, `1.5_${user.id}`,
+      ` 1_${user.id}`, `1_${user.id}\n`, `1_${user.id}_x`,
+      `8640000000000001_${user.id}`, `99999999999999999999_${user.id}`, `${"9".repeat(400)}_${user.id}`,
+    ]) {
+      const response = await niceBackendFetch(`/api/v1/users?limit=5&cursor=${encodeURIComponent(cursor)}`, { accessType: "server" });
+      expect(response.status, cursor).toBe(400);
+    }
+  });
+
   it("should be able to read a user", async ({ expect }) => {
     await Auth.fastSignUpWithEmail();
     const signedInResponse = (await niceBackendFetch("/api/v1/users/me", {
