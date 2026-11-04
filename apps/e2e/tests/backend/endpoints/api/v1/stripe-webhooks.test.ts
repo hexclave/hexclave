@@ -17,13 +17,14 @@ function uniqueEventId(prefix: string) {
 // state is eventually-consistent from the test's perspective. Poll instead of
 // reading immediately after the webhook returns.
 async function waitForItemQuantity(
-  args: { customerType: "user" | "team", customerId: string, itemId: string, expected: number },
+  args: { customerType: "user" | "team" | "custom", customerId: string, itemId: string, expected: number },
 ) {
   let last: number | undefined;
   for (let i = 0; i < 30; i++) {
     const res = await niceBackendFetch(
       `/api/latest/payments/items/${args.customerType}/${args.customerId}/${args.itemId}`,
-      { accessType: "client" },
+      // Clients can't read custom customers.
+      { accessType: args.customerType === "custom" ? "server" : "client" },
     );
     if (res.status !== 200) {
       throw new Error(`Unexpected ${res.status} reading item ${args.itemId}`);
@@ -753,6 +754,122 @@ it("syncs subscriptions from webhook and is idempotent", async ({ expect }) => {
   await waitForItemQuantity({ customerType: "user", customerId: userId, itemId, expected: 1 });
 });
 
+
+it("records a subscription bought for a custom customer under that custom customer", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Payments.setup();
+
+  const itemId = "custom-seats";
+  const productId = "custom-monthly";
+  const product = {
+    displayName: "Custom Monthly",
+    customerType: "custom",
+    serverOnly: false,
+    stackable: false,
+    prices: { monthly: { USD: "1000", interval: [1, "month"] } },
+    includedItems: { [itemId]: { quantity: 5 } },
+  };
+
+  await Project.updateConfig({
+    payments: {
+      items: {
+        [itemId]: { displayName: "Seats", customerType: "custom" },
+      },
+      products: {
+        [productId]: product,
+      },
+    },
+  });
+
+  const customCustomerId = `org-${randomUUID()}`;
+
+  const accountInfo = await niceBackendFetch("/api/latest/internal/payments/stripe/account-info", {
+    accessType: "admin",
+  });
+  expect(accountInfo.status).toBe(200);
+  const accountId: string = accountInfo.body.account_id;
+
+  const createUrlResponse = await niceBackendFetch("/api/latest/payments/purchases/create-purchase-url", {
+    method: "POST",
+    accessType: "server",
+    body: {
+      customer_type: "custom",
+      customer_id: customCustomerId,
+      product_id: productId,
+    },
+  });
+  expect(createUrlResponse.status).toBe(200);
+  const fullCode = (createUrlResponse.body as { url: string }).url.split("/purchase/")[1];
+  const stackTestTenancyId = fullCode.split("_")[0];
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const subscription = {
+    id: `sub_custom_${randomUUID().replace(/-/g, "")}`,
+    status: "active",
+    items: {
+      data: [
+        {
+          quantity: 1,
+          current_period_start: nowSec - 60,
+          current_period_end: nowSec + 60 * 60,
+        },
+      ],
+    },
+    metadata: {
+      productId,
+      product: JSON.stringify(product),
+      priceId: "monthly",
+    },
+    cancel_at_period_end: false,
+  };
+
+  // The Stripe customer that create-purchase-url now makes for a custom customer is tagged CUSTOM (#2131); before, it
+  // was tagged TEAM, and the synced subscription was recorded for team/<id>.
+  const res = await Payments.sendStripeWebhook({
+    id: uniqueEventId("custom_sub_sync"),
+    type: "invoice.paid",
+    account: accountId,
+    data: {
+      object: {
+        customer: "cus_custom_sub_sync_1",
+        stack_stripe_mock_data: {
+          "accounts.retrieve": { metadata: { tenancyId: stackTestTenancyId } },
+          "customers.retrieve": { metadata: { customerId: customCustomerId, customerType: "CUSTOM" } },
+          "subscriptions.list": { data: [subscription] },
+        },
+      },
+    },
+  });
+  expect(res.status).toBe(200);
+
+  await waitForItemQuantity({ customerType: "custom", customerId: customCustomerId, itemId, expected: 5 });
+
+  const productsRes = await niceBackendFetch(`/api/latest/payments/products/custom/${customCustomerId}`, {
+    accessType: "server",
+  });
+  expect(productsRes.status).toBe(200);
+  expect(productsRes.body.items.map((item: { id: string | null, quantity: number }) => ({ id: item.id, quantity: item.quantity }))).toMatchInlineSnapshot(`
+    [
+      {
+        "id": "custom-monthly",
+        "quantity": 1,
+      },
+    ]
+  `);
+
+  // Buying it again is refused, since the custom customer now owns it.
+  const secondUrlResponse = await niceBackendFetch("/api/latest/payments/purchases/create-purchase-url", {
+    method: "POST",
+    accessType: "server",
+    body: {
+      customer_type: "custom",
+      customer_id: customCustomerId,
+      product_id: productId,
+    },
+  });
+  expect(secondUrlResponse.status).toBe(400);
+  expect(secondUrlResponse.body.code).toBe("PRODUCT_ALREADY_GRANTED");
+});
 
 it("updates a user's subscriptions via webhook (add then remove)", async ({ expect }) => {
   await Project.createAndSwitch();

@@ -1,6 +1,6 @@
-import { CustomerType } from "@/generated/prisma/client";
 import { customerOwnsProduct, ensureClientCanAccessCustomer, ensureProductIdOrInlineProduct } from "@/lib/payments";
 import { getOwnedProductsForCustomer } from "@/lib/payments/customer-data";
+import { customerTypeToStripeCustomerType, stripeCustomerMatchesCustomerType } from "@/lib/payments/stripe-customer-type";
 import { validateRedirectUrl } from "@/lib/redirect-urls";
 import { getHexclaveStripe, getStripeForAccount } from "@/lib/stripe";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
@@ -112,12 +112,14 @@ export const POST = createSmartRouteHandler({
       const stripeCustomerSearch = await stripe.customers.search({
         query: `metadata['customerId']:'${req.body.customer_id}'`,
       });
-      let stripeCustomer = stripeCustomerSearch.data.length ? stripeCustomerSearch.data[0] : undefined;
+      // Only reuse a Stripe customer of the same type: before #2131 was fixed, `custom` customers were created as
+      // `TEAM`, and subscriptions synced from such a customer would be recorded for the team, not the custom customer.
+      let stripeCustomer = stripeCustomerSearch.data.find((customer) => stripeCustomerMatchesCustomerType(customer, customerType));
       if (!stripeCustomer) {
         stripeCustomer = await stripe.customers.create({
           metadata: {
             customerId: req.body.customer_id,
-            customerType: customerType === "user" ? CustomerType.USER : CustomerType.TEAM,
+            customerType: customerTypeToStripeCustomerType(customerType),
           }
         });
       }
