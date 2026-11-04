@@ -105,3 +105,34 @@ export function resolvePlanId(products: ReadonlyArray<PlanResolutionProduct>): P
 export function isPaidPlan(products: ReadonlyArray<PlanResolutionProduct>): boolean {
   return resolvePlanId(products) !== "free";
 }
+
+export type PaidPlanId = Exclude<PlanId, "free">;
+
+/**
+ * Monthly USD list price of each paid plan: the `monthly` price of the
+ * internal project's `team` / `growth` products. The seed uses these, and
+ * production's payments config matches them; the dashboard shows them on
+ * upgrade buttons, and the checkout page always charges whatever the live
+ * product config says.
+ */
+export const PLAN_MONTHLY_PRICES_USD: Record<PaidPlanId, number> = {
+  team: 49,
+  growth: 299,
+};
+
+export const PLAN_DISPLAY_NAMES: Record<PlanId, string> = {
+  free: "Free",
+  team: "Team",
+  growth: "Growth",
+};
+
+export function isPaidPlanId(value: string): value is PaidPlanId {
+  return value === "team" || value === "growth";
+}
+
+/**
+ * Whether a team on `currentPlanId` would gain anything by buying `targetPlanId`.
+ */
+export function isPlanUpgrade(currentPlanId: PlanId, targetPlanId: PaidPlanId): boolean {
+  return BASE_PLAN_IDS_BY_TIER.indexOf(targetPlanId) < BASE_PLAN_IDS_BY_TIER.indexOf(currentPlanId);
+}
