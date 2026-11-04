@@ -27,6 +27,15 @@ it("should error on invalid code", async ({ expect }) => {
   `);
 });
 
+it("should return 400 instead of crashing when the request has no body", async ({ expect }) => {
+  await Project.createAndSwitch();
+  const response = await niceBackendFetch("/api/latest/payments/purchases/purchase-session", {
+    method: "POST",
+    accessType: "client",
+  });
+  expect(response.status).toBe(400);
+});
+
 it("should error on invalid price_id", async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Payments.setup();
