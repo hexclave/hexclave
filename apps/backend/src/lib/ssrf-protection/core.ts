@@ -1,4 +1,6 @@
 import dns from "node:dns";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 
 const blockedAddressRanges = new net.BlockList();
@@ -168,5 +170,108 @@ export function publicInternetDnsLookup(
       return;
     }
     callback(null, address, family);
+  });
+}
+
+/**
+ * Performs an HTTP(S) request (without following redirects) that resolves the hostname with the given DNS lookup
+ * function. Passing an SSRF-checking lookup (eg. one built on `publicInternetDnsLookup`) makes the check apply to the
+ * address that the socket actually connects to; validating the URL separately before a plain `fetch` would leave a
+ * DNS-rebinding window.
+ *
+ * With `responseBody: { type: "buffered" }`, the response body is buffered and capped at `maxBytes`. Callers that only
+ * care about the status code should use `{ type: "status-only" }` instead, which resolves as soon as the response
+ * headers arrive (with a null body) and discards the body. That matters when the request has side effects: eg. a webhook
+ * that accepted a message but replied with a large body must not be reported as a failed request, or the caller would
+ * retry and cause the side effect twice.
+ */
+export async function requestWithDnsLookup(
+  url: URL,
+  options: {
+    method: "GET" | "POST",
+    headers: Headers,
+    body?: string,
+    signal: AbortSignal,
+    lookup: (hostname: string, options: dns.LookupOptions, callback: DnsLookupCallback) => void,
+    responseBody: { type: "buffered", maxBytes: number } | { type: "status-only" },
+    // used in error messages, eg. "OAuth provider"
+    description: string,
+  },
+): Promise<Response> {
+  const request = url.protocol === "http:" ? http.request : https.request;
+
+  return await new Promise<Response>((resolve, reject) => {
+    const req = request(url, {
+      headers: Object.fromEntries(options.headers.entries()),
+      lookup: options.lookup,
+      method: options.method,
+      signal: options.signal,
+    }, (res) => {
+      // Once response headers have arrived, Node emits mid-body connection failures as an `error`
+      // event on the response, not the request. Without this listener such a failure would be an
+      // unhandled `error` event (crashing the process) and the promise would never settle.
+      res.on("error", reject);
+      // Depending on the Node version and how the connection dies, a truncated body may only emit
+      // `close` without `error`; reject then too (a no-op if we already resolved on `end`).
+      res.on("close", () => {
+        if (!res.complete) {
+          reject(new Error(`${options.description} connection closed before the response completed.`));
+        }
+      });
+      // Node accepts status codes outside the Fetch Response range. Reject them before constructing a
+      // Response inside this event callback, where throws cannot reject our promise.
+      const status = res.statusCode;
+      if (status === undefined || status < 200 || status > 599) {
+        reject(new Error(`${options.description} returned an unsupported HTTP status.`));
+        res.destroy();
+        return;
+      }
+      const responseHeaders = new Headers();
+      for (const [name, value] of Object.entries(res.headers)) {
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            responseHeaders.append(name, item);
+          }
+        } else if (value != null) {
+          responseHeaders.set(name, value);
+        }
+      }
+
+      const responseBody = options.responseBody;
+      if (responseBody.type === "status-only") {
+        resolve(new Response(null, { headers: responseHeaders, status, statusText: res.statusMessage }));
+        // We don't need the body, so stop receiving it. The resulting `close` event's rejection is a no-op, as the
+        // promise has already resolved.
+        res.destroy();
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      let receivedBytes = 0;
+      res.on("data", (chunk) => {
+        const buffer = Buffer.from(chunk);
+        receivedBytes += buffer.byteLength;
+        if (receivedBytes > responseBody.maxBytes) {
+          req.destroy(new Error(`${options.description} response exceeded the maximum allowed size.`));
+          return;
+        }
+        chunks.push(buffer);
+      });
+      res.on("end", () => {
+        // The Response constructor throws a TypeError for a body on null-body statuses, even an empty
+        // one. This runs inside an event callback, so that throw would escape the promise as an
+        // uncaught exception rather than reject it.
+        resolve(new Response([204, 205, 304].includes(status) ? null : Buffer.concat(chunks), {
+          headers: responseHeaders,
+          status,
+          statusText: res.statusMessage,
+        }));
+      });
+    });
+    req.on("error", reject);
+    if (options.body !== undefined) {
+      req.write(options.body);
+    }
+    req.end();
   });
 }

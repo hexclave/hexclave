@@ -161,7 +161,7 @@ export async function setContactChannelAsPrimaryByValue(
   });
 }
 
-async function getAuthContactChannel(
+export async function getAuthContactChannel(
   tx: PrismaTransaction,
   options: {
     tenancyId: string,
@@ -208,8 +208,12 @@ export async function getAuthContactChannelWithEmailNormalization(
     return unnormalizedResult;
   }
 
+  // Phone numbers are always stored in canonical E.164 form, so there is no legacy unnormalized data to fall back to
+  if (options.type !== "EMAIL") {
+    return null;
+  }
+
   // If not found, try with normalized email
-  // Note: Currently all ContactChannelType values support normalization (only EMAIL exists)
   const normalizedEmail = normalizeEmail(options.value);
   // Only try normalized if it's different from the original
   if (normalizedEmail !== options.value) {

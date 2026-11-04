@@ -25,14 +25,29 @@ export async function ensureUserForEmailAllowsOtp(tenancy: Tenancy, email: strin
       value: email,
     }
   );
+  return await ensureUserForAuthContactChannelAllowsOtp(tenancy, contactChannel, (value) => new KnownErrors.UserWithEmailAlreadyExists(value, true));
+}
 
+/**
+ * Shared by email OTP and SMS OTP sign-in. Given the contact channel (if any) that is used for auth with the value
+ * that the user is trying to sign in with, returns the user to sign in, or null if a new user should be signed up.
+ *
+ * If the contact channel is verified but the user doesn't have the OTP auth method yet, it is added automatically
+ * (proving ownership of the verified channel is as good as proving it during sign-up). If the channel is not verified,
+ * we can't know whether the person signing in actually owns the account, so we refuse.
+ */
+export async function ensureUserForAuthContactChannelAllowsOtp(
+  tenancy: Tenancy,
+  contactChannel: Awaited<ReturnType<typeof getAuthContactChannelWithEmailNormalization>>,
+  createUnverifiedChannelError: (value: string) => Error,
+): Promise<UsersCrud["Admin"]["Read"] | null> {
   if (contactChannel) {
     const otpAuthMethod = contactChannel.projectUser.authMethods.find((m) => m.otpAuthMethod)?.otpAuthMethod;
 
     if (contactChannel.isVerified) {
       if (!otpAuthMethod) {
         // automatically merge the otp auth method with the existing account
-
+        const prisma = await getPrismaClientForTenancy(tenancy);
         await prisma.authMethod.create({
           data: {
             projectUserId: contactChannel.projectUser.projectUserId,
@@ -51,7 +66,7 @@ export async function ensureUserForEmailAllowsOtp(tenancy: Tenancy, email: strin
         user_id: contactChannel.projectUser.projectUserId,
       });
     } else {
-      throw new KnownErrors.UserWithEmailAlreadyExists(contactChannel.value, true);
+      throw createUnverifiedChannelError(contactChannel.value);
     }
   } else {
     if (!tenancy.config.auth.allowSignUp) {
