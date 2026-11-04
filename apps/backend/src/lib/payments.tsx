@@ -1,6 +1,7 @@
 import { CustomerType, PurchaseCreationSource, SubscriptionStatus } from "@/generated/prisma/client";
 import { bulldozerWriteOneTimePurchase, bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { getOwnedProductsForCustomer } from "@/lib/payments/customer-data";
+import { makeStripeCustomerCreateIdempotencyKey } from "@/lib/payments/stripe-customer-idempotency";
 import type { OwnedProductsRow } from "@/lib/payments/schema/types";
 import { ensureUserTeamPermissionExists } from "@/lib/request-checks";
 import { getPrismaClientForTenancy, PrismaClientTransaction } from "@/prisma-client";
@@ -265,6 +266,12 @@ export async function ensureStripeCustomerForCustomer(options: {
       customerId: options.customerId,
       customerType: stripeCustomerType,
     },
+  }, {
+    idempotencyKey: makeStripeCustomerCreateIdempotencyKey({
+      tenancyId: options.tenancyId,
+      stripeCustomerType,
+      customerId: options.customerId,
+    }),
   });
 }
 
