@@ -712,6 +712,7 @@ public actor StackClientApp {
             displayName: json["name"] as? String,
             primaryEmail: json["email"] as? String,
             primaryEmailVerified: json["email_verified"] as? Bool ?? false,
+            selectedTeamId: json["selected_team_id"] as? String,
             isAnonymous: json["is_anonymous"] as? Bool ?? false,
             isMultiFactorRequired: json["requires_totp_mfa"] as? Bool ?? false,
             isRestricted: json["is_restricted"] as? Bool ?? false,

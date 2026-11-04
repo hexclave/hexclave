@@ -80,8 +80,32 @@ public struct TokenPartialUser: Sendable {
     public let displayName: String?
     public let primaryEmail: String?
     public let primaryEmailVerified: Bool
+    /// Team id from the access token `selected_team_id` claim. Nil when the claim is absent or null.
+    public let selectedTeamId: String?
     public let isAnonymous: Bool
     public let isMultiFactorRequired: Bool
     public let isRestricted: Bool
     public let restrictedReason: User.RestrictedReason?
+
+    public init(
+        id: String,
+        displayName: String?,
+        primaryEmail: String?,
+        primaryEmailVerified: Bool,
+        selectedTeamId: String? = nil,
+        isAnonymous: Bool,
+        isMultiFactorRequired: Bool,
+        isRestricted: Bool,
+        restrictedReason: User.RestrictedReason?
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.primaryEmail = primaryEmail
+        self.primaryEmailVerified = primaryEmailVerified
+        self.selectedTeamId = selectedTeamId
+        self.isAnonymous = isAnonymous
+        self.isMultiFactorRequired = isMultiFactorRequired
+        self.isRestricted = isRestricted
+        self.restrictedReason = restrictedReason
+    }
 }
