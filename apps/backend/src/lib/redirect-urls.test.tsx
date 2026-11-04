@@ -127,6 +127,21 @@ describe('validateRedirectUrl', () => {
       });
     });
 
+    it('should normalize wildcard ports before building OAuth redirect URIs', () => {
+      withHostedHandlerEnv({}, () => {
+        const tenancy = createMockTenancy({
+          domains: {
+            allowLocalhost: false,
+            trustedDomains: {
+              '1': { baseUrl: 'https://*.example.com:*', handlerPath: '/handler' },
+            },
+          },
+        });
+
+        expect(getOAuthRedirectUrisForTenancy(tenancy)[0]).toBe('https://*.example.com/handler');
+      });
+    });
+
     it('should trust both current and legacy cloud hosted handler domains', () => {
       withHostedHandlerEnv({}, () => {
         const tenancy = createMockTenancy({
