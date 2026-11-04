@@ -295,11 +295,11 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
       async listProjectSecrets() {
         return await app._interface.listProjectSecrets();
       },
-      async setProjectSecret(key, value) {
-        await app._interface.setProjectSecret(key, value);
+      async setProjectSecret(key, value, environment) {
+        await app._interface.setProjectSecret(key, value, environment);
       },
-      async deleteProjectSecret(key) {
-        await app._interface.deleteProjectSecret(key);
+      async deleteProjectSecret(key, environment) {
+        await app._interface.deleteProjectSecret(key, environment);
       },
       async listDeployments(options) {
         return await app._interface.listDeployments(options);
