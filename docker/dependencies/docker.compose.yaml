@@ -185,13 +185,15 @@ services:
       start_period: 10s
 
   svix-server:
-    image: svix/svix-server
+    image: svix/svix-server:v1.104.0
     environment:
       WAIT_FOR: 'true'
       SVIX_REDIS_DSN: redis://:PASSWORD-PLACEHOLDER--oVn8GSD6b9@svix-redis:6379
       SVIX_DB_DSN: postgres://postgres:PASSWORD-PLACEHOLDER--KsoIMcchtp@svix-db:5432/svix
       SVIX_CACHE_TYPE: memory
-      SVIX_JWT_SECRET: secret
+      # svix-server >= 1.103 rejects HMAC JWT secrets shorter than 12 bytes. HEXCLAVE_SVIX_API_KEY in
+      # apps/backend/.env.development is a token signed with this secret, so change both together.
+      SVIX_JWT_SECRET: hexclave-local-dev-svix-jwt-secret
       SVIX_LOG_LEVEL: trace
       SVIX_QUEUE_TYPE: redis
     ports:
