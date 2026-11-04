@@ -3,7 +3,7 @@ import { demoteAllContactChannelsToNonPrimary, setContactChannelAsPrimaryById } 
 import { normalizeEmail } from "@/lib/emails";
 import { markProjectUserForExternalDbSync, recordExternalDbSyncDeletion, withExternalDbSyncUpdate } from "@/lib/external-db-sync";
 import { ensureContactChannelDoesNotExists, ensureContactChannelExists } from "@/lib/request-checks";
-import { getPrismaClientForTenancy, retryTransaction } from "@/prisma-client";
+import { getPrismaClientForTenancy, isPrismaUniqueConstraintViolation, retryTransaction } from "@/prisma-client";
 import { createCrudHandlers } from "@/route-handlers/crud-handler";
 import { KnownErrors } from "@hexclave/shared";
 import { contactChannelsCrud } from "@hexclave/shared/dist/interface/crud/contact-channels";
@@ -170,20 +170,46 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
         contactChannelId: params.contact_channel_id || throwErr("Missing contact channel id"),
       });
 
-      // if usedForAuth is set to true, make sure no other account uses this channel for auth
-      if (data.used_for_auth) {
+      const resultingType = data.type !== undefined ? crudContactChannelTypeToPrisma(data.type) : existingContactChannel.type;
+      const resultingValue = value !== undefined ? value : existingContactChannel.value;
+
+      // Avoid surfacing the database unique constraint as an internal error when a
+      // channel is changed to a value already present on this user.
+      if (value !== undefined || data.type !== undefined) {
+        const existingWithSameValue = await tx.contactChannel.findUnique({
+          where: {
+            tenancyId_projectUserId_type_value: {
+              tenancyId: auth.tenancy.id,
+              projectUserId: params.user_id,
+              type: resultingType,
+              value: resultingValue,
+            },
+          },
+        });
+        if (existingWithSameValue && existingWithSameValue.id !== existingContactChannel.id) {
+          throw new StatusError(StatusError.BadRequest, 'Contact channel already exists');
+        }
+      }
+
+      // Make sure no other account uses the resulting channel for auth. This must run not only when
+      // used_for_auth is switched on, but also when only the value (or type) of a channel that is
+      // already used for auth changes: otherwise changing your sign-in email to one another account
+      // signs in with hits the (tenancyId, type, value, usedForAuth) unique index and surfaces as a 500.
+      const willBeUsedForAuth = data.used_for_auth ?? existingContactChannel.usedForAuth === 'TRUE';
+      const changesUsedForAuthKey = value !== undefined || data.type !== undefined || data.used_for_auth === true;
+      if (willBeUsedForAuth && changesUsedForAuthKey) {
         const existingWithSameChannel = await tx.contactChannel.findUnique({
           where: {
             tenancyId_type_value_usedForAuth: {
               tenancyId: auth.tenancy.id,
-              type: data.type !== undefined ? crudContactChannelTypeToPrisma(data.type) : existingContactChannel.type,
-              value: value !== undefined ? value : existingContactChannel.value,
+              type: resultingType,
+              value: resultingValue,
               usedForAuth: 'TRUE',
             },
           },
         });
         if (existingWithSameChannel && existingWithSameChannel.id !== existingContactChannel.id) {
-          throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse(data.type ?? prismaContactChannelTypeToCrud(existingContactChannel.type));
+          throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse(prismaContactChannelTypeToCrud(resultingType), resultingValue);
         }
       }
 
@@ -195,21 +221,35 @@ export const contactChannelsCrudHandlers = createLazyProxy(() => createCrudHandl
         });
       }
 
-      const updated = await tx.contactChannel.update({
-        where: {
-          tenancyId_projectUserId_id: {
-            tenancyId: auth.tenancy.id,
-            projectUserId: params.user_id,
-            id: params.contact_channel_id || throwErr("Missing contact channel id"),
+      let updated;
+      try {
+        updated = await tx.contactChannel.update({
+          where: {
+            tenancyId_projectUserId_id: {
+              tenancyId: auth.tenancy.id,
+              projectUserId: params.user_id,
+              id: params.contact_channel_id || throwErr("Missing contact channel id"),
+            },
           },
-        },
-        data: withExternalDbSyncUpdate({
-          value: value,
-          isVerified: data.is_verified ?? (value ? false : undefined), // if value is updated and is_verified is not provided, set to false
-          usedForAuth: data.used_for_auth !== undefined ? (data.used_for_auth ? 'TRUE' : null) : undefined,
-          isPrimary: data.is_primary !== undefined ? (data.is_primary ? 'TRUE' : null) : undefined,
-        }),
-      });
+          data: withExternalDbSyncUpdate({
+            value: value,
+            isVerified: data.is_verified ?? (value ? false : undefined), // if value is updated and is_verified is not provided, set to false
+            usedForAuth: data.used_for_auth !== undefined ? (data.used_for_auth ? 'TRUE' : null) : undefined,
+            isPrimary: data.is_primary !== undefined ? (data.is_primary ? 'TRUE' : null) : undefined,
+          }),
+        });
+      } catch (e) {
+        // Two requests can race past the checks above; the unique indexes then reject the update.
+        // Map those two indexes to the same errors the checks throw. Any other unique violation (eg.
+        // the one-primary-per-type index) is unexpected here and is rethrown as an internal error.
+        if (isPrismaUniqueConstraintViolation(e, "ContactChannel", ["tenancyId", "projectUserId", "type", "value"])) {
+          throw new StatusError(StatusError.BadRequest, 'Contact channel already exists');
+        }
+        if (isPrismaUniqueConstraintViolation(e, "ContactChannel", ["tenancyId", "type", "value", "usedForAuth"])) {
+          throw new KnownErrors.ContactChannelAlreadyUsedForAuthBySomeoneElse(prismaContactChannelTypeToCrud(resultingType), resultingValue);
+        }
+        throw e;
+      }
 
       await markProjectUserForExternalDbSync(tx, {
         tenancyId: auth.tenancy.id,

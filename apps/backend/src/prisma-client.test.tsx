@@ -4,7 +4,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { Prisma, PrismaClient } from "@/generated/prisma/client";
-import { globalPrismaClient, globalPrismaConnectionString, isDatabaseUnavailableError, isRetryableTransactionError, waitForReplication, withPrimaryFallbackForReads } from "@/prisma-client";
+import { globalPrismaClient, globalPrismaConnectionString, isDatabaseUnavailableError, isPrismaUniqueConstraintViolation, isRetryableTransactionError, waitForReplication, withPrimaryFallbackForReads } from "@/prisma-client";
 
 const replicationStrategy = getEnvVariable("STACK_DATABASE_REPLICATION_WAIT_STRATEGY", "none");
 const replicaConnectionString = getEnvVariable("STACK_DATABASE_REPLICA_CONNECTION_STRING", "");
@@ -321,5 +321,73 @@ describe.skipIf(replicationStrategy !== "pg-stat-replication" || !replicaConfigu
   it("times out if the server never catches up", async () => {
     // The primary isn't a standby, so pg_last_wal_replay_lsn() is NULL and it never counts as caught up
     expect(await waitForReplication([createPool(globalPrismaConnectionString)], await getCurrentPrimaryLsn(), 100)).toBe(false);
+  });
+});
+
+describe("isPrismaUniqueConstraintViolation", () => {
+  function uniqueViolation(meta: Record<string, unknown>) {
+    return new Prisma.PrismaClientKnownRequestError("unique constraint", {
+      code: "P2002",
+      clientVersion: "test",
+      meta,
+    });
+  }
+
+  const usedForAuthFields = ["tenancyId", "type", "value", "usedForAuth"];
+  const perUserFields = ["tenancyId", "projectUserId", "type", "value"];
+
+  it("matches meta.target when Prisma reports it", () => {
+    const error = uniqueViolation({ modelName: "ContactChannel", target: usedForAuthFields });
+    expect(isPrismaUniqueConstraintViolation(error, "ContactChannel", usedForAuthFields)).toBe(true);
+    expect(isPrismaUniqueConstraintViolation(error, "ContactChannel", perUserFields)).toBe(false);
+  });
+
+  // Shape reported by the pg driver adapter in Prisma 7.10 (no meta.target, only the index name)
+  it("matches the driver adapter's index name", () => {
+    const error = uniqueViolation({
+      modelName: "ContactChannel",
+      driverAdapterError: {
+        name: "DriverAdapterError",
+        message: "UniqueConstraintViolation",
+        cause: {
+          kind: "UniqueConstraintViolation",
+          originalCode: "23505",
+          constraint: { index: "ContactChannel_tenancyId_type_value_usedForAuth_key" },
+          table: "ContactChannel",
+        },
+      },
+    });
+    expect(isPrismaUniqueConstraintViolation(error, "ContactChannel", usedForAuthFields)).toBe(true);
+    expect(isPrismaUniqueConstraintViolation(error, "ContactChannel", perUserFields)).toBe(false);
+    expect(isPrismaUniqueConstraintViolation(error, "ProjectUser", usedForAuthFields)).toBe(false);
+  });
+
+  // Shape reported by the pg driver adapter in Prisma 7.1 (a JSON string of quoted column names)
+  it("matches the driver adapter's quoted field list", () => {
+    const error = uniqueViolation({
+      modelName: "ContactChannel",
+      driverAdapterError: {
+        name: "DriverAdapterError",
+        message: "UniqueConstraintViolation",
+        cause: {
+          kind: "UniqueConstraintViolation",
+          originalCode: "23505",
+          constraint: { fields: JSON.stringify(['"tenancyId"', "type", "value", '"usedForAuth"']) },
+        },
+      },
+    });
+    expect(isPrismaUniqueConstraintViolation(error, "ContactChannel", usedForAuthFields)).toBe(true);
+    expect(isPrismaUniqueConstraintViolation(error, "ContactChannel", perUserFields)).toBe(false);
+  });
+
+  it("does not match other errors", () => {
+    const notUnique = new Prisma.PrismaClientKnownRequestError("record not found", {
+      code: "P2025",
+      clientVersion: "test",
+      meta: { modelName: "ContactChannel", target: usedForAuthFields },
+    });
+    expect(isPrismaUniqueConstraintViolation(notUnique, "ContactChannel", usedForAuthFields)).toBe(false);
+    expect(isPrismaUniqueConstraintViolation(uniqueViolation({ modelName: "ContactChannel" }), "ContactChannel", usedForAuthFields)).toBe(false);
+    expect(isPrismaUniqueConstraintViolation(new Error("unique constraint"), "ContactChannel", usedForAuthFields)).toBe(false);
   });
 });
