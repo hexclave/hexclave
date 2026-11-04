@@ -1,7 +1,7 @@
 import { KnownErrors } from '@hexclave/shared';
 import { generateUuid } from '@hexclave/shared/dist/utils/uuids';
 import { describe, expect, it } from 'vitest';
-import { validatePurchaseSession } from './payments';
+import { isSubscriptionCancelable, isSubscriptionInEffect, subscriptionDisplayRank, validatePurchaseSession } from './payments';
 import { bulldozerWriteOneTimePurchase, bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { globalPrismaClient } from "@/prisma-client";
 
@@ -232,6 +232,76 @@ describe.sequential('validatePurchaseSession - purchase guards (real DB)', () =>
       makeProduct({ prices: { p1: { USD: '10' } } }),
       { priceId: 'nonexistent' },
     )).rejects.toThrowError('Price not found');
+  });
+
+  it('treats a canceled-at-period-end sub in the same line as a replaceable conflict, not an OTP', async () => {
+    const lineId = `line-winddown-${testId}`;
+    const subId = generateUuid();
+    const now = new Date();
+    const periodEnd = new Date(now.getTime() + 86400000);
+    const product = makeProduct({ productLineId: lineId });
+    await prisma.subscription.create({
+      data: {
+        id: subId, tenancyId, customerId, customerType: 'CUSTOM',
+        productId: `prod-winddown-${testId}`, priceId: null, product: product as any, quantity: 1,
+        stripeSubscriptionId: null, status: 'canceled',
+        currentPeriodStart: now, currentPeriodEnd: periodEnd,
+        cancelAtPeriodEnd: true, canceledAt: now, endedAt: periodEnd,
+        creationSource: 'TEST_MODE',
+      },
+    });
+    await bulldozerWriteSubscription({
+      id: subId, tenancyId, customerId, customerType: 'CUSTOM',
+      productId: `prod-winddown-${testId}`, priceId: null, product: product as any, quantity: 1,
+      stripeSubscriptionId: null, status: 'canceled',
+      currentPeriodStart: now, currentPeriodEnd: periodEnd,
+      cancelAtPeriodEnd: true, canceledAt: now, endedAt: periodEnd, refundedAt: null, productRevokedAt: null,
+      creationSource: 'TEST_MODE', createdAt: now,
+    });
+    const res = await callValidate(product, { productId: `prod-after-winddown-${testId}` });
+    expect(res.conflictingSubscriptions.map(s => s.id)).toContain(subId);
+  });
+});
+
+describe('isSubscriptionInEffect', () => {
+  const nowMillis = 1_800_000_000_000;
+
+  it('treats endedAt=null as in effect regardless of status', () => {
+    expect(isSubscriptionInEffect({ endedAtMillis: null }, nowMillis)).toBe(true);
+    expect(isSubscriptionInEffect({ endedAt: null }, nowMillis)).toBe(true);
+  });
+
+  it('is in effect strictly before endedAt, not at or after it', () => {
+    expect(isSubscriptionInEffect({ endedAtMillis: nowMillis + 1 }, nowMillis)).toBe(true);
+    expect(isSubscriptionInEffect({ endedAtMillis: nowMillis }, nowMillis)).toBe(false);
+    expect(isSubscriptionInEffect({ endedAtMillis: nowMillis - 1 }, nowMillis)).toBe(false);
+  });
+
+  it('accepts the Prisma Date shape', () => {
+    expect(isSubscriptionInEffect({ endedAt: new Date(nowMillis + 1) }, nowMillis)).toBe(true);
+    expect(isSubscriptionInEffect({ endedAt: new Date(nowMillis) }, nowMillis)).toBe(false);
+  });
+});
+
+describe('isSubscriptionCancelable', () => {
+  it('is true only for active/trialing subs not already winding down', () => {
+    expect(isSubscriptionCancelable({ status: 'active', cancelAtPeriodEnd: false })).toBe(true);
+    expect(isSubscriptionCancelable({ status: 'trialing', cancelAtPeriodEnd: false })).toBe(true);
+    expect(isSubscriptionCancelable({ status: 'active', cancelAtPeriodEnd: true })).toBe(false);
+    expect(isSubscriptionCancelable({ status: 'canceled', cancelAtPeriodEnd: true })).toBe(false);
+    expect(isSubscriptionCancelable({ status: 'past_due', cancelAtPeriodEnd: false })).toBe(false);
+  });
+});
+
+describe('subscriptionDisplayRank', () => {
+  it('ranks cancelable above pending-cancel Stripe subs above wound-down subs', () => {
+    const cancelable = { status: 'active', cancelAtPeriodEnd: false };
+    // Pending-cancel Stripe subs stay `active` — the tier an active-only
+    // preference gets wrong
+    const stripePendingCancel = { status: 'active', cancelAtPeriodEnd: true };
+    const localWindingDown = { status: 'canceled', cancelAtPeriodEnd: true };
+    expect(subscriptionDisplayRank(cancelable)).toBeGreaterThan(subscriptionDisplayRank(stripePendingCancel));
+    expect(subscriptionDisplayRank(stripePendingCancel)).toBeGreaterThan(subscriptionDisplayRank(localWindingDown));
   });
 });
 

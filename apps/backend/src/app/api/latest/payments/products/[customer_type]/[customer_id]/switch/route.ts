@@ -1,4 +1,4 @@
-import { assertFreeTrialAllowedForPurchase, ensureClientCanAccessCustomer, ensureCustomerExists, getDefaultCardPaymentMethodSummary, getEffectiveFreeTrial, getStripeCustomerForCustomerOrNull, getStripeTrialPeriodDays, grantProductToCustomer, isActiveSubscription, isAddOnProduct } from "@/lib/payments";
+import { assertFreeTrialAllowedForPurchase, ensureClientCanAccessCustomer, ensureCustomerExists, getDefaultCardPaymentMethodSummary, getEffectiveFreeTrial, getStripeCustomerForCustomerOrNull, getStripeTrialPeriodDays, grantProductToCustomer, isAddOnProduct, isSubscriptionInEffect, isSubscriptionSwitchable } from "@/lib/payments";
 import { bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { getOwnedProductsForCustomer, getSubscriptionMapForCustomer } from "@/lib/payments/customer-data";
 import { getApplicationFeePercentOrUndefined } from "@/lib/payments/platform-fees";
@@ -106,6 +106,10 @@ export const POST = createSmartRouteHandler({
       customerId: params.customer_id,
     });
 
+    // Shared by every wind-down-aware check below (OTP guard, `existingSub`
+    // lookup, competing-sub guard) so they classify subs against one instant.
+    const nowMillis = Date.now();
+
     // Block switching if a non-subscription (OTP) product exists in the same product line,
     // since OTPs can't be replaced. Subscription ownership is fine — that's what we're switching.
     if (fromProduct.productLineId) {
@@ -116,15 +120,16 @@ export const POST = createSmartRouteHandler({
         customerId: params.customer_id,
       });
       // ownedProducts keys use '__null__' for inline products (null productId),
-      // so we normalize subscription productIds to match.
-      const activeSubProductIds = new Set(
-        Object.values(subMap).filter(s => isActiveSubscription(s)).map(s => s.productId ?? "__null__")
+      // so we normalize subscription productIds to match. In-effect (not
+      // active): a canceled-at-period-end sub is still sub-backed, not an OTP.
+      const subBackedProductIds = new Set(
+        Object.values(subMap).filter(s => isSubscriptionInEffect(s, nowMillis)).map(s => s.productId ?? "__null__")
       );
       const hasOtpInProductLine = Object.entries(ownedProducts).some(
         ([productId, p]) => productId !== body.from_product_id
           && p.productLineId === fromProduct.productLineId
           && p.quantity > 0
-          && !activeSubProductIds.has(productId)
+          && !subBackedProductIds.has(productId)
       );
       if (hasOtpInProductLine) {
         throw new StatusError(400, "Customer already has a one-time purchase in this product line");
@@ -134,8 +139,12 @@ export const POST = createSmartRouteHandler({
     // Find the active subscription to switch from. Customers on a free plan (no prices, or
     // auto-migrated from the legacy `include-by-default` sentinel) won't have a subscription
     // row — in that case we fall through to the "create a new Stripe subscription" branch.
+    // Switchable, not merely active: a local (test-mode) cancel writes
+    // `status: canceled` with a future `endedAt`, so the customer still holds
+    // the product — GET lists it — and must be able to switch off it. Stripe's
+    // equivalent (pending cancel) stays `active` and always could.
     const existingSub = Object.values(subMap).find(
-      s => s.productId === body.from_product_id && isActiveSubscription(s)
+      s => s.productId === body.from_product_id && isSubscriptionSwitchable(s, nowMillis)
     ) ?? null;
     // A price counts as "free" only if EVERY supported currency is either absent or zero.
     // Checking USD alone would misclassify a price that's only set in another supported
@@ -163,7 +172,10 @@ export const POST = createSmartRouteHandler({
     if (!existingSub && fromIsFreePlan) {
       const competingSub = Object.values(subMap).find(
         s => s.productId !== body.from_product_id
-          && isActiveSubscription(s)
+          // In-effect, not active: a canceled sub that still entitles (pending
+          // cancel, or a local test-mode cancel written as `canceled` with a
+          // future `endedAt`) would otherwise coexist with the new paid sub.
+          && isSubscriptionInEffect(s, nowMillis)
           && s.productId != null
           && getOrUndefined(products, s.productId)?.productLineId === fromProduct.productLineId
       );
@@ -272,6 +284,10 @@ export const POST = createSmartRouteHandler({
         payment_behavior: "error_if_incomplete",
         payment_settings: { save_default_payment_method: "on_subscription" },
         default_payment_method: resolvedPaymentMethodId,
+        // Paying to switch is "keep me subscribed" — Stripe persists a
+        // pending cancel across item updates unless reset, and the new plan
+        // would otherwise still die at the period boundary.
+        cancel_at_period_end: false,
         items: [{
           id: existingItem.id,
           price_data: {
@@ -315,6 +331,10 @@ export const POST = createSmartRouteHandler({
           currentPeriodStart: sanitizedUpdateDates.start,
           currentPeriodEnd: sanitizedUpdateDates.end,
           cancelAtPeriodEnd: updatedSubscription.cancel_at_period_end,
+          // Clear the eagerly-written wind-down marks; the webhook sync
+          // reconciles these anyway, this just covers the pre-webhook window
+          canceledAt: null,
+          endedAt: null,
         },
       });
       // dual write - prisma and bulldozer

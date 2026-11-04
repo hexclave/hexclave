@@ -354,12 +354,18 @@ function RealPaymentsPanel(props: { title?: string, customer: CustomerLike, cust
               const isCancelable = isSubscription && !!product.subscription?.isCancelable;
               const canSwitchPlans = isSubscription && defaultPaymentMethod && !!product.id && (product.switchOptions?.length ?? 0) > 0;
               const renewsAt = isSubscription ? (product.subscription?.currentPeriodEnd ?? null) : null;
+              const endsAtPeriodEnd = isSubscription && !!product.subscription?.cancelAtPeriodEnd;
+              const formattedPeriodEnd = renewsAt
+                ? new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" }).format(renewsAt)
+                : null;
               const subtitle =
                 product.type === "one_time"
                   ? t("One-time purchase")
-                  : renewsAt
-                    ? `${t("Renews on")} ${new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" }).format(renewsAt)}`
-                    : t("Subscription");
+                  : endsAtPeriodEnd
+                    ? (formattedPeriodEnd ? `${t("Ends on")} ${formattedPeriodEnd}` : t("Ends at the end of the billing period"))
+                    : formattedPeriodEnd
+                      ? `${t("Renews on")} ${formattedPeriodEnd}`
+                      : t("Subscription");
 
               return (
                 <div key={product.id ?? `${product.displayName}-${index}`} className="flex items-start justify-between gap-4">

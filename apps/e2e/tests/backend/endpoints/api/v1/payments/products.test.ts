@@ -1,3 +1,4 @@
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { generateUuid } from "@hexclave/shared/dist/utils/uuids";
 import { it } from "../../../../../helpers";
@@ -221,8 +222,13 @@ it("should allow a signed-in user to cancel their own subscription product", asy
               "stackable": false,
             },
             "quantity": 1,
-            "subscription": null,
-            "type": "one_time",
+            "subscription": {
+              "cancel_at_period_end": true,
+              "current_period_end": <stripped field 'current_period_end'>,
+              "is_cancelable": false,
+              "subscription_id": "<stripped UUID>",
+            },
+            "type": "subscription",
           },
         ],
         "pagination": { "next_cursor": null },
@@ -230,6 +236,187 @@ it("should allow a signed-in user to cancel their own subscription product", asy
       "headers": Headers { <some fields may have been hidden> },
     }
   `);
+});
+
+it("should report a canceled-at-period-end subscription as still in effect, and reject a second cancel", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Payments.setup();
+  await configureProduct({
+    products: {
+      "pro-plan": {
+        displayName: "Pro Plan",
+        customerType: "user",
+        serverOnly: false,
+        stackable: false,
+        prices: {
+          monthly: {
+            USD: "1000",
+            interval: [1, "month"],
+          },
+        },
+        includedItems: {},
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+  await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    method: "POST",
+    accessType: "server",
+    body: {
+      product_id: "pro-plan",
+    },
+  });
+
+  const cancelResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}/pro-plan`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(cancelResponse.status).toBe(200);
+
+  // Must not masquerade as a one-time purchase during the paid-through window
+  const listResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    accessType: "client",
+  });
+  expect(listResponse.status).toBe(200);
+  const item = (listResponse.body as { items: Array<{ id: string, type: string, subscription: { cancel_at_period_end: boolean, is_cancelable: boolean } | null }> }).items.find((i) => i.id === "pro-plan");
+  expect(item?.type).toBe("subscription");
+  expect(item?.subscription?.cancel_at_period_end).toBe(true);
+  expect(item?.subscription?.is_cancelable).toBe(false);
+
+  const secondCancelResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}/pro-plan`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(secondCancelResponse).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "This subscription is already canceled and ends at the end of the current billing period.",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("should keep the active sub's cancel button when one quantity of a stackable product is canceled", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Payments.setup();
+  await configureProduct({
+    products: {
+      "seats-plan": {
+        displayName: "Seats Plan",
+        customerType: "user",
+        serverOnly: false,
+        stackable: true,
+        prices: {
+          monthly: {
+            USD: "1000",
+            interval: [1, "month"],
+          },
+        },
+        includedItems: {},
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+  const firstGrant = await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    method: "POST",
+    accessType: "server",
+    body: { product_id: "seats-plan" },
+  });
+  await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    method: "POST",
+    accessType: "server",
+    body: { product_id: "seats-plan" },
+  });
+
+  // Cancel only the first quantity by subscription id — the second sub stays active
+  const firstSubscriptionId = (firstGrant.body as { subscription_id: string }).subscription_id;
+  const cancelResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}/seats-plan?subscription_id=${encodeURIComponent(firstSubscriptionId)}`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(cancelResponse.status).toBe(200);
+
+  // The winding-down sub must not shadow the active one: the product stays cancelable
+  const listResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    accessType: "client",
+  });
+  const item = (listResponse.body as { items: Array<{ id: string, type: string, quantity: number, subscription: { subscription_id: string, cancel_at_period_end: boolean, is_cancelable: boolean } | null }> }).items.find((i) => i.id === "seats-plan");
+  expect(item?.type).toBe("subscription");
+  expect(item?.subscription?.cancel_at_period_end).toBe(false);
+  expect(item?.subscription?.is_cancelable).toBe(true);
+  expect(item?.subscription?.subscription_id).not.toBe(firstSubscriptionId);
+
+  // Double-canceling the already-canceled quantity returns the dedicated error
+  const secondCancelResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}/seats-plan?subscription_id=${encodeURIComponent(firstSubscriptionId)}`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(secondCancelResponse).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "This subscription is already canceled and ends at the end of the current billing period.",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
+it("should allow granting another plan in the same product line while the old one winds down", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Payments.setup();
+  await configureProduct({
+    productLines: {
+      plans: { displayName: "Plans", customerType: "user" },
+    },
+    products: {
+      "plan-a": {
+        displayName: "Plan A",
+        customerType: "user",
+        productLineId: "plans",
+        serverOnly: false,
+        stackable: false,
+        prices: { monthly: { USD: "1000", interval: [1, "month"] } },
+        includedItems: {},
+      },
+      "plan-b": {
+        displayName: "Plan B",
+        customerType: "user",
+        productLineId: "plans",
+        serverOnly: false,
+        stackable: false,
+        prices: { monthly: { USD: "2000", interval: [1, "month"] } },
+        includedItems: {},
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+  await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    method: "POST",
+    accessType: "server",
+    body: { product_id: "plan-a" },
+  });
+  const cancelResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}/plan-a`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(cancelResponse.status).toBe(200);
+
+  // The winding-down plan-a sub must count as a replaceable conflict, not as
+  // a one-time purchase blocking the line
+  const grantBResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    method: "POST",
+    accessType: "server",
+    body: { product_id: "plan-b" },
+  });
+  expect(grantBResponse.status).toBe(200);
+
+  const listResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+    accessType: "client",
+  });
+  const items = (listResponse.body as { items: Array<{ id: string, type: string }> }).items;
+  expect(items.find((i) => i.id === "plan-b")?.type).toBe("subscription");
 });
 
 it("should reject a client canceling someone else's subscription product", async ({ expect }) => {
@@ -401,8 +588,13 @@ it("should cancel all stackable subscription quantities", async ({ expect }) => 
               "stackable": true,
             },
             "quantity": 2,
-            "subscription": null,
-            "type": "one_time",
+            "subscription": {
+              "cancel_at_period_end": true,
+              "current_period_end": <stripped field 'current_period_end'>,
+              "is_cancelable": false,
+              "subscription_id": "<stripped UUID>",
+            },
+            "type": "subscription",
           },
         ],
         "pagination": { "next_cursor": null },
@@ -1018,8 +1210,13 @@ it("should allow canceling an inline product subscription via subscription_id", 
               "stackable": false,
             },
             "quantity": 1,
-            "subscription": null,
-            "type": "one_time",
+            "subscription": {
+              "cancel_at_period_end": true,
+              "current_period_end": <stripped field 'current_period_end'>,
+              "is_cancelable": false,
+              "subscription_id": "<stripped UUID>",
+            },
+            "type": "subscription",
           },
         ],
         "pagination": { "next_cursor": null },
@@ -1648,3 +1845,131 @@ it("should cancel existing subscriptions immediately when granting a product of 
     }
   `);
 });
+
+it("refreshes the local billing period from Stripe's response when canceling at period end", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await Payments.setup();
+
+  const product = {
+    displayName: "Pro Plan",
+    customerType: "user",
+    serverOnly: false,
+    stackable: false,
+    prices: {
+      monthly: {
+        USD: "1000",
+        interval: [1, "month"],
+      },
+    },
+    includedItems: {},
+  };
+  await configureProduct({
+    testMode: false,
+    products: { "pro-plan": product },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+
+  const accountInfo = await niceBackendFetch("/api/latest/internal/payments/stripe/account-info", {
+    accessType: "admin",
+  });
+  expect(accountInfo.status).toBe(200);
+  const accountId: string = accountInfo.body.account_id;
+
+  const createUrl = await niceBackendFetch("/api/latest/payments/purchases/create-purchase-url", {
+    method: "POST",
+    accessType: "client",
+    body: { customer_type: "user", customer_id: userId, product_id: "pro-plan" },
+  });
+  expect(createUrl.status).toBe(200);
+  const fullCode = (createUrl.body as { url: string }).url.match(/\/purchase\/([a-z0-9-_]+)/)?.[1];
+  expect(fullCode).toBeDefined();
+  const tenancyId = (fullCode as string).split("_")[0];
+
+  // Seed the local row with a period that ends in an hour. stripe-mock reports a
+  // different period on the cancel response, which stands in for a local row
+  // that drifted from Stripe (e.g. a renewal we never synced).
+  const nowSec = Math.floor(Date.now() / 1000);
+  const idSuffix = generateUuid().replace(/-/g, "");
+  const stripeSubscription = {
+    id: `sub_cancel_period_${idSuffix}`,
+    status: "active",
+    items: {
+      data: [{
+        quantity: 1,
+        current_period_start: nowSec - 60,
+        current_period_end: nowSec + 60 * 60,
+      }],
+    },
+    metadata: {
+      productId: "pro-plan",
+      product: JSON.stringify(product),
+      priceId: "monthly",
+    },
+    cancel_at_period_end: false,
+  };
+
+  const startWebhook = await Payments.sendStripeWebhook({
+    id: `evt_cancel_period_${idSuffix}`,
+    type: "invoice.payment_succeeded",
+    account: accountId,
+    data: {
+      object: {
+        id: `in_cancel_period_${idSuffix}`,
+        customer: `cus_cancel_period_${idSuffix}`,
+        billing_reason: "subscription_create",
+        stack_stripe_mock_data: {
+          "accounts.retrieve": { metadata: { tenancyId } },
+          "customers.retrieve": { metadata: { customerId: userId, customerType: "USER" } },
+          "subscriptions.list": { data: [stripeSubscription] },
+        },
+        lines: {
+          data: [{
+            parent: { subscription_item_details: { subscription: stripeSubscription.id } },
+          }],
+        },
+      },
+    },
+  });
+  expect(startWebhook.status).toBe(200);
+
+  const readSubscription = async () => {
+    for (let i = 0; i < 30; i++) {
+      const res = await niceBackendFetch(`/api/v1/payments/products/user/${userId}`, {
+        accessType: "client",
+      });
+      expect(res.status).toBe(200);
+      const items = (res.body as {
+        items: Array<{
+          id: string,
+          subscription: { cancel_at_period_end: boolean, current_period_end: string | null } | null,
+        }>,
+      }).items;
+      const sub = items.find((i) => i.id === "pro-plan")?.subscription;
+      if (sub) {
+        return sub;
+      }
+      await wait(500);
+    }
+    throw new Error("Subscription for pro-plan never became visible");
+  };
+
+  const beforeCancel = await readSubscription();
+  const staleEndMillis = new Date(beforeCancel.current_period_end ?? throwErr("no period end")).getTime();
+  expect(staleEndMillis).toBeLessThan(Date.now() + 2 * 60 * 60 * 1000);
+
+  const cancelResponse = await niceBackendFetch(`/api/v1/payments/products/user/${userId}/pro-plan`, {
+    method: "DELETE",
+    accessType: "client",
+  });
+  expect(cancelResponse.status).toBe(200);
+
+  // The sub must still be in effect, and "Ends on" (current_period_end) must
+  // track the boundary Stripe reported rather than the stale local period —
+  // otherwise entitlements and the displayed end date disagree.
+  const afterCancel = await readSubscription();
+  expect(afterCancel.cancel_at_period_end).toBe(true);
+  const refreshedEndMillis = new Date(afterCancel.current_period_end ?? throwErr("no period end")).getTime();
+  expect(refreshedEndMillis).toBeGreaterThan(staleEndMillis);
+  expect(refreshedEndMillis).toBeGreaterThan(Date.now() + 20 * 24 * 60 * 60 * 1000);
+}, { timeout: 60_000 });

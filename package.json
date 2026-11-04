@@ -45,6 +45,7 @@
     "db:migrate": "pnpm pre && pnpm run --filter=@hexclave/backend db:migrate",
     "db:backfill-bulldozer-from-prisma": "pnpm pre && pnpm run --filter=@hexclave/backend db:backfill-bulldozer-from-prisma",
     "db:backfill-internal-free-plans": "pnpm pre && pnpm run --filter=@hexclave/backend db:backfill-internal-free-plans",
+    "db:reconcile-terminal-subscriptions-to-bulldozer": "pnpm pre && pnpm run --filter=@hexclave/backend db:reconcile-terminal-subscriptions-to-bulldozer",
     "db:regen-internal-subscriptions-to-latest": "pnpm pre && pnpm run --filter=@hexclave/backend db:regen-internal-subscriptions-to-latest",
     "gc:piledriver": "pnpm -C apps/bulldozer-js gc:piledriver",
     "dev:full": "pnpm pre && concurrently -k \"pnpm run build-packages:watch\" \"pnpm run generate-sdks:watch\" \"pnpm run generate-setup-prompt-docs:watch\" \"turbo run dev --concurrency 99999\"",
