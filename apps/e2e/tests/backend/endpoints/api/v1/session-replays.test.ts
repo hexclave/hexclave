@@ -1485,6 +1485,100 @@ it("admin list session replays filters by click_count_min", async ({ expect }) =
   expect(resAll.body?.items?.length).toBeGreaterThanOrEqual(2);
 });
 
+it("admin list session replays filters by country_codes", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Project.updateConfig({ apps: { installed: { analytics: { enabled: true } } } });
+
+  const now = Date.now();
+
+  // Replay A: session seen from Germany — the $token-refresh event logged at
+  // sign-up carries the ip info set on backendContext
+  backendContext.set({ ipData: { country: "DE", ipAddress: "127.0.0.1", city: "Berlin", region: "BE", latitude: 52.52, longitude: 13.405, tzIdentifier: "Europe/Berlin" } });
+  await Auth.fastSignUp();
+  const uploadA = await uploadBatch({
+    browserSessionId: randomUUID(),
+    batchId: randomUUID(),
+    startedAtMs: now,
+    sentAtMs: now + 500,
+    events: [{ type: 1, timestamp: now + 100 }],
+  });
+  expect(uploadA.status).toBe(200);
+  const replayIdA = uploadA.body?.session_replay_id;
+
+  // Replay B: session seen from France
+  await bumpEmailAddress();
+  backendContext.set({ ipData: { country: "FR", ipAddress: "127.0.0.1", city: "Paris", region: "IDF", latitude: 48.8566, longitude: 2.3522, tzIdentifier: "Europe/Paris" } });
+  await Auth.fastSignUp();
+  const uploadB = await uploadBatch({
+    browserSessionId: randomUUID(),
+    batchId: randomUUID(),
+    startedAtMs: now,
+    sentAtMs: now + 600,
+    events: [{ type: 1, timestamp: now + 200 }],
+  });
+  expect(uploadB.status).toBe(200);
+  const replayIdB = uploadB.body?.session_replay_id;
+
+  // Reset so the geo headers don't leak into anything else in this context
+  backendContext.set({ ipData: undefined });
+
+  // Wait for ClickHouse to ingest the $token-refresh events
+  const resDe = await listReplaysWithRetry(
+    { country_codes: "DE" },
+    (res) => res.status === 200 && res.body?.items?.length === 1 && res.body?.items?.[0]?.id === replayIdA,
+  );
+  expect(resDe.status).toBe(200);
+  expect(resDe.body?.items?.length).toBe(1);
+  expect(resDe.body?.items?.[0]?.id).toBe(replayIdA);
+
+  // Country codes are case-insensitive
+  const resDeLower = await listReplaysWithRetry(
+    { country_codes: "de" },
+    (res) => res.status === 200 && res.body?.items?.length === 1 && res.body?.items?.[0]?.id === replayIdA,
+  );
+  expect(resDeLower.status).toBe(200);
+  expect(resDeLower.body?.items?.[0]?.id).toBe(replayIdA);
+
+  // Multiple codes match either replay
+  const resBoth = await listReplaysWithRetry(
+    { country_codes: "DE,FR" },
+    (res) => res.status === 200 && res.body?.items?.length === 2,
+  );
+  expect(resBoth.status).toBe(200);
+  const bothIds = asObjects(resBoth.body?.items).map((i) => i.id);
+  expect(bothIds).toContain(replayIdA);
+  expect(bothIds).toContain(replayIdB);
+
+  // A country neither session was seen from → empty page
+  const resNone = await listReplays({ country_codes: "AQ" });
+  expect(resNone.status).toBe(200);
+  expect(resNone.body?.items).toEqual([]);
+  expect(resNone.body?.pagination?.next_cursor).toBeNull();
+});
+
+it("admin list session replays rejects invalid country_codes", async ({ expect }) => {
+  await Project.createAndSwitch({ config: { magic_link_enabled: true } });
+  await Auth.fastSignUp();
+
+  const resThreeLetters = await listReplays({ country_codes: "DEU" });
+  expect(resThreeLetters).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "country_codes must contain valid ISO 3166-1 alpha-2 country codes",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+
+  const resOneLetter = await listReplays({ country_codes: "D" });
+  expect(resOneLetter).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": "country_codes must contain valid ISO 3166-1 alpha-2 country codes",
+      "headers": Headers { <some fields may have been hidden> },
+    }
+  `);
+});
+
 it("admin list session replays rejects invalid UUID values in user_ids and team_ids", async ({ expect }) => {
   await Project.createAndSwitch({ config: { magic_link_enabled: true } });
   await Auth.fastSignUp();

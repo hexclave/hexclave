@@ -35,6 +35,7 @@ export type ListSessionReplaysOptions = {
   lastEventAtFromMillis?: number,
   lastEventAtToMillis?: number,
   clickCountMin?: number,
+  countryCodes?: string[],
 };
 
 export type ListSessionReplaysResult = {

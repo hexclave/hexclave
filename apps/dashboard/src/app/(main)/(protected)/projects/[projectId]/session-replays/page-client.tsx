@@ -3,6 +3,8 @@
 import { TeamSearchTable } from "@/components/data-table/team-search-table";
 import { UserPickerTable } from "@/components/data-table/user-picker-table";
 import { StyledLink } from "@/components/link";
+import { CountryCodeInput } from "@/components/country-code-select";
+import { CountryFlag, regionName } from "@/components/geo-referrer";
 import { Alert, Button, Dialog, DialogContent, DialogHeader, DialogTitle, Skeleton, Switch, Typography } from "@/components/ui";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFromNow } from "@/hooks/use-from-now";
@@ -107,6 +109,7 @@ type AdminAppWithSessionReplays = ReturnType<typeof useAdminApp> & {
     lastEventAtFromMillis?: number,
     lastEventAtToMillis?: number,
     clickCountMin?: number,
+    countryCodes?: string[],
   }) => Promise<{
     items: RecordingRow[],
     nextCursor: string | null,
@@ -127,6 +130,7 @@ type ReplayFilters = {
   durationMaxSeconds: string,
   lastActivePreset: "" | "24h" | "7d" | "30d",
   clickCountMin: string,
+  countryCode: string,
 };
 
 const EMPTY_FILTERS: ReplayFilters = {
@@ -138,6 +142,7 @@ const EMPTY_FILTERS: ReplayFilters = {
   durationMaxSeconds: "",
   lastActivePreset: "",
   clickCountMin: "",
+  countryCode: "",
 };
 
 function coerceRrwebEvents(raw: unknown[]): RrwebEventWithTime[] {
@@ -171,6 +176,7 @@ function filtersActiveCount(filters: ReplayFilters): number {
   if (filters.durationMinSeconds || filters.durationMaxSeconds) count += 1;
   if (filters.lastActivePreset) count += 1;
   if (filters.clickCountMin) count += 1;
+  if (filters.countryCode) count += 1;
   return count;
 }
 
@@ -530,7 +536,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
-  const [activeFilterDialog, setActiveFilterDialog] = useState<null | "user" | "team" | "duration" | "lastActive" | "clicks">(null);
+  const [activeFilterDialog, setActiveFilterDialog] = useState<null | "user" | "team" | "duration" | "lastActive" | "clicks" | "location">(null);
   const [appliedFilters, setAppliedFilters] = useState<ReplayFilters>(baseFilters);
   const [draftFilters, setDraftFilters] = useState<ReplayFilters>(baseFilters);
 
@@ -602,6 +608,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
         durationMsMax: appliedFilters.durationMaxSeconds ? Number(appliedFilters.durationMaxSeconds) * 1000 : undefined,
         lastEventAtFromMillis: lastActiveFromMillis,
         clickCountMin: appliedFilters.clickCountMin ? Number(appliedFilters.clickCountMin) : undefined,
+        countryCodes: appliedFilters.countryCode ? [appliedFilters.countryCode] : undefined,
       });
       setRecordings((prev) => {
         const items = cursor ? [...prev, ...res.items] : res.items;
@@ -1498,7 +1505,7 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
     return isEmbedded && appliedFilters.userId === lockedUserId ? Math.max(0, count - 1) : count;
   }, [appliedFilters, isEmbedded, lockedUserId]);
 
-  const openFilterDialog = useCallback((dialog: "user" | "team" | "duration" | "lastActive" | "clicks") => {
+  const openFilterDialog = useCallback((dialog: "user" | "team" | "duration" | "lastActive" | "clicks" | "location") => {
     setDraftFilters(appliedFilters);
     setActiveFilterDialog(dialog);
   }, [appliedFilters]);
@@ -1587,6 +1594,9 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                             <DropdownMenuItem onClick={() => { requestAnimationFrame(() => openFilterDialog("clicks")); }}>
                               Click count
                             </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => { requestAnimationFrame(() => openFilterDialog("location")); }}>
+                              Location
+                            </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
@@ -1616,6 +1626,11 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                           {appliedFilters.clickCountMin && (
                             <span className="inline-flex items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-[10px]">
                               clicks
+                            </span>
+                          )}
+                          {appliedFilters.countryCode && (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-[10px]">
+                              location: <CountryFlag code={appliedFilters.countryCode} /> {regionName(appliedFilters.countryCode)}
                             </span>
                           )}
                           <button
@@ -1809,6 +1824,45 @@ export default function PageClient({ initialReplayId, lockedUserId }: PageClient
                           <div className="pt-3 flex items-center justify-end gap-2">
                             <Button type="button" variant="ghost" size="sm" className="h-8" onClick={() => setActiveFilterDialog(null)}>Cancel</Button>
                             <Button type="submit" size="sm" className="h-8">Apply</Button>
+                          </div>
+                        </form>
+                      </DialogContent>
+                    </Dialog>
+
+                    <Dialog open={activeFilterDialog === "location"} onOpenChange={(open) => setActiveFilterDialog(open ? "location" : null)}>
+                      <DialogContent className="max-w-md">
+                        <DialogHeader>
+                          <DialogTitle>Location Filter</DialogTitle>
+                        </DialogHeader>
+                        <form onSubmit={(e) => {
+                    e.preventDefault();
+                    applyDraftFilters();
+                        }}>
+                          <div className="space-y-3 pt-2">
+                            <CountryCodeInput
+                              value={draftFilters.countryCode || null}
+                              onChange={(v) => setDraftFilters((prev) => ({ ...prev, countryCode: v ?? "" }))}
+                              placeholder="e.g. US"
+                            />
+                            <Typography className="text-xs text-muted-foreground">
+                              ISO 3166-1 alpha-2 country code, based on the IP address seen during the session.
+                            </Typography>
+                          </div>
+                          <div className="pt-3 flex items-center justify-end gap-2">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 mr-auto"
+                              onClick={() => {
+                          setAppliedFilters((prev) => ({ ...prev, countryCode: "" }));
+                          setActiveFilterDialog(null);
+                              }}
+                            >
+                              Clear
+                            </Button>
+                            <Button type="button" variant="ghost" size="sm" className="h-8" onClick={() => setActiveFilterDialog(null)}>Cancel</Button>
+                            <Button type="submit" size="sm" className="h-8" disabled={draftFilters.countryCode.length === 1}>Apply</Button>
                           </div>
                         </form>
                       </DialogContent>

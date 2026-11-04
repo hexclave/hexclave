@@ -1190,6 +1190,7 @@ export class HexclaveServerInterface extends HexclaveClientInterface {
     if (typeof params?.last_event_at_from_millis === "number") qs.set("last_event_at_from_millis", String(params.last_event_at_from_millis));
     if (typeof params?.last_event_at_to_millis === "number") qs.set("last_event_at_to_millis", String(params.last_event_at_to_millis));
     if (typeof params?.click_count_min === "number") qs.set("click_count_min", String(params.click_count_min));
+    if (typeof params?.country_codes === "string" && params.country_codes !== "") qs.set("country_codes", params.country_codes);
     const response = await this.sendServerRequest(
       `/session-replays${qs.size ? `?${qs.toString()}` : ""}`,
       { method: "GET" },
