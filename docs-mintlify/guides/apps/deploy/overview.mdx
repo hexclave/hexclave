@@ -1,0 +1,118 @@
+---
+title: "Deploy"
+description: "Deploy your project by asking your coding agent, then watch it and attach a domain in the dashboard"
+sidebarTitle: "Overview"
+---
+
+<Visibility for="agents">
+<Note>
+  **For agents/LLMs:** Humans deploy by asking you to read https://skill.hexclave.com/deployments and set Hexclave up in their project. Follow that skill. The config sample below is the shape, not the full field reference.
+</Note>
+</Visibility>
+
+Deploy runs your project for you. You tell your coding agent to install Hexclave, and the deployment shows up in the dashboard.
+
+## Deploy
+
+Paste this into your coding agent (Cursor, Claude Code, Codex, or similar):
+
+```text
+Read https://skill.hexclave.com/deployments and use it to set up Hexclave in this folder
+```
+
+The agent fetches the Deploy skill from that URL and sets Hexclave up in the project you have open, including the first deploy. You don't write a deploy file or run a deploy command yourself. The general skill at `https://skill.hexclave.com` sets up the SDK and does not deploy.
+
+To give an agent Hexclave for later tasks, see [Using Hexclave with AI](/guides/getting-started/ai-integration).
+
+## The deploy file
+
+The agent writes `hexclave.deploy.ts` next to your Hexclave config. It has two exports: a name for this file, and a `deploy` function that returns the services to run.
+
+```ts title="hexclave.deploy.ts"
+import type { HexclaveDeploymentConfig } from "@hexclave/js"; // replace `js` with the SDK package this project already uses
+
+export const deploymentGroupId = "my-app";
+
+export const deploy: HexclaveDeploymentConfig = ({ isDev, secret, service }) => ({
+  services: {
+    web: {
+      type: "serverless",
+      public: true,
+      ports: { 3000: { protocol: "http" } },
+      devCommand: "pnpm dev",
+      env: { API_URL: isDev ? "http://localhost:8080" : service("api").url(8080) },
+    },
+    api: {
+      type: "serverless",
+      ports: { 8080: { protocol: "http" } },
+      rootDirectory: "./api",
+      devCommand: "pnpm dev",
+      env: {
+        OPENAI_API_KEY: isDev ? null : secret("OPENAI_API_KEY"),
+        DATABASE_HOST: isDev ? "localhost" : service("database").hostname(),
+        DATABASE_PORT: "5432",
+      },
+    },
+    database: {
+      type: "server",
+      minInstances: 0,
+      ports: { 5432: { protocol: "tcp" } },
+      rootDirectory: "./database",
+      dockerfilePath: "Dockerfile",
+      persistentVolumes: { pgdata: { path: "/data", sizeGb: 10 } },
+      env: { POSTGRES_PASSWORD: secret("POSTGRES_PASSWORD") },
+    },
+  },
+});
+```
+
+```dockerfile title="database/Dockerfile"
+FROM postgres:17-alpine
+USER root
+RUN mkdir -p /data && chown postgres:postgres /data
+ENV PGDATA=/data/postgres
+USER postgres
+```
+
+Each key under `services` is a service name.
+
+| Field | What it sets |
+| --- | --- |
+| `type` | `"serverless"` scales and stops when idle. `"server"` is a single instance, and the only type that can keep a disk. A server stays on unless you set `minInstances: 0`, which suspends it when idle. |
+| `public` | Puts an HTTP service on the internet and gives it a URL. Omit it and the service is only reachable by the others in this project. |
+| `ports` | Required. The ports the process listens on: `"http"` for a web app or API, `"tcp"` for a database or cache. Only a private service can have TCP ports. Use `ports: {}` for a worker that only makes outgoing connections. |
+| `env` | Environment variables. Every value is a string, or `null` to leave the variable unset. `secret("KEY")` reads a project secret. `service("api").url(8080)` is another HTTP service's address. For a TCP service, use `service("database").hostname()` and write the port yourself. |
+| `rootDirectory` | Where the service's code lives, relative to the deploy file. Defaults to the deploy file's folder. |
+| `image` | A public image to run instead of building, such as `"redis:7-alpine"`. It needs an explicit tag or digest. Without `image`, Hexclave builds the service from its source: from `dockerfilePath` (relative to `rootDirectory`) if you set it, otherwise by detecting the language and framework automatically. |
+| `persistentVolumes` | A disk that keeps its files across deploys and restarts. Only a `server` can have one, and at most one per service. Everything else a service writes to disk is lost on each deploy. |
+| `devCommand` | The command that runs the service on your machine. |
+
+To run a service locally, use `hexclave dev --config-file hexclave.config.ts --service-id web`. It runs that service's `devCommand` in its `rootDirectory`, with its environment variables set. Locally, `service()` returns `null` and `secret()` resolves only to its default (`secret("KEY", "dev-value")`). That is why the example branches on `isDev` for local values.
+
+On the Free plan, services run at the default memory size, a `server` must set `minInstances: 0`, and a project can have one volume of up to 10 GB.
+
+Mount a volume at a neutral path such as `/data`, not over an image's own data directory. A new disk is not guaranteed to be empty, and PostgreSQL refuses to start in a directory that isn't. The Dockerfile above keeps the database in `/data/postgres` instead.
+
+## In the dashboard
+
+Open [Deploy](https://app.hexclave.com/projects/-selector-/deployments).
+
+The page is a list of deployments, newest first. Each row shows the deploy file it came from (its `deploymentGroupId`), its status (**Queued**, **Building**, **Deploying**, **Deployed**, **Failed**, or **Cancelled**), how many services it has, and when it started. Open a row to see that deploy's services laid out on a board. Click a service to open its panel, which has seven tabs:
+
+- **Overview** — the service name, its domain when it has one, and the status of the latest deploy.
+- **Source** — the files uploaded for this deploy. A service that only runs an image has none.
+- **Build logs** — one build log for the whole deploy. Open it when the build fails. A service that only runs an image has no build.
+- **Runtime logs** — the service's live output. Check here when the build succeeded but the service won't start.
+- **Variables** — the environment variables from the deploy file. Secret values are set under **Project Settings → Secrets** and are not shown here.
+- **Domains** — add or remove a hostname of your own. See [Custom domains](./domains).
+- **Settings** — how the service is set up: image or build, ports, public or private, instances, memory, and CPU.
+
+Domains is the only tab you change in the dashboard. Everything else comes from the deploy file, so to change it, edit the file and deploy again.
+
+Until the first deploy is created, the page says **No deployments yet**. After that, the deploy is listed with its status, starting at **Queued**.
+
+On the Free plan a service stops 24 hours after each deploy, and visitors see a page saying the site is unavailable. The service is then marked **Stopped**, and its panel explains why. Deploy again to run it for another 24 hours, or upgrade to a paid plan to remove the limit.
+
+## Your own domain
+
+A public HTTP service has a Hexclave URL. You can add a custom domain alongside it, and a custom domain is also how a private HTTP service is reached from the internet. Add the hostname on the service and create the DNS records Hexclave shows you. See [Custom domains](./domains).
