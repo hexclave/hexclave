@@ -1,6 +1,7 @@
 "use client";
 
 import { useUpdateConfig } from "@/components/config-update";
+import { useRouter } from "@/components/router";
 import { DesignButton, DesignCard, DesignPillToggle } from "@/components/design-components";
 import { HostedAuthMethodPreview } from "@/components/hosted-auth-preview";
 import { BrowserFrame, Switch, Typography, cn } from "@/components/ui";
@@ -440,6 +441,7 @@ export function CloudProjectOnboarding(props: {
   const state = normalizeCloudProjectOnboardingState(props.onboardingState, props.status);
   const [saving, setSaving] = useState(false);
   const updateConfig = useUpdateConfig();
+  const router = useRouter();
 
   const save = async (nextState: CloudProjectOnboardingState, status?: ProjectOnboardingStatus) => {
     setSaving(true);
@@ -462,6 +464,7 @@ export function CloudProjectOnboarding(props: {
         steps={ENTRY_TIMELINE}
         currentStep="config_choice"
         disabled={saving}
+        onLookAround={() => router.push(`/projects/${encodeURIComponent(props.project.id)}`)}
         onSelect={(choice) => {
           if (choice === "setup-new") {
             const primaryApp = props.primaryAppFromQuery;
