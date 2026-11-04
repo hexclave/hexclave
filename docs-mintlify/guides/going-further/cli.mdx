@@ -325,6 +325,67 @@ This command accepts either `hexclave login` or `HEXCLAVE_SECRET_SERVER_KEY` aut
 ```sh title="Terminal"
 hexclave config push --cloud-project-id <project-id> --config-file ./hexclave.config.ts
 ```
+
+**CI (GitHub Actions)**
+
+`config push` is the CI command: it accepts `HEXCLAVE_SECRET_SERVER_KEY`. `config pull` requires `hexclave login` and will not run on a server key.
+
+Add `HEXCLAVE_PROJECT_ID` and `HEXCLAVE_SECRET_SERVER_KEY` as repository secrets. The config file must export a plain `config` object (or `"show-onboarding"`). `defineHexclaveConfig` is optional type-checking and is not required by the CLI. If the file imports an SDK package at runtime, install dependencies so that import resolves. A repo with no root `package.json` is fine when the config is a plain object.
+
+```yaml title=".github/workflows/hexclave-config-sync.yml"
+name: Hexclave Config Sync
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+    paths:
+      - "hexclave.config.ts"
+      - ".github/workflows/hexclave-config-sync.yml"
+
+jobs:
+  push-hexclave-config:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            corepack enable
+            yarn install --immutable
+          elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+            npm install -g bun
+            bun install --frozen-lockfile
+          elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci
+          elif [ -f package.json ]; then
+            npm install
+          else
+            echo "No package.json found at the repository root; skipping dependency install."
+          fi
+      - name: Push Hexclave config
+        env:
+          HEXCLAVE_PROJECT_ID: ${{ secrets.HEXCLAVE_PROJECT_ID }}
+          HEXCLAVE_SECRET_SERVER_KEY: ${{ secrets.HEXCLAVE_SECRET_SERVER_KEY }}
+          HEXCLAVE_CONFIG_PATH: "hexclave.config.ts"
+          HEXCLAVE_SOURCE_REPO: ${{ github.repository }}
+          HEXCLAVE_SOURCE_WORKFLOW_PATH: ".github/workflows/hexclave-config-sync.yml"
+        run: npx --yes @hexclave/cli@latest config push --config-file "$HEXCLAVE_CONFIG_PATH" --source github --source-repo "$HEXCLAVE_SOURCE_REPO" --source-path "$HEXCLAVE_CONFIG_PATH" --source-workflow-path "$HEXCLAVE_SOURCE_WORKFLOW_PATH"
+```
+
+Change the branch and config path if yours differ.
+
 ### `hexclave dev`
 
 **Synopsis**
@@ -346,7 +407,7 @@ Run a command with Hexclave development-environment credentials.
 
 **Behavior and authentication**
 
-The CLI starts or reuses the development dashboard, creates a development-environment session, injects the project’s API URL, dashboard URL, project ID, and related environment variables into the child process, then forwards signals and cleans up when the child exits. The command accepts the config path supplied by the user; current project setup uses `hexclave.config.ts`.
+The CLI starts or reuses the development dashboard, creates a development-environment session, injects credentials into the child process, then forwards signals and cleans up when the child exits. Injected values include the project ID, API URL, publishable client key, and secret server key, under both `HEXCLAVE_*` and `STACK_*` names (and the usual `NEXT_PUBLIC_`, `VITE_`, and `EXPO_PUBLIC_` prefixes on the public values). The command accepts the config path supplied by the user; current project setup uses `hexclave.config.ts`.
 
 ```sh title="Terminal"
 hexclave dev --config-file ./hexclave.config.ts -- npm run dev:inner
