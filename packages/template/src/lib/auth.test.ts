@@ -12,6 +12,11 @@ vi.mock("./cookie", async (importOriginal) => {
       codeChallenge: "<stripped code challenge>",
       state: "<stripped state>",
     }),
+    consumeVerifierAndStateCookie: (state: string) => (
+      state === "TESTSTATE123"
+        ? { codeVerifier: "verifier123" }
+        : actual.consumeVerifierAndStateCookie(state)
+    ),
   };
 });
 
@@ -81,5 +86,28 @@ describe("callOAuthCallback", () => {
     await expect(callOAuthCallback(createTestInterface(), "/handler/oauth-callback"))
       .rejects.toSatisfy((error: unknown) => KnownErrors.OAuthProviderTemporarilyUnavailable.isInstance(error));
     expect(window.location.href).toBe("http://localhost:3000/handler/oauth-callback");
+  });
+
+  it("clears stale code/state when consuming a provider error (cancel then retry, #1059)", async () => {
+    window.history.replaceState({}, "", "/handler/oauth-callback?error=access_denied&error_description=User+cancelled&state=STALE123");
+
+    await expect(callOAuthCallback(createTestInterface(), "/handler/oauth-callback"))
+      .rejects.toSatisfy((error: unknown) => KnownErrors.OAuthProviderAccessDenied.isInstance(error));
+    const url = new URL(window.location.href);
+    expect(url.searchParams.has("state")).toBe(false);
+    expect(url.searchParams.has("code")).toBe(false);
+  });
+
+  it("clears stale error params after a successful callback (cancel then success, #1059)", async () => {
+    const state = "TESTSTATE123";
+    window.history.replaceState({}, "", `/handler/oauth-callback?code=CODE123&state=${state}&error=access_denied&error_description=stale`);
+
+    const iface = createTestInterface();
+    const spy = vi.spyOn(iface, "callOAuthCallback").mockResolvedValue({ newUser: false, accessToken: "a", refreshToken: "r" });
+    await callOAuthCallback(iface, "/handler/oauth-callback");
+    expect(spy).toHaveBeenCalledOnce();
+    const url = new URL(window.location.href);
+    expect(url.searchParams.has("error")).toBe(false);
+    expect(url.searchParams.has("error_description")).toBe(false);
   });
 });
