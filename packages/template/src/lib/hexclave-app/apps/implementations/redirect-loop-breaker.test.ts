@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { recordRedirectAndThrowIfLoopDetected } from "./redirect-loop-breaker";
+import { _forTesting, recordRedirectAndThrowIfLoopDetected } from "./redirect-loop-breaker";
 
 function createMockSessionStorage() {
   const map = new Map<string, string>();
@@ -17,7 +17,14 @@ function createMockSessionStorage() {
 const previousWindow = Reflect.get(globalThis, "window");
 const hadPreviousWindow = Reflect.has(globalThis, "window");
 
+// Most redirect loops go through full page loads, so each recorded redirect is from a new page load
+// unless a test says otherwise.
 function record(from: string, to: string) {
+  _forTesting.startNewPageLoad();
+  recordInSamePageLoad(from, to);
+}
+
+function recordInSamePageLoad(from: string, to: string) {
   recordRedirectAndThrowIfLoopDetected({
     currentUrl: new URL(from),
     targetUrl: new URL(to),
@@ -93,6 +100,31 @@ describe("recordRedirectAndThrowIfLoopDetected", () => {
     }
     expect(() => {
       record("https://hosted.example.test/handler/sign-in?attempt=final", "https://hosted.example.test/handler/sign-in");
+    }).toThrowError(/Redirect loop detected/);
+  });
+
+  it("counts repeated identical redirects from one page load once", () => {
+    // eg. several components calling useUser({ or: "redirect" }) on one signed-out page
+    for (let i = 0; i < 20; i++) {
+      recordInSamePageLoad("https://app.example.test/projects", "https://app.example.test/handler/sign-in");
+      vi.advanceTimersByTime(10);
+    }
+    // ...and the next page loads still have their full budget before a loop is called
+    for (let i = 0; i < 3; i++) {
+      record("https://app.example.test/projects", "https://app.example.test/handler/sign-in");
+    }
+    expect(() => {
+      record("https://app.example.test/projects", "https://app.example.test/handler/sign-in");
+    }).toThrowError(/Redirect loop detected/);
+  });
+
+  it("still catches a client-side loop within one page load", () => {
+    for (let i = 0; i < 4; i++) {
+      recordInSamePageLoad("https://app.example.test/dashboard", "https://app.example.test/handler/sign-in");
+      vi.advanceTimersByTime(2_500);
+    }
+    expect(() => {
+      recordInSamePageLoad("https://app.example.test/dashboard", "https://app.example.test/handler/sign-in");
     }).toThrowError(/Redirect loop detected/);
   });
 

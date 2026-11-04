@@ -26,6 +26,32 @@ function is4yzSMTPResponseCode(code: number | undefined) {
   return code >= 400 && code < 500;
 }
 
+/**
+ * 5yz SMTP replies are permanent negative completions (RFC 5321 §4.2.1): the server refused this message for good,
+ * so retrying won't help. Providers use them for problems in the sender's own setup, e.g. Resend replies 550 with
+ * "The <domain> domain is not verified", "API key is invalid", or "Please use our testing email address instead of
+ * domains like `example.com`". These are the email server's answer, not a Hexclave bug, so we pass the server's
+ * response on to the developer instead of reporting an unknown error.
+ */
+function getPermanentSMTPRejectionErrorType(responseCode: number | undefined, message: string): 'AUTH_FAILED' | 'REJECTED' | null {
+  if (typeof responseCode !== 'number' || responseCode < 500 || responseCode >= 600) {
+    return null;
+  }
+  if (/api key is invalid|invalid api key|authentication (failed|required)/i.test(message)) {
+    return 'AUTH_FAILED';
+  }
+  return 'REJECTED';
+}
+
+import.meta.vitest?.test("getPermanentSMTPRejectionErrorType classifies 5yz replies", ({ expect }) => {
+  expect(getPermanentSMTPRejectionErrorType(550, "Message failed: 550 Invalid `to` field. Please use our testing email address instead of domains like `example.com`.")).toBe('REJECTED');
+  expect(getPermanentSMTPRejectionErrorType(550, "Message failed: 550 The foo.example.org domain is not verified. Please, add and verify your domain on https://resend.com/domains")).toBe('REJECTED');
+  expect(getPermanentSMTPRejectionErrorType(550, "Message failed: 550 API key is invalid")).toBe('AUTH_FAILED');
+  expect(getPermanentSMTPRejectionErrorType(552, "552 Message size exceeds fixed maximum message size")).toBe('REJECTED');
+  expect(getPermanentSMTPRejectionErrorType(451, "451 Temporary local problem")).toBe(null);
+  expect(getPermanentSMTPRejectionErrorType(undefined, "Something else")).toBe(null);
+});
+
 export type LowLevelEmailConfig = {
   host: string,
   port: number,
@@ -225,6 +251,26 @@ async function _lowLevelSendEmailWithoutRetries(options: LowLevelSendEmailOption
               message: 'Connection to email server was lost unexpectedly. This could be due to incorrect email server port configuration or a temporary network issue. Please verify your configuration and try again.',
             } as const);
           }
+          // Any other 5yz reply is a permanent rejection by the email server (e.g. Resend's 550 for an unverified
+          // sender domain, an invalid API key, or a test-domain recipient), so don't retry and don't report it as unknown
+          const permanentRejectionErrorType = getPermanentSMTPRejectionErrorType(responseCode, error.message);
+          if (permanentRejectionErrorType === 'AUTH_FAILED') {
+            return Result.error({
+              rawError: error,
+              errorType: 'AUTH_FAILED',
+              canRetry: false,
+              message: 'Failed to authenticate with the email server. Please check your email credentials configuration.' + getServerResponse(error),
+            } as const);
+          }
+          if (permanentRejectionErrorType === 'REJECTED') {
+            return Result.error({
+              rawError: error,
+              errorType: 'REJECTED',
+              canRetry: false,
+              message: 'The email server permanently rejected the email. Please check your email server configuration (such as a verified sender domain and valid credentials) and the recipient address.' + getServerResponse(error),
+            } as const);
+          }
+
           // 4yz error codes are considered temporary errors in SMTP, so they should be retried anyway
           // This is fallback logic for a code we don't explicitly capture but should still be retryable and we have the code
           if (is4yzSMTPResponseCode(responseCode)) {
