@@ -242,6 +242,31 @@ it("validates required query field", async ({ expect }) => {
   `);
 });
 
+it("returns ALIAS_REQUIRED (code 206) as a safe user-facing query error", async ({ expect }) => {
+  // Missing JOIN subquery aliases is a user/AI SQL mistake. 206 is classified
+  // SAFE, so the response must be the raw ClickHouse message — not the
+  // test/dev wrapper used for unsafe/unknown codes ("Error during execution…
+  // As you are in development mode, you can see the full error: 206 …").
+  const response = await runQuery({
+    query: "SELECT * FROM (SELECT 1 AS a) CROSS JOIN (SELECT 2 AS b) LIMIT 1",
+  });
+
+  expect(stripQueryId(response, expect)).toMatchInlineSnapshot(`
+    NiceResponse {
+      "status": 400,
+      "body": {
+        "code": "ANALYTICS_QUERY_ERROR",
+        "details": { "error": "JOIN  CROSS JOIN ... no alias for subquery or table function SELECT 1 AS a. In scope SELECT * FROM (SELECT 1 AS a) CROSS JOIN (SELECT 2 AS b) LIMIT 1 (set joined_subquery_requires_alias = 0 to disable restriction). " },
+        "error": "JOIN  CROSS JOIN ... no alias for subquery or table function SELECT 1 AS a. In scope SELECT * FROM (SELECT 1 AS a) CROSS JOIN (SELECT 2 AS b) LIMIT 1 (set joined_subquery_requires_alias = 0 to disable restriction). ",
+      },
+      "headers": Headers {
+        "x-stack-known-error": "ANALYTICS_QUERY_ERROR",
+        <some fields may have been hidden>,
+      },
+    }
+  `);
+});
+
 it("handles invalid SQL query", async ({ expect }) => {
   const response = await runQuery({ query: "INVALID SQL QUERY" });
 
