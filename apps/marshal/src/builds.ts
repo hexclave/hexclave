@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { buildkitRuntimeScript } from "./buildkit-runtime.js";
 import { BASE_IMAGE, BASE_IMAGE_WORKDIR, getConfig } from "./config.js";
 import type { ReconciliationLeaseGuard } from "./reconciliation-lock.js";
 import type { EnvValue } from "./types.js";
@@ -250,52 +251,13 @@ echo "MARSHAL_BUILD_START"
 #
 # Two filesystems on the machine can serve as that upperdir, and the order matters:
 #
-#  - a tmpfs, which is fast but is unswappable RAM. Every byte the snapshot store holds is
-#    taken from the build itself, so the guest must be big enough for BOTH (see
-#    RAILPACK_BUILDER_GUEST). Undersized, this is what an 8g guest with a 6g tmpfs died of:
-#    the store filled and a large "next build" hit ENOSPC, and a hungrier one is OOM-killed
-#    at ~1.3g RSS while the kernel holds ~6g of snapshots it cannot reclaim.
-#  - a disk-backed ext4 directory mounted at $BUILDKIT_DISK_DIR. It is a legal upperdir and
-#    costs no RAM, but is materially slower than tmpfs. Hence second, not first.
+#  - a tmpfs: fastest, but it is RAM with no swap, so the guest must fit both the store and
+#    the build (see buildkitTmpfsSize). A target that fills it retries once on disk.
+#  - a disk-backed ext4 directory mounted at $BUILDKIT_DISK_DIR. A legal upperdir that costs
+#    no RAM, but materially slower. Hence second, not first.
 #
-# It is still far better than the third outcome: on the native snapshotter a build does not
-# fail, it silently gets slow enough to time out.
-# Set by the builder that started this machine: the disk-backed directory differs per
-# runtime (Fly mounts its rootfs overlay device at /.fly-upper-layer; the GCP startup script
-# mounts a data disk at /.marshal-buildkit-disk).
-BUILDKIT_DISK_DIR="\${BUILDKIT_DISK_DIR:-/.marshal-buildkit-disk}"
-BUILDKIT_ROOT=""
-BUILDKIT_STORE_READY=""
-if [ -n "\${BUILDKIT_TMPFS_SIZE:-}" ]; then
-  mkdir -p /var/lib/buildkit
-  if mount -t tmpfs -o "size=$BUILDKIT_TMPFS_SIZE" tmpfs /var/lib/buildkit; then
-    BUILDKIT_STORE_READY=1
-    echo "MARSHAL_BUILDKIT_STORE tmpfs $BUILDKIT_TMPFS_SIZE"
-  else
-    echo "MARSHAL_TMPFS_MOUNT_FAILED (falling back to the disk-backed snapshot store)"
-  fi
-fi
-# $2/$3 of /proc/mounts are the mount point and the fs type. Requiring an exact mount point
-# (not just a directory that exists) is what proves this is a separate filesystem rather than
-# a plain directory on the overlay, which would put us straight back on the native snapshotter.
-if [ -z "$BUILDKIT_STORE_READY" ] && awk -v dir="$BUILDKIT_DISK_DIR" '$2 == dir && $3 != "overlay" { ok = 1 } END { exit !ok }' /proc/mounts 2>/dev/null; then
-  BUILDKIT_ROOT="$BUILDKIT_DISK_DIR/buildkit"
-  mkdir -p "$BUILDKIT_ROOT"
-  echo "MARSHAL_BUILDKIT_STORE disk $BUILDKIT_DISK_DIR"
-fi
-if [ -n "$BUILDKIT_ROOT" ]; then
-  buildkitd --root "$BUILDKIT_ROOT" >/tmp/buildkitd.log 2>&1 &
-else
-  buildkitd >/tmp/buildkitd.log 2>&1 &
-fi
-i=0
-until buildctl debug workers >/dev/null 2>&1; do
-  i=$((i+1)); [ $i -gt 60 ] && fail "buildkitd did not start"
-  sleep 1
-done
-# Which snapshotter buildkit actually chose. Echoed because the fallback is silent: on the
-# native one a build does not fail, it just gets slow enough to hit BUILD_TIMEOUT_SECONDS.
-grep -o "auto snapshotter: using [a-z]*" /tmp/buildkitd.log | head -n 1
+# Both beat the native snapshotter, where a build does not fail but silently times out.
+${buildkitRuntimeScript()}
 mkdir -p /ctx
 # Fetch and extract OUTSIDE the context dir, then extract INTO it — otherwise the tarball
 # itself sits in the build context and a plain \`COPY . .\` bakes a compressed copy of the
@@ -397,7 +359,7 @@ while IFS= read -r TARGET_LINE; do
     # and must not appear in their \`COPY . .\`), which is fine: \`filename\` is
     # resolved against the dockerfile local, and every COPY inside it against the
     # context local, which is still the whole upload.
-    if ! buildctl build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$GEN_DIR" \\
+    if ! run_buildkit build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$GEN_DIR" \\
         --opt "filename=Dockerfile" "$@" \\
         --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
       fail "$SERVICE_KEY: the build failed (see the build log above)"
@@ -427,7 +389,7 @@ while IFS= read -r TARGET_LINE; do
       DOCKERFILE_DIR="/tmp/dockerfiles/$SERVICE_KEY"
       DOCKERFILE_NAME=Dockerfile
     fi
-    if ! buildctl build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$DOCKERFILE_DIR" \\
+    if ! run_buildkit build --frontend dockerfile.v0 --local context=/ctx --local dockerfile="$DOCKERFILE_DIR" \\
         --opt "filename=$DOCKERFILE_NAME" "$@" \\
         --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
       fail "$SERVICE_KEY: docker build failed (see the build log above)"
@@ -464,7 +426,7 @@ while IFS= read -r TARGET_LINE; do
     fi
     set -- $(secret_args "$ENV_DIR")
     if [ "$#" -gt 0 ]; then set -- "$@" --opt "build-arg:secrets-hash=$(secrets_hash "$ENV_DIR")"; fi
-    if ! buildctl build --frontend gateway.v0 --opt "source=$RAILPACK_FRONTEND_IMAGE" \\
+    if ! run_buildkit build --frontend gateway.v0 --opt "source=$RAILPACK_FRONTEND_IMAGE" \\
         --local context="$DETECT_DIR" --local dockerfile=/tmp/railpack-plan "$@" \\
         --output "type=image,name=$PUSH_TARGET,push=true" --metadata-file /tmp/md.json 2>&1; then
       fail "$SERVICE_KEY: railpack build failed (see the build log above)"
