@@ -113,15 +113,28 @@ export type Customer<IsServer extends boolean = false> =
     readonly id: string,
 
     createCheckoutUrl(options: (
-      | { productId: string, returnUrl?: string }
-      | (IsServer extends true ? { product: InlineProduct, returnUrl?: string } : never)
+      | { productId: string, returnUrl?: string, allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean }
+      | (IsServer extends true ? { product: InlineProduct, returnUrl?: string, allowPromoCodes?: boolean, allowStackingPromoCodes?: boolean } : never)
     )): Promise<string>,
 
     createPaymentMethodSetupIntent(): Promise<CustomerPaymentMethodSetupIntent>,
 
     setDefaultPaymentMethodFromSetupIntent(setupIntentId: string): Promise<CustomerDefaultPaymentMethod>,
 
-    switchSubscription(options: { fromProductId: string, toProductId: string, priceId?: string, quantity?: number }): Promise<void>,
+    switchSubscription(options: {
+      fromProductId: string,
+      toProductId: string,
+      priceId?: string,
+      quantity?: number,
+      promoCodes?: string[],
+    }): Promise<void>,
+
+    validatePromoCodes(options: {
+      productId: string,
+      priceId?: string,
+      quantity?: number,
+      promoCodes: string[],
+    }): Promise<{ originalAmount: string, netAmount: string, recurringAmount: string, appliedCodeNames: string[] }>,
   }
   & AsyncStoreProperty<
     "billing",

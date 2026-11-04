@@ -1,6 +1,7 @@
 "use client";
 
 import { CheckoutForm, PaymentsNotEnabledCard, TestModeBypassForm } from "@/components/payments/checkout";
+import { PromoCodeApplyField, promoCodeErrorMessage } from "@/components/payments/promo-code-apply";
 import { PurchasePriceOption } from "@/components/payments/purchase-price-option";
 import { PurchaseQuantitySelector } from "@/components/payments/purchase-quantity-selector";
 import { isFreePrice, shortenedInterval } from "@/components/payments/purchase-utils";
@@ -17,7 +18,7 @@ import { typedEntries } from "@hexclave/shared/dist/utils/objects";
 import { getApiBaseUrl } from "../get-api-base-url";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as yup from "yup";
 
 const USD_CURRENCY = SUPPORTED_CURRENCIES.find((currency) => currency.code === "USD")
@@ -33,6 +34,8 @@ type ProductData = {
   replaces_stripe_subscription?: boolean,
   test_mode: boolean,
   charges_enabled: boolean | null,
+  allow_promo_codes: boolean,
+  allow_stacking_promo_codes: boolean,
 };
 
 const MAX_STRIPE_AMOUNT_CENTS = 999_999 * 100;
@@ -96,6 +99,11 @@ export default function PageClient({ code }: { code: string }) {
   const [configError, setConfigError] = useState<unknown>(null);
   const [selectedPriceId, setSelectedPriceId] = useState<string | null>(null);
   const [quantityInput, setQuantityInput] = useState<string>("1");
+  const [appliedPromoCodeNames, setAppliedPromoCodeNames] = useState<string[]>([]);
+  const [promoNetCents, setPromoNetCents] = useState<number | null>(null);
+  const [promoRecurringCents, setPromoRecurringCents] = useState<number | null>(null);
+  const [promoSubmitError, setPromoSubmitError] = useState<string | null>(null);
+  const [promoValidationInFlight, setPromoValidationInFlight] = useState(false);
   const searchParams = useSearchParams();
   const returnUrl = searchParams.get("return_url");
 
@@ -106,6 +114,12 @@ export default function PageClient({ code }: { code: string }) {
     }
     return n;
   }, [quantityInput]);
+
+  const selectedPriceIdRef = useRef(selectedPriceId);
+  selectedPriceIdRef.current = selectedPriceId;
+  const quantityNumberRef = useRef(quantityNumber);
+  quantityNumberRef.current = quantityNumber;
+  const promoValidateGenerationRef = useRef(0);
 
   const unitCents = useMemo((): number => {
     if (!selectedPriceId || !data?.product?.prices) {
@@ -143,22 +157,101 @@ export default function PageClient({ code }: { code: string }) {
     return true;
   }, [hasSelectedFreeTrial, data?.replaces_stripe_subscription]);
 
-  const elementsAmountCents = useMemo(() => {
-    // Immediate charge is $0 during a free trial — Stripe Elements amount should
-    // reflect what the customer pays now (SetupIntent / deferred charge).
-    if (appliesFreeTrialAtCheckout) return 0;
+  const catalogAmountCents = useMemo(() => {
     if (!unitCents) return 0;
     if (rawAmountCents < 1) return unitCents;
     if (isTooLarge) return MAX_STRIPE_AMOUNT_CENTS;
     return rawAmountCents;
-  }, [appliesFreeTrialAtCheckout, unitCents, rawAmountCents, isTooLarge]);
+  }, [unitCents, rawAmountCents, isTooLarge]);
+
+  const elementsAmountCents = useMemo(() => {
+    // Immediate charge is $0 during a free trial — Stripe Elements amount should
+    // reflect what the customer pays now (SetupIntent / deferred charge).
+    if (appliesFreeTrialAtCheckout) return 0;
+    if (promoNetCents != null) return promoNetCents;
+    return catalogAmountCents;
+  }, [appliesFreeTrialAtCheckout, promoNetCents, catalogAmountCents]);
+
+  const validatePromoCodes = useCallback(async (codeNames: string[]) => {
+    const generation = ++promoValidateGenerationRef.current;
+    const requestedPriceId = selectedPriceId;
+    const requestedQuantity = quantityNumber;
+    const baseUrl = getApiBaseUrl();
+    const response = await fetch(`${baseUrl}/payments/purchases/validate-promo-codes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        full_code: code,
+        price_id: requestedPriceId,
+        quantity: requestedQuantity,
+        promo_codes: codeNames,
+      }),
+    });
+    const result = await readResponseJson(response);
+    if (
+      promoValidateGenerationRef.current !== generation
+      || selectedPriceIdRef.current !== requestedPriceId
+      || quantityNumberRef.current !== requestedQuantity
+    ) {
+      return;
+    }
+    if (!response.ok) {
+      throw result ?? new Error(promoCodeErrorMessage(result));
+    }
+    if (typeof result !== "object" || result === null || !("net_amount" in result) || typeof result.net_amount !== "string") {
+      throw result ?? new Error(promoCodeErrorMessage(result));
+    }
+    setAppliedPromoCodeNames(
+      "applied_code_names" in result && Array.isArray(result.applied_code_names)
+        ? result.applied_code_names.filter((name): name is string => typeof name === "string")
+        : codeNames,
+    );
+    setPromoNetCents(moneyAmountToStripeUnits(result.net_amount as MoneyAmount, USD_CURRENCY));
+    if ("recurring_amount" in result && typeof result.recurring_amount === "string") {
+      setPromoRecurringCents(moneyAmountToStripeUnits(result.recurring_amount as MoneyAmount, USD_CURRENCY));
+    } else {
+      setPromoRecurringCents(moneyAmountToStripeUnits(result.net_amount as MoneyAmount, USD_CURRENCY));
+    }
+    setPromoSubmitError(null);
+  }, [code, selectedPriceId, quantityNumber]);
+
+  const handleApplyPromo = useCallback(async (codeName: string) => {
+    await validatePromoCodes([...appliedPromoCodeNames, codeName]);
+  }, [appliedPromoCodeNames, validatePromoCodes]);
+
+  const handleRemovePromo = useCallback(async (codeName: string) => {
+    const next = appliedPromoCodeNames.filter((name) => name !== codeName);
+    if (next.length === 0) {
+      promoValidateGenerationRef.current += 1;
+      setAppliedPromoCodeNames([]);
+      setPromoNetCents(null);
+      setPromoRecurringCents(null);
+      setPromoSubmitError(null);
+      return;
+    }
+    setPromoValidationInFlight(true);
+    try {
+      await validatePromoCodes(next);
+    } catch (error) {
+      setPromoSubmitError(promoCodeErrorMessage(error));
+      setAppliedPromoCodeNames([]);
+      setPromoNetCents(null);
+      setPromoRecurringCents(null);
+    } finally {
+      setPromoValidationInFlight(false);
+    }
+  }, [appliedPromoCodeNames, validatePromoCodes]);
 
   const elementsMode = useMemo<"subscription" | "payment" | "setup">(() => {
     if (!selectedPriceId || !data?.product?.prices) return "subscription";
     if (appliesFreeTrialAtCheckout) return "setup";
+    if (promoNetCents === 0 && appliedPromoCodeNames.length > 0) {
+      const price = data.product.prices[selectedPriceId];
+      if (price.interval && !isFreePrice(price.USD)) return "setup";
+    }
     const price = data.product.prices[selectedPriceId];
     return price.interval ? "subscription" : "payment";
-  }, [data, selectedPriceId, appliesFreeTrialAtCheckout]);
+  }, [data, selectedPriceId, appliesFreeTrialAtCheckout, promoNetCents, appliedPromoCodeNames.length]);
 
   const validateCode = useCallback(async (baseUrl: string) => {
     const response = await fetch(`${baseUrl}/payments/purchases/validate-code`, {
@@ -200,6 +293,34 @@ export default function PageClient({ code }: { code: string }) {
     });
   }, [validateCode]);
 
+  useEffect(() => {
+    if (appliedPromoCodeNames.length === 0 || selectedPriceId == null) return;
+    let cancelled = false;
+    setPromoValidationInFlight(true);
+    validatePromoCodes(appliedPromoCodeNames).catch((error) => {
+      if (cancelled) return;
+      if (
+        selectedPriceIdRef.current !== selectedPriceId
+        || quantityNumberRef.current !== quantityNumber
+      ) {
+        return;
+      }
+      setPromoSubmitError(promoCodeErrorMessage(error));
+      setAppliedPromoCodeNames([]);
+      setPromoNetCents(null);
+      setPromoRecurringCents(null);
+    }).finally(() => {
+      if (!cancelled) {
+        setPromoValidationInFlight(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Re-validate from catalog price when the customer changes price or quantity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only price/quantity should retrigger
+  }, [selectedPriceId, quantityNumber]);
+
   const isFreeSelected = useMemo<boolean>(() => {
     if (!selectedPriceId || !data?.product?.prices) return false;
     const usd = data.product.prices[selectedPriceId].USD;
@@ -211,21 +332,41 @@ export default function PageClient({ code }: { code: string }) {
     return data.product.prices[selectedPriceId];
   }, [data, selectedPriceId]);
 
+  const appliesPromoZeroFirstInvoice = useMemo(() => {
+    if (isFreeSelected) return false;
+    if (selectedPriceData?.interval == null) return false;
+    return promoNetCents === 0 && appliedPromoCodeNames.length > 0;
+  }, [isFreeSelected, selectedPriceData, promoNetCents, appliedPromoCodeNames.length]);
+
+  // One-time 100% off is granted immediately with no Stripe intent. Recurring
+  // $0 still needs a card (SetupIntent) because later invoices will charge.
+  const appliesPromoZeroOneTime = useMemo(() => {
+    if (isFreeSelected) return false;
+    if (selectedPriceData?.interval != null) return false;
+    return promoNetCents === 0 && appliedPromoCodeNames.length > 0;
+  }, [isFreeSelected, selectedPriceData, promoNetCents, appliedPromoCodeNames.length]);
+
+  const treatsAsFreeCheckout = isFreeSelected || appliesPromoZeroOneTime;
+  const usesSetupMode = appliesFreeTrialAtCheckout || appliesPromoZeroFirstInvoice;
+
   const setupSubscription = async () => {
     const baseUrl = getApiBaseUrl();
     const response = await fetch(`${baseUrl}/payments/purchases/purchase-session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ full_code: code, price_id: selectedPriceId, quantity: quantityNumber }),
+      body: JSON.stringify({ full_code: code, price_id: selectedPriceId, quantity: quantityNumber, promo_codes: appliedPromoCodeNames }),
     });
     const result = await readResponseJson(response);
 
     if (!response.ok) {
-      throw new Error(getPurchaseFailureMessage(result, GENERIC_PURCHASE_FAILURE_MESSAGE));
+      const message = getPurchaseFailureMessage(result, GENERIC_PURCHASE_FAILURE_MESSAGE);
+      setPromoSubmitError(message);
+      throw new Error(message);
     }
+    setPromoSubmitError(null);
 
     const clientSecret = getClientSecret(result);
-    if (!clientSecret && !isFreeSelected) {
+    if (!clientSecret && !treatsAsFreeCheckout) {
       throw new Error(GENERIC_PURCHASE_FAILURE_MESSAGE);
     }
     if (!clientSecret) {
@@ -249,6 +390,7 @@ export default function PageClient({ code }: { code: string }) {
         full_code: code,
         price_id: selectedPriceId,
         quantity: quantityNumber,
+        promo_codes: appliedPromoCodeNames,
       }),
     });
     if (!response.ok) {
@@ -262,7 +404,7 @@ export default function PageClient({ code }: { code: string }) {
       url.searchParams.set("return_url", returnUrl);
     }
     window.location.assign(url.toString());
-  }, [code, selectedPriceId, quantityNumber, isTooLarge, returnUrl]);
+  }, [code, selectedPriceId, quantityNumber, isTooLarge, returnUrl, appliedPromoCodeNames]);
 
   if (configError != null) {
     // Surface deployment/config errors to the error boundary instead of swallowing them
@@ -270,7 +412,7 @@ export default function PageClient({ code }: { code: string }) {
     throw configError;
   }
 
-  const checkoutDisabled = quantityNumber < 1 || isTooLarge || data?.already_bought_non_stackable === true;
+  const checkoutDisabled = quantityNumber < 1 || isTooLarge || data?.already_bought_non_stackable === true || promoValidationInFlight;
   const showInvalidPurchaseCode = !loading && error != null;
 
   if (showInvalidPurchaseCode) {
@@ -333,16 +475,66 @@ export default function PageClient({ code }: { code: string }) {
                 {/* Prominent Selected Price Display */}
                 {selectedPriceData && (
                   <div className="py-2">
-                    <div className="flex items-baseline gap-1">
-                      <span className="text-5xl font-bold tabular-nums tracking-tight text-foreground">
-                        ${selectedPriceData.USD ?? "0.00"}
-                      </span>
-                      {selectedPriceData.interval && (
-                        <span className="text-lg font-medium text-muted-foreground">
-                          /{shortenedInterval(selectedPriceData.interval)}
+                    {promoNetCents != null && appliedPromoCodeNames.length > 0 ? (
+                      <div className="space-y-1">
+                        {(() => {
+                          const firstCharge = (promoNetCents / 100).toFixed(2);
+                          const recurringCents = promoRecurringCents ?? promoNetCents;
+                          const recurring = (recurringCents / 100).toFixed(2);
+                          const intervalLabel = selectedPriceData.interval
+                            ? `/${shortenedInterval(selectedPriceData.interval)}`
+                            : "";
+                          const recurringDiffers = recurringCents !== promoNetCents;
+                          return (
+                            <>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-2xl font-semibold tabular-nums tracking-tight text-red-500 line-through">
+                                  ${(catalogAmountCents / 100).toFixed(2)}
+                                </span>
+                                <span className="text-5xl font-bold tabular-nums tracking-tight text-foreground">
+                                  ${firstCharge}
+                                </span>
+                                {selectedPriceData.interval && !recurringDiffers && (
+                                  <span className="text-lg font-medium text-muted-foreground">
+                                    {intervalLabel}
+                                  </span>
+                                )}
+                                {recurringDiffers && (
+                                  <span className="text-lg font-medium text-muted-foreground">
+                                    first charge
+                                  </span>
+                                )}
+                              </div>
+                              {appliesFreeTrialAtCheckout && (
+                                <p className="text-sm text-muted-foreground">
+                                  $0.00 due now, then ${firstCharge}
+                                  {recurringDiffers
+                                    ? ` after your trial, then $${recurring}${intervalLabel}`
+                                    : `${intervalLabel}`}
+                                  {" "}with {appliedPromoCodeNames.join(", ")}
+                                </p>
+                              )}
+                              {!appliesFreeTrialAtCheckout && recurringDiffers && (
+                                <p className="text-sm text-muted-foreground">
+                                  ${firstCharge} today, then ${recurring}{intervalLabel} with {appliedPromoCodeNames.join(", ")}
+                                </p>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    ) : (
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-5xl font-bold tabular-nums tracking-tight text-foreground">
+                          ${selectedPriceData.USD ?? "0.00"}
                         </span>
-                      )}
-                    </div>
+                        {selectedPriceData.interval && (
+                          <span className="text-lg font-medium text-muted-foreground">
+                            /{shortenedInterval(selectedPriceData.interval)}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -403,6 +595,19 @@ export default function PageClient({ code }: { code: string }) {
                     />
                   </div>
                 )}
+
+                {data?.allow_promo_codes === true && selectedPriceId && (
+                  <PromoCodeApplyField
+                    appliedCodeNames={appliedPromoCodeNames}
+                    allowStacking={data.allow_stacking_promo_codes === true}
+                    disabled={checkoutDisabled}
+                    onApply={handleApplyPromo}
+                    onRemove={handleRemovePromo}
+                  />
+                )}
+                {promoSubmitError != null && (
+                  <DesignAlert variant="error" description={promoSubmitError} />
+                )}
               </div>
             )}
           </div>
@@ -438,8 +643,8 @@ export default function PageClient({ code }: { code: string }) {
                       returnUrl={returnUrl ?? undefined}
                       disabled={checkoutDisabled}
                       chargesEnabled={data.charges_enabled ?? false}
-                      isFree={isFreeSelected}
-                      setupMode={appliesFreeTrialAtCheckout}
+                      isFree={treatsAsFreeCheckout}
+                      setupMode={usesSetupMode}
                     />
                   </StripeElementsProvider>
                 )}

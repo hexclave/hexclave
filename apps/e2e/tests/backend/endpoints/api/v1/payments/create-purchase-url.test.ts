@@ -364,6 +364,8 @@ it("should return inline product metadata when validating purchase code", async 
     NiceResponse {
       "status": 200,
       "body": {
+        "allow_promo_codes": false,
+        "allow_stacking_promo_codes": false,
         "already_bought_non_stackable": false,
         "charges_enabled": null,
         "conflicting_products": [],

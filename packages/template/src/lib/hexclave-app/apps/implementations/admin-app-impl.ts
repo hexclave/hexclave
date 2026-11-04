@@ -1,4 +1,5 @@
 import { KnownErrors, HexclaveAdminInterface } from "@hexclave/shared";
+import type { AdminPromoCodeJson } from "@hexclave/shared/dist/interface/admin-interface";
 import { getProductionModeErrors } from "@hexclave/shared/dist/helpers/production-mode";
 import { InternalApiKeyCreateCrudResponse } from "@hexclave/shared/dist/interface/admin-interface";
 import type { AnalyticsClickmapOptions, AnalyticsClickmapResponse, AnalyticsClickmapTokenResponse, MetricsResponse, MetricsUserCounts, UserActivityResponse } from "@hexclave/shared/dist/interface/admin-metrics";
@@ -21,7 +22,7 @@ import { AdminProjectPermission, AdminProjectPermissionDefinition, AdminProjectP
 import type { PlanUsage } from "../../plan-usage";
 import { AdminOwnedProject, AdminProject, AdminProjectUpdateOptions, PushConfigOptions, adminProjectUpdateOptionsToCrud } from "../../projects";
 import { AdminWorkflow, AdminWorkflowRun, AdminWorkflowRunDetails, AdminWorkflowRunsFilter, AdminWorkflowSyncResult, AdminWorkflowUpgradeResult, AdminWorkflowVersion, adminWorkflowFromCrud, adminWorkflowRunDetailsFromCrud, adminWorkflowRunFromCrud, adminWorkflowSyncResultFromCrud, adminWorkflowVersionFromCrud, isWorkflowRunDetailsJson } from "../../workflows";
-import { ManagedEmailProviderListItem, ManagedEmailProviderSetupResult, ManagedEmailProviderStatus, EmailOutboxUpdateOptions, StackAdminApp, StackAdminAppConstructorOptions } from "../interfaces/admin-app";
+import { AdminPromoCode, CreateAdminPromoCodeOptions, ManagedEmailProviderListItem, ManagedEmailProviderSetupResult, ManagedEmailProviderStatus, EmailOutboxUpdateOptions, StackAdminApp, StackAdminAppConstructorOptions } from "../interfaces/admin-app";
 import { clientVersion, createCache, getDefaultExtraRequestHeaders, getDefaultProjectId, getDefaultPublishableClientKey, getDefaultSecretServerKey, getDefaultSuperSecretAdminKey, resolveApiUrls, resolveConstructorOptions } from "./common";
 import { _HexclaveServerAppImplIncomplete } from "./server-app-impl";
 
@@ -36,6 +37,31 @@ type PlanUsageResponse = Awaited<ReturnType<HexclaveAdminInterface["getPlanUsage
 /**
  * Converts a PushedConfigSource (SDK camelCase) to BranchConfigSourceApi (API snake_case).
  */
+function adminPromoCodeFromJson(json: AdminPromoCodeJson): AdminPromoCode {
+  return {
+    id: json.id,
+    codeName: json.code_name,
+    status: json.status,
+    statusDetail: json.status_detail,
+    discountType: json.discount_type,
+    discountAmount: json.discount_amount,
+    discountLabel: json.discount_label,
+    productsLabel: json.products_label,
+    applicableProductIds: json.applicable_product_ids,
+    numRedemptions: json.num_redemptions,
+    maxRedemptions: json.max_redemptions,
+    availability: json.availability,
+    availabilityType: json.availability_type,
+    startsAt: json.starts_at_millis != null ? new Date(json.starts_at_millis) : null,
+    endsAt: json.ends_at_millis != null ? new Date(json.ends_at_millis) : null,
+    pausedAt: json.paused_at_millis != null ? new Date(json.paused_at_millis) : null,
+    endedAt: json.ended_at_millis != null ? new Date(json.ended_at_millis) : null,
+    subscriptionBehavior: json.subscription_behavior,
+    subscriptionDiscountDurationMonths: json.subscription_discount_duration_months,
+    hasActiveSubscriptionRedemptions: json.has_active_subscription_redemptions,
+  };
+}
+
 function pushedConfigSourceToApi(source: PushedConfigSource): BranchConfigSourceApi {
   if (source.type === "pushed-from-github") {
     return {
@@ -220,6 +246,8 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
         oauthAccountMergeStrategy: data.config.oauth_account_merge_strategy,
         allowUserApiKeys: data.config.allow_user_api_keys,
         allowTeamApiKeys: data.config.allow_team_api_keys,
+        allowPromoCodes: data.config.allow_promo_codes,
+        allowStackingPromoCodes: data.config.allow_stacking_promo_codes,
         oauthProviders: data.config.oauth_providers.map((p) => ((p.type === 'shared' ? {
           id: p.id,
           type: 'shared',
@@ -1112,6 +1140,47 @@ export class _HexclaveAdminAppImplIncomplete<HasTokenStore extends boolean, Proj
   async listTransactions(params: { cursor?: string, limit?: number, type?: TransactionType, customerType?: 'user' | 'team' | 'custom', customerId?: string }): Promise<{ transactions: Transaction[], nextCursor: string | null }> {
     const crud = Result.orThrow(await this._transactionsCache.getOrWait([params.cursor, params.limit, params.type, params.customerType, params.customerId] as const, "write-only"));
     return crud;
+  }
+
+  async listPromoCodes(options?: { cursor?: string, query?: string, status?: AdminPromoCode["status"] | "all" }): Promise<{ promoCodes: AdminPromoCode[], nextCursor: string | null }> {
+    const json = await this._interface.listPromoCodes(options);
+    return {
+      promoCodes: json.promo_codes.map(adminPromoCodeFromJson),
+      nextCursor: json.next_cursor,
+    };
+  }
+
+  async createPromoCode(options: CreateAdminPromoCodeOptions): Promise<AdminPromoCode> {
+    return adminPromoCodeFromJson(await this._interface.createPromoCode({
+      code_name: options.codeName,
+      discount_type: options.discountType,
+      discount_amount: options.discountAmount,
+      applicable_product_ids: options.applicableProductIds,
+      max_redemptions: options.maxRedemptions,
+      subscription_behavior: options.subscriptionBehavior,
+      subscription_discount_duration_months: options.subscriptionDiscountDurationMonths,
+      availability_type: options.availabilityType,
+      starts_at_millis: options.startsAt?.getTime() ?? null,
+      ends_at_millis: options.endsAt?.getTime() ?? null,
+    }));
+  }
+
+  async getPromoCode(promoCodeId: string): Promise<AdminPromoCode> {
+    return adminPromoCodeFromJson(await this._interface.getPromoCode(promoCodeId));
+  }
+
+  async pausePromoCode(promoCodeId: string): Promise<AdminPromoCode> {
+    return adminPromoCodeFromJson(await this._interface.pausePromoCode(promoCodeId));
+  }
+
+  async resumePromoCode(promoCodeId: string): Promise<AdminPromoCode> {
+    return adminPromoCodeFromJson(await this._interface.resumePromoCode(promoCodeId));
+  }
+
+  async endPromoCode(promoCodeId: string, options?: { existingSubscriptionDiscounts?: "keep" | "end_after_period" }): Promise<AdminPromoCode> {
+    return adminPromoCodeFromJson(await this._interface.endPromoCode(promoCodeId, {
+      existing_subscription_discounts: options?.existingSubscriptionDiscounts,
+    }));
   }
 
   // Email Outbox methods
