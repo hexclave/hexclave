@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { EXTRA_SEAT_PRODUCT_ID } from "@hexclave/shared/dist/plans";
 import { getOrUndefined } from "@hexclave/shared/dist/utils/objects";
 import { bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { getSubscriptionMapForCustomer } from "@/lib/payments/customer-data";
@@ -223,16 +224,16 @@ describe.sequential("ensureFreePlanForBillingTeam (real DB)", () => {
     const { tenancy, prisma } = await getInternal();
     const billingTeamId = randomUUID();
 
-    // `extra-seats` is an add-on (isAddOnTo: { team, growth }) but lives in
+    // The extra seat is an add-on (isAddOnTo: { team, growth }) but lives in
     // the same product line as the free plan. It must NOT short-circuit the
     // fast path; the team should still get a free sub on top.
-    const extraSeatsProduct = getOrUndefined(tenancy.config.payments.products, "extra-seats");
-    if (extraSeatsProduct == null) throw new Error("Internal tenancy missing `extra-seats` product");
+    const extraSeatsProduct = getOrUndefined(tenancy.config.payments.products, EXTRA_SEAT_PRODUCT_ID);
+    if (extraSeatsProduct == null) throw new Error(`Internal tenancy missing \`${EXTRA_SEAT_PRODUCT_ID}\` product`);
 
     await seedSub({
       tenancyId: tenancy.id,
       billingTeamId,
-      productId: "extra-seats",
+      productId: EXTRA_SEAT_PRODUCT_ID,
       productSnapshot: extraSeatsProduct,
       prisma,
     });
@@ -243,6 +244,6 @@ describe.sequential("ensureFreePlanForBillingTeam (real DB)", () => {
     const productIds = new Set(subs.map((s) => s.productId));
     expect(subs).toHaveLength(2);
     expect(productIds.has("free")).toBe(true);
-    expect(productIds.has("extra-seats")).toBe(true);
+    expect(productIds.has(EXTRA_SEAT_PRODUCT_ID)).toBe(true);
   });
 });

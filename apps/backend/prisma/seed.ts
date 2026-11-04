@@ -10,7 +10,7 @@ import { getPrismaClientForTenancy, globalPrismaClient } from '@/prisma-client';
 import { ALL_APPS } from '@hexclave/shared/dist/apps/apps-config';
 import { DEFAULT_EMAIL_THEME_ID } from '@hexclave/shared/dist/helpers/emails';
 import { AdminUserProjectsCrud } from '@hexclave/shared/dist/interface/crud/projects';
-import { ITEM_IDS, PLAN_LIMITS } from '@hexclave/shared/dist/plans';
+import { EXTRA_SEAT_MONTHLY_PRICE_USD, EXTRA_SEAT_PRODUCT_ID, ITEM_IDS, PLAN_LIMITS } from '@hexclave/shared/dist/plans';
 import { DayInterval } from '@hexclave/shared/dist/utils/dates';
 import { getEnvVariable } from '@hexclave/shared/dist/utils/env';
 import { throwErr } from '@hexclave/shared/dist/utils/errors';
@@ -212,15 +212,15 @@ export async function seed() {
               [ITEM_IDS.onboardingCall]: { quantity: 1, repeat: "never" as const, expires: "when-purchase-expires" as const },
             },
           },
-          "extra-seats": {
+          [EXTRA_SEAT_PRODUCT_ID]: {
             productLineId: "plans",
-            displayName: "Extra Seats",
+            displayName: "Extra Dashboard Admin Seat",
             customerType: "team",
             serverOnly: false,
             stackable: true,
             prices: {
               monthly: {
-                USD: "29",
+                USD: String(EXTRA_SEAT_MONTHLY_PRICE_USD),
                 interval: MONTHLY_REPEAT,
                 serverOnly: false,
               },
