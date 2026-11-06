@@ -288,6 +288,17 @@ export const MetricsUserCountsSchema = yupObject({
   anonymous_users: yupNumber().integer().defined(),
 }).defined();
 
+// `/internal/metrics/entity-kpis`: just the series behind the Users and Teams
+// page KPI cards, so those pages don't pay for the full `/internal/metrics`
+// bundle (analytics, payments, emails, ...).
+export const MetricsEntityKpisSchema = yupObject({
+  // Users: sign-ups per day. Teams: newly active teams per day.
+  daily_new: MetricsDataPointsSchema,
+  daily_active_split: MetricsActivitySplitSchema,
+  // Users: all non-anonymous users. Teams: all teams.
+  total: yupNumber().integer().defined(),
+}).defined();
+
 // Derived static types — single source of truth lives in the schemas above.
 export type MetricsDataPoint = yup.InferType<typeof MetricsDataPointSchema>;
 export type MetricsActivitySplit = yup.InferType<typeof MetricsActivitySplitSchema>;
@@ -306,6 +317,7 @@ export type MetricsLoginMethodEntry = yup.InferType<typeof MetricsLoginMethodEnt
 export type MetricsRecentUser = yup.InferType<typeof MetricsRecentUserSchema>;
 export type MetricsResponse = yup.InferType<typeof MetricsResponseBodySchema>;
 export type MetricsUserCounts = yup.InferType<typeof MetricsUserCountsSchema>;
+export type MetricsEntityKpis = yup.InferType<typeof MetricsEntityKpisSchema>;
 export type UserActivityResponse = yup.InferType<typeof UserActivityResponseBodySchema>;
 export type AnalyticsClickmapKind = yup.InferType<typeof AnalyticsClickmapKindSchema>;
 export type AnalyticsClickmapDevice = yup.InferType<typeof AnalyticsClickmapDeviceSchema>;

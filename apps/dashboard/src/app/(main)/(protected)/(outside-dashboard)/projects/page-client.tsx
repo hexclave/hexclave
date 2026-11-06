@@ -23,6 +23,7 @@ import { urlString } from "@hexclave/shared/dist/utils/urls";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as yup from "yup";
 import { getArePlanLimitsEnforced, inviteUser, listInvitations, revokeInvitation } from "./actions";
+import { formatAdminSeatUsage } from "./admin-seat-usage";
 import Footer from "./footer";
 import PreviewProjectRedirect from "./preview-project-redirect";
 
@@ -844,7 +845,7 @@ function TeamAddUserDialog(props: { team: Team }) {
               <Skeleton className="h-5 w-14 rounded-full" />
             ) : (
               <DesignBadge
-                label={`${activeSeats}/${dialogData.seatLimit}`}
+                label={formatAdminSeatUsage({ activeSeats, seatLimit: dialogData.seatLimit, arePlanLimitsEnforced: dialogData.arePlanLimitsEnforced })}
                 color={atCapacity ? "orange" : "green"}
                 size="sm"
               />

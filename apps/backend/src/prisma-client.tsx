@@ -1,5 +1,6 @@
 import { Prisma, PrismaClient } from "@/generated/prisma/client";
 import { PrismaPg } from '@prisma/adapter-pg';
+import type { SqlDriverAdapterFactory } from "@prisma/client/runtime/client";
 import { readReplicas } from '@prisma/extension-read-replicas';
 import { CompleteConfig } from "@hexclave/shared/dist/config/schema";
 import { yupObject, yupValidate } from "@hexclave/shared/dist/schema-fields";
@@ -39,15 +40,14 @@ export async function getPrismaSchemaForTenancy(tenancy: Tenancy) {
 }
 
 
-const postgresPrismaClientsStore: Map<string, {
-  client: PrismaClient,
-  schema: string,
-}> = globalVar.__stack_postgres_prisma_clients ??= new Map();
-function getPostgresPrismaClient(connectionString: string, poolLabel?: string) {
-  let postgresPrismaClient = postgresPrismaClientsStore.get(connectionString);
-  if (!postgresPrismaClient) {
-    const schema = getSchemaFromConnectionString(connectionString);
-    const pool = new Pool({ connectionString, max: 25 });
+// Pools are keyed by connection string and may be shared by multiple Prisma clients (eg. the replica pool backs both
+// the replica Prisma client and the replication-status checks), so they are owned and ended here rather than by any
+// individual Prisma adapter.
+const postgresPoolsStore: Map<string, Pool> = globalVar.__hexclave_postgres_pools ??= new Map();
+function getPostgresPool(connectionString: string, poolLabel?: string): Pool {
+  let pool = postgresPoolsStore.get(connectionString);
+  if (!pool) {
+    pool = new Pool({ connectionString, max: 25 });
     if (getEnvVariable("VERCEL", "") !== "") {
       // Fluid Compute can suspend an instance while an application-owned pool still
       // has idle clients. Registering the pool keeps the invocation alive until
@@ -55,30 +55,139 @@ function getPostgresPrismaClient(connectionString: string, poolLabel?: string) {
       attachDatabasePool(pool);
     }
     registerPgPool(pool, poolLabel ?? connectionString); // Register pool for dev performance stats
-    // Error-capture locations use a label instead of the connection string so
-    // credentials never enter the error sink.
-    const safePoolLabel = poolLabel ?? "tenant";
-    const adapter = new PrismaPg(pool, {
-      schema,
-      // Prisma receives a Pool created by this application. Without this option,
-      // $disconnect removes Prisma's listener but deliberately leaves the pool open.
-      disposeExternalPool: true,
+    postgresPoolsStore.set(connectionString, pool);
+  }
+  return pool;
+}
+
+function createPrismaPgAdapter(connectionString: string, poolLabel: string | undefined, options: { captureErrors: boolean }) {
+  // Error-capture locations use a label instead of the connection string so
+  // credentials never enter the error sink.
+  const safePoolLabel = poolLabel ?? "tenant";
+  return new PrismaPg(getPostgresPool(connectionString, poolLabel), {
+    schema: getSchemaFromConnectionString(connectionString),
+    disposeExternalPool: false,
+    // Each adapter registers its own pool error listener, so only one adapter per pool should capture errors;
+    // otherwise every pool error would be reported multiple times.
+    ...(options.captureErrors ? {
       onPoolError: (error) => captureError(`pg-pool-${safePoolLabel}`, error),
       onConnectionError: (error) => captureError(`pg-connection-${safePoolLabel}`, error),
-    });
-    postgresPrismaClient = {
-      client: new PrismaClient({ adapter }),
-      schema,
-    };
-    postgresPrismaClientsStore.set(connectionString, postgresPrismaClient);
+    } : {}),
+  });
+}
+
+const postgresPrismaClientsStore: Map<string, PrismaClient> = globalVar.__hexclave_postgres_prisma_clients ??= new Map();
+function getOrCreatePrismaClient(key: string, createAdapter: () => SqlDriverAdapterFactory): PrismaClient {
+  let client = postgresPrismaClientsStore.get(key);
+  if (!client) {
+    client = new PrismaClient({ adapter: createAdapter() });
+    postgresPrismaClientsStore.set(key, client);
   }
-  return postgresPrismaClient;
+  return client;
+}
+
+function getPostgresPrismaClient(connectionString: string, poolLabel?: string) {
+  return {
+    client: getOrCreatePrismaClient(`direct:${connectionString}`, () => createPrismaPgAdapter(connectionString, poolLabel, { captureErrors: true })),
+    schema: getSchemaFromConnectionString(connectionString),
+  };
 }
 
 export async function disconnectPostgresPrismaClients(): Promise<void> {
   await Promise.all(
-    [...postgresPrismaClientsStore.values()].map(({ client }) => client.$disconnect()),
+    [...postgresPrismaClientsStore.values()].map((client) => client.$disconnect()),
   );
+  await Promise.all(
+    [...postgresPoolsStore.values()].map((pool) => pool.end()),
+  );
+}
+
+// SQLSTATEs meaning the server is shutting down or starting up (eg. an Aurora reader restarting during an engine
+// upgrade). Class 08 (connection exceptions) is matched by prefix below.
+// See: https://www.postgresql.org/docs/current/errcodes-appendix.html
+const databaseUnavailableSqlStates = new Set(["57P01", "57P02", "57P03"]);
+const databaseUnavailableErrnoCodes = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN"]);
+// The kinds that @prisma/adapter-pg maps socket errors to (see `mapSocketError` in its source)
+const databaseUnavailableDriverAdapterErrorKinds = new Set(["DatabaseNotReachable", "ConnectionClosed", "SocketTimeout"]);
+
+function isDatabaseUnavailableErrorCode(code: string): boolean {
+  return databaseUnavailableSqlStates.has(code) || code.startsWith("08") || databaseUnavailableErrnoCodes.has(code);
+}
+
+/**
+ * Whether the error means that the database server could not be reached or dropped the connection (as opposed to
+ * an error in the query itself). Accepts both raw node-postgres errors and the DriverAdapterErrors that
+ * @prisma/adapter-pg wraps them in.
+ */
+export function isDatabaseUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name === "DriverAdapterError") {
+    const cause = error.cause;
+    if (typeof cause !== "object" || cause === null) {
+      return false;
+    }
+    if ("kind" in cause && typeof cause.kind === "string" && databaseUnavailableDriverAdapterErrorKinds.has(cause.kind)) {
+      return true;
+    }
+    return "originalCode" in cause && typeof cause.originalCode === "string" && isDatabaseUnavailableErrorCode(cause.originalCode);
+  }
+  if ("code" in error && typeof error.code === "string" && isDatabaseUnavailableErrorCode(error.code)) {
+    return true;
+  }
+  // node-postgres throws plain errors without a code when the socket closes mid-query ("Connection terminated
+  // unexpectedly") or the connection is ended while queries are pending ("Connection terminated"). @prisma/adapter-pg
+  // passes those through unwrapped.
+  return error.message.startsWith("Connection terminated");
+}
+
+type SqlDriverAdapter = Awaited<ReturnType<SqlDriverAdapterFactory["connect"]>>;
+
+/**
+ * Wraps a read replica's driver adapter so that read queries fall back to the primary while the replica is
+ * unavailable.
+ *
+ * Aurora restarts reader instances on engine upgrades, OS patches, etc. (zero-downtime patching only preserves
+ * connections on the writer), and with a single reader every replica-routed read would fail for the ~15s restart.
+ * Retrying on the primary is safe because only reads are routed to the replica, and the primary is never behind the
+ * replica.
+ *
+ * Only `queryRaw` (which Prisma uses for all reads) falls back. Writes and transactions are never routed to the
+ * replica, so those are passed through as-is and fail loudly if they ever are.
+ */
+export function withPrimaryFallbackForReads(replicaFactory: SqlDriverAdapterFactory, primaryFactory: SqlDriverAdapterFactory): SqlDriverAdapterFactory {
+  return {
+    provider: replicaFactory.provider,
+    adapterName: replicaFactory.adapterName,
+    connect: async () => {
+      const [replica, primary] = await Promise.all([replicaFactory.connect(), primaryFactory.connect()]);
+      const getConnectionInfo = replica.getConnectionInfo?.bind(replica);
+      const adapter: SqlDriverAdapter = {
+        provider: replica.provider,
+        adapterName: replica.adapterName,
+        queryRaw: async (query) => {
+          try {
+            return await replica.queryRaw(query);
+          } catch (error) {
+            if (!isDatabaseUnavailableError(error)) {
+              throw error;
+            }
+            captureError("prisma-client-replica-unavailable", new HexclaveAssertionError("The read replica is unavailable, so the query was retried on the primary. This is expected while the replica restarts (eg. during maintenance), but should not happen otherwise.", { cause: error }));
+            return await primary.queryRaw(query);
+          }
+        },
+        executeRaw: async (query) => await replica.executeRaw(query),
+        executeScript: async (script) => await replica.executeScript(script),
+        startTransaction: async (isolationLevel) => await replica.startTransaction(isolationLevel),
+        ...(getConnectionInfo ? { getConnectionInfo } : {}),
+        dispose: async () => {
+          await Promise.all([replica.dispose(), primary.dispose()]);
+        },
+      };
+      return adapter;
+    },
+  };
 }
 
 async function tcpPing(host: string, port: number, timeout = 2000) {
@@ -146,14 +255,18 @@ export type PrismaClientWithReplica<T extends PrismaClient = PrismaClient> = Omi
  * - "pg-stat-replication": Query replicas for pg_last_wal_replay_lsn() (for local dev)
  * - "aurora": Query replicas for current_read_lsn via aurora_replica_status() (for AWS Aurora)
  *
- * @param replicas - List of replica Prisma clients to query directly
+ * Replicas that are unavailable (eg. restarting) count as caught up, since replica-routed reads fall back to the
+ * primary while the replica is down (see withPrimaryFallbackForReads).
+ *
+ * @param replicas - Pools of the replicas to query directly. These are raw pools rather than Prisma clients, so the
+ *   checks never fall back to the primary and connection errors aren't obscured by Prisma's error wrapping.
  * @param target - The target to wait for:
  *   - For pg-stat-replication: pg_lsn format (e.g., "0/1234ABC")
  *   - For aurora: bigint as string (e.g., "123456789")
  * @param timeoutMs - Maximum time to wait in milliseconds
  * @returns true if all replicas caught up, false if timed out
  */
-async function waitForReplication(replicas: PrismaClient[], target: string, timeoutMs: number): Promise<boolean> {
+export async function waitForReplication(replicas: Pool[], target: string, timeoutMs: number): Promise<boolean> {
   // TODO: Right now, this waits for replication on all replicas right after every operation on the primary. In the future, we could
   // instead make it per-replica and per-request, so that each replica keeps track for each request of which LSN it needs
   // to wait for on the next read. This way, the waiting period is significantly reduced. Care needs to be taken because
@@ -173,7 +286,7 @@ async function waitForReplication(replicas: PrismaClient[], target: string, time
     }
 
     // Build the check function based on strategy
-    let checkCaughtUp: (replica: PrismaClient) => Promise<boolean>;
+    let checkCaughtUp: (replica: Pool) => Promise<boolean>;
 
     if (strategy === "pg-stat-replication") {
       if (!/^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/.test(target)) {
@@ -189,11 +302,17 @@ async function waitForReplication(replicas: PrismaClient[], target: string, time
             'stack.db-replication.timeout-ms': timeoutMs,
           },
         }, async (span) => {
-          const [{ caught_up }] = await (replica as any).$queryRaw<[{ caught_up: boolean }]>`
-            SELECT pg_last_wal_replay_lsn() >= ${target}::pg_lsn AS caught_up
-          `;
-          span.setAttribute('stack.db-replication.caught-up', caught_up);
-          return caught_up;
+          const { rows } = await replica.query(
+            "SELECT pg_last_wal_replay_lsn() >= $1::pg_lsn AS caught_up",
+            [target],
+          );
+          const caughtUp: unknown = rows[0]?.caught_up;
+          // NULL if the server isn't a standby (pg_last_wal_replay_lsn() is NULL on a primary)
+          if (caughtUp !== null && typeof caughtUp !== "boolean") {
+            throw new HexclaveAssertionError(`Unexpected caught_up value from replica: ${JSON.stringify(caughtUp)}`);
+          }
+          span.setAttribute('stack.db-replication.caught-up', caughtUp === true);
+          return caughtUp === true;
         });
       };
     } else if (strategy === "aurora") {
@@ -211,16 +330,18 @@ async function waitForReplication(replicas: PrismaClient[], target: string, time
             'stack.db-replication.timeout-ms': timeoutMs,
           },
         }, async (span) => {
-          const replicaStatus = await (replica as any).$queryRaw<[{ current_lsn: bigint | null }]>`
+          const { rows: replicaStatus } = await replica.query(`
             SELECT *
             FROM aurora_replica_status()
             WHERE server_id = aurora_db_instance_identifier()
-          `;
-          span.setAttribute(
-            'stack.db-replication.replica-status',
-            JSON.stringify(replicaStatus, (_key, value) => typeof value === "bigint" ? value.toString() : value),
-          );
-          const currentLsn = replicaStatus[0]?.current_read_lsn ?? null;
+          `);
+          span.setAttribute('stack.db-replication.replica-status', JSON.stringify(replicaStatus));
+          // node-postgres returns int8 columns as strings to avoid precision loss
+          const currentLsnRaw: unknown = replicaStatus[0]?.current_read_lsn ?? null;
+          if (currentLsnRaw !== null && typeof currentLsnRaw !== "string") {
+            throw new HexclaveAssertionError(`Unexpected current_read_lsn value from aurora_replica_status(): ${JSON.stringify(currentLsnRaw)}`);
+          }
+          const currentLsn = currentLsnRaw === null ? null : BigInt(currentLsnRaw);
           span.setAttribute('stack.db-replication.current-lsn', currentLsn === null ? "null" : currentLsn.toString());
           return currentLsn === null || currentLsn >= targetBigInt;
         });
@@ -231,19 +352,32 @@ async function waitForReplication(replicas: PrismaClient[], target: string, time
 
     // Wait for all replicas in parallel with timeout and exponential backoff
     const deadline = performance.now() + timeoutMs;
-    const results = await Promise.all(replicas.map(async (replica): Promise<{ caughtUp: boolean, iterations: number }> => {
+    const results = await Promise.all(replicas.map(async (replica): Promise<{ caughtUp: boolean, unavailable: boolean, iterations: number }> => {
       let extraWaitMs = 5;
       let iterations = 0;
       while (true) {
         iterations++;
-        if (await checkCaughtUp(replica)) {
-          return { caughtUp: true, iterations };
+        let caughtUp: boolean;
+        try {
+          caughtUp = await checkCaughtUp(replica);
+        } catch (error) {
+          if (!isDatabaseUnavailableError(error)) {
+            throw error;
+          }
+          // While the replica is down, reads routed to it fall back to the primary, so there is nothing to wait for.
+          // Once an Aurora reader is back up, it serves reads from the cluster's shared storage volume, so it can't
+          // be behind writes that completed before it came back. (Local streaming replicas could briefly be behind
+          // after a restart, but that's only a development setup.)
+          return { caughtUp: true, unavailable: true, iterations };
+        }
+        if (caughtUp) {
+          return { caughtUp: true, unavailable: false, iterations };
         }
         if (performance.now() > deadline) break;
         await wait(Math.min(15 + extraWaitMs, deadline - performance.now() + 10));  // Capped to avoid overshooting
         extraWaitMs = extraWaitMs * 3;
       }
-      return { caughtUp: false, iterations };
+      return { caughtUp: false, unavailable: false, iterations };
     }));
 
     // Compute stats
@@ -253,6 +387,7 @@ async function waitForReplication(replicas: PrismaClient[], target: string, time
 
     span.setAttribute('stack.db-replication.caught-up', allCaughtUp);
     span.setAttribute('stack.db-replication.timed-out-count', timedOutCount);
+    span.setAttribute('stack.db-replication.unavailable-count', results.filter(r => r.unavailable).length);
     span.setAttribute('stack.db-replication.iterations-min', Math.min(...iterations));
     span.setAttribute('stack.db-replication.iterations-max', Math.max(...iterations));
     span.setAttribute('stack.db-replication.iterations-avg', iterations.reduce((a, b) => a + b, 0) / iterations.length);
@@ -266,9 +401,9 @@ async function waitForReplication(replicas: PrismaClient[], target: string, time
  * This ensures read-after-write consistency when using a read replica.
  *
  * @param primary - The primary Prisma client to extend
- * @param replicaClients - List of replica Prisma clients to query for replication status
+ * @param replicaPools - Pools of the replicas to query for replication status
  */
-function extendWithReplicationWait<T extends PrismaClient>(primary: T, replicaClients: PrismaClient[]): T {
+function extendWithReplicationWait<T extends PrismaClient>(primary: T, replicaPools: Pool[]): T {
   const strategy = getEnvVariable("STACK_DATABASE_REPLICATION_WAIT_STRATEGY", "none");
   if (strategy === "none") {
     return primary;
@@ -299,7 +434,7 @@ function extendWithReplicationWait<T extends PrismaClient>(primary: T, replicaCl
         span.setAttribute('stack.db-replication.target', target);
 
         // Wait for replication with a 2s timeout to prevent hanging
-        const caughtUp = await waitForReplication(replicaClients, target, 2000);
+        const caughtUp = await waitForReplication(replicaPools, target, 2000);
         if (!caughtUp) {
           span.setAttribute('stack.db-replication.timeout', true);
           captureError("prisma-client-replication-timeout", new HexclaveAssertionError("Replication wait timed out after 2s. The replica may be behind, or something weird is going on!"));
@@ -350,9 +485,16 @@ function extendWithReplicationWait<T extends PrismaClient>(primary: T, replicaCl
   }) as T;
 }
 
-function extendWithReadReplicas<T extends PrismaClient>(client: T, replicaConnectionString: string): PrismaClientWithReplica<T> {
-  // Create a separate PrismaClient for the read replica
-  const replicaClient = getPostgresPrismaClient(replicaConnectionString, "replica").client;
+function extendWithReadReplicas<T extends PrismaClient>(client: T, primaryConnectionString: string, replicaConnectionString: string): PrismaClientWithReplica<T> {
+  // Create a separate PrismaClient for the read replica, which retries reads on the primary while the replica is down
+  const replicaClient = getOrCreatePrismaClient(
+    `replica-with-primary-fallback:${replicaConnectionString}:${primaryConnectionString}`,
+    () => withPrimaryFallbackForReads(
+      createPrismaPgAdapter(replicaConnectionString, "replica", { captureErrors: true }),
+      // The primary pool's errors are already captured by the primary client's adapter
+      createPrismaPgAdapter(primaryConnectionString, "primary", { captureErrors: false }),
+    ),
+  );
 
   // Extend with read replicas FIRST so its query hook runs outermost: it routes read operations directly onto the
   // replica client, so the replication-wait hook (applied second, i.e. inner) only ever sees operations that hit
@@ -363,7 +505,7 @@ function extendWithReadReplicas<T extends PrismaClient>(client: T, replicaConnec
 
   // The $extends result doesn't structurally satisfy PrismaClient (e.g. it drops $on), but at runtime it supports
   // everything extendWithReplicationWait uses ($extends, $transaction, $queryRaw), hence the cast.
-  return extendWithReplicationWait(clientWithReadReplicas as unknown as T, [replicaClient]) as unknown as PrismaClientWithReplica<T>;
+  return extendWithReplicationWait(clientWithReadReplicas as unknown as T, [getPostgresPool(replicaConnectionString, "replica")]) as unknown as PrismaClientWithReplica<T>;
 }
 
 function extendWithFakeReadReplica<T extends PrismaClient>(client: T): PrismaClientWithReplica<T> {
@@ -380,7 +522,7 @@ export const { client: globalPrismaClient, schema: globalPrismaSchema }: {
   ? (() => {
     const { client, schema } = getPostgresPrismaClient(globalPrismaConnectionString, "primary");
     return {
-      client: actualReplicaConnectionString ? extendWithReadReplicas(client, actualReplicaConnectionString) : extendWithFakeReadReplica(client),
+      client: actualReplicaConnectionString ? extendWithReadReplicas(client, globalPrismaConnectionString, actualReplicaConnectionString) : extendWithFakeReadReplica(client),
       schema,
     };
   })()

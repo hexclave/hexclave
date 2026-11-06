@@ -25,7 +25,9 @@ export const POST = createSmartRouteHandler({
       tenancy: adaptSchema.defined(),
     }).defined(),
     body: yupObject({
-      expires_in_millis: yupNumber().max(1000 * 60 * 15).default(1000 * 60 * 2), // Default: 2 minutes, max: 15 minutes
+      // Default 2 hours, max 24 hours, so users who get distracted mid-`login` (or need to sign up first) don't
+      // have to restart. This was briefly 2 minutes (max 15), which turned out to be too strict in practice.
+      expires_in_millis: yupNumber().max(1000 * 60 * 60 * 24).default(1000 * 60 * 60 * 2),
       anon_refresh_token: yupString().optional(),
     }).default({}),
   }),
