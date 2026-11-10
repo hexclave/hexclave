@@ -1,0 +1,115 @@
+/* Design tokens for the /console surface.
+
+   They are scoped to `.hx-console` (set on the console shell root and on <body> while the console
+   is mounted) instead of `:root`, so the legacy UI at `/` keeps rendering with the original tokens
+   in globals.css. Both UIs read the same token *names* (`--background`, `--card`, …), which is what
+   lets the shared Tailwind config and the dashboard DataGrid render correctly inside either one.
+
+   Plain CSS on purpose: Tailwind rejects `@layer` in a stylesheet that has no `@tailwind`
+   directives of its own, and this file is imported separately from globals.css.
+
+   Unlike the legacy glass palette, `--card` is fully opaque here: a dense operations dashboard
+   reads better with solid surfaces and hairline borders than with translucency. */
+.hx-console {
+  --background: 240 6% 97.5%;
+  --foreground: 240 10% 6%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 6%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 6%;
+
+  --primary: 240 6% 10%;
+  --primary-foreground: 0 0% 98%;
+
+  --secondary: 240 5% 94%;
+  --secondary-foreground: 240 6% 10%;
+
+  --muted: 240 5% 95%;
+  --muted-foreground: 240 4% 42%;
+
+  --accent: 240 5% 94%;
+  --accent-foreground: 240 6% 10%;
+
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 98%;
+
+  --success: 152 60% 40%;
+  --success-foreground: 0 0% 98%;
+
+  --border: 240 6% 90%;
+  --input: 240 6% 86%;
+  --ring: 240 6% 10%;
+
+  --radius: 0.5rem;
+
+  /* Console-only tokens. */
+  --sidebar: 240 6% 96%;
+  --brand: 243 75% 59%;
+  --chart-1: 221 83% 53%;
+  --chart-2: 262 83% 58%;
+  --chart-grid: 240 6% 92%;
+
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.dark .hx-console {
+  --background: 240 6% 5%;
+  --foreground: 0 0% 96%;
+
+  --card: 240 5% 8%;
+  --card-foreground: 0 0% 96%;
+
+  --popover: 240 5% 9%;
+  --popover-foreground: 0 0% 96%;
+
+  --primary: 0 0% 96%;
+  --primary-foreground: 240 6% 10%;
+
+  --secondary: 240 4% 14%;
+  --secondary-foreground: 0 0% 96%;
+
+  --muted: 240 4% 13%;
+  --muted-foreground: 240 5% 62%;
+
+  --accent: 240 4% 14%;
+  --accent-foreground: 0 0% 96%;
+
+  --destructive: 0 63% 55%;
+  --destructive-foreground: 0 0% 98%;
+
+  --success: 152 55% 45%;
+  --success-foreground: 0 0% 98%;
+
+  --border: 240 4% 16%;
+  --input: 240 4% 20%;
+  --ring: 240 5% 80%;
+
+  --sidebar: 240 6% 6.5%;
+  --brand: 243 85% 68%;
+  --chart-1: 217 91% 60%;
+  --chart-2: 263 90% 68%;
+  --chart-grid: 240 4% 14%;
+}
+
+/* The dashboard DataGrid ships its own surface chrome; inside the console it always sits in a
+   bordered Card, so its outer frame is flattened to read as part of that card. */
+.hx-console .hx-grid {
+  border-width: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background-color: hsl(var(--card));
+}
+
+.hx-console .hx-grid > .sticky {
+  background-color: hsl(var(--muted) / 0.6);
+}
+
+.hx-console .hx-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--foreground) / 0.18) transparent;
+}
