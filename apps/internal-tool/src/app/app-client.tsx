@@ -1,5 +1,6 @@
 import { useHexclaveApp, useUser } from "@hexclave/next";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AccessDenied } from "../components/AccessDenied";
 import { AddManualQa } from "../components/AddManualQa";
 import { Analytics } from "../components/Analytics";
 import { AppSidebar, appTabLabel, isAppTab, type AppTab } from "../components/AppSidebar";
@@ -30,24 +31,20 @@ function readInitialTab(): AppTab {
 }
 
 export default function App() {
-  const hexclaveApp = useHexclaveApp();
   const user = useUser({ or: "redirect" });
   if (!isAiChatReviewer(user.clientReadOnlyMetadata)) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-50">
-        <div className="text-center">
-          <h1 className="text-lg font-semibold text-gray-900 mb-2">Access denied</h1>
-          <p className="text-sm text-gray-500">
-            You are signed in as {user.displayName ?? user.primaryEmail ?? user.id}, but your account is not approved as a reviewer.
-          </p>
-        </div>
-      </div>
+      <AccessDenied
+        accountLabel={user.primaryEmail ?? user.displayName ?? user.id}
+        onSignOut={async () => await user.signOut()}
+      />
     );
   }
   return <ReviewerApp />;
 }
 
 function ReviewerApp() {
+  const hexclaveApp = useHexclaveApp();
   const user = useUser({ or: "redirect" });
   const [selectedRow, setSelectedRow] = useState<McpCallLogRow | null>(null);
   const [selectedUsageRow, setSelectedUsageRow] = useState<AiQueryLogRow | null>(null);
