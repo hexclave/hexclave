@@ -93,7 +93,7 @@ export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInp
   return <input {...props} className={cn(fieldClasses, "h-7 px-2 text-xs", className)} />;
 }
 
-export function Textarea({ className, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+export function Textarea({ className, ...props }: React.ComponentProps<"textarea">) {
   return <textarea {...props} className={cn(fieldClasses, "px-2 py-1.5 text-xs", className)} />;
 }
 
@@ -111,6 +111,25 @@ export function FieldLabel({ children, className }: { children: React.ReactNode,
     <span className={cn("text-[10px] font-medium uppercase tracking-wider text-muted-foreground", className)}>
       {children}
     </span>
+  );
+}
+
+/**
+ * Inline "LABEL [control]" pair for filter toolbars. The label never wraps, and the control's
+ * width comes from the wrapper (`controlClassName`): Input/Select are `w-full` and `cn` has no
+ * tailwind-merge, so passing a width directly to them would race the `w-full` class.
+ */
+export function FilterField({ label, children, controlClassName, className }: {
+  label: string,
+  children: React.ReactNode,
+  controlClassName?: string,
+  className?: string,
+}) {
+  return (
+    <label className={cn("flex min-w-0 items-center gap-2", className)}>
+      <FieldLabel className="shrink-0 whitespace-nowrap">{label}</FieldLabel>
+      <div className={cn("flex min-w-0 items-center", controlClassName)}>{children}</div>
+    </label>
   );
 }
 

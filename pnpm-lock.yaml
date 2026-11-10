@@ -252,8 +252,8 @@ importers:
         specifier: ^0.35.3
         version: 0.35.3(@types/node@20.17.6)
       spacetimedb:
-        specifier: ^2.1.0
-        version: 2.1.0(@tanstack/react-query@5.90.7(react@19.2.3))(react@19.2.3)(undici@6.19.8)
+        specifier: ^2.10.1
+        version: 2.10.1(@tanstack/react-query@5.90.7(react@19.2.3))(react@19.2.3)(undici@6.19.8)
       stripe:
         specifier: ^18.3.0
         version: 18.3.0(@types/node@20.17.6)
@@ -914,8 +914,8 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1
       spacetimedb:
-        specifier: ^2.1.0
-        version: 2.1.0(@tanstack/react-query@5.90.7(react@19.2.3))(react@19.2.3)(undici@6.19.8)
+        specifier: ^2.10.1
+        version: 2.10.1(@tanstack/react-query@5.90.7(react@19.2.3))(react@19.2.3)(undici@6.19.8)
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -15733,6 +15733,11 @@ packages:
     engines: {node: '>=14'}
     hasBin: true
 
+  prettier@3.9.9:
+    resolution: {integrity: sha512-Z/CJHIkdujO/OtN7nXUii0Rf3VT5SRuhjBA82Xvu2XhBUgX3nhP67T0LHceBdQLex7OOFGTox+Q5Yg8Jk2Qivg==}
+    engines: {node: '>=14'}
+    hasBin: true
+
   pretty-format@27.5.1:
     resolution: {integrity: sha512-Qb1gy5OrP5+zDf2Bvnzdl3jsTf1qXVMazbvCoKhtKqVs4/YK4ozX4gKQJJVyNe+cajNPn0KoC0MC3FUmaHWEmQ==}
     engines: {node: ^10.13.0 || ^12.13.0 || ^14.15.0 || >=15.0.0}
@@ -16881,12 +16886,13 @@ packages:
   space-separated-tokens@2.0.2:
     resolution: {integrity: sha512-PEGlAwrG8yXGXRjW32fGbg66JAlOAwbObuqVoJpv/mRgoWDQfgH1wDPvtzWyUSNAXBGSk8h755YDbbcEy3SH2Q==}
 
-  spacetimedb@2.1.0:
-    resolution: {integrity: sha512-Kzs+HXCRj15ryld03ztU4a2uQg0M8ivV/9Bk/gvMpb59lLc/A2/r7UkGCYBePsBL7Zwqgr8gE8FeufoZVXtPnA==}
+  spacetimedb@2.10.1:
+    resolution: {integrity: sha512-X+9qO7r+v8lb9nUOyrlKMvEY6mFPRVYEjvn1eDBDIcmudIi7h2dB3r1QYS6opNSIVPHa6DhUxLH5dATS/Q0TPA==}
     peerDependencies:
       '@angular/core': '>=17.0.0'
       '@tanstack/react-query': ^5.0.0
       react: ^18.0.0 || ^19.0.0-0 || ^19.0.0
+      solid-js: ^1.6.0
       svelte: ^4.0.0 || ^5.0.0
       undici: ^6.19.2
       vue: ^3.3.0
@@ -16896,6 +16902,8 @@ packages:
       '@tanstack/react-query':
         optional: true
       react:
+        optional: true
+      solid-js:
         optional: true
       svelte:
         optional: true
@@ -36647,6 +36655,8 @@ snapshots:
 
   prettier@3.5.3: {}
 
+  prettier@3.9.9: {}
+
   pretty-format@27.5.1:
     dependencies:
       ansi-regex: 5.0.1
@@ -38418,12 +38428,12 @@ snapshots:
 
   space-separated-tokens@2.0.2: {}
 
-  spacetimedb@2.1.0(@tanstack/react-query@5.90.7(react@19.2.3))(react@19.2.3)(undici@6.19.8):
+  spacetimedb@2.10.1(@tanstack/react-query@5.90.7(react@19.2.3))(react@19.2.3)(undici@6.19.8):
     dependencies:
       base64-js: 1.5.1
       headers-polyfill: 4.0.3
       object-inspect: 1.13.4
-      prettier: 3.5.3
+      prettier: 3.9.9
       pure-rand: 7.0.1
       safe-stable-stringify: 2.5.0
       statuses: 2.0.2

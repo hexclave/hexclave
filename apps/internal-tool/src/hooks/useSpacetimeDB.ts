@@ -1,3 +1,4 @@
+import { loadHistory, type HistoryLoadOptions } from "../lib/load-history";
 import { captureError } from "@hexclave/shared/dist/utils/errors";
 import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -102,10 +103,11 @@ type PagedRows<Row> = {
   nextBeforeId: bigint | undefined,
 };
 
+// List filters: an empty list means "no filter" (the UI multi-selects use nothing-selected = all).
 export type AiUsageTableFilters = {
   createdAtOrAfterMicros: bigint | undefined,
-  systemPromptId: string | undefined,
-  modelId: string | undefined,
+  systemPromptIds: readonly string[],
+  modelIds: readonly string[],
   mode: "stream" | "generate" | undefined,
   isAuthenticated: boolean | undefined,
   hasError: boolean | undefined,
@@ -113,11 +115,16 @@ export type AiUsageTableFilters = {
 
 export type McpReviewTableFilters = {
   createdAtOrAfterMicros: bigint | undefined,
-  toolName: string | undefined,
+  toolNames: readonly string[],
   hasError: boolean | undefined,
-  qaState: "pending" | "review-failed" | "error" | "pass" | "warn" | "fail" | "feature-request" | undefined,
-  humanReviewState: "required" | "reviewed" | "not-reviewed" | undefined,
+  qaStates: ReadonlyArray<"pending" | "review-failed" | "error" | "pass" | "warn" | "fail" | "feature-request">,
+  humanReviewStates: ReadonlyArray<"required" | "reviewed" | "not-reviewed">,
 };
+
+/** Omit empty list filters from procedure args; the module treats omitted and empty the same. */
+function listArg<Value>(values: readonly Value[]): Value[] | undefined {
+  return values.length === 0 ? undefined : [...values];
+}
 
 const HISTORY_PAGE_SIZE = 50;
 
@@ -335,9 +342,17 @@ function useTableSubscription<Row extends { id: bigint }>(
           captureError("spacetimedb-connect", err);
           retry();
         })
-        .onDisconnect(() => {
+        .onDisconnect((_ctx, err) => {
           if (thisConn != null) liveConns.delete(thisConn);
           if (cancelled || connRef.current !== thisConn) return;
+          // SDK 2.10 routes established WebSocket failures here, rather than
+          // onConnectError. Keep the reason visible while retrying.
+          if (err != null) {
+            const message = formatUnknownError(err, "SpacetimeDB connection lost");
+            lastConnectionErrorMessage = message;
+            setConnectionErrorMessage(message);
+            captureError("spacetimedb-disconnect", err);
+          }
           pendingCalls.rejectAll(closedConnError());
           setConnectionState("connecting");
           retry();
@@ -380,31 +395,38 @@ function useTableSubscription<Row extends { id: bigint }>(
     return await pendingCalls.track(call(conn));
   }, [conn, pendingCalls]);
 
-  const loadOlder = async (): Promise<void> => {
+  const loadOlder = async (options: HistoryLoadOptions = {}): Promise<void> => {
     const pageOlder = binding.pageOlder;
-    if (pageOlder == null || conn == null || loadingOlderRef.current || !hasMoreHistory) return;
+    if (pageOlder == null || loadingOlderRef.current || !hasMoreHistory) return;
+    if (conn == null) throw new Error("Not connected to SpacetimeDB yet. Try again in a moment.");
 
     const oldestShown = olderRows.at(-1) ?? rows.at(-1);
-    const cursor = historyCursor
+    let cursor = historyCursor
       ?? (oldestShown == null || binding.cursorFromRow == null ? null : binding.cursorFromRow(oldestShown));
 
     loadingOlderRef.current = true;
     setIsLoadingOlder(true);
     try {
-      const page = await pendingCalls.track(pageOlder(conn, cursor, HISTORY_PAGE_SIZE));
-      setOlderRows((existing) => {
-        const seen = new Set([...rows, ...existing].map((r) => r.id));
-        return [...existing, ...page.rows.filter((r) => !seen.has(r.id))];
+      let more = true;
+      await loadHistory({
+        signal: options.signal,
+        hasMoreHistory: () => more,
+        loadOlder: async () => {
+          const page = await pendingCalls.track(pageOlder(conn, cursor, HISTORY_PAGE_SIZE));
+          setOlderRows((existing) => {
+            const seen = new Set([...rows, ...existing].map((r) => r.id));
+            return [...existing, ...page.rows.filter((r) => !seen.has(r.id))];
+          });
+          cursor = page.nextBeforeCreatedAtMicros == null ? null : {
+            beforeCreatedAtMicros: page.nextBeforeCreatedAtMicros,
+            beforeId: page.nextBeforeId,
+          };
+          setHasMoreHistory(cursor != null);
+          setHistoryCursor(cursor);
+          // Keep the cursor local during bulk loads; React may batch state updates.
+          more = options.all === true && cursor != null;
+        },
       });
-      if (page.nextBeforeCreatedAtMicros == null) {
-        setHasMoreHistory(false);
-        setHistoryCursor(null);
-      } else {
-        setHistoryCursor({
-          beforeCreatedAtMicros: page.nextBeforeCreatedAtMicros,
-          beforeId: page.nextBeforeId,
-        });
-      }
     } finally {
       loadingOlderRef.current = false;
       setIsLoadingOlder(false);
@@ -442,10 +464,10 @@ const mcpBinding: TableBinding<McpCallLogRow> = {
     beforeId: cursor?.beforeId,
     limit,
     createdAtOrAfterMicros: undefined,
-    toolName: undefined,
+    toolNames: undefined,
     hasError: undefined,
-    qaState: undefined,
-    humanReviewState: undefined,
+    qaStates: undefined,
+    humanReviewStates: undefined,
   }),
 };
 
@@ -467,8 +489,8 @@ const aiQueryBinding: TableBinding<AiQueryLogRow> = {
     beforeId: cursor?.beforeId,
     limit,
     createdAtOrAfterMicros: undefined,
-    systemPromptId: undefined,
-    modelId: undefined,
+    systemPromptIds: undefined,
+    modelIds: undefined,
     mode: undefined,
     isAuthenticated: undefined,
     hasError: undefined,
@@ -532,10 +554,10 @@ export function useMcpCallLogs(getToken?: GetSpacetimeToken) {
       beforeId: cursor?.beforeId,
       limit,
       createdAtOrAfterMicros: filters.createdAtOrAfterMicros,
-      toolName: filters.toolName,
+      toolNames: listArg(filters.toolNames),
       hasError: filters.hasError,
-      qaState: filters.qaState,
-      humanReviewState: filters.humanReviewState,
+      qaStates: listArg(filters.qaStates),
+      humanReviewStates: listArg(filters.humanReviewStates),
     };
     return await subscription.callReducer(conn => conn.procedures.pageMcpCallLog(args));
   }, [subscription.callReducer]);
@@ -562,8 +584,8 @@ export function useAiQueryLogs(getToken?: GetSpacetimeToken) {
       beforeId: cursor?.beforeId,
       limit,
       createdAtOrAfterMicros: filters.createdAtOrAfterMicros,
-      systemPromptId: filters.systemPromptId,
-      modelId: filters.modelId,
+      systemPromptIds: listArg(filters.systemPromptIds),
+      modelIds: listArg(filters.modelIds),
       mode: filters.mode,
       isAuthenticated: filters.isAuthenticated,
       hasError: filters.hasError,

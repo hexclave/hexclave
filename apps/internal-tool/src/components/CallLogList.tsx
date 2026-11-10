@@ -2,23 +2,15 @@ import { runAsynchronously } from "@hexclave/shared/dist/utils/promises";
 import { useMemo, useState } from "react";
 import { useFilteredLogPages } from "../hooks/useFilteredLogPages";
 import type { McpReviewTableFilters, PageCursor } from "../hooks/useSpacetimeDB";
-import {
-  type McpHumanReviewState,
-  type McpQaState,
-  type McpStatusFilter,
-  type McpTimeRange,
-  parseHumanReviewState,
-  parseQaState,
-  parseStatusFilter,
-  parseTimeRange,
-  rangeStartMillis,
-} from "../lib/mcp-analytics-filters";
+import { CALL_STATUS_OPTIONS, hasErrorFilter, HUMAN_REVIEW_OPTIONS, QA_STATE_OPTIONS, rangeStartMillis, stringOptions, type TimeRange } from "../lib/filter-options";
+import { countActiveMcpFilters, DEFAULT_MCP_ANALYTICS_FILTERS, type McpAnalyticsFilters } from "../lib/mcp-analytics-filters";
 import type { McpCallLogRow } from "../types";
 import { type HistoryPagingProps } from "./LoadOlderButton";
 import { McpCallDataGrid } from "./McpCallDataGrid";
-import { Alert, Button, Card, EmptyState, FieldLabel, Input, Select } from "./design";
+import { Alert, Button, Card, EmptyState, Input, Panel, PanelRow } from "./design";
+import { MultiFilter, TimeRangeFilter } from "./FilterFields";
 
-function rangeStartMicros(range: McpTimeRange): bigint | undefined {
+function rangeStartMicros(range: TimeRange): bigint | undefined {
   const startMillis = rangeStartMillis(range, Date.now());
   return startMillis == null ? undefined : BigInt(startMillis) * 1000n;
 }
@@ -47,25 +39,28 @@ export function CallLogList({
     nextBeforeId: bigint | undefined,
   }>,
 } & HistoryPagingProps) {
-  const [timeRange, setTimeRange] = useState<McpTimeRange>("all");
-  const [toolName, setToolName] = useState("");
-  const [status, setStatus] = useState<McpStatusFilter>("all");
-  const [qaState, setQaState] = useState<McpQaState | "all">("all");
-  const [humanReviewState, setHumanReviewState] = useState<McpHumanReviewState | "all">("all");
+  // Same filter model as the Overview's MCP analytics, so both views mean the same thing by each filter.
+  const [mcpFilters, setMcpFilters] = useState<McpAnalyticsFilters>(DEFAULT_MCP_ANALYTICS_FILTERS);
+  const setFilter = <Key extends keyof McpAnalyticsFilters>(key: Key, value: McpAnalyticsFilters[Key]) => {
+    setMcpFilters(current => ({ ...current, [key]: value }));
+  };
   const [snapshotVersion, setSnapshotVersion] = useState(0);
   // Free-text search is client-side over whatever rows are on screen (the live list, or the
   // loaded pages of a filtered snapshot); the server-side filters above are the categorical ones.
   const [search, setSearch] = useState("");
-  const toolNames = useMemo(() => Array.from(new Set(rows.map(row => row.toolName))).sort(), [rows]);
-  const hasFilters = timeRange !== "all" || toolName !== "" || status !== "all" || qaState !== "all" || humanReviewState !== "all";
+  const toolOptions = useMemo(() => stringOptions(Array.from(new Set(rows.map(row => row.toolName))).sort()), [rows]);
+  const hasFilters = countActiveMcpFilters(mcpFilters) > 0;
   const filters = useMemo<McpReviewTableFilters>(() => ({
-    createdAtOrAfterMicros: rangeStartMicros(timeRange),
-    toolName: toolName === "" ? undefined : toolName,
-    hasError: status === "all" ? undefined : status === "error",
-    qaState: qaState === "all" ? undefined : qaState,
-    humanReviewState: humanReviewState === "all" ? undefined : humanReviewState,
-  }), [humanReviewState, qaState, snapshotVersion, status, timeRange, toolName]);
-  const queryKey = [timeRange, toolName, status, qaState, humanReviewState, snapshotVersion].join("\u0000");
+    createdAtOrAfterMicros: rangeStartMicros(mcpFilters.timeRange),
+    toolNames: [...mcpFilters.toolNames].sort(),
+    hasError: hasErrorFilter(mcpFilters.statuses),
+    qaStates: [...mcpFilters.qaStates].sort(),
+    humanReviewStates: [...mcpFilters.humanReviewStates].sort(),
+    // snapshotVersion is a dependency on purpose: bumping it recomputes the range start ("now").
+  }), [mcpFilters, snapshotVersion]);
+  const queryKey = JSON.stringify([
+    mcpFilters.timeRange, filters.toolNames, filters.hasError ?? null, filters.qaStates, filters.humanReviewStates, snapshotVersion,
+  ]);
   const filteredPages = useFilteredLogPages({
     enabled: hasFilters,
     queryKey,
@@ -96,74 +91,33 @@ export function CallLogList({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-black/[0.06] bg-card p-3 shadow-sm ring-1 ring-black/[0.04] dark:border-white/[0.06] dark:ring-white/[0.04]">
-        <label className="grid grid-cols-[auto_6rem] items-center gap-1.5">
-          <FieldLabel>Range</FieldLabel>
-          <Select value={timeRange} onChange={event => setTimeRange(parseTimeRange(event.target.value))}>
-            <option value="all">All time</option>
-            <option value="24h">24 hours</option>
-            <option value="7d">7 days</option>
-            <option value="30d">30 days</option>
-          </Select>
-        </label>
-        {toolNames.length > 0 && <label className="grid min-w-48 flex-1 grid-cols-[auto_1fr] items-center gap-1.5">
-          <FieldLabel>Tool</FieldLabel>
-          <Select value={toolName} onChange={event => setToolName(event.target.value)}>
-            <option value="">All tools</option>
-            {toolNames.map(name => <option key={name} value={name}>{name}</option>)}
-          </Select>
-        </label>}
-        <label className="grid grid-cols-[auto_7rem] items-center gap-1.5">
-          <FieldLabel>Status</FieldLabel>
-          <Select value={status} onChange={event => setStatus(parseStatusFilter(event.target.value))}>
-            <option value="all">All calls</option>
-            <option value="ok">OK</option>
-            <option value="error">Error</option>
-          </Select>
-        </label>
-        <label className="grid grid-cols-[auto_8rem] items-center gap-1.5">
-          <FieldLabel>AI review</FieldLabel>
-          <Select value={qaState} onChange={event => setQaState(parseQaState(event.target.value))}>
-            <option value="all">All reviews</option>
-            <option value="pending">Pending</option>
-            <option value="review-failed">Failed</option>
-            <option value="error">Error</option>
-            <option value="pass">Pass (80+)</option>
-            <option value="warn">Warning</option>
-            <option value="fail">Fail (&lt;50)</option>
-          </Select>
-        </label>
-        <label className="grid grid-cols-[auto_9rem] items-center gap-1.5">
-          <FieldLabel>Human review</FieldLabel>
-          <Select value={humanReviewState} onChange={event => setHumanReviewState(parseHumanReviewState(event.target.value))}>
-            <option value="all">All</option>
-            <option value="required">Required</option>
-            <option value="reviewed">Reviewed</option>
-            <option value="not-reviewed">Not reviewed</option>
-          </Select>
-        </label>
-        <label className="grid min-w-56 flex-1 grid-cols-[auto_1fr] items-center gap-1.5">
-          <FieldLabel>Search</FieldLabel>
+      <Panel>
+        <PanelRow className="gap-x-2">
           <Input
             type="search"
+            aria-label="Search loaded MCP calls"
+            className="min-w-64 flex-1"
             value={search}
             onChange={event => setSearch(event.target.value)}
-            placeholder="Question, reason, response, user… (loaded rows)"
+            placeholder="Search question, reason, response, user… (loaded rows)"
           />
-        </label>
-        {hasFilters && <Button variant="ghost" onClick={() => {
-          setTimeRange("all");
-          setToolName("");
-          setStatus("all");
-          setQaState("all");
-          setHumanReviewState("all");
-        }}>Clear filters</Button>}
-        {hasFilters && <Button onClick={() => setSnapshotVersion(version => version + 1)} disabled={filteredPages.isLoading}>Refresh results</Button>}
-        {/* Only worth saying when it is true and surprising: a filtered list is
-            a point-in-time snapshot, so new calls do not stream into it. The
-            unfiltered list is live, which is what people already expect. */}
-        {hasFilters && <span className="ml-auto text-[10px] text-muted-foreground">Snapshot results</span>}
-      </div>
+          {hasFilters && <Button variant="ghost" onClick={() => setMcpFilters(DEFAULT_MCP_ANALYTICS_FILTERS)}>Clear filters</Button>}
+        </PanelRow>
+        <PanelRow>
+          <TimeRangeFilter value={mcpFilters.timeRange} onChange={range => setFilter("timeRange", range)} />
+          {toolOptions.length > 0 && <MultiFilter label="Tool" mono controlClassName="w-44" options={toolOptions} selected={mcpFilters.toolNames} onChange={selected => setFilter("toolNames", selected)} />}
+          <MultiFilter label="Status" controlClassName="w-28" options={CALL_STATUS_OPTIONS} selected={mcpFilters.statuses} onChange={selected => setFilter("statuses", selected)} />
+          <MultiFilter label="AI review" options={QA_STATE_OPTIONS} selected={mcpFilters.qaStates} onChange={selected => setFilter("qaStates", selected)} />
+          <MultiFilter label="Human review" options={HUMAN_REVIEW_OPTIONS} selected={mcpFilters.humanReviewStates} onChange={selected => setFilter("humanReviewStates", selected)} />
+          {/* Only worth saying when it is true and surprising: a filtered list is
+              a point-in-time snapshot, so new calls do not stream into it. The
+              unfiltered list is live, which is what people already expect. */}
+          {hasFilters && <div className="ml-auto flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground">Snapshot results</span>
+            <Button onClick={() => setSnapshotVersion(version => version + 1)} disabled={filteredPages.isLoading}>Refresh</Button>
+          </div>}
+        </PanelRow>
+      </Panel>
 
       {filteredPages.error != null && (
         <Alert>

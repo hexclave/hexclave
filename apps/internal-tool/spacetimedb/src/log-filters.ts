@@ -12,12 +12,14 @@ type AiFilterableRow = {
   errorMessage: string | undefined,
 };
 
+// List filters match a row whose value is any of the listed values; an omitted or empty list is
+// no filter (the UI's multi-selects use "nothing selected" to mean "all").
 export type AiLogFilters = {
-  systemPromptId: string | undefined,
-  modelId: string | undefined,
-  mode: string | undefined,
-  isAuthenticated: boolean | undefined,
-  hasError: boolean | undefined,
+  systemPromptIds?: readonly string[],
+  modelIds?: readonly string[],
+  mode?: string,
+  isAuthenticated?: boolean,
+  hasError?: boolean,
 };
 
 type McpFilterableRow = {
@@ -33,11 +35,15 @@ type McpFilterableRow = {
 };
 
 export type McpLogFilters = {
-  toolName: string | undefined,
-  hasError: boolean | undefined,
-  qaState: string | undefined,
-  humanReviewState: string | undefined,
+  toolNames?: readonly string[],
+  hasError?: boolean,
+  qaStates?: readonly string[],
+  humanReviewStates?: readonly string[],
 };
+
+function isListFilter(values: readonly string[] | undefined): values is readonly string[] {
+  return values != null && values.length > 0;
+}
 
 function hasErrorMessage(value: string | undefined): boolean {
   return value != null && value !== '';
@@ -74,8 +80,8 @@ function mcpHumanReviewStateMatches(row: McpFilterableRow, state: string): boole
 }
 
 export function aiLogMatches(row: AiFilterableRow, filters: AiLogFilters): boolean {
-  if (filters.systemPromptId != null && row.systemPromptId !== filters.systemPromptId) return false;
-  if (filters.modelId != null && row.modelId !== filters.modelId) return false;
+  if (isListFilter(filters.systemPromptIds) && !filters.systemPromptIds.includes(row.systemPromptId)) return false;
+  if (isListFilter(filters.modelIds) && !filters.modelIds.includes(row.modelId)) return false;
   if (filters.mode != null && row.mode !== filters.mode) return false;
   if (filters.isAuthenticated != null && row.isAuthenticated !== filters.isAuthenticated) return false;
   if (filters.hasError != null && hasErrorMessage(row.errorMessage) !== filters.hasError) return false;
@@ -83,9 +89,9 @@ export function aiLogMatches(row: AiFilterableRow, filters: AiLogFilters): boole
 }
 
 export function mcpLogMatches(row: McpFilterableRow, filters: McpLogFilters, nowMicros: bigint): boolean {
-  if (filters.toolName != null && row.toolName !== filters.toolName) return false;
+  if (isListFilter(filters.toolNames) && !filters.toolNames.includes(row.toolName)) return false;
   if (filters.hasError != null && hasErrorMessage(row.errorMessage) !== filters.hasError) return false;
-  if (filters.qaState != null && !mcpQaStateMatches(row, filters.qaState, nowMicros)) return false;
-  if (filters.humanReviewState != null && !mcpHumanReviewStateMatches(row, filters.humanReviewState)) return false;
+  if (isListFilter(filters.qaStates) && !filters.qaStates.some(state => mcpQaStateMatches(row, state, nowMicros))) return false;
+  if (isListFilter(filters.humanReviewStates) && !filters.humanReviewStates.some(state => mcpHumanReviewStateMatches(row, state))) return false;
   return true;
 }

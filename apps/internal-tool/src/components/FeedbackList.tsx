@@ -4,7 +4,9 @@ import { clsx } from "clsx";
 import type { FeedbackLogRow } from "../types";
 import { toDate } from "../utils";
 import { feedbackCategoryColor } from "../lib/feedback-category";
-import { Alert, Badge, Button, EmptyState, FieldLabel, Input, SelectionCheckbox, SelectionToolbar, Select } from "./design";
+import { stringOptions } from "../lib/filter-options";
+import { Alert, Badge, Button, EmptyState, Input, Panel, PanelRow, SelectionCheckbox, SelectionToolbar } from "./design";
+import { MultiFilter } from "./FilterFields";
 import { InternalPaginationFooter } from "./InternalDataGridFooter";
 import { type HistoryPagingProps } from "./LoadOlderButton";
 
@@ -12,7 +14,6 @@ function truncate(str: string, max: number): string {
   return str.length > max ? str.slice(0, max) + "..." : str;
 }
 
-const ALL_CATEGORIES = "all";
 
 export function FeedbackList({
   rows,
@@ -31,7 +32,7 @@ export function FeedbackList({
   selectedId?: bigint,
 } & HistoryPagingProps) {
   const [textFilter, setTextFilter] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<string>(ALL_CATEGORIES);
+  const [categoryFilter, setCategoryFilter] = useState<ReadonlySet<string>>(new Set());
   const [selectedRows, setSelectedRows] = useState<Set<bigint>>(new Set());
   const [pageIndex, setPageIndex] = useState(0);
   const [pageSize, setPageSize] = useState(25);
@@ -40,14 +41,14 @@ export function FeedbackList({
   // CallLogList builds its tool-name filter. The vocabulary lives in the MCP
   // tool; this way the filter can never be missing a category that exists in
   // the data, and never offers one that has never been used.
-  const categories = useMemo(() => {
-    return Array.from(new Set(rows.map(row => row.category))).sort();
+  const categoryOptions = useMemo(() => {
+    return stringOptions(Array.from(new Set(rows.map(row => row.category))).sort());
   }, [rows]);
 
   const visibleRows = useMemo(() => {
     const needle = textFilter.trim().toLowerCase();
     return rows
-      .filter(row => categoryFilter === ALL_CATEGORIES || row.category === categoryFilter)
+      .filter(row => categoryFilter.size === 0 || categoryFilter.has(row.category))
       .filter(row => needle === "" || row.message.toLowerCase().includes(needle))
       // Newest first. Sorting by id rather than createdAt because id is a
       // monotonic autoInc — two rows written in the same microsecond still get
@@ -89,34 +90,25 @@ export function FeedbackList({
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-[minmax(0,1fr)_12rem_auto] items-end gap-3 rounded-xl border border-black/[0.06] bg-card p-3 shadow-sm ring-1 ring-black/[0.04] dark:border-white/[0.06] dark:ring-white/[0.04]">
-        <label className="min-w-0 space-y-1">
-          <FieldLabel>Search</FieldLabel>
+      <Panel>
+        <PanelRow>
           <Input
+            type="search"
+            aria-label="Search feedback messages"
+            className="min-w-64 flex-1"
             value={textFilter}
             onChange={(e) => setTextFilter(e.target.value)}
-            placeholder="Search feedback messages"
+            placeholder="Search feedback messages…"
           />
-        </label>
-        <label className="space-y-1">
-          <FieldLabel>Category</FieldLabel>
-          <Select
-            value={categoryFilter}
-            onChange={(e) => setCategoryFilter(e.target.value)}
-          >
-            <option value={ALL_CATEGORIES}>All categories</option>
-            {categories.map(category => (
-              <option key={category} value={category}>{category}</option>
-            ))}
-          </Select>
-        </label>
-        <span className="pb-1 text-right text-[10px] tabular-nums text-muted-foreground">
-          {visibleRows.length} of {rows.length}
-        </span>
-      </div>
+          <MultiFilter label="Category" controlClassName="w-44" options={categoryOptions} selected={categoryFilter} onChange={setCategoryFilter} />
+          <span className="whitespace-nowrap text-[10px] tabular-nums text-muted-foreground">
+            {visibleRows.length} of {rows.length}
+          </span>
+        </PanelRow>
+      </Panel>
 
       {visibleRows.length === 0 ? (
-        <EmptyState className="rounded-xl border border-dashed border-border bg-card px-4 py-12">
+        <EmptyState className="rounded-xl border border-black/[0.06] bg-card px-4 py-12 dark:border-white/[0.06]">
           <p className="font-medium text-foreground">{rows.length === 0 ? "No feedback yet" : "No matching feedback"}</p>
           <p className="mt-1 text-xs">{rows.length === 0 ? "New reports will appear here as they arrive." : "Try a different message or category filter."}</p>
         </EmptyState>

@@ -1,84 +1,32 @@
 
 import { mcpLogMatches } from "../../spacetimedb/src/log-filters";
 import type { McpCallLogRow } from "../types";
-
-export type McpTimeRange = "24h" | "7d" | "30d" | "all";
-export const MCP_TIME_RANGES: readonly McpTimeRange[] = ["24h", "7d", "30d", "all"];
-
-/** Mirrors the `qaState` values `page_mcp_call_log` accepts. */
-export const MCP_QA_STATES = ["pending", "review-failed", "error", "pass", "warn", "fail", "feature-request"] as const;
-export type McpQaState = typeof MCP_QA_STATES[number];
-
-/** Mirrors the `humanReviewState` values `page_mcp_call_log` accepts. */
-export const MCP_HUMAN_REVIEW_STATES = ["required", "reviewed", "not-reviewed"] as const;
-export type McpHumanReviewState = typeof MCP_HUMAN_REVIEW_STATES[number];
-
-export const MCP_STATUS_FILTERS = ["all", "ok", "error"] as const;
-export type McpStatusFilter = typeof MCP_STATUS_FILTERS[number];
+import { type CallStatus, hasErrorFilter, type McpHumanReviewState, type McpQaState, rangeStartMillis, type TimeRange } from "./filter-options";
 
 export type McpAnalyticsFilters = {
-  timeRange: McpTimeRange,
-  /** Empty string means "all tools"; the selects use it as their neutral value. */
-  toolName: string,
-  status: McpStatusFilter,
-  qaState: McpQaState | "all",
-  humanReviewState: McpHumanReviewState | "all",
+  timeRange: TimeRange,
+  toolNames: ReadonlySet<string>,
+  statuses: ReadonlySet<CallStatus>,
+  qaStates: ReadonlySet<McpQaState>,
+  humanReviewStates: ReadonlySet<McpHumanReviewState>,
 };
 
+// Never mutated (the Sets are read-only), so sharing one default object is safe.
 export const DEFAULT_MCP_ANALYTICS_FILTERS: McpAnalyticsFilters = {
   timeRange: "all",
-  toolName: "",
-  status: "all",
-  qaState: "all",
-  humanReviewState: "all",
+  toolNames: new Set(),
+  statuses: new Set(),
+  qaStates: new Set(),
+  humanReviewStates: new Set(),
 };
-
-const RANGE_HOURS = new Map<Exclude<McpTimeRange, "all">, number>([
-  ["24h", 24],
-  ["7d", 7 * 24],
-  ["30d", 30 * 24],
-]);
-
-/** Inclusive lower bound for a range, or null when the range is unbounded. */
-export function rangeStartMillis(range: McpTimeRange, nowMillis: number): number | null {
-  if (range === "all") return null;
-  const hours = RANGE_HOURS.get(range) ?? throwUnexpected("time range", range);
-  return nowMillis - hours * 60 * 60 * 1000;
-}
-
-function throwUnexpected(label: string, value: string): never {
-  throw new Error(`Unexpected ${label}: ${value}`);
-}
-
-export function parseTimeRange(value: string): McpTimeRange {
-  const match = MCP_TIME_RANGES.find(range => range === value);
-  return match ?? throwUnexpected("time range", value);
-}
-
-export function parseStatusFilter(value: string): McpStatusFilter {
-  const match = MCP_STATUS_FILTERS.find(status => status === value);
-  return match ?? throwUnexpected("status filter", value);
-}
-
-export function parseQaState(value: string): McpQaState | "all" {
-  if (value === "all") return "all";
-  const match = MCP_QA_STATES.find(state => state === value);
-  return match ?? throwUnexpected("QA state filter", value);
-}
-
-export function parseHumanReviewState(value: string): McpHumanReviewState | "all" {
-  if (value === "all") return "all";
-  const match = MCP_HUMAN_REVIEW_STATES.find(state => state === value);
-  return match ?? throwUnexpected("human review state filter", value);
-}
 
 export function countActiveMcpFilters(filters: McpAnalyticsFilters): number {
   let active = 0;
   if (filters.timeRange !== DEFAULT_MCP_ANALYTICS_FILTERS.timeRange) active++;
-  if (filters.toolName !== "") active++;
-  if (filters.status !== "all") active++;
-  if (filters.qaState !== "all") active++;
-  if (filters.humanReviewState !== "all") active++;
+  if (filters.toolNames.size > 0) active++;
+  if (hasErrorFilter(filters.statuses) != null) active++;
+  if (filters.qaStates.size > 0) active++;
+  if (filters.humanReviewStates.size > 0) active++;
   return active;
 }
 
@@ -96,10 +44,10 @@ export function filterMcpCalls(
   const startMillis = rangeStartMillis(filters.timeRange, nowMillis);
   const nowMicros = BigInt(nowMillis) * 1000n;
   const predicateFilters = {
-    toolName: filters.toolName === "" ? undefined : filters.toolName,
-    hasError: filters.status === "all" ? undefined : filters.status === "error",
-    qaState: filters.qaState === "all" ? undefined : filters.qaState,
-    humanReviewState: filters.humanReviewState === "all" ? undefined : filters.humanReviewState,
+    toolNames: [...filters.toolNames],
+    hasError: hasErrorFilter(filters.statuses),
+    qaStates: [...filters.qaStates],
+    humanReviewStates: [...filters.humanReviewStates],
   };
   return rows.filter((row) => {
     if (startMillis != null && Number(row.createdAt.microsSinceUnixEpoch / 1000n) < startMillis) return false;

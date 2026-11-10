@@ -33,7 +33,7 @@
     "remark-gfm": "^4.0.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "spacetimedb": "^2.1.0",
+    "spacetimedb": "^2.10.1",
     "zod": "^3.24.0"
   },
   "devDependencies": {

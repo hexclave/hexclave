@@ -7,9 +7,10 @@
  */
 export { cn } from "./cn";
 export { Badge, type BadgeColor } from "./badge";
-export { Button, type ButtonVariant, Divider, FieldLabel, Input, Pill, Select, Textarea } from "./controls";
+export { Button, type ButtonVariant, Divider, FieldLabel, FilterField, Input, Pill, Select, Textarea } from "./controls";
 export { BarRow, type ChartColor, chartColors, chartTrackClass, LegendItem } from "./charts";
 export { SelectionCheckbox, SelectionToolbar } from "./selection";
-export { Alert, type AlertSize, type AlertVariant, Card, EmptyState, MetricCard, Tooltip } from "./surfaces";
+export { Alert, type AlertSize, type AlertVariant, Card, EmptyState, Metric, MetricStrip, type MetricStripLayout, Panel, PanelGrid, PanelRow, PanelSection, Tooltip } from "./surfaces";
 export { ModalDialog } from "./dialog";
 export { Resizer, useResizableWidth } from "./resize";
+export { MultiSelect, type MultiSelectOption } from "./multi-select";

@@ -42,31 +42,135 @@ export function Card({
   );
 }
 
-/** Compact KPI tile. `tooltip` renders the same hover explainer the tool used before. */
-export function MetricCard({
+/**
+ * One glass surface split into hairline-separated regions. Overview pages use this instead of a
+ * grid of separate Cards: a dozen floating boxes reads as noise, one sectioned report reads as a
+ * single thing. Direct children are separated by horizontal hairlines.
+ *
+ * Deliberately not `overflow-hidden`: metric tooltips must be able to escape the panel. The
+ * children have no background of their own, so nothing needs clipping to the rounded corners.
+ */
+export function Panel({ children, className }: { children: React.ReactNode, className?: string }) {
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-black/[0.06] bg-card shadow-sm ring-1 ring-black/[0.04] backdrop-blur-xl",
+        "divide-y divide-black/[0.06] dark:divide-white/[0.06] dark:border-white/[0.06] dark:ring-white/[0.04]",
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Titled region inside a Panel (or a PanelGrid cell). Same micro-title as Card, no chrome. */
+export function PanelSection({
+  title,
+  actions,
+  children,
+  className,
+}: {
+  title?: string,
+  actions?: React.ReactNode,
+  children: React.ReactNode,
+  className?: string,
+}) {
+  return (
+    <section className={cn("min-w-0 p-4", className)}>
+      {(title != null || actions != null) && (
+        <div className="mb-3 flex items-center justify-between gap-2">
+          {title != null && (
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
+          )}
+          {actions}
+        </div>
+      )}
+      {children}
+    </section>
+  );
+}
+
+/**
+ * Wrapping row of controls inside a Panel — the building block of every filter toolbar in this
+ * tool (search row, filter row, …). Push trailing status/actions right with `ml-auto`.
+ */
+export function PanelRow({ children, className }: { children: React.ReactNode, className?: string }) {
+  return <div className={cn("flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5", className)}>{children}</div>;
+}
+
+/**
+ * Two-column grid of PanelSections, divided by hairlines (left border on the right column, top
+ * border from the second row on). The surrounding Panel's `divide-y` supplies the outer top edge.
+ */
+export function PanelGrid({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className={cn(
+        "grid grid-cols-2",
+        "[&>*:nth-child(even)]:border-l [&>*:nth-child(n+3)]:border-t",
+        "[&>*]:border-black/[0.06] dark:[&>*]:border-white/[0.06]",
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Column layouts for MetricStrip. Spelled out as full static strings (Tailwind can't see
+ * interpolated class names), with the hairline pattern matching each breakpoint's wrap: vertical
+ * rules between cells of a row, horizontal rules between rows.
+ */
+export type MetricStripLayout = "4" | "3-then-9";
+
+const metricStripLayoutClasses = new Map<MetricStripLayout, string>([
+  ["4", "grid-cols-4 [&>*:not(:first-child)]:border-l"],
+  ["3-then-9", cn(
+    "grid-cols-3 [&>*:not(:nth-child(3n+1))]:border-l [&>*:nth-child(n+4)]:border-t",
+    "xl:grid-cols-9 xl:[&>*:nth-child(n+4)]:border-t-0 xl:[&>*:nth-child(3n+1):not(:first-child)]:border-l",
+  )],
+]);
+
+/** Row of Metrics inside a Panel, separated by hairlines instead of each sitting in its own box. */
+export function MetricStrip({ layout, children }: { layout: MetricStripLayout, children: React.ReactNode }) {
+  return (
+    <div
+      className={cn(
+        "grid [&>*]:border-black/[0.06] dark:[&>*]:border-white/[0.06]",
+        metricStripLayoutClasses.get(layout) ?? throwErr(`No metric strip classes for layout ${layout}; metricStripLayoutClasses must cover every MetricStripLayout`),
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * KPI cell for a MetricStrip. `tooltip` renders the hover explainer; pass `tooltipAlign="right"`
+ * on the last column so its tooltip opens inward instead of widening the page.
+ */
+export function Metric({
   label,
   value,
   valueClassName,
   subtitle,
   tooltip,
+  tooltipAlign = "left",
 }: {
   label: string,
   value: string,
   valueClassName?: string,
   subtitle?: string,
   tooltip?: string,
+  tooltipAlign?: "left" | "right",
 }) {
   return (
-    <div
-      className={cn(
-        "group relative rounded-xl border border-black/[0.06] bg-card p-3 shadow-sm ring-1 ring-black/[0.04] backdrop-blur-xl hover:z-20",
-        "dark:border-white/[0.06] dark:ring-white/[0.04]",
-      )}
-    >
-      <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
-      <p className={cn("text-xl font-bold tabular-nums", valueClassName ?? "text-foreground")}>{value}</p>
-      {subtitle != null && <p className="mt-0.5 text-[10px] text-muted-foreground">{subtitle}</p>}
-      {tooltip != null && <Tooltip>{tooltip}</Tooltip>}
+    <div className="group relative min-w-0 px-4 py-3 hover:z-20">
+      <p className="mb-1 truncate text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className={cn("truncate text-xl font-semibold tabular-nums", valueClassName ?? "text-foreground")}>{value}</p>
+      {subtitle != null && <p className="mt-0.5 truncate text-[10px] text-muted-foreground">{subtitle}</p>}
+      {tooltip != null && <Tooltip align={tooltipAlign}>{tooltip}</Tooltip>}
     </div>
   );
 }
