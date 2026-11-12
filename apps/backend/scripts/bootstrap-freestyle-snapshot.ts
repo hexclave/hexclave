@@ -3,11 +3,11 @@ import { readFile } from "node:fs/promises";
 import { Freestyle, FreestyleApiError } from "freestyle";
 import { DEFAULT_FREESTYLE_SNAPSHOT_ID } from "../src/lib/freestyle-vm-constants";
 
-const NODE_VERSION = "24.22.1";
+const NODE_VERSION = "24.22.3";
 // The unofficial-builds glibc-217 build has static libstdc++/libgcc and works on
 // BusyBox's glibc-only userland. Use .tar.gz because xz needs a 64 MiB dictionary.
 const NODE_ARCHIVE_URL = `https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64-glibc-217.tar.gz`;
-const NODE_ARCHIVE_SHA256 = "422ddeec2c08902a34ef80ae25de388c7b7e2920763030a5262d56b10675c570";
+const NODE_ARCHIVE_SHA256 = "773167bade05e3b2a9b34a6a58ca176274818f45dbbbf13c9d81726a04b9b3b5";
 const snapshotId = readHexclaveEnvironmentVariable(
   "HEXCLAVE_FREESTYLE_SNAPSHOT_ID",
   "STACK_FREESTYLE_SNAPSHOT_ID",

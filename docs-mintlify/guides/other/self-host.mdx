@@ -291,14 +291,14 @@ STACK_OPENROUTER_API_KEY=...
 Custom, manual, and programmatic email sending requires Freestyle. Before starting Hexclave for the first time, build the private Node 24 sandbox snapshot in the same Freestyle account as the API key:
 
 ```bash
-HEXCLAVE_FREESTYLE_API_KEY=... HEXCLAVE_FREESTYLE_SNAPSHOT_ID=hexclave-js-node24-v5 pnpm --filter @hexclave/backend freestyle:bootstrap-snapshot
+HEXCLAVE_FREESTYLE_API_KEY=... HEXCLAVE_FREESTYLE_SNAPSHOT_ID=hexclave-js-node24-v6 pnpm --filter @hexclave/backend freestyle:bootstrap-snapshot
 ```
 
-The bootstrap downloads a checksum-pinned Node 24 glibc-217 build, installs it directly into a resized Freestyle BusyBox VM, and snapshots that single VM after verifying Node and npm can install a package. The captured private `hexclave-js-node24-v5` snapshot contains BusyBox, Node, npm, and the runtime support needed by the sandbox. Then configure the server:
+The bootstrap downloads a checksum-pinned Node 24 glibc-217 build, installs it directly into a resized Freestyle BusyBox VM, and snapshots that single VM after verifying Node and npm can install a package. The captured private `hexclave-js-node24-v6` snapshot contains BusyBox, Node, npm, and the runtime support needed by the sandbox. Then configure the server:
 
 ```env
 HEXCLAVE_FREESTYLE_API_KEY=...
-HEXCLAVE_FREESTYLE_SNAPSHOT_ID=hexclave-js-node24-v5
+HEXCLAVE_FREESTYLE_SNAPSHOT_ID=hexclave-js-node24-v6
 ```
 
 Choose a different `HEXCLAVE_FREESTYLE_SNAPSHOT_ID` in both commands if that slug is already in use. Existing `STACK_FREESTYLE_*` environment names remain accepted.
