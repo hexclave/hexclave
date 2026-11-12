@@ -1,6 +1,6 @@
 {
   "name": "@hexclave/dashboard-ui-components",
-  "version": "1.0.137",
+  "version": "1.0.138",
   "repository": "https://github.com/hexclave/hexclave",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
