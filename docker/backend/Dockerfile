@@ -4,7 +4,7 @@
 # Build:  docker build -f docker/backend/Dockerfile -t stack-backend .
 # Run:    docker run -p 8102:8102 --env-file .env stack-backend
 
-ARG NODE_VERSION=24.22.1
+ARG NODE_VERSION=24.22.3
 
 # Base
 FROM node:${NODE_VERSION} AS base
