@@ -3,9 +3,10 @@ import { getOptionalRequestAbortSignal } from '@/lib/runtime/request-context';
 import { runAsynchronouslyAndWaitUntil } from '@/utils/background-tasks';
 import { getEnvVariable, getNodeEnvironment } from '@hexclave/shared/dist/utils/env';
 import { HexclaveAssertionError, captureError } from '@hexclave/shared/dist/utils/errors';
-import { Result } from '@hexclave/shared/dist/utils/results';
 import { Sandbox } from '@vercel/sandbox';
 import { Freestyle as FreestyleClient } from 'freestyle';
+import { wait } from '@hexclave/shared/dist/utils/promises';
+import { createFreestyleCapacityGate, isFreestyleAccountLimitError } from './freestyle-capacity';
 import {
   DEFAULT_FREESTYLE_SNAPSHOT_ID,
   executeJavascriptInFreestyleVm,
@@ -180,7 +181,10 @@ function createVercelSandboxEngine(): JsEngine {
           });
 
           if (installResult.exitCode !== 0) {
-            throw new HexclaveAssertionError("Failed to install packages in Vercel Sandbox", { exitCode: installResult.exitCode, innerCode: options.logSafeCode ?? code, innerOptions: options });
+            // npm's own output is the only way to tell a registry outage or
+            // throttle from a bad package spec; it never contains the code.
+            const npmStderrTail = await readCommandOutputTail(installResult, options.signal);
+            throw new HexclaveAssertionError("Failed to install packages in Vercel Sandbox", { exitCode: installResult.exitCode, npmStderrTail, innerCode: options.logSafeCode ?? code, innerOptions: options });
           }
         }
 
@@ -232,6 +236,21 @@ function createVercelSandboxEngine(): JsEngine {
   };
 }
 
+const COMMAND_OUTPUT_TAIL_CHARS = 2000;
+
+async function readCommandOutputTail(
+  command: { stderr: (opts?: { signal?: AbortSignal }) => Promise<string> },
+  signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+  try {
+    const output = await command.stderr({ signal });
+    return output.slice(-COMMAND_OUTPUT_TAIL_CHARS);
+  } catch {
+    // Diagnostics only: never let a failed log read replace the real error.
+    return undefined;
+  }
+}
+
 async function stopVercelSandboxAfterExecution(sandbox: Sandbox): Promise<void> {
   try {
     // The operation signal may already be aborted, but stopping the
@@ -246,6 +265,11 @@ async function stopVercelSandboxAfterExecution(sandbox: Sandbox): Promise<void> 
     ));
   }
 }
+
+// Long enough to cover most of a burst with one report, short enough that a
+// cleared account is back on Freestyle within seconds.
+const FREESTYLE_ACCOUNT_LIMIT_COOLDOWN_MS = 30_000;
+const freestyleCapacityGate = createFreestyleCapacityGate({ cooldownMs: FREESTYLE_ACCOUNT_LIMIT_COOLDOWN_MS });
 
 const engineMap = new Map<string, JsEngine>([
   ['freestyle', createFreestyleEngine()],
@@ -272,7 +296,9 @@ export async function executeJavascript(code: string, options: ExecuteJavascript
     resolvedOptions.signal?.throwIfAborted();
 
     if (getEnvVariable("STACK_VERCEL_SANDBOX_TOKEN") != "vercel_sandbox_disabled_for_local_development") {
-      const shouldSanityTest = !resolvedOptions.disableSanityTest && Math.random() < 0.05;
+      // While Freestyle is out of capacity, a canary that runs on both engines
+      // only competes with real executions for the exhausted account.
+      const shouldSanityTest = !resolvedOptions.disableSanityTest && !freestyleCapacityGate.isCoolingDown() && Math.random() < 0.05;
       if (shouldSanityTest) {
         runAsynchronouslyAndWaitUntil(runSanityTestWithoutExpectedCancellation(code, resolvedOptions));
       }
@@ -358,34 +384,58 @@ async function runSanityTest(code: string, options: ExecuteJavascriptOptions) {
 
 async function runWithFallback(code: string, options: ExecuteJavascriptOptions): Promise<ExecuteResult> {
   const freestyleEngine = engineMap.get("freestyle")!;
-  const vercelSandboxEngine = engineMap.get("vercel-sandbox")!;
+
+  if (freestyleCapacityGate.shouldSkipFreestyle()) {
+    // Freestyle rejected a VM for account capacity moments ago; it was
+    // reported then. Go straight to the fallback instead of spending two
+    // doomed attempts and their backoff on every execution of the burst.
+    return await runVercelSandboxFallback(code, options);
+  }
 
   const maxAttempts = 2;
-  const retryResult = await Result.retry(
-      async () => {
-        options.signal?.throwIfAborted();
-        try {
-          const result = await freestyleEngine.execute(code, options);
-          return Result.ok(result);
-        } catch (error) {
-          options.signal?.throwIfAborted();
-          return Result.error(error);
-        }
-      },
-      maxAttempts,
-      { exponentialDelayBase: 500 }
-    );
-
-  if (retryResult.status === 'ok') {
-    return retryResult.data;
+  const attemptErrors: unknown[] = [];
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    options.signal?.throwIfAborted();
+    try {
+      return await freestyleEngine.execute(code, options);
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      attemptErrors.push(error);
+      // The account limit does not clear within a retry's backoff.
+      if (isFreestyleAccountLimitError(error)) break;
+      if (attempt < maxAttempts - 1) {
+        await wait((Math.random() + 0.5) * 500 * (2 ** attempt));
+      }
+    }
   }
+  const freestyleError = new AggregateError(
+    attemptErrors,
+    `Freestyle failed after ${attemptErrors.length} attempt(s)`,
+    { cause: attemptErrors[attemptErrors.length - 1] },
+  );
 
   options.signal?.throwIfAborted();
 
-  captureError(`js-execution-freestyle-failed`, new HexclaveAssertionError(
-    `JS execution freestyle engine failed, falling back to vercel sandbox engine`,
-    { cause: retryResult.error, innerCode: options.logSafeCode ?? code, innerOptions: options }
-  ));
+  if (isFreestyleAccountLimitError(freestyleError)) {
+    const { shouldReport, skippedSinceLastReport } = freestyleCapacityGate.recordAccountLimit();
+    if (shouldReport) {
+      captureError(`js-execution-freestyle-account-limit`, new HexclaveAssertionError(
+        `Freestyle account resource limit reached; sending JS executions straight to the vercel sandbox engine for ${FREESTYLE_ACCOUNT_LIMIT_COOLDOWN_MS / 1000}s`,
+        { cause: freestyleError, skippedSinceLastReport, innerCode: options.logSafeCode ?? code, innerOptions: options }
+      ));
+    }
+  } else {
+    captureError(`js-execution-freestyle-failed`, new HexclaveAssertionError(
+      `JS execution freestyle engine failed, falling back to vercel sandbox engine`,
+      { cause: freestyleError, innerCode: options.logSafeCode ?? code, innerOptions: options }
+    ));
+  }
+
+  return await runVercelSandboxFallback(code, options);
+}
+
+async function runVercelSandboxFallback(code: string, options: ExecuteJavascriptOptions): Promise<ExecuteResult> {
+  const vercelSandboxEngine = engineMap.get("vercel-sandbox")!;
 
   try {
     const result = await vercelSandboxEngine.execute(code, options);
