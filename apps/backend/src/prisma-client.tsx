@@ -17,6 +17,7 @@ import net from "node:net";
 import { Pool } from "pg";
 import { isPromise } from "util/types";
 import { registerPgPool } from "./lib/dev-perf-stats";
+import { requestContextALS, type RequestContext } from "./lib/runtime/request-context";
 import { Tenancy } from "./lib/tenancies";
 import { ensurePolyfilled } from "./polyfills";
 
@@ -245,6 +246,55 @@ export type PrismaClientWithReplica<T extends PrismaClient = PrismaClient> = Omi
 
 
 /**
+ * Resolves with the promise's value, or with "deadline" once `deadline` (a `performance.now()` timestamp) has passed,
+ * whichever comes first. Rejections of `promise` before the deadline are passed through; later ones are ignored.
+ */
+async function raceWithDeadline<T>(promise: Promise<T>, deadline: number): Promise<{ value: T } | "deadline"> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  ignoreUnhandledRejection(promise);
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ value })),
+      new Promise<"deadline">((resolve) => {
+        timeout = setTimeout(() => resolve("deadline"), Math.max(0, deadline - performance.now()));
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * How long a replication wait may take. Once a wait in a request has timed out, the replica is known to be lagging
+ * by more than that, so waiting the full time again after each later write of the same request only multiplies the
+ * delay (eg. 3 writes x 2s on the token endpoint) without restoring read-after-write consistency. Later waits in that
+ * request still check the replica, but only briefly, in case it has caught up since.
+ */
+export const REPLICATION_WAIT_TIMEOUT_MS = 2_000;
+export const REPLICATION_WAIT_TIMEOUT_AFTER_LAG_IN_REQUEST_MS = 250;
+const requestsWithLaggingReplica = new WeakSet<RequestContext>();
+
+/**
+ * @returns the timeout for the next replication wait, given whether the current request (if any) already saw a
+ *   replication wait time out
+ */
+export function getReplicationWaitTimeoutMs(requestContext: RequestContext | undefined): number {
+  return requestContext && requestsWithLaggingReplica.has(requestContext) ? REPLICATION_WAIT_TIMEOUT_AFTER_LAG_IN_REQUEST_MS : REPLICATION_WAIT_TIMEOUT_MS;
+}
+
+/**
+ * Records that a replication wait timed out during the current request (if any).
+ *
+ * @returns whether this was the first time-out in this request (or there's no request), ie. whether it should be reported
+ */
+export function markReplicaLaggingForRequest(requestContext: RequestContext | undefined): boolean {
+  if (!requestContext) return true;
+  if (requestsWithLaggingReplica.has(requestContext)) return false;
+  requestsWithLaggingReplica.add(requestContext);
+  return true;
+}
+
+/**
  * Waits until ALL replicas have caught up to the specified target.
  * This ensures read-after-write consistency when using read replicas.
  *
@@ -359,7 +409,13 @@ export async function waitForReplication(replicas: Pool[], target: string, timeo
         iterations++;
         let caughtUp: boolean;
         try {
-          caughtUp = await checkCaughtUp(replica);
+          // The status check itself is bounded by the deadline too: the replica pool has no connection or query
+          // timeout, so a check that is queued behind busy connections or sent to a replica that stopped answering
+          // would otherwise hold the request far past `timeoutMs` (we saw 12s+ requests while the replica lagged).
+          // (The grace period leaves room for the last check, which starts just after the deadline.)
+          const checkResult = await raceWithDeadline(checkCaughtUp(replica), deadline + 100);
+          if (checkResult === "deadline") break;
+          caughtUp = checkResult.value;
         } catch (error) {
           if (!isDatabaseUnavailableError(error)) {
             throw error;
@@ -433,11 +489,18 @@ function extendWithReplicationWait<T extends PrismaClient>(primary: T, replicaPo
         }
         span.setAttribute('stack.db-replication.target', target);
 
-        // Wait for replication with a 2s timeout to prevent hanging
-        const caughtUp = await waitForReplication(replicaPools, target, 2000);
+        // Wait for replication with a timeout to prevent hanging (2s, or briefly if this request already saw the
+        // replica lagging; see REPLICATION_WAIT_TIMEOUT_AFTER_LAG_IN_REQUEST_MS)
+        const requestContext = requestContextALS.getStore();
+        const timeoutMs = getReplicationWaitTimeoutMs(requestContext);
+        span.setAttribute('stack.db-replication.timeout-ms', timeoutMs);
+        const caughtUp = await waitForReplication(replicaPools, target, timeoutMs);
         if (!caughtUp) {
           span.setAttribute('stack.db-replication.timeout', true);
-          captureError("prisma-client-replication-timeout", new HexclaveAssertionError("Replication wait timed out after 2s. The replica may be behind, or something weird is going on!"));
+          // Report once per request; later time-outs in the same request are the same lag, not new errors
+          if (markReplicaLaggingForRequest(requestContext)) {
+            captureError("prisma-client-replication-timeout", new HexclaveAssertionError("Replication wait timed out after 2s. The replica may be behind, or something weird is going on!"));
+          }
         }
       } catch (e) {
         span.setAttribute('stack.db-replication.error', `${e}`);

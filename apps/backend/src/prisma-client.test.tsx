@@ -4,7 +4,8 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { Prisma, PrismaClient } from "@/generated/prisma/client";
-import { globalPrismaClient, globalPrismaConnectionString, isDatabaseUnavailableError, isRetryableTransactionError, waitForReplication, withPrimaryFallbackForReads } from "@/prisma-client";
+import type { RequestContext } from "@/lib/runtime/request-context";
+import { getReplicationWaitTimeoutMs, globalPrismaClient, globalPrismaConnectionString, isDatabaseUnavailableError, isRetryableTransactionError, markReplicaLaggingForRequest, REPLICATION_WAIT_TIMEOUT_AFTER_LAG_IN_REQUEST_MS, REPLICATION_WAIT_TIMEOUT_MS, waitForReplication, withPrimaryFallbackForReads } from "@/prisma-client";
 
 const replicationStrategy = getEnvVariable("STACK_DATABASE_REPLICATION_WAIT_STRATEGY", "none");
 const replicaConnectionString = getEnvVariable("STACK_DATABASE_REPLICA_CONNECTION_STRING", "");
@@ -321,5 +322,64 @@ describe.skipIf(replicationStrategy !== "pg-stat-replication" || !replicaConfigu
   it("times out if the server never catches up", async () => {
     // The primary isn't a standby, so pg_last_wal_replay_lsn() is NULL and it never counts as caught up
     expect(await waitForReplication([createPool(globalPrismaConnectionString)], await getCurrentPrimaryLsn(), 100)).toBe(false);
+  });
+});
+
+describe("waitForReplication with a replica that never answers", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const stubReplicationWaitStrategy = (strategy: string) => {
+    vi.stubEnv("HEXCLAVE_DATABASE_REPLICATION_WAIT_STRATEGY", strategy);
+    vi.stubEnv("STACK_DATABASE_REPLICATION_WAIT_STRATEGY", strategy);
+  };
+
+  // Like a replica whose pool connections are all busy, or that stopped answering: the status query never settles
+  const createHangingPool = () => ({ query: () => new Promise(() => {}) }) as unknown as Pool;
+
+  it.each(["pg-stat-replication", "aurora"])("still gives up at the timeout (%s)", async (strategy) => {
+    stubReplicationWaitStrategy(strategy);
+    const target = strategy === "aurora" ? "123456789" : "0/1234ABC";
+    const start = performance.now();
+    expect(await waitForReplication([createHangingPool()], target, 100)).toBe(false);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(90);
+    expect(elapsed).toBeLessThan(1_000);
+  });
+
+  it("passes through errors that aren't about the replica being unavailable", async () => {
+    stubReplicationWaitStrategy("pg-stat-replication");
+    const failingPool = {
+      query: async () => {
+        throw new Error("syntax error");
+      },
+    } as unknown as Pool;
+    await expect(waitForReplication([failingPool], "0/1234ABC", 1_000)).rejects.toThrow("syntax error");
+  });
+});
+
+describe("replication wait timeout per request", () => {
+  const createRequestContext = () => ({ normalizedPath: "/api/latest/auth/oauth/token" }) as unknown as RequestContext;
+
+  it("waits the full timeout until a wait in the same request timed out, then only briefly", () => {
+    const requestContext = createRequestContext();
+    expect(getReplicationWaitTimeoutMs(requestContext)).toBe(REPLICATION_WAIT_TIMEOUT_MS);
+    expect(markReplicaLaggingForRequest(requestContext)).toBe(true);
+    expect(getReplicationWaitTimeoutMs(requestContext)).toBe(REPLICATION_WAIT_TIMEOUT_AFTER_LAG_IN_REQUEST_MS);
+    // only the first time-out in a request is reported
+    expect(markReplicaLaggingForRequest(requestContext)).toBe(false);
+  });
+
+  it("doesn't carry a lagging replica over to other requests", () => {
+    const laggingRequest = createRequestContext();
+    markReplicaLaggingForRequest(laggingRequest);
+    expect(getReplicationWaitTimeoutMs(createRequestContext())).toBe(REPLICATION_WAIT_TIMEOUT_MS);
+  });
+
+  it("always waits the full timeout and reports outside of a request", () => {
+    expect(markReplicaLaggingForRequest(undefined)).toBe(true);
+    expect(markReplicaLaggingForRequest(undefined)).toBe(true);
+    expect(getReplicationWaitTimeoutMs(undefined)).toBe(REPLICATION_WAIT_TIMEOUT_MS);
   });
 });
