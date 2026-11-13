@@ -3,10 +3,11 @@
 import { DesignButton } from "@/components/design-components";
 import { ALL_APPS_FRONTEND } from "@/lib/apps-frontend";
 import { useDashboardInternalUser } from "@/lib/dashboard-user";
+import { getPlanUpgradeLabel, getPlanUpgradeSummary, startPlanCheckout } from "@/lib/plan-upgrade";
 import { cn } from "@/lib/utils";
+import type { PaidPlanId } from "@hexclave/shared/dist/plans";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
-import { runAsynchronouslyWithAlert } from "@hexclave/shared/dist/utils/promises";
-import { UsersIcon, WarningCircleIcon } from "@phosphor-icons/react";
+import { ArrowRightIcon, RocketLaunchIcon, UsersIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { useMemo } from "react";
 import type { ComponentType, SVGProps } from "react";
 import { PageLayout } from "../../page-layout";
@@ -24,6 +25,7 @@ type UsageRow = {
 };
 
 type PlanUsageData = {
+  planId: "free" | "team" | "growth",
   planDisplayName: string,
   ownerTeamDisplayName: string,
   periodStart: Date,
@@ -37,6 +39,15 @@ const EMAILS_PER_MONTH_ITEM_ID = "emails_per_month";
 const ANALYTICS_EVENTS_ITEM_ID = "analytics_events";
 const SESSION_REPLAYS_ITEM_ID = "session_replays";
 const ANALYTICS_TIMEOUT_SECONDS_ITEM_ID = "analytics_timeout_seconds";
+
+/**
+ * Set when the owner team can buy a higher plan from this page; `onUpgrade`
+ * creates the checkout for `planId` and navigates there.
+ */
+type PlanUpgrade = {
+  planId: PaidPlanId,
+  onUpgrade: () => Promise<void>,
+};
 
 type UsageSectionInfo = {
   id: string,
@@ -246,16 +257,71 @@ function UsageSectionBlock({
   );
 }
 
+function PlanUpgradeCallout({ upgrade }: { upgrade: PlanUpgrade }) {
+  return (
+    <div className="grid w-full gap-4 rounded-2xl border border-foreground/[0.08] bg-foreground/[0.02] p-4 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      <div className="flex min-w-0 gap-3">
+        <RocketLaunchIcon className="mt-0.5 h-4 w-4 flex-shrink-0 text-muted-foreground" />
+        <div className="min-w-0">
+          <h5 className="mb-1 font-medium leading-none tracking-tight text-foreground">
+            You&apos;re on the Free plan
+          </h5>
+          <div className="text-sm text-muted-foreground">
+            {getPlanUpgradeSummary(upgrade.planId)}
+          </div>
+        </div>
+      </div>
+      <div className="justify-self-start sm:justify-self-end">
+        <DesignButton onClick={upgrade.onUpgrade}>
+          {getPlanUpgradeLabel(upgrade.planId)}
+        </DesignButton>
+      </div>
+    </div>
+  );
+}
+
+function PlanStat({ planDisplayName, upgrade }: { planDisplayName: string, upgrade: PlanUpgrade | null }) {
+  const content = (
+    <>
+      <span className="block text-xs font-medium uppercase tracking-wider text-muted-foreground">Plan</span>
+      <span className="mt-1 flex items-center justify-between gap-2 text-sm font-medium text-foreground">
+        <span className="truncate">{planDisplayName}</span>
+        {upgrade != null && (
+          <span className="inline-flex flex-shrink-0 items-center gap-1 text-xs text-primary">
+            Upgrade
+            <ArrowRightIcon className="h-3 w-3" />
+          </span>
+        )}
+      </span>
+    </>
+  );
+
+  if (upgrade == null) {
+    return <div className="rounded-xl bg-foreground/[0.03] px-4 py-3">{content}</div>;
+  }
+  return (
+    <DesignButton
+      variant="plain"
+      className="block h-auto w-full whitespace-normal rounded-xl bg-foreground/[0.03] px-4 py-3 text-left font-normal transition-colors hover:bg-foreground/[0.06] hover:transition-none"
+      aria-label={getPlanUpgradeLabel(upgrade.planId)}
+      onClick={upgrade.onUpgrade}
+    >
+      {content}
+    </DesignButton>
+  );
+}
+
 function UsageContent({
   planUsage,
   analyticsTimeoutRow,
+  upgrade,
 }: {
   planUsage: PlanUsageData,
   analyticsTimeoutRow: UsageRow | undefined,
+  upgrade: PlanUpgrade | null,
 }) {
   const sections = getUsageSections(planUsage.rows);
   const statItems = [
-    { label: "Plan", value: planUsage.planDisplayName },
     { label: "Billing period", value: `${formatDate(planUsage.periodStart)} – ${formatDate(planUsage.periodEnd)}` },
     { label: "Owner", value: planUsage.ownerTeamDisplayName },
   ];
@@ -263,6 +329,7 @@ function UsageContent({
   return (
     <div className="flex flex-col gap-6">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <PlanStat planDisplayName={planUsage.planDisplayName} upgrade={upgrade} />
         {statItems.map((stat) => (
           <div key={stat.label} className="rounded-xl bg-foreground/[0.03] px-4 py-3">
             <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{stat.label}</div>
@@ -287,19 +354,23 @@ function UsageContent({
 function UsageBody({
   planUsage,
   analyticsTimeoutRow,
-  onUpgrade,
+  upgrade,
   arePlanLimitsEnforced,
 }: {
   planUsage: PlanUsageData,
   analyticsTimeoutRow: UsageRow | undefined,
-  onUpgrade: (() => void) | undefined,
+  upgrade: PlanUpgrade | null,
   arePlanLimitsEnforced: boolean,
 }) {
   const overageRows = getOverageRows(planUsage.rows);
+  const showOverageBanner = arePlanLimitsEnforced && overageRows.length > 0;
+  // Free teams always see a way to pay, whether or not plan limits are enforced;
+  // the overage banner already carries its own upgrade button when it shows.
+  const showUpgradeCallout = upgrade != null && planUsage.planId === "free" && !showOverageBanner;
 
   return (
     <div className="flex flex-col gap-4">
-      {arePlanLimitsEnforced && overageRows.length > 0 && (
+      {showOverageBanner && (
         <div
           role="alert"
           className="relative grid w-full gap-4 rounded-2xl border border-amber-500/40 bg-amber-500/[0.08] p-4 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
@@ -315,16 +386,17 @@ function UsageBody({
               </div>
             </div>
           </div>
-          {onUpgrade != null && (
+          {upgrade != null && (
             <div className="justify-self-start sm:justify-self-end">
-              <DesignButton onClick={onUpgrade}>
+              <DesignButton onClick={upgrade.onUpgrade}>
                 Upgrade
               </DesignButton>
             </div>
           )}
         </div>
       )}
-      <UsageContent planUsage={planUsage} analyticsTimeoutRow={analyticsTimeoutRow} />
+      {showUpgradeCallout && <PlanUpgradeCallout upgrade={upgrade} />}
+      <UsageContent planUsage={planUsage} analyticsTimeoutRow={analyticsTimeoutRow} upgrade={upgrade} />
     </div>
   );
 }
@@ -348,15 +420,11 @@ export default function PageClient() {
     [planUsage, visibleRows],
   );
 
-  const handleUpgrade = planUsage.nextPlanId == null ? undefined : () => {
-    runAsynchronouslyWithAlert(async () => {
-      const checkoutUrl = await ownerTeam.createCheckoutUrl({
-        productId: planUsage.nextPlanId ?? throwErr("nextPlanId became null unexpectedly"),
-        returnUrl: window.location.href,
-      });
-      window.location.assign(checkoutUrl);
-    });
-  };
+  const nextPlanId = planUsage.nextPlanId;
+  const upgrade: PlanUpgrade | null = useMemo(() => nextPlanId == null ? null : {
+    planId: nextPlanId,
+    onUpgrade: () => startPlanCheckout({ team: ownerTeam, planId: nextPlanId, returnUrl: window.location.href }),
+  }, [nextPlanId, ownerTeam]);
 
   return (
     <PageLayout
@@ -367,7 +435,7 @@ export default function PageClient() {
       <UsageBody
         planUsage={planUsageForDisplay}
         analyticsTimeoutRow={analyticsTimeoutRow}
-        onUpgrade={handleUpgrade}
+        upgrade={upgrade}
         arePlanLimitsEnforced={planUsage.arePlanLimitsEnforced}
       />
     </PageLayout>

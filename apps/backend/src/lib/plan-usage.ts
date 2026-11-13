@@ -10,7 +10,7 @@ import {
 } from "@/lib/plan-entitlements";
 import { DEFAULT_BRANCH_ID, getSoleTenancyFromProjectBranch, getTenancy, type Tenancy } from "@/lib/tenancies";
 import { getPrismaClientForTenancy, getPrismaSchemaForTenancy, globalPrismaClient, sqlQuoteIdent } from "@/prisma-client";
-import { BASE_PLAN_IDS_BY_TIER, ITEM_IDS, PLAN_LIMITS, UNLIMITED, type ItemId, type PlanId } from "@hexclave/shared/dist/plans";
+import { BASE_PLAN_IDS_BY_TIER, ITEM_IDS, PLAN_DISPLAY_NAMES, PLAN_LIMITS, UNLIMITED, type ItemId, type PlanId } from "@hexclave/shared/dist/plans";
 import type { PlanUsageResponse } from "@hexclave/shared/dist/interface/admin-interface";
 import { captureError, HexclaveAssertionError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { mapWithConcurrency } from "@hexclave/shared/dist/utils/promises";
@@ -43,12 +43,6 @@ const USAGE_ITEM_LABELS = new Map<ItemId, string>([
   [ITEM_IDS.sessionReplays, "Session replays"],
   [ITEM_IDS.analyticsTimeoutSeconds, "Analytics timeout"],
   [ITEM_IDS.onboardingCall, "Onboarding call"],
-]);
-
-const PLAN_LABELS = new Map<PlanId, string>([
-  ["free", "Free"],
-  ["team", "Team"],
-  ["growth", "Growth"],
 ]);
 
 const PLAN_USAGE_TENANCY_COUNTER_CONCURRENCY = 4;
@@ -129,7 +123,7 @@ function formatClickhouseDateTimeParam(date: Date): string {
 }
 
 function getPlanLabel(planId: PlanId): string {
-  return PLAN_LABELS.get(planId) ?? throwErr(`Missing plan label for ${planId}`);
+  return PLAN_DISPLAY_NAMES[planId];
 }
 
 function getUsageItemLabel(itemId: ItemId): string {

@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { PlanUsage } from "@hexclave/next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PageClient from "./page-client";
 
 const createCheckoutUrlMock = vi.fn();
 
-function createPlanUsageState() {
+function createPlanUsageState(): PlanUsage {
   return {
     ownerTeamId: "00000000-0000-4000-8000-000000000001",
     ownerTeamDisplayName: "Acme",
@@ -156,6 +157,118 @@ describe("Usage settings page", () => {
     render(<PageClient />);
 
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows a permanent Team upgrade button to free teams even when plan limits are not enforced", async () => {
+    planUsageState = {
+      ...createPlanUsageState(),
+      arePlanLimitsEnforced: false,
+    };
+
+    render(<PageClient />);
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("You're on the Free plan")).toBeTruthy();
+    expect(screen.getByText("Team gives you 4 dashboard admins, 50,000 auth users, 25,000 emails a month, 60s analytics queries, and an onboarding call.")).toBeTruthy();
+    const upgradeButtons = screen.getAllByRole("button", { name: "Upgrade to Team — $49/mo" });
+    // The callout button and the clickable plan tile
+    expect(upgradeButtons).toHaveLength(2);
+
+    fireEvent.click(upgradeButtons[0]);
+
+    await waitFor(() => {
+      expect(createCheckoutUrlMock).toHaveBeenCalledWith({
+        productId: "team",
+        returnUrl: window.location.href,
+      });
+    });
+  });
+
+  it("starts the Team checkout when the Free plan tile is clicked", async () => {
+    planUsageState = {
+      ...createPlanUsageState(),
+      arePlanLimitsEnforced: false,
+    };
+
+    render(<PageClient />);
+
+    const planTile = screen.getAllByRole("button", { name: "Upgrade to Team — $49/mo" }).find((button) => button.textContent.startsWith("Plan"));
+    if (planTile == null) {
+      throw new Error("Expected the plan tile to be a button");
+    }
+    expect(planTile.textContent).toBe("PlanFreeUpgrade");
+
+    fireEvent.click(planTile);
+
+    await waitFor(() => {
+      expect(createCheckoutUrlMock).toHaveBeenCalledTimes(1);
+    });
+    expect(createCheckoutUrlMock).toHaveBeenCalledWith({
+      productId: "team",
+      returnUrl: window.location.href,
+    });
+  });
+
+  it("navigates to the checkout URL it gets back", async () => {
+    planUsageState = {
+      ...createPlanUsageState(),
+      arePlanLimitsEnforced: false,
+    };
+    createCheckoutUrlMock.mockResolvedValue("https://app.hexclave.com/purchase/abc");
+    const assignMock = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...originalLocation, href: originalLocation.href, assign: assignMock },
+    });
+
+    try {
+      render(<PageClient />);
+      fireEvent.click(screen.getAllByRole("button", { name: "Upgrade to Team — $49/mo" })[0]);
+
+      await waitFor(() => {
+        expect(assignMock).toHaveBeenCalledWith("https://app.hexclave.com/purchase/abc");
+      });
+    } finally {
+      Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+    }
+  });
+
+  it("does not show the Free plan upgrade callout to teams already on a paid plan", () => {
+    planUsageState = {
+      ...createPlanUsageState(),
+      planId: "team",
+      planDisplayName: "Team",
+      nextPlanId: "growth",
+      arePlanLimitsEnforced: false,
+    };
+
+    render(<PageClient />);
+
+    expect(screen.queryByText("You're on the Free plan")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Upgrade to Team — $49/mo" })).toBeNull();
+  });
+
+  it("shows no upgrade at all on the top plan", () => {
+    planUsageState = {
+      ...createPlanUsageState(),
+      planId: "growth",
+      planDisplayName: "Growth",
+      nextPlanId: null,
+      arePlanLimitsEnforced: false,
+    };
+
+    render(<PageClient />);
+
+    expect(screen.queryByText("You're on the Free plan")).toBeNull();
+    expect(screen.queryByRole("button", { name: /upgrade/i })).toBeNull();
+  });
+
+  it("shows only the overage banner, not the callout, when a free team is over an enforced limit", () => {
+    render(<PageClient />);
+
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByText("You're on the Free plan")).toBeNull();
   });
 
   it("starts checkout for the next plan from the upgrade CTA", async () => {
