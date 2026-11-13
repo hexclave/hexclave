@@ -696,6 +696,7 @@ export function ProjectOnboardingWizard(props: {
         currentStep="config_choice"
         onBack={handleBack}
         disabled={saving}
+        onLookAround={() => router.push(`/projects/${encodeURIComponent(props.project.id)}`)}
         onSelect={(choice) => {
           if (choice === "setup-new") {
             runAsynchronouslyWithAlert(openDashboardManagedOnboarding);

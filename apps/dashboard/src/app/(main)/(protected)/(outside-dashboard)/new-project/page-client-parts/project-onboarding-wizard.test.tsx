@@ -239,6 +239,20 @@ describe("ProjectOnboardingWizard", () => {
     expect(source).toContain("DeploymentChoicePage");
   });
 
+  it("keeps developers who want to look around inside their new project", () => {
+    const testDir = dirname(fileURLToPath(import.meta.url));
+    const wizardSource = readFileSync(join(testDir, "project-onboarding-wizard.tsx"), "utf-8");
+    const cloudSource = readFileSync(join(testDir, "cloud-project-onboarding.tsx"), "utf-8");
+    const componentsSource = readFileSync(join(testDir, "components.tsx"), "utf-8");
+    const openOwnProject = "onLookAround={() => router.push(`/projects/${encodeURIComponent(props.project.id)}`)}";
+
+    expect(wizardSource).toContain(openOwnProject);
+    expect(cloudSource).toContain(openOwnProject);
+    expect(componentsSource).toContain("onLookAround?: () => void");
+    expect(componentsSource).toContain("Skip setup and explore your new project. You can finish setup any time.");
+    expect(componentsSource).toContain("Open the live demo");
+  });
+
   it("keeps the development environment start screen separate from deployment choices", () => {
     const testDir = dirname(fileURLToPath(import.meta.url));
     const source = readFileSync(join(testDir, "project-onboarding-wizard.tsx"), "utf-8");

@@ -343,7 +343,14 @@ export function NewProjectEntryPage(props: {
   disabled: boolean,
   onBack?: () => void,
   onSelect: (choice: "setup-new" | "deploy") => void,
+  /**
+   * Opens the developer's own (already created) project in the dashboard.
+   * When set, "I just want to look around" keeps them in the dashboard instead of
+   * sending them to the preview site in a new tab, where most never came back.
+   */
+  onLookAround?: () => void,
 }) {
+  const onLookAround = props.onLookAround;
   return (
     <OnboardingPage
       stepKey="new-project-entry"
@@ -375,13 +382,36 @@ export function NewProjectEntryPage(props: {
           <span>OR</span>
           <span className="h-px flex-1 bg-foreground/[0.10]" />
         </div>
-        <OnboardingChoiceCard
-          icon={<CompassIcon className="h-5 w-5" />}
-          title="I just want to look around"
-          description="Explore a live Hexclave project without creating one."
-          disabled={props.disabled}
-          onClick={() => window.open("https://preview.hexclave.com", "_blank", "noopener,noreferrer")}
-        />
+        {onLookAround != null ? (
+          <>
+            <OnboardingChoiceCard
+              icon={<CompassIcon className="h-5 w-5" />}
+              title="I just want to look around"
+              description="Skip setup and explore your new project. You can finish setup any time."
+              disabled={props.disabled}
+              onClick={onLookAround}
+            />
+            <Typography variant="secondary" className="text-center text-xs">
+              Prefer a project with sample data?{" "}
+              <a
+                href="https://preview.hexclave.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline underline-offset-2 hover:text-foreground"
+              >
+                Open the live demo
+              </a>
+            </Typography>
+          </>
+        ) : (
+          <OnboardingChoiceCard
+            icon={<CompassIcon className="h-5 w-5" />}
+            title="I just want to look around"
+            description="Explore a live Hexclave project without creating one."
+            disabled={props.disabled}
+            onClick={() => window.open("https://preview.hexclave.com", "_blank", "noopener,noreferrer")}
+          />
+        )}
       </div>
     </OnboardingPage>
   );
