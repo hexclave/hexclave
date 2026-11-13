@@ -236,9 +236,13 @@ const getTenancyFromStripeAccountIdOrThrow = async (stripe: Stripe, stripeAccoun
 
 const TERMINAL_STRIPE_STATUSES = ["canceled", "incomplete_expired", "unpaid"] as const;
 
-function getEndedAtForSync(subscription: Stripe.Subscription, sanitizedEnd: Date): { endedAt: Date } | {} {
+export function getEndedAtForSync(subscription: Stripe.Subscription, sanitizedEnd: Date): { endedAt: Date | null } {
   if (!TERMINAL_STRIPE_STATUSES.includes(subscription.status as typeof TERMINAL_STRIPE_STATUSES[number])) {
-    return {};
+    // Non-terminal: reconcile the eagerly-written wind-down endedAt with
+    // Stripe's flag — a pending cancel can be reversed via Stripe's
+    // Dashboard/API, and clearing endedAt here is what reactivates
+    // entitlements.
+    return { endedAt: subscription.cancel_at_period_end ? sanitizedEnd : null };
   }
   // Prefer Stripe's `ended_at` — real Stripe always sets it on transitions into
   // a terminal status. If the webhook payload omits it (mocks, older API
@@ -254,11 +258,54 @@ function getEndedAtForSync(subscription: Stripe.Subscription, sanitizedEnd: Date
   return { endedAt: new Date() };
 }
 
-function getCanceledAtForSync(subscription: Stripe.Subscription): { canceledAt: Date } | {} {
-  if (subscription.canceled_at) {
-    return { canceledAt: new Date(subscription.canceled_at * 1000) };
+export function getCanceledAtForSync(subscription: Stripe.Subscription): { canceledAt: Date | null } {
+  // Mirror Stripe including null, so reversing a pending cancel clears the local mark
+  return { canceledAt: subscription.canceled_at ? new Date(subscription.canceled_at * 1000) : null };
+}
+
+/**
+ * True when an error from a Stripe subscription lifecycle write
+ * (`subscriptions.cancel` / `subscriptions.update`) means the subscription is
+ * already terminal, so our write is a moot no-op and can be swallowed.
+ *
+ * Error shapes determined empirically against Stripe API `2025-06-30.basil`
+ * (stripe-node 18.3.0):
+ *   - `cancel()` on an already-canceled or never-existed sub
+ *       → 404, `code: "resource_missing"`.
+ *   - `update()` on a canceled sub (e.g. `cancel_at_period_end`)
+ *       → 400, `rawType: "invalid_request_error"`, message "A canceled
+ *         subscription can only update its cancellation_details and
+ *         metadata.", and crucially **no `code`** — so it can only be matched
+ *         on the message.
+ *
+ * Note `subscription_already_canceled` is intentionally absent: re-cancelling
+ * a canceled sub returns `resource_missing`, not that code — it is never
+ * actually emitted on this path.
+ */
+export function isStripeSubscriptionAlreadyTerminalError(e: unknown): boolean {
+  const code = (e as { code?: unknown }).code;
+  if (code === "resource_missing") {
+    return true;
   }
-  return {};
+  const rawType = (e as { rawType?: unknown }).rawType;
+  const message = (e as { message?: unknown }).message;
+  return rawType === "invalid_request_error"
+    && typeof message === "string"
+    && /canceled subscription can only update/i.test(message);
+}
+
+/**
+ * Sanitized billing period of the subscription's first item, or null when the
+ * response has no items (mocked Stripe). Lets wind-down writers take both the
+ * entitlement boundary (`endedAt`) and the displayed period from Stripe's
+ * authoritative response instead of a possibly stale (pre-renewal) local one.
+ */
+export function getStripeSubscriptionPeriod(subscription: Stripe.Subscription, context: { tenancyId: string }): { start: Date, end: Date } | null {
+  if (subscription.items.data.length === 0) {
+    return null;
+  }
+  const item = subscription.items.data[0];
+  return sanitizeStripePeriodDates(item.current_period_start, item.current_period_end, { subscriptionId: subscription.id, tenancyId: context.tenancyId });
 }
 
 export async function syncStripeSubscriptions(stripe: Stripe, stripeAccountId: string, stripeCustomerId: string) {
@@ -333,6 +380,13 @@ export async function syncStripeSubscriptions(stripe: Stripe, stripeAccountId: s
         currentPeriodEnd: sanitizedDates.end,
         currentPeriodStart: sanitizedDates.start,
         cancelAtPeriodEnd: subscription.cancel_at_period_end,
+        // Same derivation as the update branch: the first sync for a sub can
+        // already be terminal (out-of-order webhooks), and a terminal row
+        // created with endedAt = null reads as "entitled forever" to
+        // isSubscriptionInEffect. Pre-existing rows in that shape need a
+        // backfill (follow-up; also requires re-emitting bulldozer rows).
+        ...getEndedAtForSync(subscription, sanitizedDates.end),
+        ...getCanceledAtForSync(subscription),
         creationSource: "PURCHASE_PAGE"
       },
     });

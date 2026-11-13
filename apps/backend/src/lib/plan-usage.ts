@@ -1,7 +1,7 @@
 import { VerificationCodeType } from "@/generated/prisma/client";
 import { getClickhouseAdminClientForMetrics } from "@/lib/clickhouse";
 import { getSubscriptionMapForCustomer } from "@/lib/payments/customer-data";
-import { isActiveSubscription } from "@/lib/payments";
+import { isSubscriptionInEffect } from "@/lib/payments";
 import {
   arePlanLimitsEnforced,
   getBillingTeamId,
@@ -157,10 +157,12 @@ export async function readBillingSubscriptionMapOrSkip(
   }
 }
 
-function resolveActivePlanSubscription(subscriptions: Record<string, SubscriptionRow>): SubscriptionRow | null {
-  const activeSubscriptions = Object.values(subscriptions).filter(isActiveSubscription);
+export function resolveInEffectPlanSubscription(subscriptions: Record<string, SubscriptionRow>, nowMillis: number): SubscriptionRow | null {
+  // In-effect (not active): a canceled-at-period-end plan sub keeps its item
+  // grants until `endedAt`, so usage must be judged against that plan.
+  const inEffectSubscriptions = Object.values(subscriptions).filter((candidate) => isSubscriptionInEffect(candidate, nowMillis));
   for (const planId of BASE_PLAN_IDS_BY_TIER) {
-    const subscription = activeSubscriptions.find((candidate) => candidate.productId === planId);
+    const subscription = inEffectSubscriptions.find((candidate) => candidate.productId === planId);
     if (subscription != null) {
       return subscription;
     }
@@ -421,9 +423,9 @@ export async function getPlanUsageForProject(project: UsageSourceProject, now: D
     customerType: "team",
     customerId: ownerTeamId,
   }));
-  const activePlanSubscription = resolveActivePlanSubscription(subscriptions);
-  const planId = resolveActivePlanId(activePlanSubscription);
-  const period = getPlanUsagePeriod(activePlanSubscription, now);
+  const inEffectPlanSubscription = resolveInEffectPlanSubscription(subscriptions, now.getTime());
+  const planId = resolveActivePlanId(inEffectPlanSubscription);
+  const period = getPlanUsagePeriod(inEffectPlanSubscription, now);
 
   const [ownerTeamDisplayName, ownedScope, dashboardAdmins] = await Promise.all([
     getOwnerTeamDisplayName(internalTenancy, ownerTeamId),
@@ -441,7 +443,7 @@ export async function getPlanUsageForProject(project: UsageSourceProject, now: D
     owner_team_id: ownerTeamId,
     owner_team_display_name: ownerTeamDisplayName,
     plan_id: planId,
-    plan_display_name: activePlanSubscription?.product.displayName ?? getPlanLabel(planId),
+    plan_display_name: inEffectPlanSubscription?.product.displayName ?? getPlanLabel(planId),
     period_start_millis: period.start.getTime(),
     period_end_millis: period.end.getTime(),
     next_plan_id: getNextPlanId(planId),
