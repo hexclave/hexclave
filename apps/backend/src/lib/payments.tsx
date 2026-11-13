@@ -186,6 +186,89 @@ function customerTypeToStripeCustomerType(customerType: "user" | "team") {
   return customerType === "user" ? CustomerType.USER : CustomerType.TEAM;
 }
 
+export function stripeCustomerIdempotencyKey(tenancyId: string, customerType: "user" | "team" | "custom", customerId: string): string {
+  return `hexclave-stripe-customer:${tenancyId}:${customerType}:${customerId}`;
+}
+
+/**
+ * Stripe Search query used to find a Customer by Hexclave `customerId` metadata.
+ * Values are interpolated raw (Search QL, not SQL). A custom id containing `'`
+ * can split the quoted token and change which rows match.
+ */
+export function stripeCustomerMetadataSearchQuery(customerId: string): string {
+  return `metadata['customerId']:'${customerId}'`;
+}
+
+/**
+ * Custom-customer checkout still takes Search's first hit (`data[0]`), with no
+ * `customerType` filter and no "newest / has-card" picker. User/team lookups
+ * go through `selectStripeCustomersMatchingType` instead. Keep this function
+ * so tests can pin the first-hit behavior that attaches the wrong `cus_…`.
+ */
+export function pickFirstStripeCustomerFromSearch<T>(customers: readonly T[]): T | undefined {
+  return customers[0];
+}
+
+/**
+ * Checkout (`create-purchase-url`) and setup-intent (save card) both call
+ * `ensureStripeCustomerForCustomer`. Stripe Search is eventually consistent
+ * (https://docs.stripe.com/search#data-freshness — "Don't use search for
+ * read-after-write flows"; searchable in under ~1 minute). Two in-flight
+ * ensures can both miss Search, both `customers.create`, and leave two
+ * Stripe Customers with the same `metadata.customerId` (Stripe does not
+ * unique-index metadata). The old lookup then threw on `matches.length > 1`.
+ * Idempotency keys collapse retries of the *same* create; this picker is
+ * for duplicates that already exist. Treat missing `customerType` as a
+ * legacy row that matches only when no typed row exists.
+ */
+type StripeCustomerLookup = Pick<Stripe.Customer, "id" | "created" | "metadata">;
+
+export function selectStripeCustomersMatchingType<T extends StripeCustomerLookup>(options: {
+  customers: T[],
+  expectedType: CustomerType,
+}): T[] {
+  const typed = options.customers.filter((customer) => customer.metadata.customerType === options.expectedType);
+  if (typed.length > 0) {
+    return typed;
+  }
+  return options.customers.filter((customer) => !("customerType" in customer.metadata) || customer.metadata.customerType === "");
+}
+
+export function pickNewestStripeCustomer<T extends StripeCustomerLookup>(customers: T[]): T | null {
+  if (customers.length === 0) {
+    return null;
+  }
+  return [...customers].sort((a, b) => b.created - a.created)[0];
+}
+
+async function pickStripeCustomerAmongDuplicates(options: {
+  stripe: Stripe,
+  customers: Stripe.Customer[],
+  customerId: string,
+  customerType: "user" | "team",
+}): Promise<Stripe.Customer> {
+  captureError("payments:duplicate-stripe-customers", new HexclaveAssertionError(
+    "Multiple Stripe customers found for customerId; using the one with a card, else newest",
+    {
+      customerId: options.customerId,
+      customerType: options.customerType,
+      stripeCustomerIds: options.customers.map((customer) => customer.id),
+    },
+  ));
+
+  const scored = await Promise.all(options.customers.map(async (customer) => {
+    const paymentMethods = await options.stripe.customers.listPaymentMethods(customer.id, { type: "card", limit: 1 });
+    return {
+      customer,
+      hasCard: paymentMethods.data.length > 0,
+    };
+  }));
+  const withCard = scored.filter((entry) => entry.hasCard);
+  const pool = withCard.length > 0 ? withCard : scored;
+  return pickNewestStripeCustomer(pool.map((entry) => entry.customer))
+    ?? throwErr("duplicate Stripe customer pool was empty after scoring");
+}
+
 export async function getStripeCustomerForCustomerOrNull(options: {
   stripe: Stripe,
   prisma: PrismaClientTransaction,
@@ -201,18 +284,14 @@ export async function getStripeCustomerForCustomerOrNull(options: {
   });
 
   const stripeCustomerType = customerTypeToStripeCustomerType(options.customerType);
-  const matchesCustomer = (customer: Stripe.Customer) => {
-    const storedType = customer.metadata.customerType;
-    if (!storedType) return true;
-    return storedType === stripeCustomerType;
-  };
+  const matchesCustomerId = (customer: Stripe.Customer) => customer.metadata.customerId === options.customerId;
 
   const stripeCustomerSearch = await options.stripe.customers.search({
     query: `metadata['customerId']:'${options.customerId}'`,
   });
-  let matches = stripeCustomerSearch.data.filter(matchesCustomer);
+  let candidates = stripeCustomerSearch.data.filter(matchesCustomerId);
 
-  if (matches.length === 0) {
+  if (candidates.length === 0) {
     // Stripe's search is eventually consistent; fall back to listing to ensure we can find a newly created customer.
     let startingAfter: string | undefined = undefined;
     for (let i = 0; i < 10; i++) {
@@ -220,15 +299,13 @@ export async function getStripeCustomerForCustomerOrNull(options: {
         limit: 100,
         ...startingAfter ? { starting_after: startingAfter } : {},
       });
-      const exactMatches = page.data.filter((customer) => (
-        customer.metadata.customerId === options.customerId && matchesCustomer(customer)
-      ));
+      const exactMatches = page.data.filter(matchesCustomerId);
       if (exactMatches.length > 0) {
-        matches = exactMatches;
+        candidates = exactMatches;
         break;
       }
       if (useStripeMock && page.data.length > 0) {
-        matches = [page.data[0]];
+        candidates = [page.data[0]];
         break;
       }
       if (!page.has_more || page.data.length === 0) {
@@ -238,14 +315,19 @@ export async function getStripeCustomerForCustomerOrNull(options: {
     }
   }
 
-  if (matches.length > 1) {
-    throw new HexclaveAssertionError("Multiple Stripe customers found for customerId; customerType filtering was ambiguous", {
-      customerId: options.customerId,
-      customerType: options.customerType,
-      stripeCustomerIds: matches.map((c) => c.id),
-    });
+  const matches = selectStripeCustomersMatchingType({
+    customers: candidates,
+    expectedType: stripeCustomerType,
+  });
+  if (matches.length <= 1) {
+    return matches[0] ?? null;
   }
-  return matches[0] ?? null;
+  return await pickStripeCustomerAmongDuplicates({
+    stripe: options.stripe,
+    customers: matches,
+    customerId: options.customerId,
+    customerType: options.customerType,
+  });
 }
 
 export async function ensureStripeCustomerForCustomer(options: {
@@ -265,6 +347,8 @@ export async function ensureStripeCustomerForCustomer(options: {
       customerId: options.customerId,
       customerType: stripeCustomerType,
     },
+  }, {
+    idempotencyKey: stripeCustomerIdempotencyKey(options.tenancyId, options.customerType, options.customerId),
   });
 }
 
@@ -616,6 +700,81 @@ export function getClientSecretFromStripeSubscription(
   throw new HexclaveAssertionError("No PaymentIntent client secret returned from Stripe for subscription");
 }
 
+export function setupIntentClientSecretFromSubscription(subscription: Stripe.Subscription): string | null {
+  const pendingSetupIntent = subscription.pending_setup_intent;
+  if (pendingSetupIntent == null || typeof pendingSetupIntent === "string") {
+    return null;
+  }
+  return typeof pendingSetupIntent.client_secret === "string" ? pendingSetupIntent.client_secret : null;
+}
+
+/**
+ * Paid catalog + promo-net $0 first invoice (no trial) auto-activates in
+ * Stripe with no PaymentIntent. Collect a card the same way free trials do,
+ * via SetupIntent, so later invoices have a payment method.
+ */
+export async function resolveSetupClientSecretForZeroFirstInvoice(options: {
+  stripe: Stripe,
+  subscription: Stripe.Subscription,
+  customerId: string,
+  tenancyId: string,
+}): Promise<string> {
+  const existing = setupIntentClientSecretFromSubscription(options.subscription);
+  if (existing != null) {
+    return existing;
+  }
+  const setupIntent = await options.stripe.setupIntents.create({
+    customer: options.customerId,
+    usage: "off_session",
+    payment_method_types: ["card"],
+    metadata: {
+      stripeSubscriptionId: options.subscription.id,
+      tenancyId: options.tenancyId,
+    },
+  });
+  if (typeof setupIntent.client_secret !== "string") {
+    throw new HexclaveAssertionError("No client secret returned from Stripe for subscription card SetupIntent");
+  }
+  return setupIntent.client_secret;
+}
+
+export async function attachSetupIntentPaymentMethodToSubscription(options: {
+  stripe: Stripe,
+  setupIntent: Stripe.SetupIntent,
+}): Promise<void> {
+  const metadata = options.setupIntent.metadata;
+  if (metadata == null || !Object.hasOwn(metadata, "stripeSubscriptionId")) {
+    return;
+  }
+  const stripeSubscriptionId = metadata.stripeSubscriptionId;
+  if (stripeSubscriptionId.length === 0) {
+    return;
+  }
+  const paymentMethodId = options.setupIntent.payment_method;
+  if (typeof paymentMethodId !== "string") {
+    throw new HexclaveAssertionError("Succeeded SetupIntent for a subscription is missing a payment method");
+  }
+  const customerId = typeof options.setupIntent.customer === "string"
+    ? options.setupIntent.customer
+    : options.setupIntent.customer?.id;
+  if (typeof customerId !== "string") {
+    throw new HexclaveAssertionError("Succeeded SetupIntent for a subscription is missing a customer");
+  }
+  await options.stripe.subscriptions.update(stripeSubscriptionId, {
+    default_payment_method: paymentMethodId,
+  });
+  await options.stripe.customers.update(customerId, {
+    invoice_settings: {
+      default_payment_method: paymentMethodId,
+    },
+    metadata: {
+      defaultPaymentMethodId: paymentMethodId,
+      default_payment_method_id: paymentMethodId,
+      hasPaymentMethod: "true",
+    },
+  });
+}
+
 type GrantProductResult =
   | {
     type: "one_time",
@@ -793,6 +952,52 @@ import.meta.vitest?.describe("free trial helpers", (test) => {
       },
     } as Stripe.Subscription, false);
     expect(payment).toEqual({ type: "payment", clientSecret: "pi_test_secret" });
+  });
+
+  test("setupIntentClientSecretFromSubscription reads an expanded pending SetupIntent", ({ expect }) => {
+    expect(setupIntentClientSecretFromSubscription({
+      pending_setup_intent: { client_secret: "seti_from_sub" },
+    } as Stripe.Subscription)).toBe("seti_from_sub");
+    expect(setupIntentClientSecretFromSubscription({
+      pending_setup_intent: "seti_unexpanded",
+    } as Stripe.Subscription)).toBeNull();
+    expect(setupIntentClientSecretFromSubscription({
+      pending_setup_intent: null,
+    } as Stripe.Subscription)).toBeNull();
+  });
+});
+
+import.meta.vitest?.describe("stripe customer de-dupe", (test) => {
+  const customer = (id: string, metadata: Record<string, string>, created: number): StripeCustomerLookup => ({
+    id,
+    created,
+    metadata,
+  });
+
+  test("selectStripeCustomersMatchingType prefers typed rows over untyped", ({ expect }) => {
+    const untyped = customer("cus_old", { customerId: "team-1" }, 1);
+    const typed = customer("cus_team", { customerId: "team-1", customerType: CustomerType.TEAM }, 2);
+    const user = customer("cus_user", { customerId: "team-1", customerType: CustomerType.USER }, 3);
+    expect(selectStripeCustomersMatchingType({
+      customers: [untyped, typed, user],
+      expectedType: CustomerType.TEAM,
+    }).map((c) => c.id)).toEqual(["cus_team"]);
+  });
+
+  test("selectStripeCustomersMatchingType falls back to untyped when no typed row exists", ({ expect }) => {
+    const untyped = customer("cus_old", { customerId: "team-1" }, 1);
+    expect(selectStripeCustomersMatchingType({
+      customers: [untyped],
+      expectedType: CustomerType.TEAM,
+    }).map((c) => c.id)).toEqual(["cus_old"]);
+  });
+
+  test("pickNewestStripeCustomer returns the later created id", ({ expect }) => {
+    expect(pickNewestStripeCustomer([
+      customer("cus_a", {}, 10),
+      customer("cus_b", {}, 50),
+      customer("cus_c", {}, 20),
+    ])?.id).toBe("cus_b");
   });
 });
 

@@ -1,4 +1,5 @@
 import { assertFreeTrialAllowedForPurchase, ensureClientCanAccessCustomer, ensureCustomerExists, getDefaultCardPaymentMethodSummary, getEffectiveFreeTrial, getStripeCustomerForCustomerOrNull, getStripeTrialPeriodDays, grantProductToCustomer, isActiveSubscription, isAddOnProduct } from "@/lib/payments";
+import { assertPromoCodesCapability, createSwitchSubscription, grantProductAndSucceedPromo, inPlaceSubscriptionDiscountFields, inPlaceSubscriptionSnapshot, listLiveHexclaveRedemptions, markHexclaveDiscountsRemoved, parsePromoCodeNames, promoCodeProjectPolicy, succeedPendingRedemptions, subscriptionDiscountParams, updateSwitchSubscription, validateAppliedPromoCodes } from "@/lib/payments/promo-code-checkout";
 import { bulldozerWriteSubscription } from "@/lib/payments/bulldozer-dual-write";
 import { getOwnedProductsForCustomer, getSubscriptionMapForCustomer } from "@/lib/payments/customer-data";
 import { getApplicationFeePercentOrUndefined } from "@/lib/payments/platform-fees";
@@ -6,6 +7,7 @@ import { upsertProductVersion } from "@/lib/product-versions";
 import { getStripeForAccount, sanitizeStripePeriodDates } from "@/lib/stripe";
 import { getPrismaClientForTenancy } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
+import { promoCodeNamesRequestSchema } from "@/app/api/latest/internal/payments/promo-codes/schema";
 import { KnownErrors } from "@hexclave/shared";
 import { adaptSchema, clientOrHigherAuthTypeSchema, moneyAmountSchema, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { SUPPORTED_CURRENCIES, type MoneyAmount } from "@hexclave/shared/dist/utils/currency-constants";
@@ -13,7 +15,6 @@ import { moneyAmountToStripeUnits } from "@hexclave/shared/dist/utils/currencies
 import { HexclaveAssertionError, StatusError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { getOrUndefined, typedEntries } from "@hexclave/shared/dist/utils/objects";
 import { typedToUppercase } from "@hexclave/shared/dist/utils/strings";
-import Stripe from "stripe";
 
 const USD_CURRENCY = SUPPORTED_CURRENCIES.find((currency) => currency.code === "USD")
   ?? throwErr("USD currency configuration missing in SUPPORTED_CURRENCIES");
@@ -39,6 +40,7 @@ export const POST = createSmartRouteHandler({
       to_product_id: yupString().defined(),
       price_id: yupString().optional(),
       quantity: yupNumber().integer().min(1).optional(),
+      promo_codes: promoCodeNamesRequestSchema.optional(),
     }).defined(),
   }),
   response: yupObject({
@@ -198,17 +200,60 @@ export const POST = createSmartRouteHandler({
       throw new StatusError(400, "This product is not stackable; quantity must be 1");
     }
 
-    if (testMode && (existingSub == null || existingSub.stripeSubscriptionId == null)) {
-      await grantProductToCustomer({
+    const promoCodes = parsePromoCodeNames(body.promo_codes);
+    const promoPolicy = promoCodeProjectPolicy(auth.tenancy.config.payments);
+    assertPromoCodesCapability(promoPolicy, {
+      wantsPromoCodes: promoCodes.length > 0,
+      wantsStacking: promoCodes.length > 1,
+    });
+    const promoValidation = await validateAppliedPromoCodes({
+      prisma,
+      tenancyId: auth.tenancy.id,
+      codeNames: promoCodes,
+      productId: body.to_product_id,
+      originalStripeUnits: unitAmountStripeUnits * quantity,
+      allowStacking: promoPolicy.allowStackingPromoCodes,
+      isOneTime: false,
+    });
+    const appliedPromos = promoValidation.applied.map((entry) => entry.promo);
+    const customerType = typedToUppercase(params.customer_type);
+
+    const succeedSwitchRedemptions = async (redemptionIds: string[], extra?: {
+      stripeSubscriptionId?: string,
+      subscriptionId?: string,
+    }) => {
+      if (redemptionIds.length === 0) return;
+      await succeedPendingRedemptions({
         prisma,
-        tenancy: auth.tenancy,
-        customerType: params.customer_type,
+        tenancyId: auth.tenancy.id,
+        redemptionIds,
+        stripeSubscriptionId: extra?.stripeSubscriptionId,
+        subscriptionId: extra?.subscriptionId,
+      });
+    };
+
+    if (testMode && (existingSub == null || existingSub.stripeSubscriptionId == null)) {
+      await grantProductAndSucceedPromo({
+        prisma,
+        tenancyId: auth.tenancy.id,
         customerId: params.customer_id,
-        product: toProduct,
-        productId: body.to_product_id,
-        priceId: selectedPriceId,
-        quantity,
-        creationSource: "TEST_MODE",
+        customerType,
+        promos: appliedPromos,
+        purchaseKind: "subscription",
+        grant: async () => {
+          const granted = await grantProductToCustomer({
+            prisma,
+            tenancy: auth.tenancy,
+            customerType: params.customer_type,
+            customerId: params.customer_id,
+            product: toProduct,
+            productId: body.to_product_id,
+            priceId: selectedPriceId,
+            quantity,
+            creationSource: "TEST_MODE",
+          });
+          return granted.type === "subscription" ? { subscriptionId: granted.subscriptionId } : {};
+        },
       });
       return { statusCode: 200, bodyType: "json", body: { success: true } };
     }
@@ -258,45 +303,85 @@ export const POST = createSmartRouteHandler({
     });
 
     if (existingSub?.stripeSubscriptionId) {
-      const existingStripeSub = await stripe.subscriptions.retrieve(existingSub.stripeSubscriptionId);
+      const existingStripeSubscriptionId = existingSub.stripeSubscriptionId;
+      const existingStripeSub = await stripe.subscriptions.retrieve(existingStripeSubscriptionId, { expand: ["discounts"] });
       if (existingStripeSub.items.data.length === 0) {
         throw new HexclaveAssertionError("Stripe subscription has no items", { subscriptionId: existingSub.id });
       }
       const existingItem = existingStripeSub.items.data[0];
+      const previousSnapshot = inPlaceSubscriptionSnapshot(existingStripeSub);
       // Intentional: switching an existing (possibly pre-platform-fee)
       // subscription to a new plan attaches the 0.9% application fee from
       // this point forward. Subscriptions that never switch plans stay
       // fee-less until a separate migration applies fees retroactively.
       const applicationFeePercent = getApplicationFeePercentOrUndefined(auth.tenancy.project.id);
-      const updated = await stripe.subscriptions.update(existingSub.stripeSubscriptionId, {
-        payment_behavior: "error_if_incomplete",
-        payment_settings: { save_default_payment_method: "on_subscription" },
-        default_payment_method: resolvedPaymentMethodId,
-        items: [{
-          id: existingItem.id,
-          price_data: {
-            currency: "usd",
-            unit_amount: unitAmountStripeUnits,
-            product: stripeProduct.id,
-            recurring: {
-              interval_count: selectedInterval[0],
-              interval: selectedInterval[1],
-            },
-          },
-          quantity,
-        }],
-        metadata: {
-          productId: body.to_product_id,
-          productVersionId,
-          priceId: selectedPriceId,
-        },
-        ...(applicationFeePercent !== undefined ? { application_fee_percent: applicationFeePercent } : {}),
+      // A forever coupon from the previous plan must not follow the customer
+      // onto a product the merchant did not include on this promo. Replace
+      // only Hexclave discounts in the same update as the plan change so a
+      // declined card leaves the old plan and its Hexclave discounts intact.
+      // Merchant coupons stay as `{ discount: id }`; never send discounts: []
+      // unless that walk left no remaining discounts.
+      const liveHexclave = await listLiveHexclaveRedemptions({
+        prisma,
+        tenancyId: auth.tenancy.id,
+        stripeSubscriptionId: existingStripeSubscriptionId,
       });
-      const updatedSubscription = updated as Stripe.Subscription;
+      const promoAttach = subscriptionDiscountParams({
+        promos: appliedPromos,
+        hasFreeTrial: false,
+      });
+      const discountFields = inPlaceSubscriptionDiscountFields({
+        promoAttach,
+        subscriptionDiscounts: existingStripeSub.discounts,
+        hexclaveCouponIds: new Set(liveHexclave.map((row) => row.stripeCouponId)),
+      });
+      const { subscription: updatedSubscription, redemptionIds } = await updateSwitchSubscription({
+        prisma,
+        tenancyId: auth.tenancy.id,
+        customerId: params.customer_id,
+        customerType,
+        promos: appliedPromos,
+        purchaseKind: "subscription",
+        stripe,
+        subscriptionId: existingStripeSubscriptionId,
+        previousSnapshot,
+        params: {
+          payment_behavior: "error_if_incomplete",
+          payment_settings: { save_default_payment_method: "on_subscription" },
+          default_payment_method: resolvedPaymentMethodId,
+          items: [{
+            id: existingItem.id,
+            price_data: {
+              currency: "usd",
+              unit_amount: unitAmountStripeUnits,
+              product: stripeProduct.id,
+              recurring: {
+                interval_count: selectedInterval[0],
+                interval: selectedInterval[1],
+              },
+            },
+            quantity,
+          }],
+          metadata: {
+            productId: body.to_product_id,
+            productVersionId,
+            priceId: selectedPriceId,
+            tenancyId: auth.tenancy.id,
+            ...promoAttach.metadata,
+          },
+          ...discountFields,
+          ...(applicationFeePercent !== undefined ? { application_fee_percent: applicationFeePercent } : {}),
+        },
+      });
+      await markHexclaveDiscountsRemoved({
+        prisma,
+        tenancyId: auth.tenancy.id,
+        redemptionIds: liveHexclave.map((row) => row.id),
+      });
       const sanitizedUpdateDates = sanitizeStripePeriodDates(
         existingItem.current_period_start,
         existingItem.current_period_end,
-        { subscriptionId: existingSub.stripeSubscriptionId, tenancyId: auth.tenancy.id }
+        { subscriptionId: existingStripeSubscriptionId, tenancyId: auth.tenancy.id }
       );
 
       await prisma.subscription.update({
@@ -322,6 +407,10 @@ export const POST = createSmartRouteHandler({
         where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: existingSub.id } },
       });
       await bulldozerWriteSubscription(updatedSub);
+      await succeedSwitchRedemptions(redemptionIds, {
+        stripeSubscriptionId: existingStripeSubscriptionId,
+        subscriptionId: existingSub.id,
+      });
     } else {
       // No existing Stripe subscription — create a new one. This happens when
       // switching from a $0 product (which has no stripeSubscriptionId) to a paid one.
@@ -332,32 +421,47 @@ export const POST = createSmartRouteHandler({
       const effectiveFreeTrial = getEffectiveFreeTrial(toProduct, selectedPrice);
       assertFreeTrialAllowedForPurchase(selectedPrice, effectiveFreeTrial);
       const trialPeriodDays = effectiveFreeTrial != null ? getStripeTrialPeriodDays(effectiveFreeTrial) : undefined;
-      const created = await stripe.subscriptions.create({
-        customer: stripeCustomer.id,
-        payment_behavior: "error_if_incomplete",
-        payment_settings: { save_default_payment_method: "on_subscription" },
-        ...resolvedPaymentMethodId ? { default_payment_method: resolvedPaymentMethodId } : {},
-        items: [{
-          price_data: {
-            currency: "usd",
-            unit_amount: unitAmountStripeUnits,
-            product: stripeProduct.id,
-            recurring: {
-              interval_count: selectedInterval[0],
-              interval: selectedInterval[1],
-            },
-          },
-          quantity,
-        }],
-        metadata: {
-          productId: body.to_product_id,
-          productVersionId,
-          priceId: selectedPriceId,
-        },
-        ...(trialPeriodDays !== undefined ? { trial_period_days: trialPeriodDays } : {}),
-        ...(applicationFeePercent !== undefined ? { application_fee_percent: applicationFeePercent } : {}),
+      const promoAttach = subscriptionDiscountParams({
+        promos: appliedPromos,
+        hasFreeTrial: trialPeriodDays !== undefined,
       });
-      const createdSubscription = created as Stripe.Subscription;
+      const { subscription: createdSubscription, redemptionIds } = await createSwitchSubscription({
+        prisma,
+        tenancyId: auth.tenancy.id,
+        customerId: params.customer_id,
+        customerType,
+        promos: appliedPromos,
+        purchaseKind: "subscription",
+        stripe,
+        params: {
+          customer: stripeCustomer.id,
+          payment_behavior: "error_if_incomplete",
+          payment_settings: { save_default_payment_method: "on_subscription" },
+          ...resolvedPaymentMethodId ? { default_payment_method: resolvedPaymentMethodId } : {},
+          items: [{
+            price_data: {
+              currency: "usd",
+              unit_amount: unitAmountStripeUnits,
+              product: stripeProduct.id,
+              recurring: {
+                interval_count: selectedInterval[0],
+                interval: selectedInterval[1],
+              },
+            },
+            quantity,
+          }],
+          metadata: {
+            productId: body.to_product_id,
+            productVersionId,
+            priceId: selectedPriceId,
+            tenancyId: auth.tenancy.id,
+            ...promoAttach.metadata,
+          },
+          ...(promoAttach.discounts != null ? { discounts: promoAttach.discounts } : {}),
+          ...(trialPeriodDays !== undefined ? { trial_period_days: trialPeriodDays } : {}),
+          ...(applicationFeePercent !== undefined ? { application_fee_percent: applicationFeePercent } : {}),
+        },
+      });
       if (createdSubscription.items.data.length === 0) {
         throw new HexclaveAssertionError("Stripe subscription has no items", { stripeSubscriptionId: createdSubscription.id });
       }
@@ -390,6 +494,10 @@ export const POST = createSmartRouteHandler({
         where: { tenancyId_stripeSubscriptionId: { tenancyId: auth.tenancy.id, stripeSubscriptionId: createdSubscription.id } },
       });
       await bulldozerWriteSubscription(createdSub);
+      await succeedSwitchRedemptions(redemptionIds, {
+        stripeSubscriptionId: createdSubscription.id,
+        subscriptionId: createdSub.id,
+      });
     }
 
     return {

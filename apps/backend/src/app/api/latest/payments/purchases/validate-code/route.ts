@@ -58,6 +58,8 @@ export const POST = createSmartRouteHandler({
       }),
       test_mode: yupBoolean().defined(),
       charges_enabled: yupBoolean().nullable().defined(),
+      allow_promo_codes: yupBoolean().defined(),
+      allow_stacking_promo_codes: yupBoolean().defined(),
     }).defined(),
   }),
   async handler({ body }) {
@@ -142,6 +144,8 @@ export const POST = createSmartRouteHandler({
         replaces_stripe_subscription: replacesStripeSubscription,
         test_mode: tenancy.config.payments.testMode === true,
         charges_enabled: verificationCode.data.chargesEnabled ?? null,
+        allow_promo_codes: verificationCode.data.allowPromoCodes === true,
+        allow_stacking_promo_codes: verificationCode.data.allowPromoCodes === true && verificationCode.data.allowStackingPromoCodes === true,
       },
     };
   },
