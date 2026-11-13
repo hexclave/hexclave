@@ -288,6 +288,31 @@ it("sums multiple non-expired changes", async ({ expect }) => {
   expect(get.body.quantity).toBe(6);
 });
 
+it("rejects quantity deltas outside the 32-bit integer range", async ({ expect }) => {
+  await Project.createAndSwitch();
+  await updateEnvironmentConfig({
+    payments: {
+      items: {
+        "test-item": {
+          displayName: "Test Item",
+          customerType: "user",
+        },
+      },
+    },
+  });
+
+  const { userId } = await Auth.fastSignUp();
+
+  for (const delta of [5_000_000_000, -5_000_000_000]) {
+    const r = await niceBackendFetch(`/api/latest/payments/items/user/${userId}/test-item/update-quantity?allow_negative=true`, {
+      method: "POST",
+      accessType: "admin",
+      body: { delta },
+    });
+    expect(r.status).toBe(400);
+  }
+});
+
 it("validates item and customer type", async ({ expect }) => {
   await Project.createAndSwitch();
   await updateEnvironmentConfig({
