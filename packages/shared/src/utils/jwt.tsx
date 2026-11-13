@@ -1,5 +1,4 @@
 import crypto from "crypto";
-import elliptic from "elliptic";
 import * as jose from "jose";
 import { JOSEError } from "jose/errors";
 import { encodeBase64Url } from "./bytes";
@@ -83,19 +82,37 @@ export type PrivateJwk = {
 async function getPrivateJwkFromDerivedSecret(derivedSecret: string, kid: string): Promise<PrivateJwk> {
   const secretHash = await globalVar.crypto.subtle.digest("SHA-256", jose.base64url.decode(derivedSecret));
   const priv = new Uint8Array(secretHash);
-
-  const ec = new elliptic.ec('p256');
-  const key = ec.keyFromPrivate(priv);
-  const publicKey = key.getPublic();
-
+  const scalar = Buffer.from(priv);
+  const order = Buffer.from("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", "hex");
+  // Multiples of the group order have no finite public point, as in the legacy implementation.
+  if (crypto.timingSafeEqual(scalar, Buffer.alloc(32)) || crypto.timingSafeEqual(scalar, order)) {
+    throw new HexclaveAssertionError("Cannot derive a finite P-256 public key");
+  }
+  // SEC1 ECPrivateKey: version 1, 32-byte scalar, named prime256v1; no JS scalar arithmetic.
+  const nativeKey = crypto.createPrivateKey({
+    key: Buffer.concat([Buffer.from("30310201010420", "hex"), scalar, Buffer.from("a00a06082a8648ce3d030107", "hex")]),
+    format: "der",
+    type: "sec1",
+  });
+  const publicJwk = crypto.createPublicKey(nativeKey).export({ format: "jwk" });
+  if (publicJwk.kty !== "EC" || publicJwk.crv !== "P-256" || !publicJwk.x || !publicJwk.y) {
+    throw new HexclaveAssertionError("Invalid native P-256 public key");
+  }
+  const encodeLegacyCoordinate = (value: string) => {
+    const bytes = jose.base64url.decode(value);
+    if (bytes.length !== 32) throw new HexclaveAssertionError("Invalid P-256 coordinate length");
+    let offset = 0;
+    while (offset < bytes.length - 1 && bytes[offset] === 0) offset++;
+    return encodeBase64Url(bytes.subarray(offset));
+  };
   return {
-    kty: 'EC',
-    crv: 'P-256',
-    alg: 'ES256',
-    kid: kid,
+    kty: "EC",
+    crv: "P-256",
+    alg: "ES256",
+    kid,
     d: encodeBase64Url(priv),
-    x: encodeBase64Url(publicKey.getX().toBuffer()),
-    y: encodeBase64Url(publicKey.getY().toBuffer()),
+    x: encodeLegacyCoordinate(publicJwk.x),
+    y: encodeLegacyCoordinate(publicJwk.y),
   };
 }
 
