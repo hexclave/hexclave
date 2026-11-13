@@ -1351,15 +1351,16 @@
                           "value": {
                             "type": "string",
                             "example": "johndoe@example.com",
-                            "description": "The value of the contact channel. For email, this should be a valid email address."
+                            "description": "The value of the contact channel. For email, this should be a valid email address. For phone, this should be a phone number in E.164 format (eg. +15555550100)."
                           },
                           "type": {
                             "type": "string",
                             "enum": [
-                              "email"
+                              "email",
+                              "phone"
                             ],
                             "example": "email",
-                            "description": "The type of the contact channel. Currently only \"email\" is supported."
+                            "description": "The type of the contact channel. Either \"email\" or \"phone\"."
                           },
                           "used_for_auth": {
                             "type": "boolean",
@@ -1454,15 +1455,16 @@
                   "value": {
                     "type": "string",
                     "example": "johndoe@example.com",
-                    "description": "The value of the contact channel. For email, this should be a valid email address."
+                    "description": "The value of the contact channel. For email, this should be a valid email address. For phone, this should be a phone number in E.164 format (eg. +15555550100)."
                   },
                   "type": {
                     "type": "string",
                     "enum": [
-                      "email"
+                      "email",
+                      "phone"
                     ],
                     "example": "email",
-                    "description": "The type of the contact channel. Currently only \"email\" is supported."
+                    "description": "The type of the contact channel. Either \"email\" or \"phone\"."
                   },
                   "used_for_auth": {
                     "type": "boolean",
@@ -1517,15 +1519,16 @@
                     "value": {
                       "type": "string",
                       "example": "johndoe@example.com",
-                      "description": "The value of the contact channel. For email, this should be a valid email address."
+                      "description": "The value of the contact channel. For email, this should be a valid email address. For phone, this should be a phone number in E.164 format (eg. +15555550100)."
                     },
                     "type": {
                       "type": "string",
                       "enum": [
-                        "email"
+                        "email",
+                        "phone"
                       ],
                       "example": "email",
-                      "description": "The type of the contact channel. Currently only \"email\" is supported."
+                      "description": "The type of the contact channel. Either \"email\" or \"phone\"."
                     },
                     "used_for_auth": {
                       "type": "boolean",
@@ -1607,6 +1610,116 @@
                   },
                   "required": [
                     "success"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contact-channels/verify-phone-number": {
+      "post": {
+        "summary": "Verify a phone number",
+        "description": "Verify a phone number contact channel of a user with the code that was sent to it via SMS",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "example": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2",
+                    "description": "A 45-character verification code, formed by concatenating the 6-character code sent via SMS with the nonce received when the code was sent"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "example": {
+                  "code": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Contact Channels"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/contact-channels/verify-phone-number",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "description": "Always equal to true.",
+                      "example": true
+                    }
+                  },
+                  "required": [
+                    "success"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contact-channels/verify-phone-number/check-code": {
+      "post": {
+        "summary": "Check phone number verification code",
+        "description": "Check if a phone number verification code is valid without using it",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "example": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2",
+                    "description": "A 45-character verification code, formed by concatenating the 6-character code sent via SMS with the nonce received when the code was sent"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "example": {
+                  "code": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Contact Channels"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/contact-channels/verify-phone-number/check-code",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "is_code_valid": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "is_code_valid"
                   ]
                 }
               }
@@ -1741,15 +1854,16 @@
                     "value": {
                       "type": "string",
                       "example": "johndoe@example.com",
-                      "description": "The value of the contact channel. For email, this should be a valid email address."
+                      "description": "The value of the contact channel. For email, this should be a valid email address. For phone, this should be a phone number in E.164 format (eg. +15555550100)."
                     },
                     "type": {
                       "type": "string",
                       "enum": [
-                        "email"
+                        "email",
+                        "phone"
                       ],
                       "example": "email",
-                      "description": "The type of the contact channel. Currently only \"email\" is supported."
+                      "description": "The type of the contact channel. Either \"email\" or \"phone\"."
                     },
                     "used_for_auth": {
                       "type": "boolean",
@@ -1911,15 +2025,16 @@
                   "value": {
                     "type": "string",
                     "example": "johndoe@example.com",
-                    "description": "The value of the contact channel. For email, this should be a valid email address."
+                    "description": "The value of the contact channel. For email, this should be a valid email address. For phone, this should be a phone number in E.164 format (eg. +15555550100)."
                   },
                   "type": {
                     "type": "string",
                     "enum": [
-                      "email"
+                      "email",
+                      "phone"
                     ],
                     "example": "email",
-                    "description": "The type of the contact channel. Currently only \"email\" is supported."
+                    "description": "The type of the contact channel. Either \"email\" or \"phone\"."
                   },
                   "used_for_auth": {
                     "type": "boolean",
@@ -1967,15 +2082,16 @@
                     "value": {
                       "type": "string",
                       "example": "johndoe@example.com",
-                      "description": "The value of the contact channel. For email, this should be a valid email address."
+                      "description": "The value of the contact channel. For email, this should be a valid email address. For phone, this should be a phone number in E.164 format (eg. +15555550100)."
                     },
                     "type": {
                       "type": "string",
                       "enum": [
-                        "email"
+                        "email",
+                        "phone"
                       ],
                       "example": "email",
-                      "description": "The type of the contact channel. Currently only \"email\" is supported."
+                      "description": "The type of the contact channel. Either \"email\" or \"phone\"."
                     },
                     "used_for_auth": {
                       "type": "boolean",
@@ -2001,6 +2117,62 @@
                     "used_for_auth",
                     "is_verified",
                     "is_primary"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contact-channels/{user_id}/{contact_channel_id}/send-sms-verification-code": {
+      "post": {
+        "summary": "Send phone number verification code",
+        "description": "Send a code via SMS to the user's phone number contact channel for verifying it. The code must then be submitted to `/contact-channels/verify-phone-number`, concatenated with the returned nonce.",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "example": "me",
+              "description": "The user to send the verification code to."
+            },
+            "description": "The user to send the verification code to.",
+            "required": true
+          },
+          {
+            "name": "contact_channel_id",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "example": "b3d396b8-c574-4c80-97b3-50031675ceb2",
+              "description": "The phone number contact channel to send the verification code to."
+            },
+            "description": "The phone number contact channel to send the verification code to.",
+            "required": true
+          }
+        ],
+        "tags": [
+          "Contact Channels"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/contact-channels/{user_id}/{contact_channel_id}/send-sms-verification-code",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nonce": {
+                      "type": "string",
+                      "example": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2",
+                      "description": "A token that must be stored temporarily and provided when verifying the 6-character code"
+                    }
+                  },
+                  "required": [
+                    "nonce"
                   ]
                 }
               }
@@ -4911,6 +5083,206 @@
         }
       }
     },
+    "/auth/sms/send-sign-in-code": {
+      "post": {
+        "summary": "Send SMS sign-in code",
+        "description": "Send a one-time sign-in code to a phone number via SMS. The phone number must be in E.164 format.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone_number": {
+                    "type": "string",
+                    "example": "+15555550100",
+                    "description": "The phone number to send the sign-in code to, in E.164 format"
+                  },
+                  "bot_challenge_token": {
+                    "type": "string"
+                  },
+                  "bot_challenge_phase": {
+                    "type": "string",
+                    "enum": [
+                      "invisible",
+                      "visible"
+                    ]
+                  },
+                  "bot_challenge_unavailable": {
+                    "type": "string",
+                    "enum": [
+                      "true"
+                    ]
+                  }
+                },
+                "required": [
+                  "phone_number"
+                ],
+                "example": {
+                  "phone_number": "+15555550100"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "SMS"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/auth/sms/send-sign-in-code",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nonce": {
+                      "type": "string",
+                      "example": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2",
+                      "description": "A token that must be stored temporarily and provided when verifying the 6-character code"
+                    }
+                  },
+                  "required": [
+                    "nonce"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/sms/sign-in": {
+      "post": {
+        "summary": "Sign in with an SMS code",
+        "description": "Signs in (or signs up) a user with the code that was sent to their phone number via SMS",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "example": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2",
+                    "description": "A 45-character verification code, formed by concatenating the 6-character code sent via SMS with the nonce received when the code was sent"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "example": {
+                  "code": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "SMS"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/auth/sms/sign-in",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "refresh_token": {
+                      "type": "string",
+                      "example": "i8ns3aq2...14y",
+                      "description": "Long-lived refresh token that can be used to obtain a new access token"
+                    },
+                    "access_token": {
+                      "type": "string",
+                      "example": "eyJhmMiJB2TO...diI4QT",
+                      "description": "Short-lived access token that can be used to authenticate the user"
+                    },
+                    "is_new_user": {
+                      "type": "boolean",
+                      "example": true,
+                      "description": "Whether the user is a new user"
+                    },
+                    "user_id": {
+                      "type": "string",
+                      "example": "3241a285-8329-4d69-8f3d-316e08cf140c",
+                      "description": "The unique identifier of the user"
+                    }
+                  },
+                  "required": [
+                    "refresh_token",
+                    "access_token",
+                    "is_new_user",
+                    "user_id"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/sms/sign-in/check-code": {
+      "post": {
+        "summary": "Check SMS sign in code",
+        "description": "Check if an SMS sign in code is valid without using it",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "example": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2",
+                    "description": "A 45-character verification code, formed by concatenating the 6-character code sent via SMS with the nonce received when the code was sent"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "example": {
+                  "code": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "SMS"
+        ],
+        "x-full-url": "https://api.hexclave.com/api/v1/auth/sms/sign-in/check-code",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "is_code_valid": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "is_code_valid"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/team-invitations": {
       "get": {
         "summary": "List team invitations",
@@ -6310,6 +6682,22 @@
                       "example": true,
                       "description": "Whether the primary email has been verified to belong to this user"
                     },
+                    "primary_phone_number": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        null
+                      ],
+                      "example": "+15555550100",
+                      "description": "Primary phone number, in E.164 format"
+                    },
+                    "primary_phone_number_verified": {
+                      "type": "boolean",
+                      "example": true,
+                      "description": "Whether the primary phone number has been verified to belong to this user"
+                    },
                     "display_name": {
                       "type": [
                         "string",
@@ -6417,6 +6805,7 @@
                   "required": [
                     "id",
                     "primary_email_verified",
+                    "primary_phone_number_verified",
                     "signed_up_at_millis",
                     "is_anonymous",
                     "is_restricted",
@@ -6534,6 +6923,17 @@
                     ],
                     "example": "johndoe@example.com",
                     "description": "Primary email"
+                  },
+                  "primary_phone_number": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      null
+                    ],
+                    "example": "+15555550100",
+                    "description": "Primary phone number, in E.164 format"
                   }
                 },
                 "example": {
@@ -6544,7 +6944,8 @@
                   },
                   "selected_team_id": "team-id",
                   "totp_secret_base64": "dG90cC1zZWNyZXQ=",
-                  "primary_email": "johndoe@example.com"
+                  "primary_email": "johndoe@example.com",
+                  "primary_phone_number": "+15555550100"
                 }
               }
             }
@@ -6635,6 +7036,22 @@
                       "type": "boolean",
                       "example": true,
                       "description": "Whether the primary email has been verified to belong to this user"
+                    },
+                    "primary_phone_number": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        null
+                      ],
+                      "example": "+15555550100",
+                      "description": "Primary phone number, in E.164 format"
+                    },
+                    "primary_phone_number_verified": {
+                      "type": "boolean",
+                      "example": true,
+                      "description": "Whether the primary phone number has been verified to belong to this user"
                     },
                     "display_name": {
                       "type": [
@@ -6743,6 +7160,7 @@
                   "required": [
                     "id",
                     "primary_email_verified",
+                    "primary_phone_number_verified",
                     "signed_up_at_millis",
                     "is_anonymous",
                     "is_restricted",

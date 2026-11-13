@@ -87,6 +87,7 @@ describe("basic config operations", () => {
           "password": { "allowSignIn": true },
           "signUpRules": {},
           "signUpRulesDefaultAction": "allow",
+          "sms": { "allowSignIn": false },
         },
         "domains": {
           "allowLocalhost": true,

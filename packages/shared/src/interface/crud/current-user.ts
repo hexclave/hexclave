@@ -12,6 +12,7 @@ const clientUpdateSchema = usersCrudServerUpdateSchema.pick([
   "otp_auth_enabled",
   "passkey_auth_enabled",
   "primary_email",
+  "primary_phone_number",
 ]).defined();
 
 const serverUpdateSchema = usersCrudServerUpdateSchema;
@@ -20,6 +21,8 @@ const clientReadSchema = usersCrudServerReadSchema.pick([
   "id",
   "primary_email",
   "primary_email_verified",
+  "primary_phone_number",
+  "primary_phone_number_verified",
   "display_name",
   "client_metadata",
   "client_read_only_metadata",

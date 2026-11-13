@@ -698,6 +698,20 @@ export const moneyAmountSchema = (currency: Currency) => yupString<MoneyAmount>(
 export const strictEmailSchema = (message: string | undefined) => yupString().email(message).max(256).matches(/^[^.]+(\.[^.]+)*@.*\.[^.][^.]+$/, message);
 // eslint-disable-next-line no-restricted-syntax
 export const emailSchema = yupString().email();
+// We require phone numbers to already be in E.164 format (`+` followed by up to 15 digits, no spaces or punctuation)
+// instead of normalizing arbitrary user input on the server. Normalizing local formats correctly needs a region
+// hint and a full numbering-plan database, which is the client's job (eg. a country-code picker); the server only
+// ever stores the canonical form, so the uniqueness constraints on contact channels compare like with like.
+export const phoneNumberRegex = /^\+[1-9]\d{6,14}$/;
+export const phoneNumberSchema = yupString().matches(phoneNumberRegex, 'Phone number must be in E.164 format, eg. +15555550100').meta({ openapiField: { description: 'A phone number in E.164 format', exampleValue: '+15555550100' } });
+import.meta.vitest?.test("phoneNumberRegex", ({ expect }) => {
+  for (const valid of ["+15555550100", "+447911123456", "+4930123456", "+123456789012345"]) {
+    expect(phoneNumberRegex.test(valid), valid).toBe(true);
+  }
+  for (const invalid of ["15555550100", "+1 555 555 0100", "+1-555-555-0100", "+(1)5555550100", "+05555550100", "+123456", "+1234567890123456", "", "+", "+1555555010a", " +15555550100"]) {
+    expect(phoneNumberRegex.test(invalid), invalid).toBe(false);
+  }
+});
 
 import.meta.vitest?.test('strictEmailSchema', ({ expect }) => {
   const validEmails = [
@@ -798,6 +812,10 @@ export const emailSenderEmailSchema = emailSchema.meta({ openapiField: { descrip
 // need the 70-char bcrypt limit from passwordSchema. Some providers (e.g. ZeptoMail) generate
 // passwords well over 100 chars.
 export const emailPasswordSchema = yupString().max(256).meta({ openapiField: { description: 'Email password. Needs to be specified when using type="standard"', exampleValue: 'your-email-password' } });
+export const smsTwilioAccountSidSchema = yupString().max(256).meta({ openapiField: { description: 'Twilio account SID. Needs to be specified when using provider="twilio"', exampleValue: 'AC00000000000000000000000000000000' } });
+export const smsTwilioAuthTokenSchema = yupString().max(256).meta({ openapiField: { description: 'Twilio auth token. Needs to be specified when using provider="twilio"', exampleValue: 'your-twilio-auth-token' } });
+export const smsSenderValueSchema = yupString().max(64).meta({ openapiField: { description: 'The sender of SMS messages; its format depends on senderType (a phone number in E.164 format, a short code, an alphanumeric sender ID, or a messaging service ID)', exampleValue: '+15555550100' } });
+export const smsWebhookSecretSchema = yupString().min(16).max(256).meta({ openapiField: { description: 'The secret used to sign SMS webhook requests (HMAC-SHA256). Needs to be specified when using provider="webhook"', exampleValue: 'a-long-random-secret' } });
 // Project domain config
 export const handlerPathSchema = yupString().test('is-handler-path', 'Handler path must start with /', (value) => value?.startsWith('/')).meta({ openapiField: { description: 'Handler path. If you did not setup a custom handler path, it should be "/handler" by default. It needs to start with /', exampleValue: '/handler' } });
 // Project email theme config
@@ -940,6 +958,9 @@ export const userIdSchema = yupString().uuid().meta({ openapiField: { descriptio
 export const primaryEmailSchema = emailSchema.meta({ openapiField: { description: 'Primary email', exampleValue: 'johndoe@example.com' } });
 export const primaryEmailAuthEnabledSchema = yupBoolean().meta({ openapiField: { description: 'Whether the primary email is used for authentication. If this is set to `false`, the user will not be able to sign in with the primary email with password or OTP', exampleValue: true } });
 export const primaryEmailVerifiedSchema = yupBoolean().meta({ openapiField: { description: 'Whether the primary email has been verified to belong to this user', exampleValue: true } });
+export const primaryPhoneNumberSchema = phoneNumberSchema.meta({ openapiField: { description: 'Primary phone number, in E.164 format', exampleValue: '+15555550100' } });
+export const primaryPhoneNumberAuthEnabledSchema = yupBoolean().meta({ openapiField: { description: 'Whether the primary phone number is used for authentication. If this is set to `true`, the user can sign in with a one-time code sent via SMS, if enabled in the project settings', exampleValue: true } });
+export const primaryPhoneNumberVerifiedSchema = yupBoolean().meta({ openapiField: { description: 'Whether the primary phone number has been verified to belong to this user', exampleValue: true } });
 export const userDisplayNameSchema = yupString().nullable().max(256).meta({ openapiField: { description: _displayNameDescription('user'), exampleValue: 'John Doe' } });
 export const selectedTeamIdSchema = yupString().uuid().meta({ openapiField: { description: 'ID of the team currently selected by the user', exampleValue: 'team-id' } });
 export const profileImageUrlSchema = urlSchema.max(MAX_IMAGE_SIZE_BASE64_BYTES).meta({ openapiField: { description: _profileImageUrlDescription('user'), exampleValue: 'https://example.com/image.jpg' } });
@@ -1046,11 +1067,14 @@ export const teamMemberProfileImageUrlSchema = urlSchema.max(1000000).meta({ ope
 
 // Contact channels
 export const contactChannelIdSchema = yupString().uuid().meta({ openapiField: { description: _idDescription('contact channel'), exampleValue: 'b3d396b8-c574-4c80-97b3-50031675ceb2' } });
-export const contactChannelTypeSchema = yupString().oneOf(['email']).meta({ openapiField: { description: `The type of the contact channel. Currently only "email" is supported.`, exampleValue: 'email' } });
+export const contactChannelTypeSchema = yupString().oneOf(['email', 'phone']).meta({ openapiField: { description: `The type of the contact channel. Either "email" or "phone".`, exampleValue: 'email' } });
 export const contactChannelValueSchema = yupString().when('type', {
   is: 'email',
   then: (schema) => schema.email(),
-}).meta({ openapiField: { description: 'The value of the contact channel. For email, this should be a valid email address.', exampleValue: 'johndoe@example.com' } });
+}).when('type', {
+  is: 'phone',
+  then: (schema) => schema.matches(phoneNumberRegex, 'Phone number must be in E.164 format, eg. +15555550100'),
+}).meta({ openapiField: { description: 'The value of the contact channel. For email, this should be a valid email address. For phone, this should be a phone number in E.164 format (eg. +15555550100).', exampleValue: 'johndoe@example.com' } });
 export const contactChannelUsedForAuthSchema = yupBoolean().meta({ openapiField: { description: 'Whether the contact channel is used for authentication. If this is set to `true`, the user will be able to sign in with the contact channel with password or OTP.', exampleValue: true } });
 export const contactChannelIsVerifiedSchema = yupBoolean().meta({ openapiField: { description: 'Whether the contact channel has been verified. If this is set to `true`, the contact channel has been verified to belong to the user.', exampleValue: true } });
 export const contactChannelIsPrimarySchema = yupBoolean().meta({ openapiField: { description: 'Whether the contact channel is the primary contact channel. If this is set to `true`, it will be used for authentication and notifications by default.', exampleValue: true } });

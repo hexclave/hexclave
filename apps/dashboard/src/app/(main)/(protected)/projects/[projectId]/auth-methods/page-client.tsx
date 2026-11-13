@@ -19,6 +19,7 @@ import { DesignMenu, type DesignMenuActionItem } from "@/components/design-compo
 import { DesignSelectorDropdown } from "@/components/design-components/select";
 import {
   AsteriskIcon,
+  ChatTextIcon,
   EnvelopeSimpleIcon,
   EyeIcon,
   GearSixIcon,
@@ -50,6 +51,7 @@ import { PageLayout } from "../page-layout";
 import { useAdminApp } from "../use-admin-app";
 import { getNewProviderCallbackUrl, resolveProviderCallbackUrl } from "./oauth-callback-url";
 import { ProviderIcon, ProviderSettingDialog, ProviderSettingSwitch, TurnOffProviderDialog } from "./providers";
+import { SmsProviderSettings } from "./sms-provider-settings";
 
 type AdminOAuthProviderConfig = AdminProject['config']['oauthProviders'][number];
 
@@ -989,16 +991,19 @@ export default function PageClient() {
   const [localPasswordEnabled, setLocalPasswordEnabled] = useState<boolean | undefined>(undefined);
   const [localOtpEnabled, setLocalOtpEnabled] = useState<boolean | undefined>(undefined);
   const [localPasskeyEnabled, setLocalPasskeyEnabled] = useState<boolean | undefined>(undefined);
+  const [localSmsEnabled, setLocalSmsEnabled] = useState<boolean | undefined>(undefined);
 
   const passwordEnabled = localPasswordEnabled ?? config.auth.password.allowSignIn;
   const otpEnabled = localOtpEnabled ?? config.auth.otp.allowSignIn;
   const passkeyEnabled = localPasskeyEnabled ?? config.auth.passkey.allowSignIn;
+  const smsEnabled = localSmsEnabled ?? config.auth.sms.allowSignIn;
 
   const authMethodsHasChanges = useMemo(() =>
     localPasswordEnabled !== undefined ||
     localOtpEnabled !== undefined ||
-    localPasskeyEnabled !== undefined,
-  [localPasswordEnabled, localOtpEnabled, localPasskeyEnabled]);
+    localPasskeyEnabled !== undefined ||
+    localSmsEnabled !== undefined,
+  [localPasswordEnabled, localOtpEnabled, localPasskeyEnabled, localSmsEnabled]);
 
   const handleAuthMethodsSave = async () => {
     const configUpdate: Record<string, boolean> = {};
@@ -1011,16 +1016,21 @@ export default function PageClient() {
     if (localPasskeyEnabled !== undefined) {
       configUpdate['auth.passkey.allowSignIn'] = localPasskeyEnabled;
     }
+    if (localSmsEnabled !== undefined) {
+      configUpdate['auth.sms.allowSignIn'] = localSmsEnabled;
+    }
     await updateConfig({ adminApp: hexclaveAdminApp, configUpdate, pushable: true });
     setLocalPasswordEnabled(undefined);
     setLocalOtpEnabled(undefined);
     setLocalPasskeyEnabled(undefined);
+    setLocalSmsEnabled(undefined);
   };
 
   const handleAuthMethodsDiscard = () => {
     setLocalPasswordEnabled(undefined);
     setLocalOtpEnabled(undefined);
     setLocalPasskeyEnabled(undefined);
+    setLocalSmsEnabled(undefined);
   };
 
   // ===== SIGN-UP local state =====
@@ -1108,6 +1118,9 @@ export default function PageClient() {
   const onPasskeyChange = (checked: boolean) => {
     setLocalPasskeyEnabled(checked === config.auth.passkey.allowSignIn ? undefined : checked);
   };
+  const onSmsChange = (checked: boolean) => {
+    setLocalSmsEnabled(checked === config.auth.sms.allowSignIn ? undefined : checked);
+  };
   const onAllowSignUpChange = (checked: boolean) => {
     setLocalAllowSignUp(checked === config.auth.allowSignUp ? undefined : checked);
   };
@@ -1140,6 +1153,13 @@ export default function PageClient() {
                 <MethodToggleRow icon={AsteriskIcon} label="Email/password authentication" hint="Classic email + password credentials." checked={passwordEnabled} onCheckedChange={onPasswordChange} density="default" />
                 <MethodToggleRow icon={LinkIcon} label="Magic link (Email OTP)" hint="One-time codes delivered by email." checked={otpEnabled} onCheckedChange={onOtpChange} density="default" />
                 <MethodToggleRow icon={KeyIcon} label="Passkey" hint="Phishing-resistant device-bound credentials." checked={passkeyEnabled} onCheckedChange={onPasskeyChange} density="default" />
+                <MethodToggleRow icon={ChatTextIcon} label="SMS one-time code" hint="Codes sent by text message to the user's phone number. Requires an SMS provider." checked={smsEnabled} onCheckedChange={onSmsChange} density="default" />
+                {smsEnabled && config.sms.server.provider === undefined && (
+                  <DesignAlert
+                    variant="warning"
+                    description="SMS sign-in won't work until you configure an SMS provider below."
+                  />
+                )}
               </div>
               <InlineSaveDiscard hasChanges={authMethodsHasChanges} onSave={handleAuthMethodsSave} onDiscard={handleAuthMethodsDiscard} />
 
@@ -1187,6 +1207,8 @@ export default function PageClient() {
               />
             </DesignCard>
           </div>
+
+          <SmsProviderSettings smsSignInEnabled={config.auth.sms.allowSignIn} />
 
           <DesignCard title="Sign-up" subtitle="Account creation policies for new users" icon={UserPlusIcon} gradient="default">
             <div className="flex flex-col gap-2">

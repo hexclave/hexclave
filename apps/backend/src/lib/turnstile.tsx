@@ -60,6 +60,8 @@ function getSiteverifyUrl(): string {
   return getEnvVariable("STACK_TURNSTILE_SITEVERIFY_URL", "https://challenges.cloudflare.com/turnstile/v0/siteverify");
 }
 
+// "send_sms_sign_in_code" is deliberately not in this list: every SMS costs the project money, and SMS sign-in is a
+// common target for SMS pumping (toll fraud), so we never let a failed visible challenge through for it.
 const visibleChallengeSignupBypassActions = new Set<TurnstileAction>([
   "sign_up_with_credential",
   "send_magic_link_email",
