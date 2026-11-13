@@ -7,6 +7,10 @@ import { adaptSchema, serverOrHigherAuthTypeSchema, userSpecifiedIdSchema, yupBo
 import { HexclaveAssertionError, StatusError, captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { randomUUID } from "node:crypto";
 
+function alreadyOnAnotherService(hostname: string) {
+  return new StatusError(400, `The domain ${JSON.stringify(hostname)} is already added to another service in this project. Remove it there first.`);
+}
+
 /**
  * Answers a POST that finds the hostname already on THIS service.
  *
@@ -66,7 +70,7 @@ async function respondToDuplicateDomain(
 export const POST = createSmartRouteHandler({
   metadata: {
     summary: "Add domain to deployment service",
-    description: "Adds a custom domain to a deployment service and, if the service has been provisioned, attaches it on the runtime (which allocates public IPs and requests a certificate). Domains are operational state (not part of the config-managed service definition), so they can be managed here regardless of where the project's configuration comes from. Read the domain endpoint afterwards for the DNS records to create.",
+    description: "Adds a custom domain to a deployment service and, if the service has been provisioned, attaches it on the runtime (which allocates public IPs and requests a certificate). Domains are operational state (not part of the config-managed service definition), so they can be managed here regardless of where the project's configuration comes from. A domain left unattached by a service its deploy file no longer declares is re-pointed onto this service. Read the domain endpoint afterwards for the DNS records to create.",
     tags: ["Deploy"],
     hidden: true,
   },
@@ -123,34 +127,50 @@ export const POST = createSmartRouteHandler({
         hostname: body.hostname,
       },
     });
-    if (existing != null) {
+    if (existing != null && existing.serviceId !== null) {
       // A sibling service holding the hostname is a genuine conflict — the caller has to
       // choose. The same hostname on THIS service is a replay of a request that already
       // succeeded, which is not.
       if (existing.serviceId !== params.service_id) {
-        throw new StatusError(400, `The domain ${JSON.stringify(body.hostname)} is already added to another service in this project. Remove it there first.`);
+        throw alreadyOnAnotherService(body.hostname);
       }
       return await respondToDuplicateDomain(prisma, auth.tenancy, row, existing);
     }
 
     // Reserve tenancy-wide ownership before touching Marshal. The unique index is the
     // concurrency arbiter: only the request that owns the row may attach the runtime claim.
-    const domainId = randomUUID();
-    const reservation = await prisma.deploymentDomain.createMany({
-      data: [{
-        tenancyId: auth.tenancy.id,
-        id: domainId,
-        serviceId: params.service_id,
-        port: domainPort,
-        hostname: body.hostname,
-        isPrimary: body.is_primary ?? false,
-        verified: false,
-      }],
-      skipDuplicates: true,
-    });
+    //
+    // A row with no service is a domain whose service was dropped from its deploy file. It
+    // is kept on purpose (see syncServiceDefinitions) and waits to be re-pointed, and adding
+    // it here IS the re-point: the row is claimed in place, guarded on `serviceId: null` so
+    // two concurrent adds still have exactly one winner. Without this the hostname was
+    // stuck for good — this POST called it taken, and the per-service DELETE could not
+    // reach it because the service it names no longer exists.
+    const reservedFields = {
+      serviceId: params.service_id,
+      port: domainPort,
+      isPrimary: body.is_primary ?? false,
+      verified: false,
+    };
+    const domainId = existing?.id ?? randomUUID();
+    const reservation = existing != null
+      ? await prisma.deploymentDomain.updateMany({
+        where: { tenancyId: auth.tenancy.id, id: existing.id, serviceId: null },
+        data: reservedFields,
+      })
+      : await prisma.deploymentDomain.createMany({
+        data: [{
+          tenancyId: auth.tenancy.id,
+          id: domainId,
+          hostname: body.hostname,
+          ...reservedFields,
+        }],
+        skipDuplicates: true,
+      });
     if (reservation.count === 0) {
-      // Confirm the intended conflict after ON CONFLICT DO NOTHING. This distinguishes the
-      // hostname race from an implausible generated-id collision or a future unique index.
+      // Confirm the intended conflict after ON CONFLICT DO NOTHING (or the lost re-point).
+      // This distinguishes the hostname race from an implausible generated-id collision or
+      // a future unique index.
       const raceWinner = await prisma.deploymentDomain.findUnique({
         where: {
           tenancyId_hostname: {
@@ -160,11 +180,14 @@ export const POST = createSmartRouteHandler({
         },
       });
       if (raceWinner != null) {
+        if (raceWinner.serviceId === null) {
+          throw new StatusError(409, `The domain ${JSON.stringify(body.hostname)} changed while it was being added. Try again.`);
+        }
         // Same distinction as above, reached when the replay arrives CONCURRENTLY rather
         // than after the first attempt committed — the ring hops on a timeout, so the
         // request it gave up on can still be in flight.
         if (raceWinner.serviceId !== params.service_id) {
-          throw new StatusError(400, `The domain ${JSON.stringify(body.hostname)} is already added to another service in this project. Remove it there first.`);
+          throw alreadyOnAnotherService(body.hostname);
         }
         return await respondToDuplicateDomain(prisma, auth.tenancy, row, raceWinner);
       }
@@ -173,11 +196,24 @@ export const POST = createSmartRouteHandler({
     let domain = await prisma.deploymentDomain.findUniqueOrThrow({
       where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domainId } },
     });
+    // Undoes the reservation when the attach fails. A re-pointed row goes back to being
+    // unattached rather than deleted: it was the project's before this request, and a
+    // failed re-point must not cost it the domain.
+    const releaseReservation = async () => {
+      if (existing == null) {
+        await prisma.deploymentDomain.delete({ where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domainId } } });
+        return;
+      }
+      await prisma.deploymentDomain.update({
+        where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domainId } },
+        data: { serviceId: null, port: null, isPrimary: existing.isPrimary, verified: existing.verified },
+      });
+    };
 
     let verified = domain.verified;
     if (row.provisionedAt != null) {
       if (getMarshalDeploymentsConfigOrNull() == null) {
-        await prisma.deploymentDomain.delete({ where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domain.id } } });
+        await releaseReservation();
         throw new StatusError(400, "Deploy is not configured on this Hexclave instance.");
       }
       const client = getMarshalClientOrThrow();
@@ -199,7 +235,7 @@ export const POST = createSmartRouteHandler({
               captureError("deployments-domain-add-runtime-compensation", cleanupError);
             }
           }
-          await prisma.deploymentDomain.delete({ where: { tenancyId_id: { tenancyId: auth.tenancy.id, id: domain.id } } });
+          await releaseReservation();
           sanitizeMarshalError(e, "Adding the domain failed");
         }
       }

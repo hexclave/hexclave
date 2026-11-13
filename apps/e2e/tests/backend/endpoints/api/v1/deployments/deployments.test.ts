@@ -2010,6 +2010,67 @@ describe("domains", () => {
     expect((loserService.body as any).url).toBeNull();
   });
 
+  it("re-points a domain left behind by a removed service onto another service", { timeout: 120_000 }, async ({ expect }) => {
+    // Dropping a service from its deploy file keeps its domain, unattached, so the
+    // certificate is not released by a config edit. Adding that hostname to another service
+    // is how it gets used again: neither "already added to another service" (no service
+    // holds it) nor a DELETE on the removed service (which no longer exists) can free it.
+    await Project.createAndSwitch();
+    const droppedServiceId = uniqueServiceId("dropped");
+    const keptServiceId = uniqueServiceId("kept");
+    const { syncId: definitionSyncId, sourceId } = await syncServices({
+      [droppedServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+      [keptServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} },
+    });
+    const upload = await createUpload();
+    await pollDeploymentToStatus(
+      await startDeploy({ sourceId, uploadId: upload.uploadId, definitionSyncId, levels: [[droppedServiceId], [keptServiceId]] }),
+      "deployed",
+    );
+
+    const hostname = `${droppedServiceId}.verified.test`;
+    const firstAdd = await niceBackendFetch(`/api/v1/deployments/services/${droppedServiceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname, is_primary: true },
+    });
+    expect(firstAdd.status).toBe(201);
+
+    const resync = await syncServices({ [keptServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } }, sourceId);
+    expect(resync.removedServiceIds).toEqual([droppedServiceId]);
+    const deleteOnRemoved = await niceBackendFetch(`/api/v1/deployments/services/${droppedServiceId}/domains/${hostname}`, {
+      method: "DELETE",
+      accessType: "admin",
+    });
+    expect(deleteOnRemoved.status).toBe(404);
+
+    const repoint = await niceBackendFetch(`/api/v1/deployments/services/${keptServiceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname },
+    });
+    expect(repoint.status).toBe(201);
+    expect(repoint.body).toMatchObject({ hostname, is_primary: false });
+
+    const keptGet = await niceBackendFetch(`/api/v1/deployments/services/${keptServiceId}/domains/${hostname}`, { accessType: "admin" });
+    expect(keptGet.status).toBe(200);
+    expect((keptGet.body as any).verified).toBe(true);
+    const keptService = await niceBackendFetch(`/api/v1/deployments/services/${keptServiceId}`, { accessType: "admin" });
+    expect((keptService.body as any).url).toBe(`https://${hostname}`);
+
+    // Once re-pointed it belongs to that service like any other domain, so a third service
+    // is refused the usual way.
+    const otherServiceId = uniqueServiceId("other");
+    await syncServices({ [otherServiceId]: { type: "serverless", ports: { 3000: { protocol: "http" } }, env: {} } });
+    const otherAdd = await niceBackendFetch(`/api/v1/deployments/services/${otherServiceId}/domains`, {
+      method: "POST",
+      accessType: "admin",
+      body: { hostname },
+    });
+    expect(otherAdd.status).toBe(400);
+    expect(JSON.stringify(otherAdd.body)).toContain("already added to another service");
+  });
+
   it("refuses a domain on a service whose ports cannot hold one", async ({ expect }) => {
     await Project.createAndSwitch();
 
