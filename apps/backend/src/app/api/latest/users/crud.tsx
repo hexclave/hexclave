@@ -565,6 +565,60 @@ export async function getUser(options: { userId: string } & ({ projectId: string
 }
 
 
+export type UserListSortField = "signedUpAt" | "lastActiveAt";
+export type UserListPosition = { sortValue: Date, projectUserId: string };
+const uuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const userListCursorRegex = new RegExp(`^(\\d+)_(${uuidPattern})$`, "i");
+const legacyUserListCursorRegex = new RegExp(`^${uuidPattern}$`, "i");
+
+export function encodeUserListCursor(position: UserListPosition): string {
+  return `${position.sortValue.getTime()}_${position.projectUserId}`;
+}
+
+export function parseUserListCursor(cursor: string): { type: "position", position: UserListPosition } | { type: "legacy", projectUserId: string } | null {
+  if (legacyUserListCursorRegex.test(cursor)) {
+    return { type: "legacy", projectUserId: cursor };
+  }
+  const match = cursor.match(userListCursorRegex);
+  if (match == null) {
+    return null;
+  }
+  // The regex accepts any digit string, but past ±8.64e15 ms a Date is invalid, which Prisma rejects with a 500.
+  const sortValue = new Date(Number(match[1]));
+  if (Number.isNaN(sortValue.getTime())) {
+    return null;
+  }
+  return { type: "position", position: { sortValue, projectUserId: match[2] } };
+}
+
+// Keyset "rows after this position" for (sortField, projectUserId). The redundant sortField bound lets Postgres
+// turn the OR into an index range; without it every page walks from the tenancy's first matching user.
+export function userListCursorWhere(
+  position: UserListPosition,
+  sortField: UserListSortField,
+  sortDirection: "asc" | "desc",
+): Prisma.ProjectUserWhereInput {
+  const sortBound = sortDirection === "desc" ? { lte: position.sortValue } : { gte: position.sortValue };
+  const sortStrict = sortDirection === "desc" ? { lt: position.sortValue } : { gt: position.sortValue };
+  const idCmp = sortDirection === "desc" ? { lt: position.projectUserId } : { gt: position.projectUserId };
+  if (sortField === "signedUpAt") {
+    return {
+      signedUpAt: sortBound,
+      OR: [
+        { signedUpAt: sortStrict },
+        { signedUpAt: position.sortValue, projectUserId: idCmp },
+      ],
+    };
+  }
+  return {
+    lastActiveAt: sortBound,
+    OR: [
+      { lastActiveAt: sortStrict },
+      { lastActiveAt: position.sortValue, projectUserId: idCmp },
+    ],
+  };
+}
+
 export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersCrud, {
   paramsSchema: yupObject({
     user_id: userIdOrMeSchema.defined(),
@@ -572,7 +626,11 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
   querySchema: yupObject({
     team_id: yupString().uuid().optional().meta({ openapiField: { onlyShowInOperations: [ 'List' ], description: "Only return users who are members of the given team" } }),
     limit: yupNumber().integer().min(1).max(maxListPageSize).optional().meta({ openapiField: { onlyShowInOperations: [ 'List' ], description: `The maximum number of items to return (capped at ${maxListPageSize}). Larger result sets must be paged with cursor.` } }),
-    cursor: yupString().uuid().optional().meta({ openapiField: { onlyShowInOperations: [ 'List' ], description: "The cursor to start the result set from." } }),
+    cursor: yupString().optional().test(
+      "user-list-cursor",
+      "cursor must be a `next_cursor` returned by a previous request",
+      (cursor) => cursor == null || parseUserListCursor(cursor) != null,
+    ).meta({ openapiField: { onlyShowInOperations: [ 'List' ], description: "The cursor to start the result set from." } }),
     order_by: yupString().oneOf(['signed_up_at', 'last_active_at']).optional().meta({ openapiField: { onlyShowInOperations: [ 'List' ], description: "The field to sort the results by. Defaults to signed_up_at" } }),
     desc: yupString().oneOf(["true", "false"]).optional().meta({ openapiField: { onlyShowInOperations: [ 'List' ], description: "Whether to sort the results in descending order. Defaults to false" } }),
     query: yupString().optional().meta({ openapiField: { onlyShowInOperations: [ 'List' ], description: "A search query to filter the results by. This is a free-text search that is applied to the user's id (exact-match only), display name and primary email." } }),
@@ -689,46 +747,69 @@ export const usersCrudHandlers = createLazyProxy(() => createCrudHandlers(usersC
     };
 
     const sortDirection = query.desc === 'true' ? 'desc' : 'asc';
+    const sortField: UserListSortField = query.order_by === 'last_active_at' ? 'lastActiveAt' : 'signedUpAt';
+
+    // Keyset pagination on (sortField, projectUserId) instead of Prisma's `cursor` option: Prisma drops LIMIT on
+    // compound-key models (see prisma-cursor-bug-explainer), and its cursor only works while the cursor user still
+    // matches the filters. A position doesn't depend on the cursor user matching the filters (or, for encoded
+    // cursors, on it existing at all).
+    let cursorFilter: Prisma.ProjectUserWhereInput | undefined;
+    if (query.cursor) {
+      const parsed = parseUserListCursor(query.cursor) ?? throwErr("cursor passed schema validation, so it must parse");
+      let position: UserListPosition | null;
+      if (parsed.type === "position") {
+        position = parsed.position;
+      } else {
+        // Legacy cursor: a bare user ID, whose position we can only look up while the user exists.
+        const cursorUser = await prisma.projectUser.findUnique({
+          where: {
+            tenancyId_projectUserId: {
+              tenancyId: auth.tenancy.id,
+              projectUserId: parsed.projectUserId,
+            },
+          },
+          select: { signedUpAt: true, lastActiveAt: true, projectUserId: true },
+        });
+        if (cursorUser == null) {
+          throw new StatusError(StatusError.BadRequest, "The user referenced by `cursor` does not exist (it may have been deleted). Restart pagination without a cursor.");
+        }
+        position = { sortValue: cursorUser[sortField], projectUserId: cursorUser.projectUserId };
+      }
+      cursorFilter = userListCursorWhere(position, sortField, sortDirection);
+    }
+
     const db = await prisma.projectUser.findMany({
-      where,
+      where: {
+        AND: [
+          where,
+          ...cursorFilter ? [cursorFilter] : [],
+        ],
+      },
       include: userFullInclude,
       orderBy: [
-        {
-          [({
-            signed_up_at: 'signedUpAt',
-            last_active_at: 'lastActiveAt',
-          } as const)[query.order_by ?? 'signed_up_at']]: sortDirection,
-        },
+        { [sortField]: sortDirection },
         { projectUserId: sortDirection },
       ],
       // +1 to detect whether a next page exists without a separate count.
       take: query.limit == null ? maxListPageSize + 1 : query.limit + 1,
-      // Cursor convention: the client sends the id of the LAST row of the
-      // previous page; Prisma starts AT that id, and `skip: 1` drops it so we
-      // don't re-emit it. (teams/crud.tsx uses an encoded keyset cursor
-      // instead, so its pages survive the cursor row being deleted.)
-      ...query.cursor ? {
-        skip: 1,
-        cursor: {
-          tenancyId_projectUserId: {
-            tenancyId: auth.tenancy.id,
-            projectUserId: query.cursor,
-          },
-        },
-      } : {},
     });
 
-    if (query.limit == null && db.length > maxListPageSize) {
+    const limit = query.limit;
+    if (limit == null && db.length > maxListPageSize) {
       throw new StatusError(StatusError.BadRequest, `Listing more than ${maxListPageSize} users requires a limit. Pass limit and paginate using cursor.`);
     }
 
-    const items = db.slice(0, query.limit).map((user) => userPrismaToCrud(user, auth.tenancy.config));
-    const hasMore = query.limit != null && db.length > query.limit;
+    const items = db.slice(0, limit).map((user) => userPrismaToCrud(user, auth.tenancy.config));
+    const hasMore = limit != null && db.length > limit;
+    const lastReturned = hasMore ? db[limit - 1] ?? throwErr("hasMore implies the page has `limit` rows") : null;
     return {
       items,
       is_paginated: true,
       pagination: {
-        next_cursor: hasMore && items.length > 0 ? items[items.length - 1].id : null,
+        next_cursor: lastReturned == null ? null : encodeUserListCursor({
+          sortValue: lastReturned[sortField],
+          projectUserId: lastReturned.projectUserId,
+        }),
       },
     };
   },
