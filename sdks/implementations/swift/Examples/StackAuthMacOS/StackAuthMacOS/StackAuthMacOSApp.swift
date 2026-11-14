@@ -495,6 +495,9 @@ func serializeServerUser(_ user: ServerUser) async -> [String: Any] {
     dict["otpAuthEnabled"] = await user.otpAuthEnabled
     dict["passkeyAuthEnabled"] = await user.passkeyAuthEnabled
     dict["isMultiFactorRequired"] = await user.isMultiFactorRequired
+    if let team = await user.selectedTeam {
+        dict["selectedTeam"] = ["id": team.id, "displayName": await team.displayName]
+    }
     return dict
 }
 
@@ -998,7 +1001,7 @@ struct UserManagementView: View {
         if let user = user {
             viewModel.logCall(
                 "getPartialUser()",
-                result: "PartialUser {\n  id: \"\(user.id)\"\n  primaryEmail: \"\(user.primaryEmail ?? "nil")\"\n}"
+                result: "PartialUser {\n  id: \"\(user.id)\"\n  primaryEmail: \"\(user.primaryEmail ?? "nil")\"\n  selectedTeamId: \"\(user.selectedTeamId ?? "nil")\"\n}"
             )
         } else {
             viewModel.logCall("getPartialUser()", result: "nil (not signed in)")

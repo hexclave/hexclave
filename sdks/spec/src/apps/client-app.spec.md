@@ -506,7 +506,7 @@ TokenPartialUser:
   displayName: string | null
   primaryEmail: string | null
   primaryEmailVerified: bool
-  selectedTeamId: string | null [JS-ONLY]
+  selectedTeamId: string | null
   isAnonymous: bool
   isMultiFactorRequired: bool
   isRestricted: bool
@@ -516,7 +516,7 @@ Implementation for "token":
 1. Get access token from storage
 2. If no token: return null
 3. Decode JWT payload (base64url decode middle segment)
-4. Extract fields: sub (id), name, email, email_verified, selected_team_id [JS-ONLY], is_anonymous, is_restricted, restricted_reason
+4. Extract fields: sub (id), name, email, email_verified, selected_team_id, is_anonymous, is_restricted, restricted_reason
 
 Implementation for "convex" [JS-ONLY]:
 1. Call ctx.auth.getUserIdentity()
