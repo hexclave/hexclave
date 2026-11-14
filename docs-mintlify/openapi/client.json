@@ -1571,6 +1571,12 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "require_password_if_set": {
+                    "type": "boolean"
+                  },
+                  "password": {
+                    "type": "string"
+                  },
                   "code": {
                     "type": "string",
                     "example": "u3h6gn4w24pqc8ya679inrhjwh1rybth6a7thurqhnpf2",

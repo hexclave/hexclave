@@ -379,9 +379,11 @@ export function getCustomPagePrompts(): Record<PageComponentKey, CustomPagePromp
         - Read the verification code from URL params.
         - If the code is missing, show an invalid-link state.
         - If the code exists, show a confirmation step:
-          - Verify action calls \`hexclaveApp.verifyEmail(code)\`.
+          - Verify action calls \`hexclaveApp.verifyEmail(code, { requirePasswordIfSet: true })\`.
           - Cancel action calls \`hexclaveApp.redirectToHome()\`.
         - Handle verification result:
+          - \`EmailVerificationRequiresPassword\` => the account has a password. Show a password step that explains the user must enter the password of the account the email belongs to, and warns them not to verify it if they did not create the account. Submit calls \`hexclaveApp.verifyEmail(code, { requirePasswordIfSet: true, password })\`.
+          - \`PasswordConfirmationMismatch\` => show a "wrong password" message on the password step and let the user retry.
           - \`VerificationCodeNotFound\` => invalid-link state.
           - \`VerificationCodeExpired\` => expired-link state.
           - \`VerificationCodeAlreadyUsed\` => treat as successful verification.
@@ -392,10 +394,37 @@ export function getCustomPagePrompts(): Record<PageComponentKey, CustomPagePromp
         export default function CustomEmailVerificationPage(props: { searchParams?: Record<string, string> }) {
           const hexclaveApp = useHexclaveApp();
           const [result, setResult] = useState<Awaited<ReturnType<typeof hexclaveApp.verifyEmail>> | null>(null);
+          const [needsPassword, setNeedsPassword] = useState(false);
+          const [password, setPassword] = useState("");
+          const [passwordError, setPasswordError] = useState<string | null>(null);
           const code = props.searchParams?.code;
 
           if (!code) {
             return <MessageCard title="Invalid Verification Link" />;
+          }
+
+          const verify = async (passwordToSend?: string) => {
+            const verifyResult = await hexclaveApp.verifyEmail(code, { requirePasswordIfSet: true, password: passwordToSend });
+            if (verifyResult.status === "error" && KnownErrors.EmailVerificationRequiresPassword.isInstance(verifyResult.error)) {
+              setNeedsPassword(true);
+            } else if (verifyResult.status === "error" && KnownErrors.PasswordConfirmationMismatch.isInstance(verifyResult.error)) {
+              setPasswordError("Wrong password");
+            } else {
+              setResult(verifyResult);
+            }
+          };
+
+          if (!result && needsPassword) {
+            return (
+              <form onSubmit={async (e) => { e.preventDefault(); await verify(password); }}>
+                <h2>Enter your password</h2>
+                <p>To verify this email, enter the password of the account it belongs to.</p>
+                <p>If you did not create this account, do not verify it. Someone may have signed up with your email address.</p>
+                <input type="password" autoComplete="current-password" value={password} onChange={(e) => { setPassword(e.target.value); setPasswordError(null); }} />
+                {passwordError && <p>{passwordError}</p>}
+                <button type="submit">Verify</button>
+              </form>
+            );
           }
 
           if (!result) {
@@ -404,7 +433,7 @@ export function getCustomPagePrompts(): Record<PageComponentKey, CustomPagePromp
                 title="Do you want to verify your email?"
                 primaryButtonText="Verify"
                 primaryAction={async () => {
-                  setResult(await hexclaveApp.verifyEmail(code));
+                  await verify();
                 }}
                 secondaryButtonText="Cancel"
                 secondaryAction={async () => {
@@ -437,8 +466,20 @@ export function getCustomPagePrompts(): Record<PageComponentKey, CustomPagePromp
       `,
       notes: deindent`
         - Preserve explicit states for invalid, expired, and already-used codes so users know what happened and what to do next.
+        - Always pass \`requirePasswordIfSet: true\`. Without it, someone can sign up with another person's email and a password they chose, and the real owner clicking the verification link would verify an account the attacker can still sign in to.
       `,
-      versions: {},
+      versions: {
+        2: {
+          minSdkVersion: "1.0.134",
+          upgradePrompt: deindent`
+            Require the account's password before verifying an email:
+            - Call \`hexclaveApp.verifyEmail(code, { requirePasswordIfSet: true })\` instead of \`hexclaveApp.verifyEmail(code)\`.
+            - If it returns \`EmailVerificationRequiresPassword\`, show a password step (explain that the user must enter the password of the account the email belongs to, and warn them not to verify it if they did not create the account), then call \`hexclaveApp.verifyEmail(code, { requirePasswordIfSet: true, password })\`.
+            - If it returns \`PasswordConfirmationMismatch\`, show a "wrong password" message and let the user retry.
+          `,
+          changelog: "Require the account's password before verifying an email, so attackers can't get victims to verify accounts created with their email.",
+        },
+      },
     }),
     passwordReset: createCustomPagePrompt({
       key: "passwordReset",
