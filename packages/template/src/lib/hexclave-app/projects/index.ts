@@ -159,16 +159,18 @@ export type AdminProject = {
   listProjectSecrets(this: AdminProject): Promise<AdminProjectSecretJson[]>,
 
   /**
-   * Sets (or overwrites) the value of a project secret. Values are only read
-   * server-side by the feature that consumes them — today, a deploy filling
-   * `secret()` env vars.
+   * Sets (or overwrites) the value of a project secret for one environment
+   * (`default` / `production` / `preview` / `development`; defaults to `default`), or for a
+   * list of environments at once — either all of them are saved or none are.
+   * Values are only read server-side by a deploy or `hexclave dev`.
    */
-  setProjectSecret(this: AdminProject, key: string, value: string): Promise<void>,
+  setProjectSecret(this: AdminProject, key: string, value: string, environment?: AdminProjectSecretJson["environment"] | readonly AdminProjectSecretJson["environment"][]): Promise<void>,
 
   /**
-   * Deletes a stored project secret value.
+   * Deletes a stored project secret value for one environment, or every
+   * environment's value of the key when `environment` is omitted.
    */
-  deleteProjectSecret(this: AdminProject, key: string): Promise<void>,
+  deleteProjectSecret(this: AdminProject, key: string, environment?: AdminProjectSecretJson["environment"]): Promise<void>,
 
   /**
    * Lists the project's deployments (one per `hexclave deploy`) newest first,

@@ -29,8 +29,12 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
+import type { ProjectSecretEnvironment } from "@hexclave/shared/dist/project-secrets";
+import { throwErr } from "@hexclave/shared/dist/utils/errors";
+import { Link } from "@/components/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getServiceOutputs, portEntriesOf, type BoardService, type EnvVar } from "./board-model";
+import { useAdminApp } from "../use-admin-app";
+import { environmentValueRows, getServiceOutputs, portEntriesOf, productionSecretMissing, secretEnvironmentBadges, type BoardService, type EnvironmentBadge, type EnvironmentValueRow, type EnvVar } from "./board-model";
 import { allDirectoryPaths, buildSourceTree, visibleRows, type SourceTreeNode } from "./source-tree";
 
 type DesignBadgeColor = "blue" | "cyan" | "purple" | "green" | "orange" | "red";
@@ -230,12 +234,45 @@ const ENV_VAR_TYPE_LABELS = new Map<EnvVar["type"], string>([
 
 // Read-only on purpose: env var definitions come from the `services` export of
 // hexclave.deploy.ts and are synced by `hexclave deploy` — the dashboard only
-// displays them. Secret VALUES are entered under Project Settings > Secrets.
+// displays them. File vars are non-secrets; secret VALUES are entered under
+// Project Settings > Secrets.
 export function VariablesContent({ service, services, isHexclave }: {
   service: BoardService,
   services: BoardService[],
   isHexclave: boolean,
 }) {
+  const hexclaveAdminApp = useAdminApp();
+  const project = hexclaveAdminApp.useProject();
+  const [secretEnvironmentsByKey, setSecretEnvironmentsByKey] = useState<Map<string, Set<ProjectSecretEnvironment>> | null>(null);
+  const [secretsError, setSecretsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isHexclave) return;
+    // An object rather than a `let` flag: the lint rule narrows a `let` to its
+    // initial `false` inside the closure and flags the checks as always falsy.
+    const effect = { cancelled: false };
+    runAsynchronously((async () => {
+      try {
+        const stored = await project.listProjectSecrets();
+        if (effect.cancelled) return;
+        const next = new Map<string, Set<ProjectSecretEnvironment>>();
+        for (const secret of stored) {
+          const environments = next.get(secret.key) ?? new Set<ProjectSecretEnvironment>();
+          environments.add(secret.environment);
+          next.set(secret.key, environments);
+        }
+        setSecretEnvironmentsByKey(next);
+        setSecretsError(null);
+      } catch (error) {
+        if (effect.cancelled) return;
+        setSecretsError(error instanceof Error ? error.message : String(error));
+      }
+    })());
+    return () => {
+      effect.cancelled = true;
+    };
+  }, [isHexclave, project]);
+
   if (isHexclave) {
     return (
       <div className="h-full overflow-y-auto p-4">
@@ -249,8 +286,11 @@ export function VariablesContent({ service, services, isHexclave }: {
   return (
     <div className="h-full space-y-3 overflow-y-auto p-4">
       <p className="text-[11px] text-muted-foreground">
-        Variables are defined in the <span className="font-mono">services</span> member of the <span className="font-mono">deploy</span> export of your <span className="font-mono">hexclave.deploy.ts</span> and synced when you run <span className="font-mono">hexclave deploy</span>. Secret values are entered under Project Settings &gt; Secrets. A build also sees <span className="font-mono">CI=true</span>, and a deploy run in CI passes its <span className="font-mono">CI_COMMIT_*</span> variables through to the services it builds.
+        Non-secret variables come from the <span className="font-mono">env</span> object in your <span className="font-mono">hexclave.deploy.ts</span> (default / production / preview / development). Secrets are declared with <span className="font-mono">secret(&quot;KEY&quot;)</span> and their values live under{" "}
+        <Link href={`/projects/${project.id}/project-settings/secrets`} className="underline underline-offset-2">Project Settings → Secrets</Link>.
+        A build also sees <span className="font-mono">CI=true</span>.
       </p>
+      {secretsError != null && <div className="text-[11px] text-destructive">Failed to load secret environments: {secretsError}</div>}
 
       {service.envVars.length === 0 && (
         <div className="rounded-xl border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
@@ -258,33 +298,106 @@ export function VariablesContent({ service, services, isHexclave }: {
         </div>
       )}
 
-      {service.envVars.map((envVar) => (
-        <div key={envVar.key} className="space-y-1.5 rounded-xl bg-foreground/[0.02] p-2.5 ring-1 ring-black/[0.04] dark:ring-white/[0.04]">
-          <div className="flex items-center gap-1.5">
-            <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-foreground">{envVar.key}</span>
-            <span className="shrink-0 rounded-md bg-foreground/[0.05] px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              {ENV_VAR_TYPE_LABELS.get(envVar.type) ?? envVar.type}
-            </span>
-          </div>
-
-          {envVar.type === "plain" && (
-            <div className="truncate rounded-lg bg-foreground/[0.03] px-2 py-1 font-mono text-[11px] text-muted-foreground">{envVar.value}</div>
-          )}
-
-          {envVar.type === "secret" && (
-            <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/[0.06] px-2 py-1 text-[11px] text-muted-foreground ring-1 ring-amber-500/20">
-              <LockSimpleIcon className="h-3 w-3 shrink-0 text-amber-500" weight="fill" />
-              <span className="min-w-0 truncate">
-                Secret <span className="font-mono text-foreground">{envVar.secretKey}</span> · value set under Project Settings &gt; Secrets
+      {service.envVars.map((envVar) => {
+        const stored = storedSecretEnvironments(envVar, secretEnvironmentsByKey);
+        return (
+          <div key={envVar.key} className="space-y-1.5 rounded-xl bg-foreground/[0.02] p-2.5 ring-1 ring-black/[0.04] dark:ring-white/[0.04]">
+            <div className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-foreground">{envVar.key}</span>
+              <span className="shrink-0 rounded-md bg-foreground/[0.05] px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                {ENV_VAR_TYPE_LABELS.get(envVar.type) ?? throwErr(`Unknown env var type ${JSON.stringify(envVar.type)}`)}
               </span>
             </div>
-          )}
 
-          {envVar.type === "connection" && envVar.value != null && (
-            <ConnectionTarget value={envVar.value} services={services} />
-          )}
-        </div>
-      ))}
+            {envVar.type === "secret" ? (
+              <>
+                {secretEnvironmentsByKey == null && secretsError == null ? (
+                  <div className="text-[11px] text-muted-foreground">Checking stored values…</div>
+                ) : (
+                  <EnvironmentBadges badges={secretEnvironmentBadges(envVar, stored)} />
+                )}
+                <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/[0.06] px-2 py-1 text-[11px] text-muted-foreground ring-1 ring-amber-500/20">
+                  <LockSimpleIcon className="h-3 w-3 shrink-0 text-amber-500" weight="fill" />
+                  <span className="min-w-0 truncate">
+                    Secret <span className="font-mono text-foreground">{envVar.secretKey}</span>
+                    {productionSecretMissing(envVar, stored) && <span className="text-amber-700 dark:text-amber-400"> · deploys fail until a production or default value is set</span>}
+                    {" · "}
+                    <Link href={`/projects/${project.id}/project-settings/secrets`} className="underline underline-offset-2">Project Settings → Secrets</Link>
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-1">
+                {environmentValueRows(envVar).map((row) => (
+                  <EnvironmentValue key={row.environment} row={row} services={services} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// `null` = unknown (list still loading or failed), which `secretEnvironmentBadges`
+// and `productionSecretMissing` treat differently from "known to have no stored value".
+function storedSecretEnvironments(
+  envVar: EnvVar,
+  secretEnvironmentsByKey: Map<string, Set<ProjectSecretEnvironment>> | null,
+): ReadonlySet<ProjectSecretEnvironment> | null {
+  if (envVar.type !== "secret" || secretEnvironmentsByKey == null) return null;
+  const secretKey = envVar.secretKey ?? throwErr(`Secret env var ${JSON.stringify(envVar.key)} has no secret key; the API sets secret_key for every secret var`);
+  return secretEnvironmentsByKey.get(secretKey) ?? new Set();
+}
+
+const ENVIRONMENT_BADGE_STYLES = new Map<EnvironmentBadge["state"], { className: string, suffix: string }>([
+  ["set", { className: "bg-foreground/[0.05] text-muted-foreground", suffix: "" }],
+  ["omit", { className: "bg-foreground/[0.03] text-muted-foreground/70 line-through", suffix: " omit" }],
+]);
+
+// One environment's value of a non-secret env var: the environment on the
+// left, then the literal, the connection it resolves from, or "not set" for an
+// explicit `null`. Fixed-width label column so the values line up.
+function EnvironmentValue({ row, services }: { row: EnvironmentValueRow, services: BoardService[] }) {
+  const { value } = row;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-20 shrink-0 font-mono text-[10px] text-muted-foreground/70">{row.environment}</span>
+      <div className="min-w-0 flex-1">
+        {value.type === "plain" && (
+          <div className="truncate rounded-lg bg-foreground/[0.03] px-2 py-1 font-mono text-[11px] text-muted-foreground" title={value.value ?? undefined}>
+            {value.value ?? throwErr(`Plain value for ${row.environment} has no value; the API sets value for every plain entry`)}
+          </div>
+        )}
+        {value.type === "connection" && (
+          <ConnectionTarget value={value.value ?? throwErr(`Connection for ${row.environment} has no reference; the API sets value for every connection entry`)} services={services} />
+        )}
+        {value.type === "omit" && (
+          <div className="px-2 py-1 text-[11px] italic text-muted-foreground/70">not set</div>
+        )}
+        {value.type === "secret" && (
+          // Unreachable while the CLI and API reject mixing secret() with other
+          // values in one var: a secret var renders through secretEnvironmentBadges.
+          throwErr(`Non-secret env var has a secret entry for ${row.environment}; secret() cannot be mixed with other values in one env var`)
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EnvironmentBadges({ badges }: { badges: EnvironmentBadge[] }) {
+  if (badges.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {badges.map((badge) => {
+        const style = ENVIRONMENT_BADGE_STYLES.get(badge.state) ?? throwErr(`Unknown environment badge state ${JSON.stringify(badge.state)}`);
+        return (
+          <span key={badge.environment} className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] ${style.className}`}>
+            {badge.environment}{style.suffix}
+          </span>
+        );
+      })}
     </div>
   );
 }

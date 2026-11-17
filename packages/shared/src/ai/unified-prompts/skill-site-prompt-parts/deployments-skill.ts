@@ -22,7 +22,7 @@ export const deploymentsSkillSection = deindent`
   // Required, and unique across every deploy file deploying into this project.
   export const deploymentGroupId = "my-app";
 
-  export const deploy: HexclaveDeploymentConfig = ({ isDev, secret, service, hexclave }) => ({
+  export const deploy: HexclaveDeploymentConfig = ({ secret, service, hexclave }) => ({
     services: {
       web: {
         type: "serverless",
@@ -30,10 +30,10 @@ export const deploymentsSkillSection = deindent`
         ports: { 3000: { protocol: "http" } },
         devCommand: "pnpm dev",
         env: {
-          MY_ENV_VAR: "true",
-          OPENAI_API_KEY: isDev ? null : secret("OPENAI_API_KEY"),
-          API_URL: isDev ? "http://localhost:3001" : service("api").url(8080),
-          DATABASE_HOST: isDev ? "localhost" : service("database").hostname(),
+          LOG_LEVEL: { default: "info", development: "debug" },
+          OPENAI_API_KEY: secret("OPENAI_API_KEY"),
+          API_URL: { default: service("api").url(8080), development: "http://localhost:3001" },
+          DATABASE_HOST: { default: service("database").hostname(), development: "localhost" },
           DATABASE_PORT: "5432",
         },
       },
@@ -63,11 +63,36 @@ export const deploymentsSkillSection = deindent`
 
   \`CI\` is \`"true"\` during every remote build. If \`hexclave deploy\` was itself run in CI, the GitLab-style \`CI_COMMIT_SHA\`, \`CI_COMMIT_SHORT_SHA\`, \`CI_COMMIT_REF_NAME\`, \`CI_COMMIT_BRANCH\`, \`CI_COMMIT_TAG\` and \`CI_REPOSITORY_URL\` are passed through to the service too (GitHub Actions' \`GITHUB_*\` are translated into the same names); one that nothing can answer is absent rather than empty. Declaring an env var of the same name overrides these as well.
 
+  ## Environment variables
+
+  Each entry of a service's \`env\` is either a single value, which applies to every environment, or an object of per-environment values:
+
+  \`\`\`ts
+  env: {
+    LOG_LEVEL: { default: "info", development: "debug" },
+    API_URL: { default: service("api").url(8080), development: "http://localhost:3001" },
+    OPENAI_API_KEY: secret("OPENAI_API_KEY"),
+    ANALYTICS_KEY: { production: secret("ANALYTICS_KEY"), development: null },
+  }
+  \`\`\`
+
+  The environments are \`default\`, \`production\`, \`preview\`, and \`development\`. An environment uses its own value when it has one, and the \`default\` value otherwise; a single value such as \`LOG_LEVEL: "info"\` is shorthand for \`{ default: "info" }\`. \`null\` leaves the variable unset in that environment. When an environment has neither its own value nor a \`default\`, the CLI fails and names the variable and the environment. \`hexclave deploy\` always deploys the \`production\` environment and \`hexclave dev\` runs with \`development\`; \`preview\` values are accepted and validated, but neither command uses them.
+
+  Each environment's value is one of:
+
+  - a string literal;
+  - \`null\`, to leave the variable unset;
+  - \`secret("KEY")\`, a project secret whose value is stored outside the file (see Secrets below);
+  - \`service("<id>").url(8080)\` or \`service("<id>").hostname()\`, another service's address (see Network model below);
+  - \`hexclave.projectId\`, \`hexclave.apiUrl\`, \`hexclave.jwksUrl\`, \`hexclave.publishableClientKey\`, or \`hexclave.secretServerKey\`, for the project's managed Hexclave backend.
+
+  A reference (\`secret()\`, \`service()\`, \`hexclave.*\`) must be the whole value for its environment; interpolating one into a string throws. A variable is a secret in every environment it is set in, or in none: \`{ production: secret("KEY"), development: null }\` is valid, but mixing \`secret()\` with a literal in one variable is rejected, and every environment of a secret variable names the same key — the per-environment VALUES live in the secret store. \`service()\` addresses don't exist on your own machine, so \`hexclave dev\` rejects them in the \`development\` environment: give \`development\` a localhost string instead, as \`API_URL\` does above.
+
   ## Network model: HTTP and private TCP
 
   Use the default HTTP protocol for web applications and APIs. \`service("api").url(8080)\` gives that port's URL — the service's PUBLIC url when the target service is public, and its internal address otherwise — and a bare \`url()\` requires exactly one HTTP port so it is unambiguous. \`service("api").hostname()\` is the private hostname without a port, and always works. There is no port output — write the number (e.g. \`DATABASE_PORT: "5432"\`), which you already declared in the target's \`ports\`. Service ids are unique across the whole project, so a service deployed from another repository is referenced exactly the same way. The process must listen on each configured port and bind to \`0.0.0.0\`.
 
-  Use \`protocol: "tcp"\` on a port for a database, cache, queue, SMTP server, or other raw TCP daemon such as PostgreSQL, MySQL, Redis, or RabbitMQ. TCP ports are reachable only from other services in the same project: pass \`service("database").hostname()\` and the port as a literal, as separate env vars. Only a private service may declare TCP ports, and a service with no HTTP port exposes no \`url\` and cannot take custom domains. The daemon must bind to \`0.0.0.0\`, not only localhost. Do not manually change generated Fly infrastructure; Hexclave reconciliation owns it and can replace out-of-band changes.
+  Use \`protocol: "tcp"\` on a port for a database, cache, queue, SMTP server, or other raw TCP daemon such as PostgreSQL, MySQL, Redis, or RabbitMQ. TCP ports are reachable only from other services in the same project: pass \`service("database").hostname()\` and the port as a literal (e.g. \`DATABASE_PORT: "5432"\`), as separate env vars. Only a private service may declare TCP ports, and a service with no HTTP port exposes no \`url\` and cannot take custom domains. The daemon must bind to \`0.0.0.0\`, not only localhost. Do not manually change generated Fly infrastructure; Hexclave reconciliation owns it and can replace out-of-band changes.
 
   A service with \`minInstances: 0\` autostarts when a connection reaches its Flycast host and port. Make clients retry initial DNS/connect/auth failures with a bounded backoff: an HTTP app and its TCP dependency may be cold-starting simultaneously. If startup latency is unacceptable, use \`minInstances: 1\` on a paid plan.
 
@@ -83,7 +108,7 @@ export const deploymentsSkillSection = deindent`
 
   ## Storage: the container filesystem is ephemeral
 
-  By default anything a service writes to disk is lost on every deploy, restart, and scale-to-zero. Give a \`server\` service a persistent disk with \`persistentVolumes: { pgdata: { path: "/data", sizeGb: 10 } }\` — the key (\`pgdata\`) is the volume's id, \`path\` is an absolute mount point inside the container, \`sizeGb\` is gigabytes (1–500). Everything written under \`path\` then survives deploys and restarts. One disk per service for now; a second entry is rejected.
+  By default anything a service writes to disk is lost on every deploy, restart, and scale-to-zero. Give a \`server\` service a persistent disk with \`persistentVolumes: { pgdata: { path: "/data", sizeGb: 10 } }\` — the key (\`pgdata\`) is the volume's id, \`path\` is an absolute mount point inside the container, \`sizeGb\` is gigabytes (1–500). Everything written under \`path\` then survives deploys and restarts. A service can have one disk; a second entry is rejected.
 
   The volume id names the disk within its service. Two services may never claim the same id at once. Moving an id to a different service does NOT move the data: a Fly volume lives inside one service's app, so the new service gets a fresh empty disk and the old one keeps its data, detached and still billed. Renaming a service does the same thing. To move data, copy it out (object storage, a database dump) before the move and restore it after.
 
@@ -107,8 +132,6 @@ export const deploymentsSkillSection = deindent`
 
   Disks only grow: raising \`sizeGb\` expands them in place, but LOWERING it fails the deploy rather than silently ignoring you. Removing a volume from a service detaches the disk without deleting it — the data stays (re-declaring the same id remounts it) and so does the billing, so a disk you truly want gone has to be deleted deliberately. \`hexclave dev\` ignores \`persistentVolumes\` entirely; locally your app just writes to your own filesystem.
 
-  Env var values may be: a plain string; \`null\` (omit the var — useful with \`isDev\`); \`secret(key, defaultValue?)\` — the value is stored per project in the dashboard (Project Settings > Secrets), never in the config; \`service("<id>").url(8080)\` for an HTTP port — a reference to a PRIVATE service resolves to its internal URL, which is available immediately, while one to a PUBLIC service resolves to the platform URL (or a verified custom domain) and so waits for the target to be up; \`service("<id>").hostname()\` for either protocol, always available (pair it with a literal port for TCP clients); or \`hexclave.projectId\` / \`.apiUrl\` / \`.jwksUrl\` / \`.publishableClientKey\` / \`.secretServerKey\` for the managed Hexclave backend. A target with no HTTP port has no URL, so \`url()\` on it fails with guidance to use hostname and port, as does a bare \`url()\` on a target whose several HTTP ports make it ambiguous. References must be the WHOLE value — string interpolation with them throws. During \`hexclave dev\`, \`secret()\` resolves to its default value (error if it has none and isn't guarded by \`isDev\`) and \`service()\` returns \`null\`.
-
   ## How services are built
 
   Each service is built remotely — Docker is never required locally. By default (no \`dockerfilePath\`) the build is auto-detected with [Railpack](https://railpack.com), which handles Node, Python, Go, PHP, Java, Ruby, and more out of the box; either way, the image's default command must start a server listening on each configured port on \`0.0.0.0\` and speaking that port's protocol. Set \`dockerfilePath\` to build from your own Dockerfile instead — a Dockerfile in the source is deliberately NOT picked up unless \`dockerfilePath\` names it. A service with an \`image\` and no \`buildCommand\` is not built at all: nothing is uploaded for it and its deploy takes seconds. A tag is resolved when the image is pulled, so redeploying an unchanged tag rolls nothing and a moved tag lands only when something else changes the service — name a digest to fix the bytes. The reference must carry an explicit tag or digest either way — a bare \`"postgres"\` means \`:latest\`, which changes under you. Use it for a third-party server you run unmodified, like the \`redis:7-alpine\` cache above; a service that mounts a PERSISTENT VOLUME usually still needs its own small Dockerfile, because the image's data directory has to be moved under the mount point (see Storage below). To adjust Railpack's detection (custom install/build/start commands, static output dirs), add a \`railpack.json\` to the service's source, or set the equivalent \`RAILPACK_*\` env var on the service. If detection can't work at all, add a Dockerfile and set \`dockerfilePath\`; the remote build's logs are available if a build fails.
@@ -125,15 +148,15 @@ export const deploymentsSkillSection = deindent`
 
   ## Secrets
 
-  Secret values are write-only, stored per project, and read server-side at deploy time. Humans set them in the dashboard under Project Settings > Secrets; agents set them via \`exec\`:
+  Secret values never go in the deploy file or in git. They are write-only, stored per project and per environment (\`default\`, \`production\`, \`preview\`, \`development\`), and read server-side. As with env vars, an environment uses its own stored value, and the \`default\` one otherwise. Humans set them in the dashboard under Project Settings > Secrets; agents set them via \`exec\`, passing the environment as the third argument (it defaults to \`'default'\`; a list such as \`['production', 'preview']\` sets several at once, all or nothing):
 
   \`\`\`sh title="Terminal"
   npx @hexclave/cli@latest exec --cloud-project-id <project-id> \\
     "const p = await hexclaveServerApp.getProject(); \\
-     await p.setProjectSecret('OPENAI_API_KEY', process.env.OPENAI_API_KEY);"
+     await p.setProjectSecret('OPENAI_API_KEY', process.env.OPENAI_API_KEY, 'default');"
   \`\`\`
 
-  \`listProjectSecrets()\` returns keys and timestamps only — values can never be read back, and the dashboard lists only keys that have a value. \`defaultValue\` lives purely in the deploy file: it is sent with the deploy and never stored, so it never shows up as a set secret. A deploy fails up front and names every \`secret()\` without a default that has no stored value. Note that \`exec\` requires a \`hexclave login\` session — a server-key-only environment (typical CI) can DEPLOY using stored secrets but cannot SET them; set secrets beforehand from a logged-in machine or the dashboard.
+  \`listProjectSecrets()\` returns keys, environments, and timestamps only — values can never be read back. Set a \`production\` or \`default\` value before \`hexclave deploy\`; \`hexclave dev\` pulls the \`development\` value (else \`default\`) from the cloud project you deploy to (\`--cloud-project-id\` or \`HEXCLAVE_PROJECT_ID\`, not the throwaway project of your local development environment), authenticated with your \`hexclave login\` session, and injects it into the child process without printing it or writing a file. A missing value fails closed, naming the key and environment. \`exec\` requires a \`hexclave login\` session — a server-key-only environment (typical CI) can DEPLOY using stored secrets but cannot SET them or pull them for local \`development\`.
 
   ## Agent workflow (do this — do not drive the dashboard UI)
 
@@ -174,7 +197,7 @@ export const deploymentsSkillSection = deindent`
 
   ## Local development
 
-  \`hexclave dev --config-file hexclave.config.ts --service-id web\` (services come from \`hexclave.deploy.ts\` next to it, or \`--deploy-file <path>\`) runs the service's \`devCommand\` with its env vars injected (plus the development-environment credentials) — services run directly on your machine during development, never in containers. Passing \`-- <command>\` instead (or additionally) overrides the devCommand.
+  \`hexclave dev --config-file hexclave.config.ts --service-id web\` (services come from \`hexclave.deploy.ts\` next to it, or \`--deploy-file <path>\`) runs the service's \`devCommand\` on your laptop (never in a container) with the \`development\` (else \`default\`) value of each env var injected, plus the development-environment credentials. Secret values are pulled from Project Settings → Secrets of the cloud project you deploy to, which needs \`hexclave login\` and \`--cloud-project-id\` / \`HEXCLAVE_PROJECT_ID\` (only when the service uses \`secret()\`), and are never printed. Passing \`-- <command>\` instead (or additionally) overrides the devCommand.
 
   ## Checking status and debugging failures
 
@@ -184,17 +207,17 @@ export const deploymentsSkillSection = deindent`
   npx @hexclave/cli@latest exec --cloud-project-id <project-id> \\
     "const p = await hexclaveServerApp.getProject(); \\
      const svc = (await p.listDeploymentServices()).find(s => s.id === 'web'); \\
-     return { status: svc.status, url: svc.url, run: svc.latest_run };"
+     return { status: svc.status, url: svc.url, latestDeploymentId: svc.latest_deployment_id };"
   \`\`\`
 
-  A service's \`status\` is one of \`not_deployed\`, \`queued\`, \`building\`, \`deployed\`, \`failed\`, or \`canceled\`; a run's is \`queued\`, \`building\`, \`ready\`, \`error\`, or \`canceled\`.
+  A service's \`status\` is one of \`not_deployed\`, \`queued\`, \`building\`, \`deploying\`, \`deployed\`, \`failed\`, or \`canceled\`; a deployment's (one per \`hexclave deploy\`) is \`queued\`, \`building\`, \`deploying\`, \`deployed\`, \`failed\`, or \`canceled\`.
 
-  A failed run's \`error\` field is only a one-line summary. Do not guess the cause from it — fetch the actual build output by run id (printed by \`deploy\`; or \`listDeploymentRuns('web', { limit: 5 })\`):
+  A failed deployment's \`error\` field is only a one-line summary. Do not guess the cause from it — fetch the actual build output by deployment id (from \`svc.latest_deployment_id\` above, or \`listDeployments({ limit: 5 })\`). One deploy is one build, so one log covers every service it shipped:
 
   \`\`\`sh title="Terminal"
   npx @hexclave/cli@latest exec --cloud-project-id <project-id> \\
     "const p = await hexclaveServerApp.getProject(); \\
-     return p.getDeploymentRunLogs('<run-id>');"
+     return p.getDeploymentBuildLogs('<deployment-id>');"
   \`\`\`
 
   ## Domains
@@ -212,5 +235,5 @@ export const deploymentsSkillSection = deindent`
 
   ## Removing a service
 
-  Removing a service from \`deployment.services\` stops it from being deployed, but does not (yet) tear down its existing deployment — automatic cleanup of removed services is planned.
+  Delete the service from \`services\` in its deploy file and run \`hexclave deploy\` again: that deploy tears the service down. Its persistent volume and any custom domains are kept, detached, so a config edit can never destroy data; the volume keeps billing until you delete it. Services declared by other deploy files are never touched.
 `;
