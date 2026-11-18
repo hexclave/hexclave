@@ -49,8 +49,10 @@ export function getTrustedDomainsForTenancy(tenancy: Tenancy): string[] {
 export function getOAuthRedirectUrisForTenancy(tenancy: Tenancy): string[] {
   return [
     ...Object.values(tenancy.config.domains.trustedDomains)
-      .filter((domain) => domain.baseUrl)
-      .map((domain) => new URL(domain.handlerPath, domain.baseUrl).toString()),
+      .map((domain) => domain.baseUrl == null
+        ? null
+        : new URL(domain.handlerPath, domain.baseUrl.replace(/^(https?:\/\/[^/?#\\\s]+):\*(?=[/?#]|$)/i, "$1")).toString())
+      .filter((uri): uri is string => uri != null),
     ...getHostedHandlerTrustedDomains(tenancy.project.id)
       .map((domain) => new URL("/handler/oauth-callback", domain).toString()),
   ];
