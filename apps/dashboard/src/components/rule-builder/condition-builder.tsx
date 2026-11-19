@@ -9,7 +9,7 @@ import {
   type GroupNode,
   type RuleNode,
 } from "@/lib/cel-visual-parser";
-import { MinusIcon, PlusIcon, TrashIcon, WarningCircleIcon } from "@phosphor-icons/react";
+import { MinusIcon, PlusIcon, TrashIcon, WarningCircleIcon, XIcon } from "@phosphor-icons/react";
 import { CountryCodeInput } from "@/components/country-code-select";
 import { normalizeCountryCode } from "@hexclave/shared/dist/schema-fields";
 import { validateCountryCode } from "@hexclave/shared/dist/utils/country-codes";
@@ -101,6 +101,95 @@ const OPERATOR_LABELS: Record<ConditionOperator, string> = {
   in_list: 'is one of',
 };
 
+// Chip input for "is one of" values
+function ChipsInput({
+  values,
+  onChange,
+  placeholder,
+  className,
+}: {
+  values: string[],
+  onChange: (values: string[]) => void,
+  placeholder?: string,
+  className?: string,
+}) {
+  const [inputValue, setInputValue] = React.useState("");
+
+  const commitValue = (text: string) => {
+    const trimmed = text.trim();
+    if (trimmed && !values.includes(trimmed)) {
+      onChange([...values, trimmed]);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      commitValue(inputValue);
+      setInputValue("");
+    } else if (e.key === 'Backspace' && inputValue === "" && values.length > 0) {
+      onChange(values.slice(0, -1));
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pasted = e.clipboardData.getData('text');
+    if (pasted.includes(',')) {
+      e.preventDefault();
+      const combined = inputValue + pasted;
+      const items = combined.split(',').map(s => s.trim()).filter(Boolean);
+      const uniqueNew = items.filter(item => !values.includes(item));
+      if (uniqueNew.length > 0) {
+        onChange([...values, ...uniqueNew]);
+      }
+      setInputValue("");
+    }
+  };
+
+  const removeChip = (index: number) => {
+    onChange(values.filter((_, i) => i !== index));
+  };
+
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-1 px-2 py-1 min-h-8 w-full rounded-md border border-input bg-transparent text-sm focus-within:ring-1 focus-within:ring-ring",
+        className,
+      )}
+    >
+      {values.map((chip, index) => (
+        <span
+          key={`${chip}-${index}`}
+          className="inline-flex items-center gap-0.5 rounded bg-secondary px-1.5 py-0.5 text-xs font-medium text-secondary-foreground"
+        >
+          {chip}
+          <button
+            type="button"
+            onClick={() => removeChip(index)}
+            aria-label={`Remove ${chip}`}
+            className="rounded-full p-0.5 hover:bg-secondary-foreground/20 transition-colors hover:transition-none"
+          >
+            <XIcon className="h-3 w-3" />
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        value={inputValue}
+        onChange={(e) => setInputValue(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        onBlur={() => {
+          commitValue(inputValue);
+          setInputValue("");
+        }}
+        placeholder={values.length === 0 ? placeholder : undefined}
+        className="flex-1 min-w-[80px] bg-transparent outline-none text-sm placeholder:text-muted-foreground"
+      />
+    </div>
+  );
+}
+
 // Single condition row component
 function ConditionRow({
   condition,
@@ -152,7 +241,7 @@ function ConditionRow({
   const handleOperatorChange = (operator: ConditionOperator) => {
     let value = condition.value;
     if (operator === 'in_list' && !Array.isArray(value)) {
-      value = value ? [String(value)] : [''];
+      value = value ? [String(value)] : [];
     } else if (operator !== 'in_list' && Array.isArray(value)) {
       value = value[0] ?? '';
     }
@@ -248,17 +337,11 @@ function ConditionRow({
             </Button>
           </div>
         ) : condition.operator === 'in_list' ? (
-          <DesignInput
-            type="text"
-            size="sm"
-            value={Array.isArray(condition.value) ? condition.value.join(', ') : String(condition.value)}
-            onChange={(e) => {
-              const items = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
-              handleValueChange(items);
-            }}
-            placeholder="value1, value2, ... (values cannot contain commas)"
+          <ChipsInput
+            values={Array.isArray(condition.value) ? condition.value : []}
+            onChange={(items) => handleValueChange(items)}
+            placeholder="Type a value and press Enter or comma to add"
             className={cn(
-              conditionValueClass,
               countryCodeError !== null
                 ? "border-destructive ring-1 ring-destructive/30"
                 : undefined,
