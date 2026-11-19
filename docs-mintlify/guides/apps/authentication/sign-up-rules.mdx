@@ -69,6 +69,18 @@ The default action applies when no rules match:
 
 Set the default to "Reject" when you want to only allow sign-ups from specific domains.
 
+## Invite-only or an existing directory
+
+Hexclave does not import your old user table by itself. To keep the Hexclave directory aligned with people you already know:
+
+1. Create those users with the [server users API](/api/server/users/create-user) (or `hexclaveServerApp.createUser()`).
+2. Set `auth.allowSignUp` to `false`. New sign-ups are rejected, including a first-time OAuth sign-in. Users who already exist can still sign in.
+3. If you need a Hexclave user on first OAuth instead, leave `allowSignUp` on and set the default sign-up-rule action to **Reject**, then add **Allow** rules for the emails or domains you want.
+
+`allowSignUp: false` does not hide Hexclave from your app. Check Hexclave user IDs (and [restricted](/guides/apps/authentication/restricted-users) state) in your own backend before granting access.
+
+Server-side user creation still works when `allowSignUp` is `false`.
+
 ## Common use cases
 
 ### Block disposable email domains

@@ -4,7 +4,9 @@ description: "Receive real-time updates when events occur in your Stack project"
 icon: "/images/app-icons/webhooks.svg"
 ---
 
-Webhooks are a powerful way to keep your backend in sync with Stack. They allow you to receive real-time updates when events occur in your Stack project, such as when a user or team is created, updated, or deleted.
+Webhooks keep your backend in sync with Hexclave. When an event occurs in your project - for example a user or team is created, updated, or deleted - Hexclave sends a signed POST to a URL you register.
+
+They notify your server. They are not a job runner, cron, or an API for defining triggers. Subscribe to events, verify the signature, and run your own logic.
 
 For payload schemas and each webhook event, see the [webhook API reference](/api/webhooks/users/usercreated).
 
