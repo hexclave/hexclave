@@ -34,12 +34,15 @@ function DraftCard({
   draft,
   onOpen,
   onDelete,
+  onRename,
 }: {
   draft: { id: string, displayName: string },
   onOpen: () => void,
   onDelete: () => void,
+  onRename: (newName: string) => Promise<void>,
 }) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [showRenameDialog, setShowRenameDialog] = useState(false);
 
   return (
     <>
@@ -98,6 +101,14 @@ function DraftCard({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowRenameDialog(true);
+                }}
+              >
+                Rename
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 className="text-destructive focus:text-destructive"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -110,6 +121,30 @@ function DraftCard({
           </DropdownMenu>
         </div>
       </div>
+
+      <FormDialog
+        open={showRenameDialog}
+        onOpenChange={setShowRenameDialog}
+        title="Rename Draft"
+        formSchema={yup.object({
+          name: yup.string().defined().nonEmpty().label("Draft name"),
+        })}
+        defaultValues={{ name: draft.displayName }}
+        okButton={{ label: "Rename" }}
+        cancelButton
+        onSubmit={async (values) => {
+          await onRename(values.name);
+        }}
+        render={(form) => (
+          <InputField
+            control={form.control}
+            name="name"
+            label="Draft Name"
+            placeholder="Enter a new name for your draft"
+            required
+          />
+        )}
+      />
 
       <ActionDialog
         open={showDeleteDialog}
@@ -136,12 +171,15 @@ function HistoryDraftCard({
   draft,
   onOpen,
   onDelete,
+  onRename,
 }: {
   draft: { id: string, displayName: string, sentAt: Date },
   onOpen: () => void,
   onDelete: () => void,
+  onRename: (newName: string) => Promise<void>,
 }) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [showRenameDialog, setShowRenameDialog] = useState(false);
 
   return (
     <>
@@ -191,6 +229,14 @@ function HistoryDraftCard({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowRenameDialog(true);
+                }}
+              >
+                Rename
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 className="text-destructive focus:text-destructive"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -203,6 +249,30 @@ function HistoryDraftCard({
           </DropdownMenu>
         </div>
       </div>
+
+      <FormDialog
+        open={showRenameDialog}
+        onOpenChange={setShowRenameDialog}
+        title="Rename Draft"
+        formSchema={yup.object({
+          name: yup.string().defined().nonEmpty().label("Draft name"),
+        })}
+        defaultValues={{ name: draft.displayName }}
+        okButton={{ label: "Rename" }}
+        cancelButton
+        onSubmit={async (values) => {
+          await onRename(values.name);
+        }}
+        render={(form) => (
+          <InputField
+            control={form.control}
+            name="name"
+            label="Draft Name"
+            placeholder="Enter a new name for your draft"
+            required
+          />
+        )}
+      />
 
       <ActionDialog
         open={showDeleteDialog}
@@ -295,6 +365,10 @@ export default function PageClient() {
     await hexclaveAdminApp.deleteEmailDraft(draftId);
   };
 
+  const handleRenameDraft = async (draftId: string, newName: string) => {
+    await stackAdminApp.updateEmailDraft(draftId, { displayName: newName });
+  };
+
   return (
     <AppEnabledGuard appId="emails">
       <PageLayout
@@ -353,6 +427,7 @@ export default function PageClient() {
                   draft={draft}
                   onOpen={() => handleOpenDraft(draft.id)}
                   onDelete={() => runAsynchronouslyWithAlert(() => handleDeleteDraft(draft.id))}
+                  onRename={(newName) => handleRenameDraft(draft.id, newName)}
                 />
               ))}
             </div>
@@ -387,6 +462,7 @@ export default function PageClient() {
                     draft={draft}
                     onOpen={() => handleOpenHistoryDraft(draft.id)}
                     onDelete={() => runAsynchronouslyWithAlert(() => handleDeleteDraft(draft.id))}
+                    onRename={(newName) => handleRenameDraft(draft.id, newName)}
                   />
                 ))}
               </div>
