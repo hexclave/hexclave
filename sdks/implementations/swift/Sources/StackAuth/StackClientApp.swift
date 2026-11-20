@@ -286,16 +286,8 @@ public actor StackClientApp {
         }
         
         if httpResponse.statusCode != 200 {
-            // Check for known error in response
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errorCode = json["code"] as? String {
-                if errorCode == "INVALID_APPLE_CREDENTIALS" {
-                    fatalError("Invalid Apple credentials")
-                }
-                let message = json["error"] as? String ?? "Apple Sign In failed"
-                throw OAuthError(code: errorCode, message: message)
-            }
-            throw OAuthError(code: "apple_signin_failed", message: "HTTP \(httpResponse.statusCode)")
+            throw StackAuthError.fromHTTPErrorResponse(data: data, response: httpResponse)
+                ?? OAuthError(code: "apple_signin_failed", message: "HTTP \(httpResponse.statusCode)")
         }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -350,12 +342,8 @@ public actor StackClientApp {
         }
         
         if httpResponse.statusCode != 200 {
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errorCode = json["error"] as? String {
-                let message = json["error_description"] as? String ?? "Token exchange failed"
-                throw OAuthError(code: errorCode, message: message)
-            }
-            throw OAuthError(code: "token_exchange_failed", message: "HTTP \(httpResponse.statusCode)")
+            throw StackAuthError.fromHTTPErrorResponse(data: data, response: httpResponse)
+                ?? OAuthError(code: "token_exchange_failed", message: "HTTP \(httpResponse.statusCode)")
         }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
