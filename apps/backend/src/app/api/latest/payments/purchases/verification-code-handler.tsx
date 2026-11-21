@@ -13,6 +13,8 @@ export const purchaseUrlVerificationCodeHandler = createVerificationCodeHandler(
     stripeCustomerId: yupString().optional(),
     stripeAccountId: yupString().optional(),
     chargesEnabled: yupBoolean().optional(),
+    allowPromoCodes: yupBoolean().optional(),
+    allowStackingPromoCodes: yupBoolean().optional(),
   }),
   // @ts-ignore TODO: fix this
   async handler(_, __, data) {

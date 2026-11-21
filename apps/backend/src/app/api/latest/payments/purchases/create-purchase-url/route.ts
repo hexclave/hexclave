@@ -1,12 +1,13 @@
 import { CustomerType } from "@/generated/prisma/client";
-import { customerOwnsProduct, ensureClientCanAccessCustomer, ensureProductIdOrInlineProduct } from "@/lib/payments";
+import { customerOwnsProduct, ensureClientCanAccessCustomer, ensureProductIdOrInlineProduct, ensureStripeCustomerForCustomer, stripeCustomerIdempotencyKey } from "@/lib/payments";
 import { getOwnedProductsForCustomer } from "@/lib/payments/customer-data";
+import { assertPromoCodesCapability, promoCodeProjectPolicy } from "@/lib/payments/promo-code-checkout";
 import { validateRedirectUrl } from "@/lib/redirect-urls";
 import { getHexclaveStripe, getStripeForAccount } from "@/lib/stripe";
 import { getPrismaClientForTenancy, globalPrismaClient } from "@/prisma-client";
 import { createSmartRouteHandler } from "@/route-handlers/smart-route-handler";
 import { KnownErrors } from "@hexclave/shared/dist/known-errors";
-import { adaptSchema, clientOrHigherAuthTypeSchema, inlineProductSchema, urlSchema, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
+import { adaptSchema, clientOrHigherAuthTypeSchema, inlineProductSchema, urlSchema, yupBoolean, yupNumber, yupObject, yupString } from "@hexclave/shared/dist/schema-fields";
 import { getEnvVariable } from "@hexclave/shared/dist/utils/env";
 import { throwErr } from "@hexclave/shared/dist/utils/errors";
 import { purchaseUrlVerificationCodeHandler } from "../verification-code-handler";
@@ -48,6 +49,18 @@ export const POST = createSmartRouteHandler({
           description: "Inline product definition. Either this or product_id should be given."
         }
       }),
+      allow_promo_codes: yupBoolean().optional().meta({
+        openapiField: {
+          description: "When true, the purchase page shows a promo-code field.",
+          exampleValue: false,
+        },
+      }),
+      allow_stacking_promo_codes: yupBoolean().optional().meta({
+        openapiField: {
+          description: "When true with allow_promo_codes, multiple promo codes may be applied.",
+          exampleValue: false,
+        },
+      }),
       return_url: urlSchema.optional().meta({
         openapiField: {
           description: "URL to redirect to after purchase completion. Must be configured as a trusted domain in the project configuration.",
@@ -72,6 +85,13 @@ export const POST = createSmartRouteHandler({
     if (tenancy.config.payments.blockNewPurchases) {
       throw new KnownErrors.NewPurchasesBlocked();
     }
+    const promoPolicy = promoCodeProjectPolicy(tenancy.config.payments);
+    const allowPromoCodes = req.body.allow_promo_codes === true;
+    const allowStackingPromoCodes = allowPromoCodes && req.body.allow_stacking_promo_codes === true;
+    assertPromoCodesCapability(promoPolicy, {
+      wantsPromoCodes: allowPromoCodes,
+      wantsStacking: allowStackingPromoCodes,
+    });
 
     if (req.auth.type === "client") {
       await ensureClientCanAccessCustomer({
@@ -109,16 +129,27 @@ export const POST = createSmartRouteHandler({
 
     if (!testMode) {
       const stripe = await getStripeForAccount({ tenancy });
-      const stripeCustomerSearch = await stripe.customers.search({
-        query: `metadata['customerId']:'${req.body.customer_id}'`,
-      });
-      let stripeCustomer = stripeCustomerSearch.data.length ? stripeCustomerSearch.data[0] : undefined;
-      if (!stripeCustomer) {
-        stripeCustomer = await stripe.customers.create({
+      const prisma = await getPrismaClientForTenancy(tenancy);
+      let stripeCustomer: Awaited<ReturnType<typeof ensureStripeCustomerForCustomer>>;
+      if (customerType === "user" || customerType === "team") {
+        stripeCustomer = await ensureStripeCustomerForCustomer({
+          stripe,
+          prisma,
+          tenancyId: tenancy.id,
+          customerType,
+          customerId: req.body.customer_id,
+        });
+      } else {
+        const stripeCustomerSearch = await stripe.customers.search({
+          query: `metadata['customerId']:'${req.body.customer_id}'`,
+        });
+        stripeCustomer = stripeCustomerSearch.data[0] ?? await stripe.customers.create({
           metadata: {
             customerId: req.body.customer_id,
-            customerType: customerType === "user" ? CustomerType.USER : CustomerType.TEAM,
-          }
+            customerType: CustomerType.CUSTOM,
+          },
+        }, {
+          idempotencyKey: stripeCustomerIdempotencyKey(tenancy.id, "custom", req.body.customer_id),
         });
       }
 
@@ -144,6 +175,8 @@ export const POST = createSmartRouteHandler({
         stripeCustomerId,
         stripeAccountId,
         chargesEnabled,
+        allowPromoCodes,
+        allowStackingPromoCodes,
       },
       method: {},
       callbackUrl: undefined,

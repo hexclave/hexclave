@@ -220,6 +220,7 @@ export const ALL_APPS_FRONTEND = {
     navigationItems: [
       { displayName: "Product Lines", href: "./product-lines" },
       { displayName: "Products & Items", href: "./products" },
+      { displayName: "Promo Codes", href: "./promo-codes" },
       { displayName: "Customers", href: "./customers" },
       { displayName: "Transactions", href: "./transactions" },
       { displayName: "Payouts", href: "./payouts" },

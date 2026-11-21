@@ -13,6 +13,42 @@ import type { AdminWorkflow, AdminWorkflowRun, AdminWorkflowRunDetails, AdminWor
 import { _HexclaveAdminAppImpl } from "../implementations";
 import { StackServerApp, StackServerAppConstructorOptions } from "./server-app";
 
+export type AdminPromoCode = {
+  id: string,
+  codeName: string,
+  status: "active" | "scheduled" | "paused" | "expired" | "ended",
+  statusDetail: string | null,
+  discountType: "percent" | "amount",
+  discountAmount: number,
+  discountLabel: string,
+  productsLabel: string,
+  applicableProductIds: string[] | null,
+  numRedemptions: number,
+  maxRedemptions: number | null,
+  availability: string,
+  availabilityType: "always" | "between_dates",
+  startsAt: Date | null,
+  endsAt: Date | null,
+  pausedAt: Date | null,
+  endedAt: Date | null,
+  subscriptionBehavior: "first_payment" | "fixed_duration" | "forever",
+  subscriptionDiscountDurationMonths: number | null,
+  hasActiveSubscriptionRedemptions: boolean,
+};
+
+export type CreateAdminPromoCodeOptions = {
+  codeName: string,
+  discountType: "percent" | "amount",
+  discountAmount: number,
+  applicableProductIds: string[] | null,
+  maxRedemptions: number | null,
+  subscriptionBehavior: "first_payment" | "fixed_duration" | "forever",
+  subscriptionDiscountDurationMonths: number | null,
+  availabilityType: "always" | "between_dates",
+  startsAt: Date | null,
+  endsAt: Date | null,
+};
+
 export type EmailOutboxListOptions = {
   status?: string,
   simpleStatus?: string,
@@ -175,6 +211,12 @@ export type StackAdminApp<HasTokenStore extends boolean = boolean, ProjectId ext
       amountUsd: MoneyAmount,
       endAction?: "now" | "at-period-end",
     }): Promise<{ refundTransactionId: string }>,
+    listPromoCodes(options?: { cursor?: string, query?: string, status?: AdminPromoCode["status"] | "all" }): Promise<{ promoCodes: AdminPromoCode[], nextCursor: string | null }>,
+    createPromoCode(options: CreateAdminPromoCodeOptions): Promise<AdminPromoCode>,
+    getPromoCode(promoCodeId: string): Promise<AdminPromoCode>,
+    pausePromoCode(promoCodeId: string): Promise<AdminPromoCode>,
+    resumePromoCode(promoCodeId: string): Promise<AdminPromoCode>,
+    endPromoCode(promoCodeId: string, options?: { existingSubscriptionDiscounts?: "keep" | "end_after_period" }): Promise<AdminPromoCode>,
     getAnalyticsClickmap(options: AnalyticsClickmapOptions): Promise<AnalyticsClickmapResponse>,
     createAnalyticsClickmapToken(options: { origin: string }): Promise<AnalyticsClickmapTokenResponse>,
 
