@@ -282,8 +282,22 @@ export class InternalSession {
   startRefreshingAccessToken(minMillisUntilExpiration: number, maxMillisSinceIssued: number | null): { unsubscribe: () => void } {
     let canceled = false;
     runAsynchronously(async () => {
+      let staleTokenRetryDelay = 1_000;
       while (!canceled) {
-        const tokens = await this.getOrFetchLikelyValidTokens(minMillisUntilExpiration, maxMillisSinceIssued);
+        let tokens: Awaited<ReturnType<typeof this.getOrFetchLikelyValidTokens>>;
+        try {
+          tokens = await this.getOrFetchLikelyValidTokens(minMillisUntilExpiration, maxMillisSinceIssued);
+        } catch (error) {
+          // A suspended tab can resume with a stale token even after the fetch retry above. Keep the background
+          // refresh alive rather than reporting an assertion for each mounted session subscriber and stopping.
+          if (!(error instanceof HexclaveAssertionError) || !error.message.includes("access token issuance is too slow")) {
+            throw error;
+          }
+          await wait(staleTokenRetryDelay);
+          staleTokenRetryDelay = Math.min(staleTokenRetryDelay * 2, 30_000);
+          continue;
+        }
+        staleTokenRetryDelay = 1_000;
         if (!tokens) return;  // session is invalid, stop refreshing
         const nextRefreshIn = Math.min(
           tokens.accessToken.expiresInMillis - minMillisUntilExpiration,

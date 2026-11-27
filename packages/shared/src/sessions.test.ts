@@ -270,6 +270,32 @@ describe("InternalSession#getOrFetchLikelyValidTokens", () => {
     expect(tokens?.accessToken.issuedMillisAgo).toBeLessThan(15_000);
   });
 
+  it("continues background refresh after a stale token survives the fetch retry", async () => {
+    let refreshCount = 0;
+    const session = new InternalSession({
+      refreshAccessTokenCallback: async () => {
+        refreshCount += 1;
+        return createAccessToken("rtid-1", { iatOffsetSeconds: refreshCount < 3 ? -20 : 0 });
+      },
+      refreshToken: "rt-abc",
+    });
+
+    const subscription = session.startRefreshingAccessToken(20_000, 15_000);
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        if (refreshCount >= 3) {
+          subscription.unsubscribe();
+          resolve();
+        } else {
+          setTimeout(check, 10);
+        }
+      };
+      check();
+    });
+
+    expect(refreshCount).toBe(3);
+  });
+
   it("throws after one retry when the newly fetched access token is still too old", async () => {
     let refreshCount = 0;
     const session = new InternalSession({
