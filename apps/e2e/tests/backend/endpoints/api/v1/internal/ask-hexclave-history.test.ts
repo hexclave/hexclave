@@ -1,5 +1,6 @@
 import { describe } from "vitest";
 import { it } from "../../../../../helpers";
+import { withInternalDatabase } from "../external-db-sync-utils";
 import {
   Auth,
   INTERNAL_PROJECT_OWNER_TEAM_ID,
@@ -23,6 +24,8 @@ describe("internal ask Hexclave history", () => {
     backendContext.set({ projectKeys: InternalProjectKeys, userAuth: null });
     const unauthenticated = await niceBackendFetch(BASE_PATH, { accessType: "client" });
     expect(unauthenticated.status).toBe(401);
+    const unauthenticatedCall = await niceBackendFetch(`${BASE_PATH}/${crypto.randomUUID()}`, { accessType: "client" });
+    expect(unauthenticatedCall.status).toBe(401);
 
     await Project.createAndSwitch();
     await Auth.fastSignUp();
@@ -57,5 +60,47 @@ describe("internal ask Hexclave history", () => {
       { accessType: "client" },
     );
     expect(invalidLimit.status).toBe(400);
+  });
+
+  it("returns one call by id and rejects missing or malformed ids", async ({ expect }) => {
+    await signInAsInternalAdmin();
+    const id = crypto.randomUUID();
+    await withInternalDatabase(async (client) => {
+      await client.query(
+        `INSERT INTO "AskHexclaveCall" (
+          "id", "transport", "conversationId", "question", "response", "reason", "userPrompt",
+          "context", "user", "project", "modelId", "stepCount", "durationMs", "innerToolCalls"
+        ) VALUES (
+          $1::uuid, 'skill-ask', 'conversation-deep-link', 'Where is the dashboard link?',
+          'On the history page for this call.', 'Checking the Discord deep link', 'Add the dashboard link',
+          'Discord notification', 'Ada Lovelace', 'Analytical Engine', 'test-model', 1, 10, '[]'::jsonb
+        )`,
+        [id],
+      );
+    });
+
+    try {
+      const response = await niceBackendFetch(`${BASE_PATH}/${id}`, { accessType: "client" });
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        id,
+        transport: "skill-ask",
+        conversation_id: "conversation-deep-link",
+        question: "Where is the dashboard link?",
+        response: "On the history page for this call.",
+        user: "Ada Lovelace",
+        project: "Analytical Engine",
+      });
+
+      const missing = await niceBackendFetch(`${BASE_PATH}/${crypto.randomUUID()}`, { accessType: "client" });
+      expect(missing.status).toBe(404);
+
+      const invalid = await niceBackendFetch(`${BASE_PATH}/not-a-uuid`, { accessType: "client" });
+      expect(invalid.status).toBe(400);
+    } finally {
+      await withInternalDatabase(async (client) => {
+        await client.query(`DELETE FROM "AskHexclaveCall" WHERE "id" = $1::uuid`, [id]);
+      });
+    }
   });
 });

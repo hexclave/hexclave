@@ -1,5 +1,6 @@
 import {
   listAskHexclaveCalls,
+  toAskHexclaveHistoryApiCall,
   type AskHexclaveTransport,
 } from "@/lib/ai/ask-hexclave-history";
 import { ensurePlatformAdmin } from "@/lib/platform-admin";
@@ -110,28 +111,7 @@ export const GET = createSmartRouteHandler({
       statusCode: 200,
       bodyType: "json",
       body: {
-        calls: result.calls.map((call) => ({
-          id: call.id,
-          created_at: call.createdAt,
-          transport: call.transport,
-          conversation_id: call.conversationId,
-          question: call.question,
-          response: call.response,
-          reason: call.reason,
-          user_prompt: call.userPrompt,
-          context: call.context,
-          user: call.user,
-          project: call.project,
-          request_ip: call.requestIp,
-          request_ip_source: call.requestIpSource,
-          user_agent: call.userAgent,
-          request_host: call.requestHost,
-          mcp_protocol_version: call.mcpProtocolVersion,
-          model_id: call.modelId,
-          step_count: call.stepCount,
-          duration_ms: call.durationMs,
-          inner_tool_calls: call.innerToolCalls,
-        })),
+        calls: result.calls.map(toAskHexclaveHistoryApiCall),
         next_cursor: result.nextCursor,
       },
     };
