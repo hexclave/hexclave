@@ -1,5 +1,5 @@
 import { encodeBase64 } from "@hexclave/shared/dist/utils/bytes";
-import { captureError } from "@hexclave/shared/dist/utils/errors";
+import { captureError, throwErr } from "@hexclave/shared/dist/utils/errors";
 import { wait } from "@hexclave/shared/dist/utils/promises";
 import { createUuidV7Generator } from "@hexclave/shared/dist/utils/uuids";
 import * as lmdb from "lmdb";
@@ -420,7 +420,7 @@ export function declareLmdbLowLevelDatabase(options: {
       await traceSpanHot({ description: "bulldozer-js.low-level.lmdb.commit", attributes: { "bulldozer.low_level.backend": "lmdb", "bulldozer.low_level.operation_count": operations.length } }, async () => {
         const requiredSeqWaitStartedAt = performance.now();
         const batchSeqIds = new Set(operations.map(operation => operation.seqId));
-        await Promise.all(operations.map(async operation => await waitUntilAvailableOutsideBatch(operation.requiresSeq, batchSeqIds)));
+        await waitUntilAllAvailableOutsideBatch(operations.map(operation => operation.requiresSeq), batchSeqIds);
         activityStats.requiredSeqWaits++;
         activityStats.requiredSeqWaitTotalMs += performance.now() - requiredSeqWaitStartedAt;
         const transactionStartedAt = performance.now();
@@ -514,19 +514,28 @@ export function declareLmdbLowLevelDatabase(options: {
   const waitUntilDurable = async (seq: DatabaseSeq) => {
     await getDurabilityPromise(getSeqId(seq));
   };
-  const waitUntilAvailableOutsideBatch = async (seq: DatabaseSeq, batchSeqIds: Set<string>): Promise<void> => {
-    const seqId = getSeqId(seq);
-    if (seqId === initialSeqId || batchSeqIds.has(seqId)) return;
-    const dependencies = combinedSeqDependencies.get(seqId);
-    if (dependencies === undefined) {
-      await getAvailabilityPromise(seqId);
-      return;
+  // A combined seq's memoized availability promise can't be awaited here: if any seq inside it is part
+  // of the batch being committed, the batch would wait on itself forever. So we expand combined seqs
+  // and skip the in-batch ones. Callers like Piledriver GC build combined seqs thousands of levels
+  // deep that all operations in a batch share, so this must be iterative (recursion overflowed the
+  // stack) and visit each combined seq once per batch (per-operation walks cost operations × depth).
+  // The answer depends on which seqs are in the batch, so the visited set can't outlive the batch.
+  const waitUntilAllAvailableOutsideBatch = async (seqs: DatabaseSeq[], batchSeqIds: Set<string>) => {
+    const visited = new Set<string>();
+    const outsideBatchAvailability: Promise<void>[] = [];
+    const toVisit = seqs.map(seq => getSeqId(seq));
+    while (toVisit.length > 0) {
+      const seqId = toVisit.pop() ?? throwErr("toVisit was checked to be non-empty");
+      if (seqId === initialSeqId || batchSeqIds.has(seqId) || visited.has(seqId)) continue;
+      visited.add(seqId);
+      const dependencies = combinedSeqDependencies.get(seqId);
+      if (dependencies === undefined) {
+        outsideBatchAvailability.push(getAvailabilityPromise(seqId));
+      } else {
+        for (const dependencySeqId of dependencies) toVisit.push(dependencySeqId);
+      }
     }
-    await Promise.all(dependencies.map(async dependencySeqId => {
-      if (dependencySeqId === initialSeqId || batchSeqIds.has(dependencySeqId)) return;
-      const dependencySeq = toSeq(dependencySeqId);
-      await waitUntilAvailableOutsideBatch(dependencySeq, batchSeqIds);
-    }));
+    await Promise.all(outsideBatchAvailability);
   };
   const waitUntilAllAvailable = async () => {
     await Promise.all(seqToAvailability.values());
