@@ -61,7 +61,7 @@ function removeOAuthCallbackParamsFromHistory(originalUrl: URL): void {
   for (const param of oauthCallbackParams) {
     newUrl.searchParams.delete(param);
   }
-  window.history.replaceState({}, "", newUrl.toString());
+  window.history.replaceState(window.history.state, "", newUrl.toString());
 }
 
 function getProviderOAuthErrorFromUrl(originalUrl: URL): KnownError | null {

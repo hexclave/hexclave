@@ -89,25 +89,77 @@ describe("callOAuthCallback", () => {
   });
 
   it("clears stale code/state when consuming a provider error (cancel then retry, #1059)", async () => {
-    window.history.replaceState({}, "", "/handler/oauth-callback?error=access_denied&error_description=User+cancelled&state=STALE123");
+    window.history.replaceState(
+      { routerKey: "keep-me" },
+      "",
+      "/handler/oauth-callback?error=access_denied&error_description=User+cancelled&errorCode=STALE_ERR&details=%7B%7D&state=STALE123",
+    );
 
     await expect(callOAuthCallback(createTestInterface(), "/handler/oauth-callback"))
       .rejects.toSatisfy((error: unknown) => KnownErrors.OAuthProviderAccessDenied.isInstance(error));
-    const url = new URL(window.location.href);
-    expect(url.searchParams.has("state")).toBe(false);
-    expect(url.searchParams.has("code")).toBe(false);
+    expect(window.history.state).toEqual({ routerKey: "keep-me" });
+    let url = new URL(window.location.href);
+    for (const param of ["code", "state", "error", "error_description", "errorCode", "message", "details"]) {
+      expect(url.searchParams.has(param)).toBe(false);
+    }
+
+    // Also exercise stale `code` (without `state`) on the provider-error path, since having both
+    // `code` and `state` routes to the token-exchange path instead of the provider-error branch.
+    window.history.replaceState({}, "", "/handler/oauth-callback?error=access_denied&error_description=User+cancelled&code=STALECODE");
+
+    await expect(callOAuthCallback(createTestInterface(), "/handler/oauth-callback"))
+      .rejects.toSatisfy((error: unknown) => KnownErrors.OAuthProviderAccessDenied.isInstance(error));
+    url = new URL(window.location.href);
+    for (const param of ["code", "state", "error", "error_description", "errorCode", "message", "details"]) {
+      expect(url.searchParams.has(param)).toBe(false);
+    }
   });
 
   it("clears stale error params after a successful callback (cancel then success, #1059)", async () => {
     const state = "TESTSTATE123";
-    window.history.replaceState({}, "", `/handler/oauth-callback?code=CODE123&state=${state}&error=access_denied&error_description=stale`);
+    // Note: errorCode + message together would route to the known-error branch, so exercise them
+    // separately on the success path (details/errorCode here, message below).
+    window.history.replaceState(
+      { routerKey: "keep-me" },
+      "",
+      `/handler/oauth-callback?code=CODE123&state=${encodeURIComponent(state)}&error=access_denied&error_description=stale&errorCode=ERR&details=%7B%7D`,
+    );
 
     const iface = createTestInterface();
     const spy = vi.spyOn(iface, "callOAuthCallback").mockResolvedValue({ newUser: false, accessToken: "a", refreshToken: "r" });
     await callOAuthCallback(iface, "/handler/oauth-callback");
     expect(spy).toHaveBeenCalledOnce();
+    expect(window.history.state).toEqual({ routerKey: "keep-me" });
+    let url = new URL(window.location.href);
+    for (const param of ["code", "state", "error", "error_description", "errorCode", "message", "details"]) {
+      expect(url.searchParams.has(param)).toBe(false);
+    }
+
+    window.history.replaceState(
+      {},
+      "",
+      `/handler/oauth-callback?code=CODE123&state=${encodeURIComponent(state)}&message=stale_msg&details=%7B%7D`,
+    );
+    await callOAuthCallback(iface, "/handler/oauth-callback");
+    url = new URL(window.location.href);
+    for (const param of ["code", "state", "error", "error_description", "errorCode", "message", "details"]) {
+      expect(url.searchParams.has(param)).toBe(false);
+    }
+  });
+
+  it("clears all callback params and preserves history state on known-error callbacks (#1059)", async () => {
+    window.history.replaceState(
+      { routerKey: "keep-me" },
+      "",
+      "/handler/oauth-callback?errorCode=OAUTH_PROVIDER_ACCESS_DENIED&message=Denied&details=%7B%7D&code=STALECODE&state=STALE123&error=access_denied&error_description=stale",
+    );
+
+    await expect(callOAuthCallback(createTestInterface(), "/handler/oauth-callback"))
+      .rejects.toSatisfy((error: unknown) => KnownErrors.OAuthProviderAccessDenied.isInstance(error));
+    expect(window.history.state).toEqual({ routerKey: "keep-me" });
     const url = new URL(window.location.href);
-    expect(url.searchParams.has("error")).toBe(false);
-    expect(url.searchParams.has("error_description")).toBe(false);
+    for (const param of ["code", "state", "error", "error_description", "errorCode", "message", "details"]) {
+      expect(url.searchParams.has(param)).toBe(false);
+    }
   });
 });
